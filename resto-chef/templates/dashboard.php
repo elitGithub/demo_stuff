@@ -1,3 +1,59 @@
-<div class="page-heading heading-row"><div><div class="eyebrow">A LITTLE CLARITY FOR YOUR DAY</div><h1>Kitchen overview<span class="accent-dot">.</span></h1><p>Orders in motion. Good food going out.</p></div><a class="button" href="/admin/orders">Open order desk →</a></div><form action="/admin" method="get" class="date-filter"><label>From<input name="from" type="date" value="<?= e($from) ?>" required></label><span>→</span><label>To<input name="to" type="date" value="<?= e($to) ?>" required></label><button class="button secondary" type="submit">Apply dates</button><a class="text-link" href="/admin?from=<?= e($today) ?>&amp;to=<?= e($today) ?>">Today</a><span class="small muted">Reporting timezone: <?= e($config['timezone']) ?></span></form>
-<div class="metrics"><article class="metric metric-featured"><span>Completed sales</span><strong><?= money($report['revenue_cents']) ?></strong><small>Includes <?= money($report['delivery_fees_cents']) ?> in delivery fees</small></article><article class="metric"><span>Completed orders</span><strong><?= $report['completed_count'] ?></strong><small>Within selected dates</small></article><article class="metric"><span>Average order</span><strong><?= money($report['average_cents']) ?></strong><small>Per completed order</small></article><article class="metric"><span>In the kitchen</span><strong><?= $report['active_count'] ?><i class="live-dot"></i></strong><small>Active orders right now</small></article></div>
-<div class="dashboard-grid"><section class="panel"><div class="panel-heading"><div><h2>Sales, day by day</h2><p class="muted small">Recognized when an order is completed.</p></div><span class="pill"><?= e($config['currency']) ?></span></div><?php $max=max(1,...array_column($report['daily'],'revenue_cents')); ?><div class="sales-chart"><?php foreach($report['daily'] as $day): ?><div class="sales-day"><span><?= e($day['date']) ?></span><meter min="0" max="<?= $max ?>" value="<?= $day['revenue_cents'] ?>" aria-label="Sales on <?= e($day['date']) ?>"><?= money($day['revenue_cents']) ?></meter><strong><?= money($day['revenue_cents']) ?></strong><small><?= $day['orders'] ?> orders</small></div><?php endforeach; ?></div><?php if(!$report['completed_count']): ?><p class="muted">No completed orders in this period. Complete an order from the order desk to see it here.</p><?php endif; ?></section><section class="panel"><div class="panel-heading"><div><h2>Popular dishes</h2><p class="muted small">The favorites people come back for.</p></div><span class="small-sun">✳</span></div><?php foreach($report['popular'] as $i=>$item): ?><div class="popular-item"><span class="rank">0<?= $i+1 ?></span><div><strong><?= e($item['name']) ?></strong><small><?= $item['quantity'] ?> sold</small></div><b><?= money($item['revenue_cents']) ?></b></div><?php endforeach; ?><?php if(!$report['popular']): ?><p class="muted">Your bestsellers will appear after orders are completed.</p><?php endif; ?><div class="info-box"><strong><?= $report['cancelled_count'] ?> cancelled orders</strong><p>Cancelled and unfinished orders are excluded from sales. Payment is collected on pickup or delivery.</p></div></section></div>
+<div class="page-heading heading-row">
+    <div>
+        <div class="eyebrow">A LITTLE CLARITY FOR YOUR DAY</div>
+        <h1>Kitchen overview<span class="accent-dot">.</span></h1>
+        <p>Orders in motion. Good food going out.</p></div>
+    <a class="button" href="/admin/orders">Open order desk →</a></div>
+<form action="/admin" method="get" class="date-filter"><label>From<input name="from" type="date" value="<?= e($from) ?>"
+                                                                         required></label><span>→</span><label>To<input
+                name="to" type="date" value="<?= e($to) ?>" required></label>
+    <button class="button secondary" type="submit">Apply dates</button>
+    <a class="text-link" href="/admin?from=<?= e($today) ?>&amp;to=<?= e($today) ?>">Today</a><span class="small muted">Reporting timezone: <?= e(
+                $config['timezone']
+        ) ?></span></form>
+<div class="metrics">
+    <article class="metric metric-featured"><span>Completed sales</span><strong><?= money(
+                    $report['revenue_cents']
+            ) ?></strong><small>Includes <?= money($report['delivery_fees_cents']) ?> in delivery fees</small></article>
+    <article class="metric"><span>Completed orders</span><strong><?= $report['completed_count'] ?></strong><small>Within
+            selected dates</small></article>
+    <article class="metric"><span>Average order</span><strong><?= money($report['average_cents']) ?></strong><small>Per
+            completed order</small></article>
+    <article class="metric"><span>In the kitchen</span><strong><?= $report['active_count'] ?><i
+                    class="live-dot"></i></strong><small>Active orders right now</small></article>
+</div>
+<div class="dashboard-grid">
+    <section class="panel">
+        <div class="panel-heading">
+            <div><h2>Sales, day by day</h2>
+                <p class="muted small">Recognized when an order is completed.</p></div>
+            <span class="pill"><?= e($config['currency']) ?></span></div><?php
+        $max = max(1, ...array_column($report['daily'], 'revenue_cents')); ?>
+        <div class="sales-chart"><?php
+            foreach ($report['daily'] as $day): ?>
+                <div class="sales-day"><span><?= e($day['date']) ?></span>
+                <meter min="0" max="<?= $max ?>" value="<?= $day['revenue_cents'] ?>"
+                       aria-label="Sales on <?= e($day['date']) ?>"><?= money($day['revenue_cents']) ?></meter>
+                <strong><?= money($day['revenue_cents']) ?></strong><small><?= $day['orders'] ?> orders</small>
+                </div><?php
+            endforeach; ?></div><?php
+        if (!$report['completed_count']): ?><p class="muted">No completed orders in this period. Complete an order from
+            the order desk to see it here.</p><?php
+        endif; ?></section>
+    <section class="panel">
+        <div class="panel-heading">
+            <div><h2>Popular dishes</h2>
+                <p class="muted small">The favorites people come back for.</p></div>
+            <span class="small-sun">✳</span></div><?php
+        foreach ($report['popular'] as $i => $item): ?>
+            <div class="popular-item"><span class="rank">0<?= $i + 1 ?></span>
+            <div><strong><?= e($item['name']) ?></strong><small><?= $item['quantity'] ?> sold</small></div>
+            <b><?= money($item['revenue_cents']) ?></b></div><?php
+        endforeach; ?><?php
+        if (!$report['popular']): ?><p class="muted">Your bestsellers will appear after orders are completed.</p><?php
+        endif; ?>
+        <div class="info-box"><strong><?= $report['cancelled_count'] ?> cancelled orders</strong>
+            <p>Cancelled and unfinished orders are excluded from sales. Payment is collected on pickup or delivery.</p>
+        </div>
+    </section>
+</div>

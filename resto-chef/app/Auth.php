@@ -1,9 +1,12 @@
 <?php
+
 declare(strict_types=1);
 
 final class Auth
 {
-    public function __construct(private PDO $db) {}
+    public function __construct(private PDO $db)
+    {
+    }
 
     public function user(int $id): ?array
     {
@@ -14,14 +17,24 @@ final class Auth
 
     public function register(string $name, string $email, string $password): array
     {
-        $name = trim($name); $email = strtolower(trim($email));
-        if (mb_strlen($name) < 2 || mb_strlen($name) > 100) throw new InvalidArgumentException('Enter a name between 2 and 100 characters.');
-        if (strlen($email) > 190 || !filter_var($email, FILTER_VALIDATE_EMAIL)) throw new InvalidArgumentException('Enter a valid email address.');
-        if (strlen($password) < 12 || strlen($password) > 72) throw new InvalidArgumentException('Use a password between 12 and 72 bytes.');
+        $name = trim($name);
+        $email = strtolower(trim($email));
+        if (mb_strlen($name) < 2 || mb_strlen($name) > 100) {
+            throw new InvalidArgumentException('Enter a name between 2 and 100 characters.');
+        }
+        if (strlen($email) > 190 || !filter_var($email, FILTER_VALIDATE_EMAIL)) {
+            throw new InvalidArgumentException('Enter a valid email address.');
+        }
+        if (strlen($password) < 12 || strlen($password) > 72) {
+            throw new InvalidArgumentException('Use a password between 12 and 72 bytes.');
+        }
         $q = $this->db->prepare('INSERT INTO users(name,email,password_hash,role,created_at) VALUES (?,?,?,?,?)');
-        try { $q->execute([$name, $email, password_hash($password, PASSWORD_DEFAULT), 'customer', time()]); }
-        catch (PDOException $e) {
-            if (in_array((string)$e->getCode(), ['23000','23505'], true)) throw new DomainException('Unable to register this email. Try signing in instead.');
+        try {
+            $q->execute([$name, $email, password_hash($password, PASSWORD_DEFAULT), 'customer', time()]);
+        } catch (PDOException $e) {
+            if (in_array((string)$e->getCode(), ['23000', '23505'], true)) {
+                throw new DomainException('Unable to register this email. Try signing in instead.');
+            }
             throw $e;
         }
         return $this->user((int)$this->db->lastInsertId());
@@ -35,7 +48,9 @@ final class Auth
         foreach ($buckets as $bucket => $limit) {
             $q = $this->db->prepare('SELECT failures FROM login_attempts WHERE bucket=? AND window_start>?');
             $q->execute([$bucket, $cutoff]);
-            if ((int)$q->fetchColumn() >= $limit) throw new DomainException('Too many sign-in attempts. Please try again in 15 minutes.');
+            if ((int)$q->fetchColumn() >= $limit) {
+                throw new DomainException('Too many sign-in attempts. Please try again in 15 minutes.');
+            }
         }
         $q = $this->db->prepare('SELECT id,password_hash FROM users WHERE email=?');
         $q->execute([$email]);
@@ -50,13 +65,17 @@ final class Auth
                 $sql = $mysql
                     ? 'INSERT INTO login_attempts(bucket,failures,window_start) VALUES (?,1,?) ON DUPLICATE KEY UPDATE failures=failures+1'
                     : 'INSERT INTO login_attempts(bucket,failures,window_start) VALUES (?,1,?) ON CONFLICT(bucket) DO UPDATE SET failures=failures+1';
-                $this->db->prepare($sql)->execute([$bucket,time()]);
+                $this->db->prepare($sql)->execute([$bucket, time()]);
             }
-            $this->db->prepare('DELETE FROM login_attempts WHERE window_start<?')->execute([time()-86400]);
+            $this->db->prepare('DELETE FROM login_attempts WHERE window_start<?')->execute([time() - 86400]);
             return null;
         }
-        if (password_needs_rehash($row['password_hash'], PASSWORD_DEFAULT)) $this->db->prepare('UPDATE users SET password_hash=? WHERE id=?')->execute([password_hash($password, PASSWORD_DEFAULT), $row['id']]);
-        $this->db->prepare('DELETE FROM login_attempts WHERE bucket=?')->execute([hash('sha256','email:' . $email)]);
+        if (password_needs_rehash($row['password_hash'], PASSWORD_DEFAULT)) {
+            $this->db->prepare('UPDATE users SET password_hash=? WHERE id=?')->execute(
+                [password_hash($password, PASSWORD_DEFAULT), $row['id']]
+            );
+        }
+        $this->db->prepare('DELETE FROM login_attempts WHERE bucket=?')->execute([hash('sha256', 'email:' . $email)]);
         return $this->user((int)$row['id']);
     }
 }

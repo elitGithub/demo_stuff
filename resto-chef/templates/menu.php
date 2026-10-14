@@ -1,13 +1,75 @@
 <section class="hero">
-    <div class="hero-copy"><div class="eyebrow"><span class="small-sun">✳</span> FROM OUR KITCHEN, WITH LOVE</div><h1>Good food.<br>Great <em>company.</em></h1><p>Your favorites, made fresh. A comforting bowl, a little something crispy, and one less thing to think about.</p><div class="hero-actions"><a class="button" href="#menu">Find your favorite <span>↗</span></a><span class="hero-note">Pickup or delivery<br><strong>You choose. We cook.</strong></span></div></div>
-    <div class="hero-art"><img src="/assets/hero.jpg" alt="Freshly prepared food from our kitchen" fetchpriority="high"><span class="hero-sticker">Made fresh<br><strong>every order.</strong><span>✳</span></span><div class="hero-caption"><span>THE EVERYDAY, MADE DELICIOUS</span><span>01 / THE KITCHEN</span></div></div>
+    <div class="hero-copy">
+        <div class="eyebrow"><span class="small-sun">✳</span> FROM OUR KITCHEN, WITH LOVE</div>
+        <h1>Good food.<br>Great <em>company.</em></h1>
+        <p>Your favorites, made fresh. A comforting bowl, a little something crispy, and one less thing to think
+            about.</p>
+        <div class="hero-actions"><a class="button" href="#menu">Find your favorite <span>↗</span></a><span
+                    class="hero-note">Pickup or delivery<br><strong>You choose. We cook.</strong></span></div>
+    </div>
+    <div class="hero-art"><img src="/assets/hero.jpg" alt="Freshly prepared food from our kitchen" fetchpriority="high"><span
+                class="hero-sticker">Made fresh<br><strong>every order.</strong><span>✳</span></span>
+        <div class="hero-caption"><span>THE EVERYDAY, MADE DELICIOUS</span><span>01 / THE KITCHEN</span></div>
+    </div>
 </section>
 <section id="menu" class="menu-section">
-    <div class="section-heading"><div><div class="eyebrow">SOMETHING FOR EVERY CRAVING</div><h2>Meet the menu<span class="accent-dot">.</span></h2></div><form class="search-form" action="/menu" method="get"><label class="sr-only" for="search">Search dishes</label><input id="search" name="q" value="<?= e($search) ?>" maxlength="80" placeholder="Find your next favorite…" type="search"><button type="submit" aria-label="Search menu">⌕</button></form></div>
-    <nav class="category-tabs" aria-label="Menu categories"><a class="chip <?= !$category?'selected':'' ?>" href="/menu<?= $search!==''?'?q='.urlencode($search):'' ?>">All dishes <span><?= count($store->menu()) ?></span></a><?php foreach($categories as $c): ?><a class="chip <?= $category===$c['id']?'selected':'' ?>" href="/menu?category=<?= (int)$c['id'] ?><?= $search!==''?'&amp;q='.urlencode($search):'' ?>"><?= e($c['name']) ?></a><?php endforeach; ?></nav>
-    <?php if(!$foods): ?><div class="empty-state"><span>⌕</span><h3>No dishes found</h3><p>Try another search or explore the full menu.</p><a class="button" href="/menu">See all dishes</a></div><?php endif; ?>
-    <div class="food-grid"><?php foreach($foods as $food): ?>
-        <article class="food-card <?= !$food['available']?'sold-out':'' ?>"><div class="food-image"><img src="/assets/<?= e($food['image']) ?>" alt="" loading="lazy"><span class="food-tag"><?= e($food['tag']) ?></span><?php if(!$food['available']): ?><span class="sold-out-label">Currently unavailable</span><?php endif; ?></div><div class="food-body"><span class="food-category"><?= e($food['category']) ?></span><h3><?= e($food['name']) ?></h3><p><?= e($food['description']) ?></p><div class="food-bottom"><strong><?= money((int)$food['price_cents']) ?></strong><form method="post" action="/cart/add" class="submit-once"><?= csrfField() ?><input type="hidden" name="food_id" value="<?= (int)$food['id'] ?>"><input type="hidden" name="quantity" value="1"><input type="hidden" name="return_to" value="menu"><button class="add-button" <?= !$food['available']?'disabled':'' ?> type="submit" aria-label="Add <?= e($food['name']) ?> to cart"><?= $food['available']?'Add to cart <span>＋</span>':'Back soon' ?></button></form></div></div></article>
-    <?php endforeach; ?></div>
+    <div class="section-heading">
+        <div>
+            <div class="eyebrow">SOMETHING FOR EVERY CRAVING</div>
+            <h2>Meet the menu<span class="accent-dot">.</span></h2></div>
+        <form class="search-form" action="/menu" method="get"><label class="sr-only" for="search">Search
+                dishes</label><input id="search" name="q" value="<?= e($search) ?>" maxlength="80"
+                                     placeholder="Find your next favorite…" type="search">
+            <button type="submit" aria-label="Search menu">⌕</button>
+        </form>
+    </div>
+    <nav class="category-tabs" aria-label="Menu categories"><a class="chip <?= !$category ? 'selected' : '' ?>"
+                                                               href="/menu<?= $search !== '' ? '?q=' . urlencode(
+                                                                               $search
+                                                                       ) : '' ?>">All dishes <span><?= count(
+                        $store->menu()
+                ) ?></span></a><?php
+        foreach ($categories as $c): ?><a class="chip <?= $category === $c['id'] ? 'selected' : '' ?>"
+                                          href="/menu?category=<?= (int)$c['id'] ?><?= $search !== '' ? '&amp;q=' . urlencode(
+                                                          $search
+                                                  ) : '' ?>"><?= e($c['name']) ?></a><?php
+        endforeach; ?></nav>
+    <?php
+    if (!$foods): ?>
+        <div class="empty-state"><span>⌕</span>
+            <h3>No dishes found</h3>
+            <p>Try another search or explore the full menu.</p><a class="button" href="/menu">See all dishes</a>
+        </div><?php
+    endif; ?>
+    <div class="food-grid"><?php
+        foreach ($foods as $food): ?>
+            <article class="food-card <?= !$food['available'] ? 'sold-out' : '' ?>">
+                <div class="food-image"><img src="/assets/<?= e($food['image']) ?>" alt="" loading="lazy"><span
+                            class="food-tag"><?= e($food['tag']) ?></span><?php
+                    if (!$food['available']): ?><span class="sold-out-label">Currently unavailable</span><?php
+                    endif; ?></div>
+                <div class="food-body"><span class="food-category"><?= e($food['category']) ?></span>
+                    <h3><?= e($food['name']) ?></h3>
+                    <p><?= e($food['description']) ?></p>
+                    <div class="food-bottom"><strong><?= money((int)$food['price_cents']) ?></strong>
+                        <form method="post" action="/cart/add" class="submit-once"><?= csrfField() ?><input
+                                    type="hidden" name="food_id" value="<?= (int)$food['id'] ?>"><input type="hidden"
+                                                                                                        name="quantity"
+                                                                                                        value="1"><input
+                                    type="hidden" name="return_to" value="menu">
+                            <button class="add-button" <?= !$food['available'] ? 'disabled' : '' ?> type="submit"
+                                    aria-label="Add <?= e(
+                                            $food['name']
+                                    ) ?> to cart"><?= $food['available'] ? 'Add to cart <span>＋</span>' : 'Back soon' ?></button>
+                        </form>
+                    </div>
+                </div>
+            </article>
+        <?php
+        endforeach; ?></div>
 </section>
-<div class="care-strip"><div class="care-icon">✳</div><div><h3>A good meal starts with a little care.</h3><p>Fresh ingredients. Familiar flavors. Prepared when you order.</p></div><span>PICK UP · SLOW DOWN · ENJOY</span></div>
+<div class="care-strip">
+    <div class="care-icon">✳</div>
+    <div><h3>A good meal starts with a little care.</h3>
+        <p>Fresh ingredients. Familiar flavors. Prepared when you order.</p></div>
+    <span>PICK UP · SLOW DOWN · ENJOY</span></div>

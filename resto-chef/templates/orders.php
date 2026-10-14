@@ -1,2 +1,32 @@
-<div class="page-heading heading-row"><div><div class="eyebrow">GOOD MEALS, GOOD MEMORIES</div><h1>Your orders<span class="accent-dot">.</span></h1><p>From our kitchen to your table.</p></div><a class="button secondary" href="/menu">Order something good ↗</a></div>
-<?php if(!$orders): ?><div class="empty-state"><span>✳</span><h2>Your first favorite is waiting.</h2><p>Once you order, you can follow its progress here.</p><a class="button" href="/menu">Explore the menu</a></div><?php else: ?><div class="order-history"><?php foreach($orders as $order): ?><a class="panel history-card" href="/orders/<?= (int)$order['id'] ?>"><div><span class="eyebrow"><?= e($order['reference']) ?></span><h3><?= e(ucfirst($order['fulfillment'])) ?> · <?= count($order['items']) ?> <?= count($order['items'])===1?'dish':'dishes' ?></h3><p><?= e(implode(', ',array_map(fn($item)=>$item['quantity'].'× '.$item['name'],$order['items']))) ?></p><small><?= e(displayTime((int)$order['created_at'])) ?></small></div><div class="history-right"><span class="status status-<?= e($order['status']) ?>"><?= e(Store::STATUSES[$order['status']]) ?></span><strong><?= money((int)$order['total_cents']) ?></strong><span class="text-link">View order →</span></div></a><?php endforeach; ?></div><nav class="pagination" aria-label="Order pages"><?php if($page>1): ?><a class="button secondary" href="/orders?page=<?= $page-1 ?>">← Previous</a><?php endif; ?><span>Page <?= $page ?></span><?php if(count($orders)===20): ?><a class="button secondary" href="/orders?page=<?= $page+1 ?>">Next →</a><?php endif; ?></nav><?php endif; ?>
+<div class="page-heading heading-row">
+    <div>
+        <div class="eyebrow">GOOD MEALS, GOOD MEMORIES</div>
+        <h1>Your orders<span class="accent-dot">.</span></h1>
+        <p>From our kitchen to your table.</p></div>
+    <a class="button secondary" href="/menu">Order something good ↗</a></div>
+<?php
+if (!$orders): ?>
+    <div class="empty-state"><span>✳</span>
+        <h2>Your first favorite is waiting.</h2>
+        <p>Once you order, you can follow its progress here.</p><a class="button" href="/menu">Explore the menu</a>
+    </div><?php
+else: ?>
+    <div class="order-history"><?php
+    foreach ($orders as $order): ?><a class="panel history-card" href="/orders/<?= (int)$order['id'] ?>">
+        <div><span class="eyebrow"><?= e($order['reference']) ?></span>
+            <h3><?= e(ucfirst($order['fulfillment'])) ?> · <?= count($order['items']) ?> <?= count(
+                                                                                                     $order['items']
+                                                                                             ) === 1 ? 'dish' : 'dishes' ?></h3>
+            <p><?= e(implode(', ', array_map(fn($item) => $item['quantity'] . '× ' . $item['name'], $order['items']))
+                ) ?></p><small><?= e(displayTime((int)$order['created_at'])) ?></small></div>
+        <div class="history-right"><span class="status status-<?= e($order['status']) ?>"><?= e(
+                        Store::STATUSES[$order['status']]
+                ) ?></span><strong><?= money((int)$order['total_cents']) ?></strong><span
+                    class="text-link">View order →</span></div></a><?php
+    endforeach; ?></div>
+    <nav class="pagination" aria-label="Order pages"><?php
+    if ($page > 1): ?><a class="button secondary" href="/orders?page=<?= $page - 1 ?>">← Previous</a><?php
+    endif; ?><span>Page <?= $page ?></span><?php
+    if (count($orders) === 20): ?><a class="button secondary" href="/orders?page=<?= $page + 1 ?>">Next →</a><?php
+    endif; ?></nav><?php
+endif; ?>

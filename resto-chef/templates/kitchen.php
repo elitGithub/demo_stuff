@@ -1,3 +1,83 @@
-<div class="page-heading heading-row"><div><div class="eyebrow">FROM FIRST BITE TO LAST PICKUP</div><h1>Order desk<span class="accent-dot">.</span></h1><p>Keep every order moving, one delicious step at a time.</p></div><a class="button secondary" href="/admin/orders?status=<?= e($status) ?>">Refresh orders ↻</a></div><nav class="category-tabs" aria-label="Filter orders"><?php foreach(['active'=>'In progress','all'=>'All orders']+Store::STATUSES as $key=>$label): ?><a class="chip <?= $status===$key?'selected':'' ?>" href="/admin/orders?status=<?= e($key) ?>"><?= e($label) ?></a><?php endforeach; ?></nav>
-<?php if(!$orders): ?><div class="empty-state"><span>✓</span><h2>All caught up.</h2><p>No orders in this view. Refresh to check for new arrivals.</p></div><?php endif; ?>
-<div class="kitchen-grid"><?php foreach($orders as $order): ?><article class="panel kitchen-card"><div class="kitchen-card-top"><span class="eyebrow"><?= e($order['reference']) ?></span><span class="status status-<?= e($order['status']) ?>"><?= e(Store::STATUSES[$order['status']]) ?></span></div><div class="kitchen-customer"><h2><?= e($order['customer_name']) ?></h2><span class="pill"><?= $order['fulfillment']==='delivery'?'↗ Delivery':'⌂ Pickup' ?></span></div><p class="small muted"><?= e(displayTime((int)$order['created_at'])) ?> · <?= e($order['phone']) ?></p><div class="kitchen-items"><?php foreach($order['items'] as $item): ?><div><b><?= (int)$item['quantity'] ?>×</b><span><?= e($item['name']) ?></span><strong><?= money((int)$item['line_total_cents']) ?></strong></div><?php endforeach; ?></div><?php if($order['address']): ?><p class="delivery-address"><strong>Deliver to</strong><br><?= e($order['address']) ?></p><?php endif; ?><?php if($order['notes']): ?><div class="kitchen-note"><strong>Kitchen note</strong><p><?= e($order['notes']) ?></p></div><?php endif; ?><div class="kitchen-total"><span>Total · pay on <?= e($order['fulfillment']) ?></span><strong><?= money((int)$order['total_cents']) ?></strong></div><?php $next=Store::nextStatus($order); if($next): ?><div class="order-actions"><form method="post" action="/admin/orders/status" class="submit-once"><?= csrfField() ?><input type="hidden" name="order_id" value="<?= (int)$order['id'] ?>"><input type="hidden" name="expected_status" value="<?= e($order['status']) ?>"><input type="hidden" name="status" value="<?= e($next) ?>"><button class="button full-width" type="submit"><?= e(match($next){'preparing'=>'Start preparing','ready'=>'Mark ready','out_for_delivery'=>'Dispatch delivery','completed'=>'Complete order'}) ?> →</button></form><form method="post" action="/admin/orders/status" data-confirm="Cancel this order? This cannot be undone."><?= csrfField() ?><input type="hidden" name="order_id" value="<?= (int)$order['id'] ?>"><input type="hidden" name="expected_status" value="<?= e($order['status']) ?>"><input type="hidden" name="status" value="cancelled"><button type="submit" class="text-button danger">Cancel order</button></form></div><?php endif; ?></article><?php endforeach; ?></div><nav class="pagination" aria-label="Order pages"><?php if($page>1): ?><a class="button secondary" href="/admin/orders?status=<?= e($status) ?>&amp;page=<?= $page-1 ?>">← Previous</a><?php endif; ?><span>Page <?= $page ?></span><?php if(count($orders)===20): ?><a class="button secondary" href="/admin/orders?status=<?= e($status) ?>&amp;page=<?= $page+1 ?>">Next →</a><?php endif; ?></nav>
+<div class="page-heading heading-row">
+    <div>
+        <div class="eyebrow">FROM FIRST BITE TO LAST PICKUP</div>
+        <h1>Order desk<span class="accent-dot">.</span></h1>
+        <p>Keep every order moving, one delicious step at a time.</p></div>
+    <a class="button secondary" href="/admin/orders?status=<?= e($status) ?>">Refresh orders ↻</a></div>
+<nav class="category-tabs" aria-label="Filter orders"><?php
+    foreach (['active' => 'In progress', 'all' => 'All orders'] + Store::STATUSES as $key => $label): ?><a
+        class="chip <?= $status === $key ? 'selected' : '' ?>" href="/admin/orders?status=<?= e($key) ?>"><?= e(
+            $label
+    ) ?></a><?php
+    endforeach; ?></nav>
+<?php
+if (!$orders): ?>
+    <div class="empty-state"><span>✓</span>
+        <h2>All caught up.</h2>
+        <p>No orders in this view. Refresh to check for new arrivals.</p></div><?php
+endif; ?>
+<div class="kitchen-grid"><?php
+    foreach ($orders as $order): ?>
+        <article class="panel kitchen-card">
+        <div class="kitchen-card-top"><span class="eyebrow"><?= e($order['reference']) ?></span><span
+                    class="status status-<?= e($order['status']) ?>"><?= e(Store::STATUSES[$order['status']]) ?></span>
+        </div>
+        <div class="kitchen-customer"><h2><?= e($order['customer_name']) ?></h2><span
+                    class="pill"><?= $order['fulfillment'] === 'delivery' ? '↗ Delivery' : '⌂ Pickup' ?></span></div><p
+                class="small muted"><?= e(displayTime((int)$order['created_at'])) ?> · <?= e($order['phone']) ?></p>
+        <div class="kitchen-items"><?php
+        foreach ($order['items'] as $item): ?>
+            <div><b><?= (int)$item['quantity'] ?>×</b><span><?= e($item['name']) ?></span><strong><?= money(
+                        (int)$item['line_total_cents']
+                ) ?></strong></div><?php
+        endforeach; ?></div><?php
+        if ($order['address']): ?><p class="delivery-address"><strong>Deliver to</strong><br><?= e($order['address']) ?>
+            </p><?php
+        endif; ?><?php
+        if ($order['notes']): ?>
+            <div class="kitchen-note"><strong>Kitchen note</strong>
+            <p><?= e($order['notes']) ?></p></div><?php
+        endif; ?>
+        <div class="kitchen-total"><span>Total · pay on <?= e($order['fulfillment']) ?></span><strong><?= money(
+                    (int)$order['total_cents']
+            ) ?></strong></div><?php
+        $next = Store::nextStatus($order);
+        if ($next): ?>
+            <div class="order-actions">
+            <form method="post" action="/admin/orders/status" class="submit-once"><?= csrfField() ?><input type="hidden"
+                                                                                                           name="order_id"
+                                                                                                           value="<?= (int)$order['id'] ?>"><input
+                        type="hidden" name="expected_status" value="<?= e($order['status']) ?>"><input type="hidden"
+                                                                                                       name="status"
+                                                                                                       value="<?= e(
+                                                                                                               $next
+                                                                                                       ) ?>">
+                <button class="button full-width" type="submit"><?= e(
+                            match ($next) {
+                                'preparing'        => 'Start preparing',
+                                'ready'            => 'Mark ready',
+                                'out_for_delivery' => 'Dispatch delivery',
+                                'completed'        => 'Complete order'
+                            }
+                    ) ?> →
+                </button>
+            </form>
+            <form method="post" action="/admin/orders/status"
+                  data-confirm="Cancel this order? This cannot be undone."><?= csrfField() ?><input type="hidden"
+                                                                                                    name="order_id"
+                                                                                                    value="<?= (int)$order['id'] ?>"><input
+                        type="hidden" name="expected_status" value="<?= e($order['status']) ?>"><input type="hidden"
+                                                                                                       name="status"
+                                                                                                       value="cancelled">
+                <button type="submit" class="text-button danger">Cancel order</button>
+            </form></div><?php
+        endif; ?></article><?php
+    endforeach; ?></div>
+<nav class="pagination" aria-label="Order pages"><?php
+    if ($page > 1): ?><a class="button secondary"
+                         href="/admin/orders?status=<?= e($status) ?>&amp;page=<?= $page - 1 ?>">← Previous</a><?php
+    endif; ?><span>Page <?= $page ?></span><?php
+    if (count($orders) === 20): ?><a class="button secondary"
+                                     href="/admin/orders?status=<?= e($status) ?>&amp;page=<?= $page + 1 ?>">Next
+            →</a><?php
+    endif; ?></nav>

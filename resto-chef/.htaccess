@@ -1,0 +1,2 @@
+# The project root must never be the public document root.
+Require all denied

@@ -1,0 +1,6 @@
+Require all granted
+Options -Indexes
+DirectoryIndex index.php
+RewriteEngine On
+RewriteRule ^assets/[a-zA-Z0-9_-]+\.(css|js|jpg|png|svg|webp|woff2)$ - [L]
+RewriteRule ^ index.php [L,QSA]

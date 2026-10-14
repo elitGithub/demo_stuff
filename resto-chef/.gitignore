@@ -1,0 +1,6 @@
+/.env
+/storage/*
+!/storage/.gitkeep
+/.phpintel/
+/.idea/
+/tests/__pycache__/

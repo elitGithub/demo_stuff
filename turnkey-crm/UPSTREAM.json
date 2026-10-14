@@ -1,0 +1,30 @@
+{
+  "product_working_name": "Turnkey CRM",
+  "upstream": {
+    "name": "Krayin",
+    "tag": "v2.2.6",
+    "repository": "https://github.com/krayin/laravel-crm",
+    "commit": "e597417bbc537cbd9716e7f1342d65dc21ac2145",
+    "archive_url": "https://codeload.github.com/krayin/laravel-crm/zip/e597417bbc537cbd9716e7f1342d65dc21ac2145",
+    "archive_sha256": "4F6408424FAE95F4337F36D4B03418DD04A2A8B6FE2AE0A5C16E446E0AD09CA9"
+  },
+  "copied_from": "\\\\wsl.localhost\\Ubuntu\\var\\www\\2026-10-13\\ok\\outputs\\crm-foundations\\krayin-2.2.6",
+  "copy_verified_at_utc": "2026-10-14T16:25:41.299577+00:00",
+  "verification": {
+    "algorithm": "SHA-256",
+    "source_file_count": 1297,
+    "matched_file_count": 1297,
+    "mismatches": [],
+    "checksum_manifest": "UPSTREAM.sha256",
+    "scope": "All files in the previously pinned source snapshot, before product changes. Added Turnkey documentation and provenance files are excluded."
+  },
+  "archive_symlinks_stored_as_text": [
+    ".ai/skills",
+    ".claude/skills",
+    ".codex/skills",
+    ".cursor/skills",
+    ".kilocode/skills"
+  ],
+  "application_runtime_verified": false,
+  "dependencies_installed": false
+}

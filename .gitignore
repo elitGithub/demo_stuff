@@ -120,7 +120,6 @@ dist
 
 # vuepress v2.x temp and cache directory
 .temp
-.cache
 
 # Docusaurus cache and generated files
 .docusaurus
@@ -236,9 +235,7 @@ Backup of *.doc*
 *.~vsd*
 
 ### Yeoman template
-node_modules/
 bower_components/
-*.log
 
 build/
 dist/
@@ -333,22 +330,6 @@ cscope.in.out
 cscope.po.out
 
 
-### Clojure template
-pom.xml
-pom.xml.asc
-*.jar
-*.class
-/lib/
-/classes/
-/target/
-/checkouts/
-.lein-deps-sum
-.lein-repl-history
-.lein-plugins/
-.lein-failures
-.nrepl-port
-.cpcache/
-
 ### JBoss4 template
 # gitignore for JBoss v4 projects
 
@@ -384,18 +365,7 @@ pom.xml.asc
 # `/server/minimal/lib`, you should add an empty `.gitignore` or `.gitkeep` file
 # to the directory - otherwise you may have issues when starting the service.
 
-/server/all/data
-/server/all/log
-/server/all/tmp
-/server/all/work
-/server/default/data
-/server/default/log
-/server/default/tmp
-/server/default/work
-/server/minimal/data
-/server/minimal/log
-/server/minimal/tmp
-/server/minimal/work
+
 /server/jbossweb-standalone/data
 /server/jbossweb-standalone/log
 /server/jbossweb-standalone/tmp
@@ -406,9 +376,7 @@ pom.xml.asc
 /server/standard/work
 /server/default/deploy/*.jar.failed
 /server/default/deploy/*.jar.dodeploy
-/server/default/deploy/*.xml.failed
 /server/default/deploy/*.xml.dodeploy
-/server/default/deploy/*.war.failed
 /server/default/deploy/*.war.dodeploy
 
 
@@ -501,23 +469,14 @@ Cargo.lock
 
 ### SPFx template
 #SharePoint Framework (SPFx)
-# Logs
-logs
-*.log
-npm-debug.log*
 
 # Dependency directories
 node_modules
 
-# Build generated files
-dist
 lib
 solution
 temp
 *.sppkg
-
-# Coverage directory used by tools like istanbul
-coverage
 
 # OSX
 .DS_Store
@@ -1318,7 +1277,6 @@ _book
 
 # Idris 1
 *.ibc
-*.o
 
 ### Symfony template
 # Cache and logs (Symfony2)
@@ -1349,7 +1307,6 @@ _book
 # Managed by Composer
 /app/bootstrap.php.cache
 /var/bootstrap.php.cache
-/bin/*
 !bin/console
 !bin/symfony_requirements
 /vendor/
@@ -7228,7 +7185,6 @@ TSWLatexianTemp*
 
 ### AppceleratorTitanium template
 # Build folder and log file
-build/
 build.log
 
 ### Anjuta template
@@ -7266,13 +7222,8 @@ stylesheets/bundles
 
 # ignore compilation output of ModelSim
 *.mti
-*.dat
 *.dbs
 *.psm
-*.bak
-*.cmp
-*.jpg
-*.html
 *.bsf
 
 # ignore simulation output of ModelSim
@@ -7285,21 +7236,10 @@ transcript*
 sc_dpiheader.h
 vsim.dbg
 
-### Actionscript template
-# Build and Release Folders
-bin-debug/
-bin-release/
-[Oo]bj/
-[Bb]in/
-
-# Other files and folders
-.settings/
-
 # Executables
 *.swf
 *.air
-*.ipa
-*.apk
+
 
 # Project files, i.e. `.project`, `.actionScriptProperties` and `.flexProperties`
 # should NOT be excluded as they contain compiler settings and other important
@@ -7322,12 +7262,6 @@ gradle-app.setting
 # Cache of project
 .gradletasknamecache
 
-# Eclipse Gradle plugin generated files
-# Eclipse Core
-.project
-# JDT-specific (Eclipse Java Development Tools)
-.classpath
-
 ### Vim template
 # Swap
 [._]*.s[a-v][a-z]
@@ -7341,11 +7275,6 @@ gradle-app.setting
 Session.vim
 Sessionx.vim
 
-# Temporary
-.netrwhist
-*~
-# Auto-generated tag files
-tags
 # Persistent undo
 [._]*.un~
 
@@ -7354,3 +7283,7 @@ tags
 result
 result-*
 
+
+# Turnkey CRM owns its source and artifact ignore rules.
+!/turnkey-crm/
+!/turnkey-crm/**

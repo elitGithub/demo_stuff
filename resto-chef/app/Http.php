@@ -15,7 +15,7 @@ final class Http
         if($method==='GET' && !in_array($path,$getRoutes,true) && !$orderDetail) fail(404,'This page could not be found.');
         if($method==='POST') {
             $token=$_POST['_csrf']??null;
-            if(!is_string($token) || !hash_equals($_SESSION['_csrf'],$token)) fail(419,'Your form expired. Refresh this page and try again.');
+            if(!is_string($token) || !hash_equals($_SESSION['_csrf'],$token)) fail(403,'Your form expired. Refresh this page and try again.');
         }
         if(str_starts_with($path,'/admin')) requireAdmin();
         if($method==='POST') {

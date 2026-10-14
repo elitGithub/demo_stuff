@@ -1,18 +1,20 @@
 <?php
 declare(strict_types=1);
 
-// Environment variables take precedence. The optional local file is never public.
+// Environment variables take precedence. Read private file settings without putenv,
+// which is disabled on some shared hosts. Do not mutate the process environment.
+$fileSettings = [];
 $envPath = dirname(__DIR__) . '/.env';
 if (is_file($envPath)) {
     foreach (file($envPath, FILE_IGNORE_NEW_LINES | FILE_SKIP_EMPTY_LINES) as $line) {
         if (preg_match('/^([A-Z][A-Z0-9_]*)=(.*)$/', trim($line), $match) && getenv($match[1]) === false) {
             $value = trim($match[2]);
             if (strlen($value) >= 2 && (($value[0] === '"' && str_ends_with($value, '"')) || ($value[0] === "'" && str_ends_with($value, "'")))) $value = substr($value, 1, -1);
-            putenv($match[1] . '=' . $value);
+            $fileSettings[$match[1]] = $value;
         }
     }
 }
-$setting = static fn(string $name, string $default): string => getenv($name) === false ? $default : (string)getenv($name);
+$setting = static fn(string $name, string $default): string => getenv($name) === false ? ($fileSettings[$name] ?? $default) : (string)getenv($name);
 $timezone = $setting('APP_TIMEZONE', 'UTC');
 new DateTimeZone($timezone);
 $currency = $setting('APP_CURRENCY', 'USD');

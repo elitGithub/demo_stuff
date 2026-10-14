@@ -74,7 +74,7 @@ with tempfile.TemporaryDirectory(prefix='restrogirls-http-') as temporary:
                 status,body,_=visitor.get(path)
                 check(status in (403,404), 'private path blocked: '+path)
             status,_,_=visitor.post('/cart/add',{'food_id':'1','quantity':'1'})
-            check(status == 419, 'POST without CSRF rejected')
+            check(status == 403, 'POST without CSRF rejected')
             status,_,_=visitor.get('/cart/add?food_id=1&quantity=1')
             check(status == 405, 'GET cannot mutate cart')
             status,body,_=visitor.get('/admin')

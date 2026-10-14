@@ -5,6 +5,21 @@ and search the menu, use a multi-item cart, choose pickup or delivery, place ord
 and track their history. Staff can manage dishes, prices, categories, availability,
 preparation status and date-filtered sales.
 
+## Deploy on InfinityFree
+
+Follow [the complete InfinityFree deployment guide](deploy/infinityfree/DEPLOY.md).
+Build a fresh upload ZIP, importable MySQL demo SQL, and private demo logins with:
+
+```bash
+python3 bin/package-infinityfree.py
+```
+
+Outputs are in ignored `storage/infinityfree/`. Extract the ZIP locally, configure
+`htdocs/private/.env`, and upload only the contents of `htdocs` to the host's website
+directory. Import `demo.sql` separately through phpMyAdmin. The raw repository
+layout is not the InfinityFree upload layout. No command-line access on the host is
+needed. See the guide for exact steps, HTTPS, verification and troubleshooting.
+
 ## Run locally
 
 Requirements: PHP 8.2+ with PDO, pdo_sqlite and mbstring. No Composer or npm install.
@@ -68,8 +83,8 @@ DB_PASSWORD=your-random-password
 Use a setup account with schema-creation permissions to run `bin/setup.php`, then
 restrict the runtime account to the needed SELECT/INSERT/UPDATE/DELETE permissions
 on this database. No credentials are embedded in source; blank passwords and the
-root database user are rejected. Automated integration validation currently uses
-SQLite; test MySQL against your target server before deploying that configuration.
+root database user are rejected. Automated integration validation covers SQLite and an isolated MySQL/Apache HTTPS
+package deployment. Check the target hosting account using the deployment guide.
 The legacy `mishtidb` database is never automatically imported or modified.
 
 ## Security and hosting
@@ -112,6 +127,7 @@ refresh, with a refresh control on customer and staff pages.
 
 ```bash
 php tests/domain.php
+python3 tests/config.py
 python3 tests/web.py
 python3 tests/concurrency.py
 # With the demo running and Google Chrome installed; Node 22+:

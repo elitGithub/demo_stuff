@@ -4,6 +4,10 @@ This changelog consists of the bug & security fixes and new features being inclu
 
 ## **v2.2.7 (Upcoming)**
 
+* [fixed] Selected InnoDB explicitly for shared-hosting installations to support Unicode indexes, transactions and foreign keys.
+
+* [feature] Added an InfinityFree upload bundle with protected application files, private installer access, production dependencies and storage without symlinks.
+
 * [fixed] Loaded sidebar styling in the full admin layout head and synchronized collapsed submenu accessibility state.
 
 * [enhancement] Expanded Contacts inside the desktop sidebar with nested links and current-page highlighting, replacing the second navigation panel.

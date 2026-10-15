@@ -1,0 +1,22 @@
+Options -Indexes -MultiViews
+DirectoryIndex index.php
+
+# Application code and credentials are never served, including before routing.
+RewriteEngine On
+RewriteRule ^_app(?:/|$) - [F,L,NC]
+RewriteRule (^|/)\. - [F,L]
+
+<FilesMatch "(?i)\.(?:env|ini|log|sql|zip|bak|key|pem)$">
+    Require all denied
+</FilesMatch>
+
+RewriteCond %{HTTP:Authorization} .
+RewriteRule .* - [E=HTTP_AUTHORIZATION:%{HTTP:Authorization}]
+
+RewriteCond %{REQUEST_FILENAME} !-d
+RewriteCond %{REQUEST_URI} (.+)/$
+RewriteRule ^ %1 [L,R=301]
+
+RewriteCond %{REQUEST_FILENAME} !-d
+RewriteCond %{REQUEST_FILENAME} !-f
+RewriteRule ^ index.php [L]

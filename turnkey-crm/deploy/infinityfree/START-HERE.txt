@@ -1,0 +1,75 @@
+Turnkey CRM - InfinityFree installation
+
+Target: https://turnkey-demo.is-great.org
+Database: if0_43175351_turnkey
+MySQL host: sql206.infinityfree.com
+Database username: check the hosting panel (expected if0_43175351).
+
+This is a fresh-install package for the empty site. It includes our customized CRM
+and production dependencies. It contains a fresh application key and a private
+setup key, but NO local .env, database dump, sessions, logs or existing accounts.
+
+1. In the domain's htdocs folder, remove turnkey-check.php after saving its results.
+2. Use Upload & Unzip for the ARCHIVE_COUNT files in upload-zips, in numeric order.
+   Extract each into htdocs itself. Do not create an extra turnkey folder.
+   The last archive activates index.php. Remove any uploaded ZIPs after extraction.
+   Alternatively upload the CONTENTS of the htdocs folder with FTP, including
+   dotfiles; upload its root index.php last.
+3. Confirm htdocs contains .htaccess, index.php, _app, admin, installer, turnkey,
+   and storage. If there is a default index.html, remove it.
+4. Before entering credentials, visit:
+   https://turnkey-demo.is-great.org/_app/composer.json
+   It MUST be forbidden (403), with no JSON shown. If it is readable, stop here.
+   This is the check that the host honors the protective .htaccess files.
+5. Open your private setup link:
+   PRIVATE_SETUP_URL
+   Keep this link private. It grants installer access for one hour in that browser.
+   Reopen it if access expires before installation finishes.
+6. In the Krayin browser installer use:
+   App name: Turnkey CRM
+   App URL: https://turnkey-demo.is-great.org
+   Timezone: Asia/Jerusalem
+   Language: English
+   Currency: USD
+   Database connection: MySQL
+   Database host: sql206.infinityfree.com
+   Database port: 3306
+   Database name: if0_43175351_turnkey
+   Database username: the exact username from the hosting panel
+   Database password: enter directly in the installer, not in chat
+   Database prefix: leave empty
+   Administrator: your private owner account with a unique password
+   Do not use the future shared demo login for this owner account.
+
+The installer runs migrate:fresh, seeds Krayin defaults, and sets the owner account.
+This deletes any tables in the selected database. Use ONLY the empty database above.
+It also invokes key:generate and storage:link internally; the hosting configuration
+makes storage:link a no-op. YOU operate the installer; this package builder has
+not connected to a database or executed Artisan.
+
+The installer creates the base CRM, not our fictional demo dataset. After it
+finishes, tell us the result so we can complete the data import separately. Do not
+run the installer again after a timeout without checking what completed.
+InfinityFree has a 60-second request limit, so migrations/seeding can time out.
+
+After the demo data has been loaded, edit htdocs/_app/.env:
+  APP_ENV=demo
+  TURNKEY_DEMO=true
+Keep APP_DEBUG=false, TURNKEY_SHARED_HOSTING=true, file sessions/cache and log mail.
+Do not set demo mode before installation/data preparation: it blocks writes.
+No config cache is shipped, so these .env edits apply on the next request.
+The shared demo login will work only after demo accounts/data are imported.
+
+Verify before sharing:
+- _app/composer.json remains forbidden.
+- /admin/login shows Turnkey branding.
+- The shared demo user can view contacts, opportunities, activities and quotes.
+- Attempts to save/delete are rejected in APP_ENV=demo.
+- Quotes generate PDFs and all assets load over HTTPS.
+
+This package targets the English demo. Oversized Chinese/CJK fonts are omitted.
+Google API service classes are limited to the People and OAuth APIs used by Krayin.
+Background workers, cron and symlink storage are not required for this deployment.
+Customer installations needing those capabilities require a different host profile.
+
+Keep START-HERE.txt and manifest.json LOCAL; upload only htdocs or upload-zips.

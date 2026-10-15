@@ -34,6 +34,17 @@ class TurnkeyServiceProvider extends ServiceProvider
 
     public function boot(): void
     {
+        if ($this->app['config']->get('turnkey.shared_hosting')) {
+            // The release puts public files directly in htdocs. No symlink is needed.
+            $this->app['config']->set('filesystems.links', []);
+            $this->app['config']->set('filesystems.disks.public.root', public_path('storage'));
+
+            // The hosted demo has no outbound mail or installer telemetry.
+            $this->app['config']->set('mail.default', 'log');
+            $this->app['events']->listen(MessageSending::class, fn () => false);
+            $this->app['events']->forget('krayin.installed');
+        }
+
         $views = __DIR__.'/../Resources/views';
         $this->loadViewsFrom($views, 'turnkey');
         $this->loadTranslationsFrom(__DIR__.'/../Resources/lang', 'turnkey');

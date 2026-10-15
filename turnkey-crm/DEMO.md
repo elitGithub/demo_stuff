@@ -138,7 +138,7 @@ The initial sidebar preview used an anonymous layout and missed a stylesheet ord
 
 ## Source control
 
-The workspace root `.gitignore` explicitly allows `turnkey-crm`; this directory's own rules then exclude `.env` variants, credentials, dependencies, caches, runtime storage and generated builds. Source, docs, example environments and dependency lockfiles remain eligible for Git. Nothing was staged or committed.
+The workspace root `.gitignore` contains shared exclusions and leaves new project folders visible without explicit allowlists. This directory's own rules exclude `.env` variants, credentials, dependencies, caches, runtime storage and generated builds. Source, docs, example environments and dependency lockfiles remain eligible for Git.
 
 The existing compiled browser assets remain on disk for the local demo but are ignored by Git. A fresh source checkout therefore needs the frontend assets built or supplied in a release artifact before serving the CRM. Preserve the runtime storage directory skeleton when packaging a release.
 

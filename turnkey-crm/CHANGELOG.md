@@ -4,6 +4,8 @@ This changelog consists of the bug & security fixes and new features being inclu
 
 ## **v2.2.7 (Upcoming)**
 
+* [changed] Updated the demo source-control documentation for the workspace's shared ignore rules; project folders no longer need explicit allowlists.
+
 * [enhancement] Updated the shared demo email addresses and password defaults to use CustomCRM branding.
 
 * [changed] Renamed the CRM branding to CustomCRM while preserving the existing domain, demo accounts and read-only protections.

@@ -1,0 +1,1 @@
+<label>Payment received by<select name="method" required><option value="cash">Cash</option><option value="card">Card — recorded locally</option><option value="transfer">Bank transfer</option></select></label>

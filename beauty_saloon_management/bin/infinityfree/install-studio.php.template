@@ -1,0 +1,181 @@
+<?php
+declare(strict_types=1);
+
+header('Cache-Control: no-store');
+header('Referrer-Policy: no-referrer');
+header('X-Content-Type-Options: nosniff');
+header("Content-Security-Policy: default-src 'none'; style-src 'unsafe-inline'; form-action 'self'; base-uri 'none'; frame-ancestors 'none'");
+$parts = {{PARTS}};
+$code = is_string($_POST['code'] ?? null) ? $_POST['code'] : '';
+$authenticated = $_SERVER['REQUEST_METHOD'] === 'POST' && hash_equals('{{CODE_HASH}}', hash('sha256', $code));
+$directory = __DIR__.'/studio/_app/.installation';
+$progressFile = $directory.'/progress.json';
+$completedFile = $directory.'/complete.json';
+$message = '';
+$progress = [];
+$finished = false;
+$lock = null;
+
+function studioInstallerEscape(string $value): string
+{
+    return htmlspecialchars($value, ENT_QUOTES, 'UTF-8');
+}
+
+function studioInstallerWrite(string $path, string $contents): void
+{
+    $temporary = $path.'.'.bin2hex(random_bytes(8)).'.tmp';
+    if (file_put_contents($temporary, $contents, LOCK_EX) !== strlen($contents)) {
+        if (is_file($temporary)) {
+            unlink($temporary);
+        }
+        throw new RuntimeException('Cannot save installation progress. Check the directory permissions.');
+    }
+    if (! rename($temporary, $path)) {
+        unlink($temporary);
+        throw new RuntimeException('Cannot save installation progress. The previous state was preserved.');
+    }
+}
+
+try {
+    if (is_file($completedFile)) {
+        throw new RuntimeException('This installation is already complete. Remove install-studio.php if it remains.');
+    }
+    if ($_SERVER['REQUEST_METHOD'] === 'POST' && ! $authenticated) {
+        http_response_code(403);
+        throw new RuntimeException('The installation code is incorrect.');
+    }
+    if ($authenticated) {
+        if (PHP_VERSION_ID < 80300) {
+            throw new RuntimeException('PHP 8.3 or newer is required.');
+        }
+        foreach (['ctype', 'dom', 'fileinfo', 'mbstring', 'openssl', 'PDO', 'pdo_sqlite', 'session', 'tokenizer', 'xml', 'zip', 'gd'] as $extension) {
+            if (! extension_loaded($extension)) {
+                throw new RuntimeException('Missing PHP extension: '.$extension);
+            }
+        }
+        $lock = fopen($directory.'/install.lock', 'c');
+        if (! $lock || ! flock($lock, LOCK_EX | LOCK_NB)) {
+            throw new RuntimeException('Another installation step is running. Wait, then retry.');
+        }
+        if (is_file($completedFile) || file_exists(__DIR__.'/studio/index.php') || file_exists(__DIR__.'/index.html') || file_exists(__DIR__.'/index.php')) {
+            throw new RuntimeException('An active Studio or root website already exists. Nothing was overwritten.');
+        }
+        if (is_file($progressFile)) {
+            $saved = json_decode((string) file_get_contents($progressFile), true, 512, JSON_THROW_ON_ERROR);
+            if (($saved['release'] ?? '') !== '{{RELEASE_HASH}}') {
+                throw new RuntimeException('Existing installation progress belongs to another release. Nothing was overwritten.');
+            }
+            $progress = $saved['parts'];
+            if ($progress !== array_slice($parts, 0, count($progress), true)) {
+                throw new RuntimeException('Installation progress verification failed.');
+            }
+        }
+        $action = is_string($_POST['action'] ?? null) ? $_POST['action'] : 'status';
+        if (isset($parts[$action])) {
+            if (isset($progress[$action])) {
+                $message = $action.' is already installed.';
+            } else {
+                if ($action !== array_keys($parts)[count($progress)]) {
+                    throw new RuntimeException('Install the payload files in the displayed order.');
+                }
+                $archive = __DIR__.'/'.$action;
+                if (! is_file($archive) || ! hash_equals($parts[$action], hash_file('sha256', $archive))) {
+                    throw new RuntimeException('Upload '.$action.' using Upload Files first. Its checksum must match this release.');
+                }
+                $zip = new ZipArchive;
+                if ($zip->open($archive) !== true) {
+                    throw new RuntimeException('Cannot open the payload ZIP.');
+                }
+                for ($i = 0; $i < $zip->numFiles; $i++) {
+                    $name = $zip->getNameIndex($i);
+                    if (! is_string($name) || ! str_starts_with($name, 'studio/') || str_contains($name, '\\') || str_contains($name, "\0") || in_array('..', explode('/', $name), true) || $name === 'studio/index.php') {
+                        throw new RuntimeException('Unsafe payload path rejected.');
+                    }
+                    $zip->getExternalAttributesIndex($i, $system, $attributes);
+                    if ((($attributes >> 16) & 0170000) === 0120000) {
+                        throw new RuntimeException('Payload symlinks are forbidden.');
+                    }
+                    $target = __DIR__;
+                    foreach (explode('/', $name) as $segment) {
+                        $target .= '/'.$segment;
+                        if (is_link($target)) {
+                            throw new RuntimeException('Existing destination symlink rejected.');
+                        }
+                    }
+                }
+                if (! $zip->extractTo(__DIR__)) {
+                    throw new RuntimeException('Extraction failed. Retry this step after checking free space.');
+                }
+                $zip->close();
+                $progress[$action] = $parts[$action];
+                studioInstallerWrite($progressFile, json_encode(['release' => '{{RELEASE_HASH}}', 'parts' => $progress], JSON_THROW_ON_ERROR));
+                $message = 'Installed '.$action.'.';
+            }
+        } elseif ($action === 'finish') {
+            if ($progress !== $parts) {
+                throw new RuntimeException('Install all payload parts before finishing.');
+            }
+            require __DIR__.'/studio/_app/vendor/autoload.php';
+            $app = require __DIR__.'/studio/_app/bootstrap/app.php';
+            $app->usePublicPath(__DIR__.'/studio');
+            $app->make(Illuminate\Contracts\Console\Kernel::class)->bootstrap();
+            if (! $app->environment('production') || config('app.debug') || ! config('studio.demo') || ! config('studio.public_demo') || config('database.default') !== 'sqlite') {
+                throw new RuntimeException('Production browse-only configuration verification failed.');
+            }
+            $database = $app->make('db')->connection()->getPdo();
+            if ($database->query('PRAGMA integrity_check')->fetchColumn() !== 'ok' || (int) $database->query('SELECT count(*) FROM users')->fetchColumn() !== 1 || (int) $database->query('SELECT count(*) FROM clients')->fetchColumn() !== 28) {
+                throw new RuntimeException('The fictional demonstration database failed verification.');
+            }
+            $outputs = [__DIR__.'/studio/index.php' => base64_decode('{{PUBLIC_INDEX}}', true), __DIR__.'/index.html' => base64_decode('{{HUB_HTML}}', true)];
+            $created = [];
+            try {
+                foreach ($outputs as $path => $contents) {
+                    $file = fopen($path, 'x');
+                    if (! $file) {
+                        throw new RuntimeException('An activation file already exists or cannot be written.');
+                    }
+                    $created[] = $path;
+                    $written = fwrite($file, $contents);
+                    fclose($file);
+                    if ($written !== strlen($contents)) {
+                        throw new RuntimeException('Could not write an activation file.');
+                    }
+                }
+                studioInstallerWrite($completedFile, json_encode(['completed_at' => gmdate('c'), 'parts' => $parts], JSON_THROW_ON_ERROR));
+            } catch (Throwable $error) {
+                foreach ($created as $path) {
+                    unlink($path);
+                }
+                throw $error;
+            }
+            foreach (array_keys($parts) as $part) {
+                unlink(__DIR__.'/'.$part);
+            }
+            if (is_file(__DIR__.'/01-setup.zip')) {
+                unlink(__DIR__.'/01-setup.zip');
+            }
+            $finished = true;
+            $message = 'Installed successfully. Your public demo is ready.';
+            if (! unlink(__FILE__)) {
+                $message .= ' Remove install-studio.php manually in File Manager.';
+            }
+        } elseif ($action !== 'status') {
+            throw new RuntimeException('Unknown installation action.');
+        }
+    }
+} catch (Throwable $error) {
+    if (http_response_code() < 400) {
+        http_response_code(409);
+    }
+    $message = $error->getMessage();
+} finally {
+    if (is_resource($lock)) {
+        flock($lock, LOCK_UN);
+        fclose($lock);
+    }
+}
+?><!doctype html><html lang="en"><meta charset="utf-8"><meta name="viewport" content="width=device-width, initial-scale=1"><title>Install Studio</title><style>body{font:16px system-ui;max-width:680px;margin:50px auto;padding:24px;background:#f8f7f5;color:#292827}p{line-height:1.6}button,input{font:inherit;padding:12px;margin:6px 0}button{cursor:pointer}input{width:95%}a{color:inherit}.notice{padding:16px;background:#fff;border:1px solid #ddd}</style><h1>Install Studio</h1>
+<?php if ($message !== '') { ?><p class="notice"><?= studioInstallerEscape($message) ?></p><?php } ?>
+<?php if ($finished) { ?><p><a href="/">Open demo collection</a> · <a href="/studio/">Open salon website</a> · <a href="/studio/login">Open workspace</a></p><p>The demo uses fictional data and browse-only access.</p>
+<?php } elseif (! $authenticated) { ?><p>Enter the installation code from your private START-HERE.txt file. No files are changed until you submit an installation step.</p><form method="post"><label>Installation code<input type="password" name="code" autocomplete="off" required></label><button>Continue</button></form>
+<?php } else { ?><p><?= count($progress) ?> of <?= count($parts) ?> payloads installed. Upload the payload ZIPs as files into htdocs, then use these buttons in order.</p><?php foreach ($parts as $part => $hash) { ?><form method="post"><input type="hidden" name="code" value="<?= studioInstallerEscape($code) ?>"><button name="action" value="<?= studioInstallerEscape($part) ?>" <?= isset($progress[$part]) ? 'disabled' : '' ?>>Install <?= studioInstallerEscape($part) ?></button></form><?php } ?><form method="post"><input type="hidden" name="code" value="<?= studioInstallerEscape($code) ?>"><button name="action" value="finish" <?= $progress !== $parts ? 'disabled' : '' ?>>Finish installation</button></form><?php } ?></html>

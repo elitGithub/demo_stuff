@@ -1,0 +1,2277 @@
+{
+  "date": "2026-10-15",
+  "scope": {
+    "barbarbaba": {
+      "files": 154,
+      "bytes": 9533999
+    },
+    "cdm": {
+      "files": 2627,
+      "bytes": 124027863
+    },
+    "Database": {
+      "files": 1,
+      "bytes": 22889
+    }
+  },
+  "first_party_php": [
+    {
+      "path": "barbarbaba/booking.php",
+      "sha256": "38b218e3f869e5ac6f7a2e9e2bbe46f6e98040487550cbb33887489be44ba05a",
+      "area": "booking and billing",
+      "tables": [
+        "tblappointment"
+      ],
+      "bytes": 1753
+    },
+    {
+      "path": "barbarbaba/create_order.php",
+      "sha256": "839456b1def9ace18a0b38c2a2f80b0e12ffbc6321f92a727957ee5da7b69ded",
+      "area": "booking and billing",
+      "tables": [],
+      "bytes": 1027
+    },
+    {
+      "path": "barbarbaba/index.php",
+      "sha256": "236dddcc4d056fbc3593fb7e120fa653caaa968b03dc590d0a3453f24ebb49ac",
+      "area": "shared shell and dashboard",
+      "tables": [
+        "selected",
+        "tbl_tax",
+        "tblservices",
+        "the"
+      ],
+      "bytes": 16312
+    },
+    {
+      "path": "barbarbaba/panel/about-us.php",
+      "sha256": "0c045dbb7918c09f9933d68b1834478050f29ef4b75b3aca6cdf4417ec4e3331",
+      "area": "website content",
+      "tables": [
+        "About",
+        "tblpage"
+      ],
+      "bytes": 4661
+    },
+    {
+      "path": "barbarbaba/panel/accepted-appointment.php",
+      "sha256": "4ff48a8eab5bd873c6c818f0451a57a2e14483116a612d7d431087a32b527733",
+      "area": "booking and billing",
+      "tables": [
+        "tblappointment",
+        "tblcustomers"
+      ],
+      "bytes": 5820
+    },
+    {
+      "path": "barbarbaba/panel/add-appointment.php",
+      "sha256": "0274a6954af82e51e86c08ae18bda5a2012e7c2feddb353fb905260c709a0c00",
+      "area": "booking and billing",
+      "tables": [
+        "data",
+        "tblappointment",
+        "tblcustomers",
+        "tblservices"
+      ],
+      "bytes": 7694
+    },
+    {
+      "path": "barbarbaba/panel/add-category.php",
+      "sha256": "8b7397fdac7e974d5ad1fbe4a73a372fcdbed82f1d3827ef0bfc66d17dfae0b8",
+      "area": "catalogue and team",
+      "tables": [
+        "tbl_category"
+      ],
+      "bytes": 4623
+    },
+    {
+      "path": "barbarbaba/panel/add-customer-services.php",
+      "sha256": "fc9cda22efd29fa76102acb27d25174c422f09ae85833652d344f3addf88ccff",
+      "area": "catalogue and team",
+      "tables": [
+        "tbl_staff",
+        "tbl_tax",
+        "tblinvoice",
+        "tblservices"
+      ],
+      "bytes": 7540
+    },
+    {
+      "path": "barbarbaba/panel/add-customer.php",
+      "sha256": "ea0c9328197dc35718bfb429a5cae54cffe9798d57ff142b77e111e542eee409",
+      "area": "client records",
+      "tables": [
+        "tblcustomers"
+      ],
+      "bytes": 6448
+    },
+    {
+      "path": "barbarbaba/panel/add-services.php",
+      "sha256": "d2c5ad6eb559638bffc2e01ab4efb7953d2a39b4ec11aa48a0206e873fa0ff08",
+      "area": "catalogue and team",
+      "tables": [
+        "tbl_category",
+        "tblservices"
+      ],
+      "bytes": 5694
+    },
+    {
+      "path": "barbarbaba/panel/add-staff.php",
+      "sha256": "dedc256587177194899561974df4523d9fcaf035f346fd8e27a75c44355e6789",
+      "area": "catalogue and team",
+      "tables": [
+        "tbl_staff"
+      ],
+      "bytes": 5246
+    },
+    {
+      "path": "barbarbaba/panel/add-tax.php",
+      "sha256": "f75407b229fbfb502993caf18e6a9d5537eda902d069457e9f14ff7954341056",
+      "area": "catalogue and team",
+      "tables": [
+        "tbl_tax"
+      ],
+      "bytes": 4514
+    },
+    {
+      "path": "barbarbaba/panel/add_invoice.php",
+      "sha256": "a6c1fb89a15dfd39b5e6d64796c6eeea897c16ac91a01ec005585048e443e112",
+      "area": "inventory and retail",
+      "tables": [
+        "stock",
+        "tblinvoice",
+        "tblservices"
+      ],
+      "bytes": 1747
+    },
+    {
+      "path": "barbarbaba/panel/add_plan.php",
+      "sha256": "dc9b2a42d2127ecf65a9cdfa865f17b10423b83034f7713268ca3bc5de8136cf",
+      "area": "membership",
+      "tables": [
+        "membership_plans"
+      ],
+      "bytes": 5078
+    },
+    {
+      "path": "barbarbaba/panel/add_subscribe.php",
+      "sha256": "721a13b63b4abaefac67b7f3653c8232e55f95207fcd991e88beb2779db3ce69",
+      "area": "membership",
+      "tables": [
+        "membership_plans",
+        "tblcustomers",
+        "user_memberships"
+      ],
+      "bytes": 5260
+    },
+    {
+      "path": "barbarbaba/panel/admin-profile.php",
+      "sha256": "d2fe86878221429f97e2d862fcede86153ab11f9b60bf7190eb73c4d1748e8ad",
+      "area": "identity and access",
+      "tables": [
+        "Profile",
+        "tbladmin"
+      ],
+      "bytes": 5125
+    },
+    {
+      "path": "barbarbaba/panel/all-appointment.php",
+      "sha256": "af1a58bd54db00cd061217aa5dfacdc7eec824c389508f70c3d16791ef040b19",
+      "area": "booking and billing",
+      "tables": [
+        "tblappointment",
+        "tblcustomers"
+      ],
+      "bytes": 4395
+    },
+    {
+      "path": "barbarbaba/panel/birthday_cron.php",
+      "sha256": "b4b811ea954b15730f10624d8ef988b8fa3fec803b7d04b25f52beef6ff3574f",
+      "area": "outreach",
+      "tables": [
+        "emailsetting",
+        "tblcustomers"
+      ],
+      "bytes": 2375
+    },
+    {
+      "path": "barbarbaba/panel/bwdates-reports-details.php",
+      "sha256": "3a31d7542f458b7dd63ed5ca0a4e5ac499cdbf9818cec67eab8bfc9d0bd5c45a",
+      "area": "reporting",
+      "tables": [
+        "tblcustomers",
+        "tblinvoice"
+      ],
+      "bytes": 6453
+    },
+    {
+      "path": "barbarbaba/panel/bwdates-reports-ds.php",
+      "sha256": "1b04315ad920e5a586de954932eb7d15c9c6601ecb05928546691814bf2b17cb",
+      "area": "reporting",
+      "tables": [
+        "Date"
+      ],
+      "bytes": 4201
+    },
+    {
+      "path": "barbarbaba/panel/change-password.php",
+      "sha256": "90f8a08627c4cee867a1c9744e065d2ca60d7e5099087e5ac2957de2d5763290",
+      "area": "identity and access",
+      "tables": [
+        "tbladmin"
+      ],
+      "bytes": 5327
+    },
+    {
+      "path": "barbarbaba/panel/contact-us.php",
+      "sha256": "ef9f2e8ffe85af9b3eeedb629f301323605c28bd75a9bf603cfceb31ae70111c",
+      "area": "website content",
+      "tables": [
+        "Contact",
+        "tblpage"
+      ],
+      "bytes": 5948
+    },
+    {
+      "path": "barbarbaba/panel/customer-list.php",
+      "sha256": "9873e9884814d5e8c9a669d9c6991d69c31e54d6c32cb3ea6af84b6a3cf6719b",
+      "area": "client records",
+      "tables": [
+        "tblcustomers"
+      ],
+      "bytes": 6146
+    },
+    {
+      "path": "barbarbaba/panel/dash-index.php",
+      "sha256": "40cf549ee0d3d003956e469c376f11b6795cdf4fc35fe086d7296f2dea19f5d3",
+      "area": "shared shell and dashboard",
+      "tables": [
+        "tblappointment",
+        "tblcustomers",
+        "tblinvoice",
+        "tblservices"
+      ],
+      "bytes": 8360
+    },
+    {
+      "path": "barbarbaba/panel/dashboard.php",
+      "sha256": "6b382f4358fb3bd0618689c3e618a5a04b7cfcf1a04de25d5a592b224970bf86",
+      "area": "shared shell and dashboard",
+      "tables": [
+        "tblappointment",
+        "tblcustomers",
+        "tblinvoice",
+        "tblservices"
+      ],
+      "bytes": 14425
+    },
+    {
+      "path": "barbarbaba/panel/edit-appointment.php",
+      "sha256": "90f646f20f7a22a2dd5f8b1be36e05b5a17a9641e9361a733596c8ad5dd874ca",
+      "area": "booking and billing",
+      "tables": [
+        "Appointment",
+        "tblappointment"
+      ],
+      "bytes": 5451
+    },
+    {
+      "path": "barbarbaba/panel/edit-category.php",
+      "sha256": "050dfac4ac5e46a1493e32b0091b7502a3351a54a96bed4f58d5b0ea6a9d1d4b",
+      "area": "catalogue and team",
+      "tables": [
+        "Category",
+        "Tax",
+        "tbl_category"
+      ],
+      "bytes": 4791
+    },
+    {
+      "path": "barbarbaba/panel/edit-customer-detailed.php",
+      "sha256": "2e5f26e4959d90e7320ba06c19220eb0c8961a69d764b7b60e5af566b4c4c872",
+      "area": "client records",
+      "tables": [
+        "Customer",
+        "tblcustomers"
+      ],
+      "bytes": 7499
+    },
+    {
+      "path": "barbarbaba/panel/edit-services.php",
+      "sha256": "422b536229199633d9c47c3c38c7f6812bc8051f18785a51755bc0e50812d7e3",
+      "area": "catalogue and team",
+      "tables": [
+        "Services",
+        "tbl_category",
+        "tblservices"
+      ],
+      "bytes": 6205
+    },
+    {
+      "path": "barbarbaba/panel/edit-staff.php",
+      "sha256": "c8db60d001182d93922aab4e056ad778ade6b19f8720fa205c0665553e85cb75",
+      "area": "catalogue and team",
+      "tables": [
+        "Staff",
+        "tbl_staff"
+      ],
+      "bytes": 5164
+    },
+    {
+      "path": "barbarbaba/panel/edit-subscription.php",
+      "sha256": "da32efc93c571efaa1d02d08fa19c5accd1a8414df8e117bfb227f95c513c343",
+      "area": "membership",
+      "tables": [
+        "Staff",
+        "User",
+        "membership_plans",
+        "tblcustomers",
+        "user_memberships"
+      ],
+      "bytes": 5837
+    },
+    {
+      "path": "barbarbaba/panel/edit-tax.php",
+      "sha256": "e1af00167330b90737169ef8abbf175543fdce3123208d27dd1019ca96c83a83",
+      "area": "catalogue and team",
+      "tables": [
+        "Tax",
+        "tbl_tax"
+      ],
+      "bytes": 4578
+    },
+    {
+      "path": "barbarbaba/panel/edit_plan.php",
+      "sha256": "a60b85a61e7c72ef0e6bbd5472449205cd10e25f1e66521ce168dd80c4b2a6ce",
+      "area": "membership",
+      "tables": [
+        "Staff",
+        "membership_plans"
+      ],
+      "bytes": 5399
+    },
+    {
+      "path": "barbarbaba/panel/fetch-appointments.php",
+      "sha256": "5e1680d8c43c413bd98f73ca2043bdce2dba534d8729308a96ef7cfbf9b9f6da",
+      "area": "booking and billing",
+      "tables": [
+        "tblappointment",
+        "tblservices"
+      ],
+      "bytes": 933
+    },
+    {
+      "path": "barbarbaba/panel/forgot-password.php",
+      "sha256": "a3b470cc710a203c16415fe169d28e3ee66023d493b6ad2b1779e45e6e5aaf5b",
+      "area": "identity and access",
+      "tables": [
+        "tbladmin"
+      ],
+      "bytes": 4163
+    },
+    {
+      "path": "barbarbaba/panel/get_customer_details.php",
+      "sha256": "91493b7b6be791a65621cebf16e404ec31dd1387a6aa25ff60f6db4b961dac79",
+      "area": "client records",
+      "tables": [
+        "tblcustomers"
+      ],
+      "bytes": 369
+    },
+    {
+      "path": "barbarbaba/panel/get_service_data.php",
+      "sha256": "626cee888ce726af732a45341f46188dcb2df316d38c21e4211ede428ba56afb",
+      "area": "reporting",
+      "tables": [
+        "tblservices"
+      ],
+      "bytes": 308
+    },
+    {
+      "path": "barbarbaba/panel/includes/dbconnection.php",
+      "sha256": "163addd7d46c8ac769d0132c0a84146484aa9d070338eaba5cb6ba9d2c894c27",
+      "area": "shared shell and dashboard",
+      "tables": [],
+      "bytes": 157
+    },
+    {
+      "path": "barbarbaba/panel/includes/footer.php",
+      "sha256": "4d3e7ea8708fa1cf0606f98d7a24bf181b44e0fad890273e2aa8360bb3527e94",
+      "area": "shared shell and dashboard",
+      "tables": [],
+      "bytes": 703
+    },
+    {
+      "path": "barbarbaba/panel/includes/header.php",
+      "sha256": "d27faa56bfa45fae8f8730da70faddb327872e66228c15329bd5ad9515d2e058",
+      "area": "shared shell and dashboard",
+      "tables": [
+        "tbladmin",
+        "tblappointment"
+      ],
+      "bytes": 5289
+    },
+    {
+      "path": "barbarbaba/panel/includes/sidebar.php",
+      "sha256": "96e3df41c7567b9476a9fada23028ccc1fa84aca5861dd3234465fb85e805ce3",
+      "area": "shared shell and dashboard",
+      "tables": [],
+      "bytes": 14273
+    },
+    {
+      "path": "barbarbaba/panel/index.php",
+      "sha256": "67134b6663a3cbb9eead5332e16a0bf06d84c30c052295319d64b46cc6106218",
+      "area": "shared shell and dashboard",
+      "tables": [
+        "tbladmin"
+      ],
+      "bytes": 5330
+    },
+    {
+      "path": "barbarbaba/panel/invoices.php",
+      "sha256": "66d3558e479ac963551b3ae024976efa2825d2bccbe970a371291083e3070b08",
+      "area": "booking and billing",
+      "tables": [
+        "tblcustomers",
+        "tblinvoice"
+      ],
+      "bytes": 5561
+    },
+    {
+      "path": "barbarbaba/panel/logout.php",
+      "sha256": "77753be0734c2a49f4ed211eb497668ca5b1e7d8dc9bb27085b5cea109ef7581",
+      "area": "identity and access",
+      "tables": [],
+      "bytes": 98
+    },
+    {
+      "path": "barbarbaba/panel/manage-category.php",
+      "sha256": "91bd5b7d7d800b746e0c9922d9fe46e6a3cbb2fb464b60cd12614c4b48fdb5b9",
+      "area": "catalogue and team",
+      "tables": [
+        "tbl_category"
+      ],
+      "bytes": 5954
+    },
+    {
+      "path": "barbarbaba/panel/manage-services.php",
+      "sha256": "d73c3a14206f6c8e57b741820eb2b7e67c8fb426a19019e0a7e3a739fbee7f21",
+      "area": "catalogue and team",
+      "tables": [
+        "tblservices"
+      ],
+      "bytes": 7843
+    },
+    {
+      "path": "barbarbaba/panel/manage-staff.php",
+      "sha256": "e312714ae7037925d427a899900f6454bb195ce5fd72b92267d74b246f5e7a55",
+      "area": "catalogue and team",
+      "tables": [
+        "tbl_staff"
+      ],
+      "bytes": 7036
+    },
+    {
+      "path": "barbarbaba/panel/manage-tax.php",
+      "sha256": "9d85d0b4a7d0d83ff9272300d56fcee7b976cbabff023b2f04000007fb4ba6fc",
+      "area": "catalogue and team",
+      "tables": [
+        "tbl_tax"
+      ],
+      "bytes": 5839
+    },
+    {
+      "path": "barbarbaba/panel/manage_plan.php",
+      "sha256": "1a082a2e0a91bec2e7e949ff47ac6b14c79ef2a8da484102b776d71e27a8bcd4",
+      "area": "membership",
+      "tables": [
+        "membership_plans",
+        "tblservices"
+      ],
+      "bytes": 6153
+    },
+    {
+      "path": "barbarbaba/panel/manage_subscribe.php",
+      "sha256": "1cb32526ea8bc1472c7f4dbc3b93d7da23897833b3617b075a3f1a3d0f3f425a",
+      "area": "membership",
+      "tables": [
+        "membership_plans",
+        "tblcustomers",
+        "user_memberships"
+      ],
+      "bytes": 6492
+    },
+    {
+      "path": "barbarbaba/panel/marriage_reminder.php",
+      "sha256": "d6f67b8946da46a26c13228732de4cc523c500b79c9b95cca8e4b688e4b0d049",
+      "area": "outreach",
+      "tables": [
+        "emailsetting",
+        "tblcustomers"
+      ],
+      "bytes": 2418
+    },
+    {
+      "path": "barbarbaba/panel/msg_send.php",
+      "sha256": "2c6da186edfcb04a5a729b61e48a8fde3874fc18c8fecf6e0e80e33f1cff8072",
+      "area": "outreach",
+      "tables": [
+        "emailsetting",
+        "tblappointment",
+        "tblcustomers"
+      ],
+      "bytes": 2525
+    },
+    {
+      "path": "barbarbaba/panel/new-appointment.php",
+      "sha256": "8578151df485dbb2e53cc61500d8c840f9a9e8d7675f6506dfd2b67580422639",
+      "area": "booking and billing",
+      "tables": [
+        "tblappointment"
+      ],
+      "bytes": 5414
+    },
+    {
+      "path": "barbarbaba/panel/order.php",
+      "sha256": "f2ffd2f07cf0de7afcf71bba9b38cedf852fce1e0ca99aac9160f9d17ecf22f8",
+      "area": "inventory and retail",
+      "tables": [
+        "data",
+        "tbl_tax",
+        "tblcustomers",
+        "tblservices"
+      ],
+      "bytes": 16503
+    },
+    {
+      "path": "barbarbaba/panel/pro_sale.php",
+      "sha256": "acf4e434d06f027fbe118ec5738817a002c6ed26782279ea3b36b9c9233e2777",
+      "area": "reporting",
+      "tables": [
+        "Date",
+        "tblinvoice",
+        "tblservices"
+      ],
+      "bytes": 5781
+    },
+    {
+      "path": "barbarbaba/panel/rejected-appointment.php",
+      "sha256": "efbabca27bcb085606023e0702ae41ceddf6dfd946599613e73d72607a60ad91",
+      "area": "booking and billing",
+      "tables": [
+        "tblappointment",
+        "tblcustomers"
+      ],
+      "bytes": 5678
+    },
+    {
+      "path": "barbarbaba/panel/reset-password.php",
+      "sha256": "31862028617f65aa24a22b4d156bccf5592728c8f8ce950a60924a656de4a5a4",
+      "area": "identity and access",
+      "tables": [
+        "tbladmin"
+      ],
+      "bytes": 4172
+    },
+    {
+      "path": "barbarbaba/panel/sales-reports-detail.php",
+      "sha256": "1f78e2f8cdfd8ba1931a7c0298c02cffda048d46a65fbe150423d39a738f8771",
+      "area": "reporting",
+      "tables": [
+        "tblinvoice",
+        "tblservices"
+      ],
+      "bytes": 7394
+    },
+    {
+      "path": "barbarbaba/panel/sales-reports.php",
+      "sha256": "0ab6466c3c8a44f76d476c3ced9434ddcf0b31d234b535efed6d028e9bfd1b35",
+      "area": "reporting",
+      "tables": [
+        "Date"
+      ],
+      "bytes": 4221
+    },
+    {
+      "path": "barbarbaba/panel/schedule-staff.php",
+      "sha256": "66262f618439265649934656470d3dad3e5b40716625ecb4ce72f1575884dde0",
+      "area": "catalogue and team",
+      "tables": [
+        "tbl_staff",
+        "tbl_staff_schedule"
+      ],
+      "bytes": 6057
+    },
+    {
+      "path": "barbarbaba/panel/search-appointment.php",
+      "sha256": "6e892bfb43a97b9a27f2b744c7f672cfa2d88da42379972189ecff46d04e2a32",
+      "area": "booking and billing",
+      "tables": [
+        "tblappointment"
+      ],
+      "bytes": 6461
+    },
+    {
+      "path": "barbarbaba/panel/search-invoices.php",
+      "sha256": "03d58997b7b03ff12ce522d212dc6af11c59d5e4ca36bf282ed54c3270b6a244",
+      "area": "booking and billing",
+      "tables": [
+        "tblcustomers",
+        "tblinvoice"
+      ],
+      "bytes": 6748
+    },
+    {
+      "path": "barbarbaba/panel/staff_commision.php",
+      "sha256": "fad9e8f8d14a39b941cdf3ffc7740cd54afdac2327df6713c8c7ebc86633a5ea",
+      "area": "reporting",
+      "tables": [
+        "Date",
+        "tbl_staff",
+        "tblinvoice"
+      ],
+      "bytes": 5740
+    },
+    {
+      "path": "barbarbaba/panel/stock.php",
+      "sha256": "c79e1b159649c1d1b8cabdfdcf4b178e78ebdc548a848aaf711d11e76872a6be",
+      "area": "inventory and retail",
+      "tables": [
+        "tblservices"
+      ],
+      "bytes": 649
+    },
+    {
+      "path": "barbarbaba/panel/subcriber.php",
+      "sha256": "d984a5abc4287e09458b302a162cf44bc1c1dc49207cda4fcd0aa399c8feda2f",
+      "area": "outreach",
+      "tables": [
+        "tblsubscriber"
+      ],
+      "bytes": 5800
+    },
+    {
+      "path": "barbarbaba/panel/top_services.php",
+      "sha256": "0dfd8be506e805a2ee3b50cc6639da99ae9a9fc647eba3df787da314f013683e",
+      "area": "reporting",
+      "tables": [
+        "tblinvoice",
+        "tblservices"
+      ],
+      "bytes": 6090
+    },
+    {
+      "path": "barbarbaba/panel/top_staff.php",
+      "sha256": "307f72ed93af0ae9d81cdb67d0e3f6e898f2ec8960f44f689d8735a7af9cbac1",
+      "area": "reporting",
+      "tables": [
+        "tbl_staff",
+        "tblinvoice",
+        "tblservices"
+      ],
+      "bytes": 6022
+    },
+    {
+      "path": "barbarbaba/panel/view-appointment.php",
+      "sha256": "fc401d42a8b680cd56aec58a78ccd0c6a0f1c3a4d66e7f257af532d8aa433ae1",
+      "area": "booking and billing",
+      "tables": [
+        "emailsetting",
+        "tbl_staff",
+        "tbl_tax",
+        "tblappointment",
+        "tblcustomers",
+        "tblinvoice",
+        "tblservices",
+        "the"
+      ],
+      "bytes": 13576
+    },
+    {
+      "path": "barbarbaba/panel/view-invoice.php",
+      "sha256": "bed28e498948a6695255826eef26ab4044310b6aece0a13c94bc3e9bce1ac3d6",
+      "area": "booking and billing",
+      "tables": [
+        "tblcustomers",
+        "tblinvoice",
+        "tblservices"
+      ],
+      "bytes": 6605
+    },
+    {
+      "path": "barbarbaba/panel/view_order.php",
+      "sha256": "365a1079379b8d1f1ed3a4804bbf6f612889482e3423d5ce4b2c914c986e9f0a",
+      "area": "inventory and retail",
+      "tables": [
+        "tbl_staff",
+        "tblcustomers",
+        "tblinvoice"
+      ],
+      "bytes": 6157
+    },
+    {
+      "path": "barbarbaba/panel/view_schedule.php",
+      "sha256": "e9558cf2fdbd607e0bf1b3259819a6c312abb584e64e036127567e3d69c97751",
+      "area": "catalogue and team",
+      "tables": [
+        "tbl_staff",
+        "tbl_staff_schedule",
+        "tblservices"
+      ],
+      "bytes": 8655
+    },
+    {
+      "path": "barbarbaba/panel/visit.php",
+      "sha256": "96d94329003b0f161fe27f7a420236990e5a02a9d70d6e8927743eb9351a15e6",
+      "area": "booking and billing",
+      "tables": [
+        "tbl_staff",
+        "tblcustomers",
+        "tblinvoice"
+      ],
+      "bytes": 7518
+    },
+    {
+      "path": "barbarbaba/reciept.php",
+      "sha256": "6d5a2205c2765a550c4d2d9a357de8738606d2ed660beb5214a5044f73c61395",
+      "area": "booking and billing",
+      "tables": [
+        "tblappointment"
+      ],
+      "bytes": 2415
+    },
+    {
+      "path": "cdm/admin_alert.php",
+      "sha256": "8b38be8f12c28b4793b18a48438a35701f9ae91873a9966f790f6d08947da2e5",
+      "area": "pipeline activity and follow-ups",
+      "tables": [],
+      "bytes": 4339
+    },
+    {
+      "path": "cdm/admin_client_scripts.php",
+      "sha256": "93fd59078f6e74d050a6c1e91bd728f969727bac2a56f4b554838b1cd76b80ba",
+      "area": "shared shell and dashboard",
+      "tables": [
+        "Customer"
+      ],
+      "bytes": 2242
+    },
+    {
+      "path": "cdm/admin_clients.php",
+      "sha256": "a098b0516d396a6a0eeb15d9eb8def9a3cee3a0eef465315bea09b9d23a12d62",
+      "area": "client records",
+      "tables": [
+        "customer_orders",
+        "customers",
+        "sales_agents"
+      ],
+      "bytes": 5859
+    },
+    {
+      "path": "cdm/admin_create_customer.php",
+      "sha256": "09ca777d9b77cb2a0cebedd48414b7ac87ee21dbdd5e45026d566827b29a671a",
+      "area": "client records",
+      "tables": [
+        "customers"
+      ],
+      "bytes": 1437
+    },
+    {
+      "path": "cdm/admin_customer_modal.php",
+      "sha256": "73f1fdc5e0e0a972f929bf9b44d5913d32e0b4037f9c982736a77904f2c5694f",
+      "area": "client records",
+      "tables": [
+        "Customer",
+        "Record"
+      ],
+      "bytes": 10544
+    },
+    {
+      "path": "cdm/admin_customers.php",
+      "sha256": "847b1d86980a15258d4a3f8ea5947bf95ef392a25bbdb0abeadc52a0a660a47f",
+      "area": "client records",
+      "tables": [
+        "Records",
+        "customers"
+      ],
+      "bytes": 6708
+    },
+    {
+      "path": "cdm/admin_dashboard.php",
+      "sha256": "6f11fae7cc16ffad6ae02b70767beaa93b7edc18f0b3882daa06458f27b2aa9f",
+      "area": "shared shell and dashboard",
+      "tables": [
+        "customer_orders",
+        "fetch_customer_metrics"
+      ],
+      "bytes": 22199
+    },
+    {
+      "path": "cdm/admin_delete_customer.php",
+      "sha256": "01e8597aa35125a274e2d70310555656a8f0c9855ab467f15418d1b4cbb28ad7",
+      "area": "client records",
+      "tables": [
+        "customers"
+      ],
+      "bytes": 1110
+    },
+    {
+      "path": "cdm/admin_fetch_all_notifications.php",
+      "sha256": "e026ae4453207d17031ebb1b701d3f3ac402f546127a60f9d3a2f9de9cbef1f2",
+      "area": "pipeline activity and follow-ups",
+      "tables": [
+        "admin_notifications",
+        "the"
+      ],
+      "bytes": 587
+    },
+    {
+      "path": "cdm/admin_fetch_notification_details.php",
+      "sha256": "0c7143f06451f4b50d3fd12668c094a8b81403be2b617fc07dd07f4b9126ac93",
+      "area": "pipeline activity and follow-ups",
+      "tables": [
+        "POST",
+        "admin_notifications",
+        "the"
+      ],
+      "bytes": 728
+    },
+    {
+      "path": "cdm/admin_fetch_notifications.php",
+      "sha256": "5813920b3c3da9abf806af7f8c31cfceffa7b721882036dc1f3669482eec99ef",
+      "area": "pipeline activity and follow-ups",
+      "tables": [
+        "admin_notifications"
+      ],
+      "bytes": 607
+    },
+    {
+      "path": "cdm/admin_main_sidebar.php",
+      "sha256": "07c587556acfdd39222027cf65f37c00e72a673626a561ebfe47b1b020eef12a",
+      "area": "shared shell and dashboard",
+      "tables": [],
+      "bytes": 3266
+    },
+    {
+      "path": "cdm/admin_mark_notification_read.php",
+      "sha256": "4ce46838f4a4527f3c3b2ffdb6dfa6d8ee7672bc96b42234f3da9a49ad0dc62c",
+      "area": "pipeline activity and follow-ups",
+      "tables": [
+        "admin_notifications",
+        "notification"
+      ],
+      "bytes": 508
+    },
+    {
+      "path": "cdm/admin_navbarsection.php",
+      "sha256": "4a5f4360850b61a5b8cef0f24e77258d828d4ea4985a7072d00dee5c0982d861",
+      "area": "shared shell and dashboard",
+      "tables": [
+        "Profile"
+      ],
+      "bytes": 12049
+    },
+    {
+      "path": "cdm/admin_profile_modal.php",
+      "sha256": "ed006c2736aa5a389bce0d3763dda2ecc51c3ddddd442409e9d4f5e894c336b4",
+      "area": "identity and access",
+      "tables": [
+        "Profile"
+      ],
+      "bytes": 5378
+    },
+    {
+      "path": "cdm/admin_remove_notifications.php",
+      "sha256": "1d63f694195218e7ebae89592e9f18af2d0a1a976cc8e87fc3397397e1a0a77f",
+      "area": "pipeline activity and follow-ups",
+      "tables": [
+        "notifications"
+      ],
+      "bytes": 477
+    },
+    {
+      "path": "cdm/admin_reports.php",
+      "sha256": "b86d7cbd71164683d30c580e1ddd9e3acbd08b0b194c8349dbfaafaa2de22920",
+      "area": "reporting",
+      "tables": [
+        "POST",
+        "customer_orders",
+        "customers",
+        "sales_agents"
+      ],
+      "bytes": 7021
+    },
+    {
+      "path": "cdm/admin_session.php",
+      "sha256": "a483225f6276396e3e7da1ee6a7b089cefe2ec29d2d46020a1420a48c12f157b",
+      "area": "identity and access",
+      "tables": [
+        "creation",
+        "database",
+        "last",
+        "session",
+        "users"
+      ],
+      "bytes": 3109
+    },
+    {
+      "path": "cdm/admin_update_customer.php",
+      "sha256": "85eb9404f249f364a6c882c57a74c51c7dd2158074f54a484b6fdd5e08b1523a",
+      "area": "client records",
+      "tables": [
+        "customers",
+        "is",
+        "query"
+      ],
+      "bytes": 1888
+    },
+    {
+      "path": "cdm/admin_update_profile.php",
+      "sha256": "63edf6972cc443a78a0477d1a595559f98639fe2c0d2f27568610c665f95cabd",
+      "area": "identity and access",
+      "tables": [
+        "session",
+        "users"
+      ],
+      "bytes": 2956
+    },
+    {
+      "path": "cdm/check_notifications.php",
+      "sha256": "3fcbd44c6b12bb00ebfb8b149a25432ca87ca3d5b5be758a7686977c9fca9903",
+      "area": "pipeline activity and follow-ups",
+      "tables": [
+        "notifications"
+      ],
+      "bytes": 672
+    },
+    {
+      "path": "cdm/check_order_status.php",
+      "sha256": "d7e0ff024abb1c7ae3cac40b13f785654ec23895220966a29bac8c33130f1190",
+      "area": "sales pipeline",
+      "tables": [
+        "customer_orders"
+      ],
+      "bytes": 2517
+    },
+    {
+      "path": "cdm/conn.php",
+      "sha256": "e7580df01ec9d28f8fc1d1f1148352a9276da221e5bfa900754234c341460e80",
+      "area": "shared shell and dashboard",
+      "tables": [],
+      "bytes": 1130
+    },
+    {
+      "path": "cdm/data.php",
+      "sha256": "70cd970b85a6aa5514d5dee71413342787e920330efa9af6cd1e11b20344e122",
+      "area": "reporting",
+      "tables": [
+        "customer_orders"
+      ],
+      "bytes": 1567
+    },
+    {
+      "path": "cdm/data_pie.php",
+      "sha256": "2ddb81d58e1899c7307b34b8a11d52b23c7e644a01d9a919a18091eda1ca4800",
+      "area": "reporting",
+      "tables": [
+        "customer_orders",
+        "customers",
+        "one"
+      ],
+      "bytes": 1446
+    },
+    {
+      "path": "cdm/data_table.php",
+      "sha256": "b7ab9b7c58b586c915f90a30a34bacaf56980c6dcd285f0af89fed44ac859376",
+      "area": "reporting",
+      "tables": [
+        "customer_orders",
+        "customers"
+      ],
+      "bytes": 1537
+    },
+    {
+      "path": "cdm/export_data.php",
+      "sha256": "b60ffcdb5af03229778d234385a0239778a419f7412e121a005a9ae7960ddd6b",
+      "area": "reporting",
+      "tables": [
+        "CSV",
+        "POST",
+        "customer_orders",
+        "customers",
+        "sales_agents"
+      ],
+      "bytes": 2272
+    },
+    {
+      "path": "cdm/export_master_list.php",
+      "sha256": "7b678b0a9cc8a012115034c78fbad0ff2fc991013b26494f736a2b759e791d2f",
+      "area": "reporting",
+      "tables": [
+        "POST",
+        "customer_orders",
+        "customers",
+        "sales_agents"
+      ],
+      "bytes": 1661
+    },
+    {
+      "path": "cdm/fetch_agents.php",
+      "sha256": "e1084b0b423c57eb5662ac946b1f7eedef5c5df858b7d283d0de8812ff1781f7",
+      "area": "identity and access",
+      "tables": [
+        "sales_agents"
+      ],
+      "bytes": 1244
+    },
+    {
+      "path": "cdm/fetch_all_notifications.php",
+      "sha256": "43798055e5d3ff0a6ad63b9bcc87bb09552badb187013d86dca0dc37f8b75fbe",
+      "area": "pipeline activity and follow-ups",
+      "tables": [
+        "notifications",
+        "session"
+      ],
+      "bytes": 975
+    },
+    {
+      "path": "cdm/fetch_customer_data.php",
+      "sha256": "d6c8367b1094792c2778301685eb28b7b483f0c235cdee911df7d4cbbbb73cc8",
+      "area": "reporting",
+      "tables": [
+        "customer_orders"
+      ],
+      "bytes": 1455
+    },
+    {
+      "path": "cdm/fetch_customer_records.php",
+      "sha256": "5a3bd8a599c516489f0b551c310200892453850faeecc7c210cb1550f458c071",
+      "area": "client records",
+      "tables": [
+        "customer_orders",
+        "customers"
+      ],
+      "bytes": 1596
+    },
+    {
+      "path": "cdm/fetch_filtered_data.php",
+      "sha256": "0a7003a5a0a9d1c8b3ac1755386630221d233bb3b5e69319d08e8e0a0bcd9bd0",
+      "area": "reporting",
+      "tables": [
+        "customer_orders",
+        "customers",
+        "sales_managers"
+      ],
+      "bytes": 1711
+    },
+    {
+      "path": "cdm/fetch_manager_details.php",
+      "sha256": "5abab819c4311a2ca864418a352862fcbba14f19a29dc03812cd91e79703ecb8",
+      "area": "identity and access",
+      "tables": [
+        "sales_agents",
+        "sales_managers"
+      ],
+      "bytes": 1531
+    },
+    {
+      "path": "cdm/fetch_notification_details.php",
+      "sha256": "043105d11c1e65902ce73d273958467cffc32e948fb9f60e554e1f5a77fa1f80",
+      "area": "pipeline activity and follow-ups",
+      "tables": [
+        "notifications",
+        "session"
+      ],
+      "bytes": 1396
+    },
+    {
+      "path": "cdm/fetch_notifications.php",
+      "sha256": "fbae20fff5c0d4ac1c3888180f54d23b385f90d6258139eae9592b675081be0e",
+      "area": "pipeline activity and follow-ups",
+      "tables": [
+        "notifications",
+        "session"
+      ],
+      "bytes": 1097
+    },
+    {
+      "path": "cdm/fetch_order_statuses.php",
+      "sha256": "d387060fa4e3a0514fc8d2246fa6129e2fdf2c3fcdfe43b44727b9323c6f5e21",
+      "area": "sales pipeline",
+      "tables": [
+        "customer_orders"
+      ],
+      "bytes": 1028
+    },
+    {
+      "path": "cdm/fetch_orders.php",
+      "sha256": "b35c6e0e1c25f92b5dc798f7203efaac38b1e445016fe9e04f6f7ec1c0f97069",
+      "area": "sales pipeline",
+      "tables": [
+        "POST",
+        "customer_orders",
+        "customers",
+        "sales_agents"
+      ],
+      "bytes": 2148
+    },
+    {
+      "path": "cdm/fetch_records.php",
+      "sha256": "a2801d4dae5c2ea243be31a8b7b7994301b7bffa6127a08198ccbfb625d14433",
+      "area": "sales pipeline",
+      "tables": [
+        "customer_orders",
+        "with"
+      ],
+      "bytes": 2745
+    },
+    {
+      "path": "cdm/fetch_sales_manager.php",
+      "sha256": "5e975b0fa194f0b61942c65de5f347850d6aa687f2f1310785e715aa85400cf8",
+      "area": "identity and access",
+      "tables": [
+        "customer_orders"
+      ],
+      "bytes": 892
+    },
+    {
+      "path": "cdm/fetch_sales_managers.php",
+      "sha256": "b1ef1fa216fac652ac1f2606517dea50877ae6389c97e7db19acf090055abf82",
+      "area": "identity and access",
+      "tables": [
+        "sales_managers"
+      ],
+      "bytes": 875
+    },
+    {
+      "path": "cdm/filter_delivery.php",
+      "sha256": "633cfd658d15958f5e6cbe13b26d68fc48b2a39e74d46ca04f16d37318b99550",
+      "area": "sales pipeline",
+      "tables": [
+        "customer_orders",
+        "customers"
+      ],
+      "bytes": 2041
+    },
+    {
+      "path": "cdm/filter_engagement.php",
+      "sha256": "f47aa47cb48da4296b665276d764e78cb8c9a73b255930a0b5f06502bdaf3c72",
+      "area": "sales pipeline",
+      "tables": [
+        "Records",
+        "customer_orders",
+        "customers",
+        "sales_agents",
+        "sales_managers"
+      ],
+      "bytes": 3711
+    },
+    {
+      "path": "cdm/filter_leads.php",
+      "sha256": "f081e18c0c7e651a8f94ce8e683ef43e483b2a3ab4ef4eddf3fac3929f71037b",
+      "area": "sales pipeline",
+      "tables": [
+        "Records",
+        "customer_orders",
+        "customers",
+        "sales_agents",
+        "sales_managers"
+      ],
+      "bytes": 3767
+    },
+    {
+      "path": "cdm/filter_orders.php",
+      "sha256": "9d74a90cc6741b89571403faa9d46fb364e4ae933158974bfdfde55a5951ed10",
+      "area": "sales pipeline",
+      "tables": [
+        "customer_orders",
+        "customers"
+      ],
+      "bytes": 2383
+    },
+    {
+      "path": "cdm/filter_payment.php",
+      "sha256": "b47baba80e2f1d5920d3a5f36dfdbd382b66cfd1264841e7bdf9e9d273ab1651",
+      "area": "sales pipeline",
+      "tables": [
+        "Records",
+        "customer_orders",
+        "customers"
+      ],
+      "bytes": 4106
+    },
+    {
+      "path": "cdm/filter_proposal.php",
+      "sha256": "cd67428df3f3e5c1521e1c39761abdf19ae735a563ee662ff9c138a5a478b1a9",
+      "area": "sales pipeline",
+      "tables": [
+        "customer_orders",
+        "customers",
+        "sales_agents",
+        "sales_managers"
+      ],
+      "bytes": 3084
+    },
+    {
+      "path": "cdm/footer.php",
+      "sha256": "0d550764e2c4289f89e4a815515cec23fd8286703e97996ff5ac3100b3ad1763",
+      "area": "shared shell and dashboard",
+      "tables": [],
+      "bytes": 291
+    },
+    {
+      "path": "cdm/footer_scripts.php",
+      "sha256": "0b7de152cc9f2262dd23df8673ed29a7880a67012222153a3631ea95a98e50de",
+      "area": "shared shell and dashboard",
+      "tables": [
+        "the"
+      ],
+      "bytes": 13264
+    },
+    {
+      "path": "cdm/get_customer_order_details.php",
+      "sha256": "f28bfd7fe47129cf39f16b7e524e08030ee84ee9934ab82736ca57fa6085847b",
+      "area": "client records",
+      "tables": [
+        "customer_orders",
+        "customers",
+        "sales_agents",
+        "sales_managers"
+      ],
+      "bytes": 4704
+    },
+    {
+      "path": "cdm/handle_follow_up.php",
+      "sha256": "53e53c86cb72f203938a54bbf3bd70c943975b131e877b843424ab8067f48ec2",
+      "area": "pipeline activity and follow-ups",
+      "tables": [
+        "notifications",
+        "the"
+      ],
+      "bytes": 1623
+    },
+    {
+      "path": "cdm/header_scripts.php",
+      "sha256": "2c40a165ac8d70943bcb10bb916735e2bcb18ca893b13ad11142b97cb6242703",
+      "area": "shared shell and dashboard",
+      "tables": [],
+      "bytes": 12285
+    },
+    {
+      "path": "cdm/index.php",
+      "sha256": "5ebd03e3805013ce31b22a6f012823c90dc34db5c542be729a1343b51823e37e",
+      "area": "shared shell and dashboard",
+      "tables": [
+        "users"
+      ],
+      "bytes": 7727
+    },
+    {
+      "path": "cdm/insert_follow_up_notification.php",
+      "sha256": "f474a710eeb97c161209e2339524b3c6f89bc2c64c7c8b167066f8243167edef",
+      "area": "pipeline activity and follow-ups",
+      "tables": [
+        "notifications"
+      ],
+      "bytes": 1592
+    },
+    {
+      "path": "cdm/login.php",
+      "sha256": "20ae4a03f15885df31a4d4806ddc4210bcf28f66a89a3c3ccf60ac8701f50f01",
+      "area": "identity and access",
+      "tables": [],
+      "bytes": 801
+    },
+    {
+      "path": "cdm/logout.php",
+      "sha256": "65e277ffb0d3f2b184244538ba2ffe185709687e395752dfc7fcb8b60832568f",
+      "area": "identity and access",
+      "tables": [],
+      "bytes": 235
+    },
+    {
+      "path": "cdm/mark_notification_read.php",
+      "sha256": "ec2d682e3c1bfd679f903769a7f6c4f0c4f430bd42a85072feb4c5d72996a16f",
+      "area": "pipeline activity and follow-ups",
+      "tables": [
+        "notification",
+        "notifications"
+      ],
+      "bytes": 502
+    },
+    {
+      "path": "cdm/register.php",
+      "sha256": "9b2d09a364a2f87382bfb45b7db1e3aa058a0e09980b412d42036d2855e3f6cb",
+      "area": "identity and access",
+      "tables": [
+        "database",
+        "users"
+      ],
+      "bytes": 6331
+    },
+    {
+      "path": "cdm/register_process.php",
+      "sha256": "ace622b64fbe9df17f6a8a4727c26707d32590aabc4b7187c95216e87d7f5204",
+      "area": "identity and access",
+      "tables": [
+        "users"
+      ],
+      "bytes": 2670
+    },
+    {
+      "path": "cdm/remove_notifications.php",
+      "sha256": "b543120a529cab67442b04730833959f430a384747c4d80f71529a4bd89c91ad",
+      "area": "pipeline activity and follow-ups",
+      "tables": [
+        "notifications",
+        "session"
+      ],
+      "bytes": 1501
+    },
+    {
+      "path": "cdm/scripts/admin_customer_scripts.php",
+      "sha256": "f0c3e26a3e713ad5e3a9792f6a742a830e55f63e94b131f9623d928f5fe2f317",
+      "area": "client records",
+      "tables": [],
+      "bytes": 5136
+    },
+    {
+      "path": "cdm/scripts/admin_dashboard_scripts.php",
+      "sha256": "91d1fd7f964f102a7636bfefc2687e38c7235da52b2b334cacd898fb76f35390",
+      "area": "shared shell and dashboard",
+      "tables": [],
+      "bytes": 8849
+    },
+    {
+      "path": "cdm/scripts/admin_report_scripts.php",
+      "sha256": "39e5389a659f34cca344fdff67c52fa7d68beb6900ab792993280c2ea4ec1d3e",
+      "area": "reporting",
+      "tables": [],
+      "bytes": 3876
+    },
+    {
+      "path": "cdm/scripts/superadmin_sales_agent_scripts.php",
+      "sha256": "4622544f707206395fea9cc9a44292241123d0ba84a1be1451882f912763ad1d",
+      "area": "identity and access",
+      "tables": [
+        "form"
+      ],
+      "bytes": 6114
+    },
+    {
+      "path": "cdm/scripts/superadmin_sales_manager_scripts.php",
+      "sha256": "a4d720192548f840c8fad06a92d76596cd316629982f901828a220cf0141b024",
+      "area": "identity and access",
+      "tables": [],
+      "bytes": 7889
+    },
+    {
+      "path": "cdm/scripts/superadmin_users_scripts.php",
+      "sha256": "52f5b762aa684f8ca3aa5c791882b2408deeeb94c5f5f3c0d6d4d1b18927cb0d",
+      "area": "identity and access",
+      "tables": [
+        "the"
+      ],
+      "bytes": 6017
+    },
+    {
+      "path": "cdm/scripts/user_cancelled_transaction_scripts.php",
+      "sha256": "10ba51d4313df34033860b4ca8e33acf8c6b6fca74dc200461ca90a13c2ae25c",
+      "area": "sales pipeline",
+      "tables": [
+        "Customer",
+        "the"
+      ],
+      "bytes": 4834
+    },
+    {
+      "path": "cdm/scripts/user_closed_scripts.php",
+      "sha256": "d657ed112222c4fe819e0ee3ad2d2c94929b2f9ee7360f9442e3e90ff4a842d5",
+      "area": "sales pipeline",
+      "tables": [
+        "Customer"
+      ],
+      "bytes": 3853
+    },
+    {
+      "path": "cdm/scripts/user_dashboard_scripts.php",
+      "sha256": "076c4e9a17076b93205b0771fe92a4150b135beacf73f584ec8587083a1b3c9a",
+      "area": "shared shell and dashboard",
+      "tables": [
+        "form"
+      ],
+      "bytes": 5966
+    },
+    {
+      "path": "cdm/scripts/user_delivery_scripts.php",
+      "sha256": "6c133a44aeaa5a1e9b3397b843a534a4c20dc1111ba9d85d5d555ed4261e0bc0",
+      "area": "sales pipeline",
+      "tables": [
+        "Customer"
+      ],
+      "bytes": 3699
+    },
+    {
+      "path": "cdm/scripts/user_engagement_scripts.php",
+      "sha256": "dffe70a23d3186d062128aa78b40bc89a98e9df32e8ed43b0942c7fa60884a42",
+      "area": "sales pipeline",
+      "tables": [
+        "Customer"
+      ],
+      "bytes": 4796
+    },
+    {
+      "path": "cdm/scripts/user_leads_generation_scripts.php",
+      "sha256": "eda161eb5d70c3e56bc53a028b0704f114bf5cd5120f8f66e8eac2ad4e8e7095",
+      "area": "sales pipeline",
+      "tables": [
+        "form"
+      ],
+      "bytes": 6947
+    },
+    {
+      "path": "cdm/scripts/user_order_scripts.php",
+      "sha256": "87032c03f637871644c43c4535a49d6c52b33847be3020d7e58303995060f284",
+      "area": "sales pipeline",
+      "tables": [
+        "Customer"
+      ],
+      "bytes": 4742
+    },
+    {
+      "path": "cdm/scripts/user_payment_scripts.php",
+      "sha256": "4afa1b7ae001f79fb99996d4e8203ccfeb2080bf09af7735926b2f51175a037b",
+      "area": "sales pipeline",
+      "tables": [
+        "Customer"
+      ],
+      "bytes": 4726
+    },
+    {
+      "path": "cdm/scripts/user_proposal_scripts.php",
+      "sha256": "1f930e3ec958a4ff417cf2cc4489151e0bd97a83e4860223c0838e925934b53b",
+      "area": "sales pipeline",
+      "tables": [
+        "Customer"
+      ],
+      "bytes": 4741
+    },
+    {
+      "path": "cdm/session.php",
+      "sha256": "f78ead76f3909fab6de1c0f5fd2fe8dbe2bca09e39cf0c1749fb7df125880be7",
+      "area": "identity and access",
+      "tables": [
+        "database",
+        "session",
+        "users"
+      ],
+      "bytes": 2229
+    },
+    {
+      "path": "cdm/superadmin_backup.php",
+      "sha256": "968d6c438bfd29727f6bacf6f2ac5121e38ed95e2e4f531140bec89fb95074fd",
+      "area": "private operations",
+      "tables": [
+        "backups",
+        "the"
+      ],
+      "bytes": 1993
+    },
+    {
+      "path": "cdm/superadmin_create_manager.php",
+      "sha256": "591c2321a353b5c097cd1df155262158e72b0b375310aebaee37e8c34a4a4139",
+      "area": "identity and access",
+      "tables": [
+        "sales_managers"
+      ],
+      "bytes": 1024
+    },
+    {
+      "path": "cdm/superadmin_dashboard.php",
+      "sha256": "499fb697eb85ca75d273a4500260bee10c9cd44f1b034fe1ffa9920f40dc609e",
+      "area": "shared shell and dashboard",
+      "tables": [
+        "information_schema",
+        "sales_agents",
+        "sales_managers",
+        "users"
+      ],
+      "bytes": 5746
+    },
+    {
+      "path": "cdm/superadmin_delete_manager.php",
+      "sha256": "1e21f83191a6ce35d92a265d5f8b1f5ee30dda4e43d97fdc1854bd910f2819fc",
+      "area": "identity and access",
+      "tables": [
+        "sales_agents",
+        "sales_managers"
+      ],
+      "bytes": 2105
+    },
+    {
+      "path": "cdm/superadmin_main_sidebar.php",
+      "sha256": "5878b5ca93b324e6d6e5fe4fb396691d6e141dc1a95c562149ed441784899c9d",
+      "area": "shared shell and dashboard",
+      "tables": [],
+      "bytes": 4687
+    },
+    {
+      "path": "cdm/superadmin_navbar_section.php",
+      "sha256": "b82c6c5d0da0547c7a7089c5dfd8dd5aaa5efc83cf5f2255e808efc88c055022",
+      "area": "shared shell and dashboard",
+      "tables": [
+        "Profile"
+      ],
+      "bytes": 2114
+    },
+    {
+      "path": "cdm/superadmin_phpmyadmin.php",
+      "sha256": "487e4e4bd542b3b0c24c16ad84a349693fd6fb9d66d3b446a18c6dc66eda8a79",
+      "area": "private operations",
+      "tables": [
+        "information_schema",
+        "table"
+      ],
+      "bytes": 8689
+    },
+    {
+      "path": "cdm/superadmin_phpmyadmin_view_details.php",
+      "sha256": "cdaa055fffe1205fb62105079797c2e4388363b1048d6ad345653e9ce0113fa2",
+      "area": "private operations",
+      "tables": [
+        "information_schema"
+      ],
+      "bytes": 5051
+    },
+    {
+      "path": "cdm/superadmin_profile_modal.php",
+      "sha256": "22bb287d7fe589d68cd7518d6b0d95322b786e64ed9c6c490a115d94ce5b4f83",
+      "area": "identity and access",
+      "tables": [
+        "Profile"
+      ],
+      "bytes": 5231
+    },
+    {
+      "path": "cdm/superadmin_sales_agent.php",
+      "sha256": "c3d6c8927d825dd51bc4d16f10662b41da6730a7592d84e26935d14b0692fafb",
+      "area": "identity and access",
+      "tables": [
+        "Records",
+        "sales_agents",
+        "sales_managers"
+      ],
+      "bytes": 8226
+    },
+    {
+      "path": "cdm/superadmin_sales_agent_create.php",
+      "sha256": "a507d26162c0846e4107773a0d71e2a280d39d48eb56190c82953a512dc753cf",
+      "area": "identity and access",
+      "tables": [
+        "sales_agents"
+      ],
+      "bytes": 1058
+    },
+    {
+      "path": "cdm/superadmin_sales_agent_modal.php",
+      "sha256": "97603ba25a7852f41b391ac7a77c9424a9cabc8e6898cb0700f8416c7c382b8a",
+      "area": "identity and access",
+      "tables": [
+        "Agent",
+        "Record",
+        "sales_managers"
+      ],
+      "bytes": 8978
+    },
+    {
+      "path": "cdm/superadmin_sales_agent_update.php",
+      "sha256": "4afcd6cf65c4d03bed6d95a3425a1139015bfb31f73cb7808258f45a783874e6",
+      "area": "identity and access",
+      "tables": [
+        "is",
+        "query",
+        "sales_agents"
+      ],
+      "bytes": 1617
+    },
+    {
+      "path": "cdm/superadmin_sales_manager.php",
+      "sha256": "f63e9601ab63e6efb46a91a491818b9c708664cf156e43f2759050525d4df542",
+      "area": "identity and access",
+      "tables": [
+        "Records",
+        "sales_managers"
+      ],
+      "bytes": 6007
+    },
+    {
+      "path": "cdm/superadmin_sales_manager_modal.php",
+      "sha256": "39a7213f659e4c43e5e11cdc8cf00debd3e1941d080dd8b113d441ae29c876e0",
+      "area": "identity and access",
+      "tables": [
+        "Manager",
+        "Record"
+      ],
+      "bytes": 9547
+    },
+    {
+      "path": "cdm/superadmin_salest_agent_delete.php",
+      "sha256": "8279d011010e7d78b35031170a3eed3e59f5c1a4b4341d1bfc7d3a53ba48255a",
+      "area": "identity and access",
+      "tables": [
+        "sales_agents"
+      ],
+      "bytes": 1299
+    },
+    {
+      "path": "cdm/superadmin_update_manager.php",
+      "sha256": "d31c23cbfb07a44aa054385081ef8f45e07a93307ee4dfd17151cdc7ed360206",
+      "area": "identity and access",
+      "tables": [
+        "is",
+        "query",
+        "sales_managers"
+      ],
+      "bytes": 1572
+    },
+    {
+      "path": "cdm/superadmin_update_profile.php",
+      "sha256": "e1c1dee82333732fa56bffab601f22cc95830cc98b98d24b0d8f5a4f1bc5c6e6",
+      "area": "identity and access",
+      "tables": [
+        "firstname",
+        "profile",
+        "users"
+      ],
+      "bytes": 2987
+    },
+    {
+      "path": "cdm/superadmin_user_create.php",
+      "sha256": "cb32998770a32f0e6a9b7436db0697c3c4e7ce292741e7457af777a4b86326f2",
+      "area": "identity and access",
+      "tables": [
+        "users"
+      ],
+      "bytes": 4336
+    },
+    {
+      "path": "cdm/superadmin_user_delete.php",
+      "sha256": "496a0056921758faf5675aa148e5cf31f0a83dfdc9a8208de41a6cc27daefd01",
+      "area": "identity and access",
+      "tables": [
+        "users"
+      ],
+      "bytes": 1316
+    },
+    {
+      "path": "cdm/superadmin_user_modal.php",
+      "sha256": "91fd052cdcf3bb6ffbf93db360c8f609d060eb0922876930d9436267df5a01c8",
+      "area": "identity and access",
+      "tables": [
+        "Modal",
+        "Record"
+      ],
+      "bytes": 9696
+    },
+    {
+      "path": "cdm/superadmin_user_update.php",
+      "sha256": "c02903cefe17dae3b145a9f0f9c943d549fd328dca6fcbc0520def3672be6a43",
+      "area": "identity and access",
+      "tables": [
+        "is",
+        "query",
+        "users"
+      ],
+      "bytes": 1738
+    },
+    {
+      "path": "cdm/superadmin_users.php",
+      "sha256": "0fe8222e0f6ccf36d5b25d11bcb1733408b013830d2be5c50dc7d2d3e8f3ad73",
+      "area": "identity and access",
+      "tables": [
+        "Records",
+        "users"
+      ],
+      "bytes": 5358
+    },
+    {
+      "path": "cdm/update_user.php",
+      "sha256": "dac037450aadd63fe41944287a3656d66afffdf7d2071bba992a939579bed856",
+      "area": "identity and access",
+      "tables": [
+        "the",
+        "user",
+        "users"
+      ],
+      "bytes": 989
+    },
+    {
+      "path": "cdm/user_alert.php",
+      "sha256": "9c74b4bb4b6f6310790dd41a398c7438c06e49e5c8e327564470a5462048fed9",
+      "area": "pipeline activity and follow-ups",
+      "tables": [],
+      "bytes": 4135
+    },
+    {
+      "path": "cdm/user_cancelled_transactions.php",
+      "sha256": "520f20bb0e5552eec91ae0141069d51d8ad5b31f986b73b255777131a192159c",
+      "area": "sales pipeline",
+      "tables": [
+        "customer_orders",
+        "customers",
+        "order",
+        "sales_agents",
+        "sales_managers"
+      ],
+      "bytes": 7827
+    },
+    {
+      "path": "cdm/user_check_email_availability.php",
+      "sha256": "14187e7add081311fd216591b177acfcf38ca730572dab8e451f4a9e988622d0",
+      "area": "client records",
+      "tables": [
+        "customers"
+      ],
+      "bytes": 728
+    },
+    {
+      "path": "cdm/user_check_order_status.php",
+      "sha256": "c1ba3437f1e836ebafeb26dd8ca815cb6950ef9ecbebc29fd7c812944573c58b",
+      "area": "sales pipeline",
+      "tables": [
+        "customer_orders",
+        "session"
+      ],
+      "bytes": 3051
+    },
+    {
+      "path": "cdm/user_closed_modal.php",
+      "sha256": "5a28e61e7109f36ffd4b3d2828757e420863b345344f15a0a5109eba7ae5d474",
+      "area": "sales pipeline",
+      "tables": [
+        "Client",
+        "Customer"
+      ],
+      "bytes": 4930
+    },
+    {
+      "path": "cdm/user_closed_transactions.php",
+      "sha256": "af5eb3e02dc3ef4805d462df493cb4ec4c103e7ec51c5b96fbf448286aa582ec",
+      "area": "sales pipeline",
+      "tables": [
+        "customer_orders",
+        "customers",
+        "sales_agents",
+        "sales_managers"
+      ],
+      "bytes": 6824
+    },
+    {
+      "path": "cdm/user_closed_update.php",
+      "sha256": "f1277985d7208a144d0c1f4167ee64d1fc7324bc3cca4d69117a47c3484a47a1",
+      "area": "sales pipeline",
+      "tables": [
+        "admin_notifications",
+        "customer_orders",
+        "is",
+        "notifications",
+        "query",
+        "session",
+        "the"
+      ],
+      "bytes": 2494
+    },
+    {
+      "path": "cdm/user_content_header.php",
+      "sha256": "f449a4f3f20af819fb889917b95320604130d7c1538b16301ad50685d0485ffb",
+      "area": "shared shell and dashboard",
+      "tables": [],
+      "bytes": 683
+    },
+    {
+      "path": "cdm/user_create_customer.php",
+      "sha256": "09ca777d9b77cb2a0cebedd48414b7ac87ee21dbdd5e45026d566827b29a671a",
+      "area": "client records",
+      "tables": [
+        "customers"
+      ],
+      "bytes": 1437
+    },
+    {
+      "path": "cdm/user_customer_create_order.php",
+      "sha256": "a8e00a45dc49de5dc55c5417fafd58d0f93195593d0e373882ecdd920d805788",
+      "area": "sales pipeline",
+      "tables": [
+        "customer_orders"
+      ],
+      "bytes": 1611
+    },
+    {
+      "path": "cdm/user_customer_modal.php",
+      "sha256": "4e8e57fce1437e15a2a25afc6a5b597d541582b2b7a5da167dcd1357aae609fa",
+      "area": "client records",
+      "tables": [
+        "Customer",
+        "Record",
+        "contact"
+      ],
+      "bytes": 9672
+    },
+    {
+      "path": "cdm/user_customer_orders_modal.php",
+      "sha256": "43c8e05df83675d31fd804263bed0781adaceec8301ccda4825511b3932c45da",
+      "area": "client records",
+      "tables": [
+        "Customer",
+        "Status",
+        "Transaction",
+        "customers",
+        "database",
+        "sales_managers"
+      ],
+      "bytes": 14585
+    },
+    {
+      "path": "cdm/user_dashboard.php",
+      "sha256": "f9049fb02f09c352d58bd781ffcbbc3b056ac31f6464455eb78d7a3eecbbd9af",
+      "area": "shared shell and dashboard",
+      "tables": [
+        "Records",
+        "customers"
+      ],
+      "bytes": 6029
+    },
+    {
+      "path": "cdm/user_delete_customer.php",
+      "sha256": "adf84c091d5853b0a0192d89d3f169afdd39e0c14c153e7aabc32e7694bcbe0e",
+      "area": "client records",
+      "tables": [
+        "customers"
+      ],
+      "bytes": 1042
+    },
+    {
+      "path": "cdm/user_delivery.php",
+      "sha256": "019b37d7f61de808fc0724450f20dda43e8539f8d6934fae93957b889d8fa5c5",
+      "area": "sales pipeline",
+      "tables": [
+        "Records",
+        "customer_orders",
+        "customers",
+        "sales_agents",
+        "sales_managers"
+      ],
+      "bytes": 7627
+    },
+    {
+      "path": "cdm/user_delivery_customer_modal.php",
+      "sha256": "a30266aa7f1e95243a1e1e3313875863e4a4ad7c1dbb752f20b29ba9d112309f",
+      "area": "client records",
+      "tables": [
+        "Customer",
+        "Transaction"
+      ],
+      "bytes": 6923
+    },
+    {
+      "path": "cdm/user_delivery_modal.php",
+      "sha256": "e1dfdf4bcedea8d8c21b80d7c29e04b4ef47e39709e286e6be847a88b17b32a6",
+      "area": "sales pipeline",
+      "tables": [
+        "Customer"
+      ],
+      "bytes": 4682
+    },
+    {
+      "path": "cdm/user_delivery_update.php",
+      "sha256": "63010b04aa20325e0a323b3a0d849fc65ef1ab70031229d606a59309be43c850",
+      "area": "sales pipeline",
+      "tables": [
+        "admin_notifications",
+        "customer",
+        "customer_orders",
+        "form",
+        "notifications",
+        "session",
+        "the",
+        "timestamp"
+      ],
+      "bytes": 4922
+    },
+    {
+      "path": "cdm/user_engagement.php",
+      "sha256": "cbc92b26984bdfc8545f308d64c0ee9785a99fff5ea802a339953a5bdc87f330",
+      "area": "sales pipeline",
+      "tables": [
+        "Records",
+        "customer_orders",
+        "customers",
+        "sales_agents",
+        "sales_managers"
+      ],
+      "bytes": 11859
+    },
+    {
+      "path": "cdm/user_fetch_agents.php",
+      "sha256": "ae918d03a35de897b462878944ae9d5dd6dc25202bff61b25bf3b9fb0cf99527",
+      "area": "identity and access",
+      "tables": [
+        "sales_agents"
+      ],
+      "bytes": 529
+    },
+    {
+      "path": "cdm/user_filter_date_engagement.php",
+      "sha256": "e544ae24cf36e916a2704a96f410d96ac0cd4912ea3d9dc62097d00e37c409ea",
+      "area": "sales pipeline",
+      "tables": [
+        "Records",
+        "customer_orders",
+        "customers",
+        "sales_agents",
+        "sales_managers"
+      ],
+      "bytes": 3629
+    },
+    {
+      "path": "cdm/user_filter_date_leads.php",
+      "sha256": "73bb1a4ae01edf7a94530ab623ab1bb3d8d06a8084b9cdc11d10560e5cc09224",
+      "area": "sales pipeline",
+      "tables": [
+        "Records",
+        "customer_orders",
+        "customers",
+        "sales_agents",
+        "sales_managers"
+      ],
+      "bytes": 3172
+    },
+    {
+      "path": "cdm/user_filter_date_orders.php",
+      "sha256": "3f69563187d1433ff2e41af85b7ea5ea80711b4255501ecc52ea6fb570ac204e",
+      "area": "sales pipeline",
+      "tables": [
+        "Records",
+        "customer_orders",
+        "customers"
+      ],
+      "bytes": 3315
+    },
+    {
+      "path": "cdm/user_filter_date_proposal.php",
+      "sha256": "735fc5b2e208b876e8561d940576884d9e73bb0984127fd4f9c270266ae6b8e2",
+      "area": "sales pipeline",
+      "tables": [
+        "Records",
+        "customer_orders",
+        "customers",
+        "sales_agents",
+        "sales_managers"
+      ],
+      "bytes": 3890
+    },
+    {
+      "path": "cdm/user_get_customer_details.php",
+      "sha256": "78d4b6704b0e1f0970d2b3ef7619a5d640b5b808fc48ae9eab057839ba320598",
+      "area": "client records",
+      "tables": [
+        "customers"
+      ],
+      "bytes": 3941
+    },
+    {
+      "path": "cdm/user_get_customer_full_order_details.php",
+      "sha256": "e610054886e1db555208c27f820452b90f7c03b8a75a0204c551530b6cb2de26",
+      "area": "client records",
+      "tables": [
+        "customer_orders",
+        "customers",
+        "sales_agents",
+        "sales_managers"
+      ],
+      "bytes": 18024
+    },
+    {
+      "path": "cdm/user_get_customer_order_details.php",
+      "sha256": "d5acfa8be72668e3803848b3c222bf6c4d49cb55ac26e17cac44cae66d9296fc",
+      "area": "client records",
+      "tables": [
+        "customer_orders",
+        "customers",
+        "sales_agents",
+        "sales_managers"
+      ],
+      "bytes": 3593
+    },
+    {
+      "path": "cdm/user_leads.php",
+      "sha256": "e71b3b288c9af3a114f8179811cefc2ce119648998aaf5bf8091e817e1b6a370",
+      "area": "sales pipeline",
+      "tables": [
+        "Records",
+        "customer_orders",
+        "customers",
+        "sales_agents",
+        "sales_managers",
+        "the"
+      ],
+      "bytes": 10843
+    },
+    {
+      "path": "cdm/user_main_sidebar.php",
+      "sha256": "7f747c94e79b7e42d9572a34db45b820870be8bb4870f106d082650ba5075038",
+      "area": "shared shell and dashboard",
+      "tables": [],
+      "bytes": 4328
+    },
+    {
+      "path": "cdm/user_modal.php",
+      "sha256": "f7b32e8555680c96db661cde608ab815572b981851fb895a19c82d873301c87e",
+      "area": "identity and access",
+      "tables": [
+        "Modal",
+        "User"
+      ],
+      "bytes": 10889
+    },
+    {
+      "path": "cdm/user_navbarsection.php",
+      "sha256": "89a567d565dba2db9ae1f7b9978fe3067d60e15ced0fd5d057abae9363f87afe",
+      "area": "shared shell and dashboard",
+      "tables": [
+        "Profile"
+      ],
+      "bytes": 12053
+    },
+    {
+      "path": "cdm/user_order.php",
+      "sha256": "eb4d2de165b63723fdb15a92afe9d67e6eae3248500c593ca4ffc523d0ccfe27",
+      "area": "sales pipeline",
+      "tables": [
+        "POST",
+        "Records",
+        "customer_orders",
+        "customers",
+        "sales_agents",
+        "sales_managers"
+      ],
+      "bytes": 11172
+    },
+    {
+      "path": "cdm/user_order_customer_modal.php",
+      "sha256": "8dc1f6a889aad72e6e57b310decf562788dfbd16b69fe7b193454357f01dd272",
+      "area": "client records",
+      "tables": [
+        "Customer",
+        "Transaction"
+      ],
+      "bytes": 7919
+    },
+    {
+      "path": "cdm/user_order_customer_update.php",
+      "sha256": "ea6baba8c47efbe30b73e58d68bfc225a846ac84ef9011b8df76858d6b025495",
+      "area": "client records",
+      "tables": [
+        "admin_notifications",
+        "customer_orders",
+        "form",
+        "notifications",
+        "query",
+        "session",
+        "the",
+        "timestamp"
+      ],
+      "bytes": 4678
+    },
+    {
+      "path": "cdm/user_payment.php",
+      "sha256": "3610d2cc64dec0440b9200c1cb04347458548287b28863962899cbacdbbeaf31",
+      "area": "sales pipeline",
+      "tables": [
+        "Records",
+        "customer_orders",
+        "customers",
+        "sales_agents",
+        "sales_managers"
+      ],
+      "bytes": 9670
+    },
+    {
+      "path": "cdm/user_payment_customer_modal.php",
+      "sha256": "8933b1f376e6244af6be6e231609aaeb210456468d155990764be6da8e0c305f",
+      "area": "client records",
+      "tables": [
+        "Customer",
+        "Transaction"
+      ],
+      "bytes": 7503
+    },
+    {
+      "path": "cdm/user_payment_update.php",
+      "sha256": "83830300182fef74e85c22eb93147d1983f374ab7f3301b58300aeeb0c9c9f09",
+      "area": "sales pipeline",
+      "tables": [
+        "admin_notifications",
+        "customer_orders",
+        "form",
+        "notifications",
+        "session",
+        "the",
+        "timestamp"
+      ],
+      "bytes": 4669
+    },
+    {
+      "path": "cdm/user_profile_modal.php",
+      "sha256": "cd5baccb0cf9e9ae64a2f2c0bf35e3fb1e3df5e0d8a0ad46115254a73cf9b562",
+      "area": "identity and access",
+      "tables": [
+        "Record"
+      ],
+      "bytes": 5106
+    },
+    {
+      "path": "cdm/user_proposal.php",
+      "sha256": "d1047bc9f7575cbe10bc8fb8bcee0e91c0250bde7ba3f837028d866c8541b007",
+      "area": "sales pipeline",
+      "tables": [
+        "Records",
+        "customer_orders",
+        "customers",
+        "sales_agents",
+        "sales_managers"
+      ],
+      "bytes": 12121
+    },
+    {
+      "path": "cdm/user_proposal_modal.php",
+      "sha256": "db6bf5df92c69460ab21400b6d38d848ab922ed1523af81c3481a566ad732aec",
+      "area": "sales pipeline",
+      "tables": [
+        "Customer",
+        "Transaction"
+      ],
+      "bytes": 6156
+    },
+    {
+      "path": "cdm/user_proposal_update_order.php",
+      "sha256": "1c8be0071c086ccb70e98d86dc2fad8bdfc2cea44c8e03a34f15656c5e55a28c",
+      "area": "sales pipeline",
+      "tables": [
+        "admin_notifications",
+        "customer_orders",
+        "form",
+        "is",
+        "notifications",
+        "session",
+        "the",
+        "timestamp"
+      ],
+      "bytes": 4912
+    },
+    {
+      "path": "cdm/user_session.php",
+      "sha256": "f8161da021d52d0d9279c5d1dcf98ff08734dfe5efb30a04e7672218c89a2566",
+      "area": "identity and access",
+      "tables": [
+        "session",
+        "the",
+        "users"
+      ],
+      "bytes": 2885
+    },
+    {
+      "path": "cdm/user_update_cancelled_orders.php",
+      "sha256": "ba3b8035bb7875155a0ad31ac8449ffcb19ecb20c63b020c36126e2dfe192422",
+      "area": "sales pipeline",
+      "tables": [
+        "cancelled",
+        "customer_orders"
+      ],
+      "bytes": 488
+    },
+    {
+      "path": "cdm/user_update_customer.php",
+      "sha256": "735d4cfb40666b40e8e9e85fda343bb8dde015d0919f8a649099e424006cf35a",
+      "area": "client records",
+      "tables": [
+        "customers",
+        "is",
+        "query"
+      ],
+      "bytes": 1893
+    },
+    {
+      "path": "cdm/user_update_customer_order.php",
+      "sha256": "3b009e602f24ce3cbdced5b52f447ec256d9bb1357a22ebd23d5c27d2eb71a4b",
+      "area": "client records",
+      "tables": [
+        "admin_notifications",
+        "customer_orders",
+        "notifications",
+        "session",
+        "status"
+      ],
+      "bytes": 3769
+    },
+    {
+      "path": "cdm/user_update_order_status.php",
+      "sha256": "90626873369aa0d9ebc7f181c4d929f13a260b420b1313777e02f3ccb1f08642",
+      "area": "sales pipeline",
+      "tables": [
+        "customer_orders",
+        "order",
+        "orders"
+      ],
+      "bytes": 784
+    },
+    {
+      "path": "cdm/user_void_transaction.php",
+      "sha256": "a24daa389df2543d298f2db088fcf0715db6600716becb79733decd4900a9a43",
+      "area": "sales pipeline",
+      "tables": [
+        "customer_orders",
+        "if",
+        "order",
+        "query"
+      ],
+      "bytes": 1173
+    }
+  ],
+  "sql_schemas": [
+    {
+      "path": "Database/barber_baba.sql",
+      "sha256": "ffbb901f6fa458d069813784f0767836a49f54b4192122cfbef2290533130c3a",
+      "tables": [
+        "emailsetting",
+        "membership_plans",
+        "tbladmin",
+        "tblappointment",
+        "tblcustomers",
+        "tblinvoice",
+        "tblservices",
+        "tblsubscriber",
+        "tbl_category",
+        "tbl_staff",
+        "tbl_staff_schedule",
+        "tbl_tax",
+        "user_memberships"
+      ]
+    },
+    {
+      "path": "cdm/database/cdms.sql",
+      "sha256": "80ff4e0a76666b75bb81757093ce9b1b536df5ebc9a4073fc37fe4eb524fdbcc",
+      "tables": [
+        "admin_notifications",
+        "backups",
+        "customers",
+        "customer_orders",
+        "notifications",
+        "sales_agents",
+        "sales_managers",
+        "users"
+      ]
+    }
+  ],
+  "note": "Metadata inventory only; no customer records or credentials retained. Disposition and test evidence are in legacy-audit.md."
+}

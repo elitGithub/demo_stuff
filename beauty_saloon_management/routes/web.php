@@ -1,0 +1,74 @@
+<?php
+
+use App\Http\Controllers\AccessController;
+use App\Http\Controllers\AuthController;
+use App\Http\Controllers\BookingController;
+use App\Http\Controllers\CatalogueController;
+use App\Http\Controllers\ClientController;
+use App\Http\Controllers\InvoiceController;
+use App\Http\Controllers\OutreachController;
+use App\Http\Controllers\ProfileController;
+use App\Http\Controllers\ReportController;
+use App\Http\Controllers\WorkspaceController;
+use App\Http\Middleware\EnsureActiveUser;
+use Illuminate\Support\Facades\Route;
+
+Route::get('/', [BookingController::class, 'home'])->name('home');
+Route::get('/book', [BookingController::class, 'create'])->name('booking.create');
+Route::post('/book', [BookingController::class, 'store'])->middleware('throttle:10,1')->name('booking.store');
+Route::get('/availability', [BookingController::class, 'availability'])->middleware('throttle:90,1')->name('availability');
+Route::get('/booking/{reference}', [BookingController::class, 'confirmation'])->whereUuid('reference')->middleware('throttle:60,1')->name('booking.confirmed');
+Route::middleware('guest')->group(function () {
+    Route::get('/login', [AuthController::class, 'create'])->name('login');
+    Route::post('/login', [AuthController::class, 'store'])->middleware('throttle:5,1')->name('login.store');
+    Route::post('/demo-login', [AuthController::class, 'demo'])->middleware('throttle:10,1')->name('login.demo');
+});
+Route::post('/logout', [AuthController::class, 'destroy'])->middleware('auth')->name('logout');
+Route::prefix('app')->middleware(['auth', EnsureActiveUser::class])->group(function () {
+    Route::get('/', [WorkspaceController::class, 'dashboard'])->name('dashboard');
+    Route::get('/appointments', [WorkspaceController::class, 'schedule'])->name('appointments.index');
+    Route::get('/appointments/create', [BookingController::class, 'create'])->name('appointments.create');
+    Route::post('/appointments', [BookingController::class, 'store'])->name('appointments.store');
+    Route::get('/appointments/{appointment}', [BookingController::class, 'show'])->name('appointments.show');
+    Route::post('/appointments/{appointment}/status', [BookingController::class, 'status'])->name('appointments.status');
+    Route::post('/appointments/{appointment}/reschedule', [BookingController::class, 'reschedule'])->name('appointments.reschedule');
+    Route::post('/appointments/{appointment}/invoice', [InvoiceController::class, 'issue'])->middleware('can:manage-studio')->name('appointments.invoice');
+    Route::get('/clients', [ClientController::class, 'index'])->name('clients.index');
+    Route::post('/clients', [ClientController::class, 'store'])->name('clients.store');
+    Route::get('/clients/{client}', [ClientController::class, 'show'])->name('clients.show');
+    Route::put('/clients/{client}', [ClientController::class, 'update'])->name('clients.update');
+    Route::get('/clients/{client}/photo', [ClientController::class, 'photo'])->name('clients.photo');
+    Route::post('/clients/{client}/notes', [ClientController::class, 'note'])->name('clients.note');
+    Route::post('/clients/{client}/follow-ups', [ClientController::class, 'followUp'])->name('clients.follow-up');
+    Route::post('/follow-ups/{followUp}/complete', [WorkspaceController::class, 'followUp'])->name('follow-ups.complete');
+    Route::get('/services', [CatalogueController::class, 'services'])->middleware('can:manage-studio')->name('services.index');
+    Route::post('/services', [CatalogueController::class, 'saveService'])->middleware('can:manage-studio')->name('services.store');
+    Route::put('/services/{service}', [CatalogueController::class, 'saveService'])->middleware('can:manage-studio')->name('services.update');
+    Route::get('/team', [CatalogueController::class, 'team'])->middleware('can:manage-studio')->name('team.index');
+    Route::post('/team', [CatalogueController::class, 'saveStylist'])->middleware('can:manage-studio')->name('team.store');
+    Route::put('/team/{stylist}', [CatalogueController::class, 'saveStylist'])->middleware('can:manage-studio')->name('team.update');
+    Route::post('/team/{stylist}/time-off', [CatalogueController::class, 'timeOff'])->middleware('can:manage-studio')->name('team.time-off');
+    Route::delete('/team/{stylist}/time-off/{timeOff}', [CatalogueController::class, 'removeTimeOff'])->middleware('can:manage-studio')->name('team.time-off.remove');
+    Route::get('/reminders', [WorkspaceController::class, 'reminders'])->middleware('can:manage-studio')->name('reminders.index');
+    Route::post('/reminders/process', [WorkspaceController::class, 'process'])->middleware('can:manage-studio')->name('reminders.process');
+    Route::get('/invoices', [InvoiceController::class, 'index'])->middleware('can:manage-studio')->name('invoices.index');
+    Route::get('/invoices/{invoice}', [InvoiceController::class, 'show'])->middleware('can:manage-studio')->name('invoices.show');
+    Route::post('/invoices/{invoice}/payment', [InvoiceController::class, 'pay'])->middleware('can:manage-studio')->name('invoices.pay');
+    Route::get('/invoices/{invoice}/download', [InvoiceController::class, 'pdf'])->middleware('can:manage-studio')->name('invoices.pdf');
+    Route::get('/invoices/{invoice}/receipt', [InvoiceController::class, 'pdf'])->middleware('can:manage-studio')->name('invoices.receipt');
+    Route::get('/settings', [WorkspaceController::class, 'settings'])->middleware('can:manage-studio')->name('settings');
+    Route::get('/access', [AccessController::class, 'index'])->middleware('can:manage-access')->name('access.index');
+    Route::post('/access', [AccessController::class, 'save'])->middleware('can:manage-access')->name('access.store');
+    Route::put('/access/{user}', [AccessController::class, 'save'])->middleware('can:manage-access')->name('access.update');
+    Route::get('/reports', [ReportController::class, 'index'])->middleware('can:manage-studio')->name('reports.index');
+    Route::get('/reports/export', [ReportController::class, 'export'])->middleware('can:manage-studio')->name('reports.export');
+    Route::get('/profile', [ProfileController::class, 'edit'])->name('profile.edit');
+    Route::put('/profile', [ProfileController::class, 'update'])->middleware('throttle:5,1')->name('profile.update');
+    require __DIR__.'/commerce.php';
+    require __DIR__.'/pipeline.php';
+    require __DIR__.'/outreach.php';
+});
+
+Route::post('/newsletter', [OutreachController::class, 'subscribe'])->middleware('throttle:10,1')->name('newsletter.subscribe');
+Route::get('/newsletter/unsubscribe/{token}', [OutreachController::class, 'unsubscribeForm'])->where('token', '[A-Za-z0-9]{64}')->middleware('throttle:30,1')->name('newsletter.unsubscribe');
+Route::post('/newsletter/unsubscribe/{token}', [OutreachController::class, 'unsubscribe'])->where('token', '[A-Za-z0-9]{64}')->middleware('throttle:10,1')->name('newsletter.unsubscribe.confirm');

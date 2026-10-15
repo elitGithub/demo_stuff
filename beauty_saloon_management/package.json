@@ -1,0 +1,11 @@
+{
+  "name": "atelier-studio",
+  "private": true,
+  "scripts": {
+    "format": "prettier --write \"public/assets/*.{css,js}\"",
+    "format:check": "prettier --check \"public/assets/*.{css,js}\""
+  },
+  "devDependencies": {
+    "prettier": "3.9.10"
+  }
+}

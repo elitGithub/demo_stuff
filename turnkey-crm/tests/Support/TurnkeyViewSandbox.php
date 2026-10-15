@@ -24,10 +24,10 @@ final class TurnkeyViewSandbox
         require_once $root.'/packages/Webkul/Core/src/Http/helpers.php';
         $app = new Application($root);
         $app->instance('config', new Repository([
-            'app' => ['name' => 'Turnkey CRM', 'locale' => 'en', 'fallback_locale' => 'en', 'url' => $url],
+            'app' => ['name' => 'CustomCRM', 'locale' => 'en', 'fallback_locale' => 'en', 'url' => $url],
             'view' => ['paths' => [$root.'/resources/views'], 'compiled' => $root.'/storage/framework/views'],
             'krayin-vite' => require $root.'/config/krayin-vite.php',
-            'turnkey' => ['demo' => $demo, 'demo_email' => 'demo@turnkey.example', 'demo_password' => 'TurnkeyDemo!2026'],
+            'turnkey' => ['demo' => $demo, 'demo_email' => 'demo@customcrm.example', 'demo_password' => 'CustomCRMDemo!2026'],
             'menu' => ['admin' => require $root.'/packages/Webkul/Admin/src/Config/menu.php'],
         ]));
         Facade::clearResolvedInstances();

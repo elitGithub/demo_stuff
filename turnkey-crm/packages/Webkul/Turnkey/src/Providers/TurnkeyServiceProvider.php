@@ -39,6 +39,9 @@ class TurnkeyServiceProvider extends ServiceProvider
             $this->app['config']->set('filesystems.links', []);
             $this->app['config']->set('filesystems.disks.public.root', public_path('storage'));
 
+            // Dompdf otherwise assumes a public directory inside the private app.
+            $this->app['config']->set('dompdf.public_path', public_path());
+
             // The hosted demo has no outbound mail or installer telemetry.
             $this->app['config']->set('mail.default', 'log');
             $this->app['events']->listen(MessageSending::class, fn () => false);

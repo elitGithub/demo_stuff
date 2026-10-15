@@ -7,8 +7,8 @@ it('renders shared credentials only for the demo and removes disabled menu links
         $app = TurnkeyViewSandbox::create($demo);
         try {
             $html = $app['view']->make('admin::sessions.login')->render();
-            expect($html)->toContain('Turnkey CRM', '/turnkey/brand.css', '/admin/login', 'name="_token"');
-            expect(str_contains($html, 'TurnkeyDemo!2026'))->toBe($demo);
+            expect($html)->toContain('CustomCRM', '/turnkey/brand.css', '/admin/login', 'name="_token"');
+            expect(str_contains($html, 'CustomCRMDemo!2026'))->toBe($demo);
             expect(str_contains($html, 'id="use-demo-account"'))->toBe($demo);
             expect(str_contains($html, 'Forgot password?'))->toBe(! $demo);
             $settings = array_filter($app['config']->get('menu.admin'), fn ($item) => $item['key'] === 'settings');

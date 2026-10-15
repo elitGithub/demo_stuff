@@ -3,7 +3,7 @@
 
     <main class="turnkey-login">
         <section class="turnkey-story" aria-labelledby="demo-headline">
-            <img src="{{ asset('turnkey/logo-dark.svg') }}" width="230" height="48" alt="{{ config('turnkey.name') }}">
+            <img src="{{ asset('turnkey/logo-dark.svg?v=customcrm') }}" width="230" height="48" alt="{{ config('turnkey.name') }}">
             <div class="turnkey-story-copy">
                 <span class="turnkey-eyebrow">A little more clarity. Every day.</span>
                 <h1 id="demo-headline">@lang('turnkey::app.headline')</h1>

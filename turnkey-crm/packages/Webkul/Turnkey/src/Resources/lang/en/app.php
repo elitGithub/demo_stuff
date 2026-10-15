@@ -44,7 +44,7 @@ return [
     'read_only_notice' => 'Fictional data · Read-only demo · Database changes are disabled',
     'headline' => 'From first enquiry to lasting customer.',
     'intro' => 'Keep your contacts, opportunities and next steps together. A clear view of your business, without the busywork.',
-    'welcome' => 'Welcome to Turnkey CRM',
+    'welcome' => 'Welcome to CustomCRM',
     'sign_in' => 'Sign in to your workspace',
     'email' => 'Email address',
     'password' => 'Password',

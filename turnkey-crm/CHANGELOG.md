@@ -4,6 +4,12 @@ This changelog consists of the bug & security fixes and new features being inclu
 
 ## **v2.2.7 (Upcoming)**
 
+* [enhancement] Updated the shared demo email addresses and password defaults to use CustomCRM branding.
+
+* [changed] Renamed the CRM branding to CustomCRM while preserving the existing domain, demo accounts and read-only protections.
+
+* [fixed] Restored quote and dashboard PDF downloads when shared hosting serves public files outside the private application folder.
+
 * [feature] Added a private hosted-demo preparation page that preserves the installer owner, seeds once and activates read-only mode.
 
 * [fixed] Selected InnoDB explicitly for shared-hosting installations to support Unicode indexes, transactions and foreign keys.

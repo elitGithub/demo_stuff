@@ -1,15 +1,15 @@
-# Run the Turnkey CRM demo in WSL
+# Run the CustomCRM demo in WSL
 
-This is the real Krayin/Laravel CRM with Turnkey branding and a fictional service-business dataset. The dedicated `turnkey_crm_demo` database was installed, populated and checked locally on 2026-10-14 with operator approval.
+This is the real Krayin/Laravel CRM with CustomCRM branding and a fictional service-business dataset. The dedicated `turnkey_crm_demo` database was installed, populated and checked locally on 2026-10-14 with operator approval.
 
 ## Open the existing demo
 
-Visit [Turnkey CRM](http://localhost:8081/admin/login). Click **Use demo account**, then **Sign in**.
+Visit [CustomCRM](http://localhost:8081/admin/login). Click **Use demo account**, then **Sign in**.
 
 | Account | Email | Password |
 | --- | --- | --- |
-| Manager | `demo@turnkey.example` | `TurnkeyDemo!2026` |
-| Salesperson | `sales@turnkey.example` | `TurnkeyDemo!2026` |
+| Manager | `demo@customcrm.example` | `CustomCRMDemo!2026` |
+| Salesperson | `sales@customcrm.example` | `CustomCRMDemo!2026` |
 
 The private owner is separate from these shared accounts. Its local credential record is `storage/app/turnkey-preview/private-owner.json`; keep it private.
 
@@ -17,9 +17,9 @@ To restart the existing demo from WSL, run `cd /var/www/demo_stuff/turnkey-crm` 
 
 ## Included
 
-- Responsive Turnkey login, blue branding, application header, mobile/dark logo variants, email and quote identity.
+- Responsive CustomCRM login, blue branding, application header, mobile/dark logo variants, email and quote identity.
 - 8 companies, 12 contacts, 12 opportunities across six stages, 16 activities/notes, 4 services and 4 quotes.
-- Shared manager account `demo@turnkey.example`, plus salesperson `sales@turnkey.example` with visibility restricted to that user's records. Both use the configured demo password, initially `TurnkeyDemo!2026`.
+- Shared manager account `demo@customcrm.example`, plus salesperson `sales@customcrm.example` with visibility restricted to that user's records. Both use the configured demo password, initially `CustomCRMDemo!2026`.
 - CRM editing remains available with `APP_ENV=local`. `APP_ENV=demo` blocks database changes for every account. System/account settings, password resets, integrations, mail sending and uploaded files are separately restricted by `TURNKEY_DEMO=true`. The installation owner remains separate.
 - Dates are relative to the day the sample data is inserted.
 
@@ -66,7 +66,7 @@ The commands below are provided for the operator. The assistant must not run dat
    php artisan krayin-crm:install
    ```
 
-   Select the dedicated database; keep the application name `Turnkey CRM`, URL `http://localhost:8081`, locale English and your chosen currency. Create a private owner account with a strong password different from `admin123`. Do not use the shared demo email as the owner, and do not skip admin creation. Do not reuse this command for customer updates.
+   Select the dedicated database; keep the application name `CustomCRM`, URL `http://localhost:8081`, locale English and your chosen currency. Create a private owner account with a strong password different from `admin123`. Do not use the shared demo email as the owner, and do not skip admin creation. Do not reuse this command for customer updates.
 
 5. Populate the CRM:
 
@@ -148,7 +148,7 @@ After the operator finishes the browser installer, the temporary `deploy/infinit
 
 Only that authenticated, signed POST bootstraps the CRM and accesses its database. It validates the exact host/database/site, requires file sessions/cache and InnoDB tables, and refuses existing business data. The existing demo seeder preserves the installer owner and commits the sample records and seed marker in one transaction. A repeat after an interrupted response skips a committed seed and finishes the environment change.
 
-Before creating demo accounts, the page closes normal CRM requests behind a persistent preparation marker. A failed or interrupted request leaves this gate closed, while the private setup page remains usable for retries. After seeding, the page atomically sets `APP_ENV=demo`, `TURNKEY_DEMO=true` and `APP_DEBUG=false`, preserving all other environment settings. The existing application-level query guard blocks database writes on subsequent requests; the hosting database user's grants are unchanged. The default shared login is `demo@turnkey.example` / `TurnkeyDemo!2026`, unless the demo password was configured differently before seeding.
+Before creating demo accounts, the page closes normal CRM requests behind a persistent preparation marker. A failed or interrupted request leaves this gate closed, while the private setup page remains usable for retries. After seeding, the page atomically sets `APP_ENV=demo`, `TURNKEY_DEMO=true` and `APP_DEBUG=false`, preserving all other environment settings. The existing application-level query guard blocks database writes on subsequent requests; the hosting database user's grants are unchanged. The default shared login is `demo@customcrm.example` / `CustomCRMDemo!2026`, unless the demo password was configured differently before seeding.
 
 The maintenance gate opens only after the environment switch succeeds. The completion marker then disables the temporary page. Delete `htdocs/turnkey-demo-setup.php` and the earlier `turnkey-check.php` after success. Then sign in using the demo account and check the dashboard, contacts, opportunities, activities and quotes; mutation controls should be hidden and the read-only banner visible. Keep the private `_app` folder and the installed marker. No reinstall or reset is part of this operation.
 

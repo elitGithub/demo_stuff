@@ -14,7 +14,7 @@
             @else
                 <img
                     class="h-10 max-sm:hidden"
-                    src="{{ request()->cookie('dark_mode') ? asset('turnkey/logo-dark.svg') : asset('turnkey/logo.svg') }}"
+                    src="{{ request()->cookie('dark_mode') ? asset('turnkey/logo-dark.svg?v=customcrm') : asset('turnkey/logo.svg?v=customcrm') }}"
                     id="logo-image"
                     alt="{{ config('app.name') }}"
                 />
@@ -88,7 +88,7 @@
                         />
                     @else
                         <img
-                            src="{{ request()->cookie('dark_mode') ? asset('turnkey/logo-dark.svg') : asset('turnkey/logo.svg') }}"
+                            src="{{ request()->cookie('dark_mode') ? asset('turnkey/logo-dark.svg?v=customcrm') : asset('turnkey/logo.svg?v=customcrm') }}"
                             id="logo-image"
                             alt="{{ config('app.name') }}"
                             width="24"
@@ -155,9 +155,9 @@
                 return {
                     isDarkMode: {{ request()->cookie('dark_mode') ?? 0 }},
 
-                    logo: @json(core()->getConfigData('general.general.admin_logo.logo_image') ? Storage::url(core()->getConfigData('general.general.admin_logo.logo_image')) : asset('turnkey/logo.svg')),
+                    logo: @json(core()->getConfigData('general.general.admin_logo.logo_image') ? Storage::url(core()->getConfigData('general.general.admin_logo.logo_image')) : asset('turnkey/logo.svg?v=customcrm')),
 
-                    dark_logo: @json(core()->getConfigData('general.general.admin_logo.logo_image') ? Storage::url(core()->getConfigData('general.general.admin_logo.logo_image')) : asset('turnkey/logo-dark.svg')),
+                    dark_logo: @json(core()->getConfigData('general.general.admin_logo.logo_image') ? Storage::url(core()->getConfigData('general.general.admin_logo.logo_image')) : asset('turnkey/logo-dark.svg?v=customcrm')),
                 };
             },
 

@@ -26,7 +26,7 @@
                 @else
                     <img
                         class="h-10"
-                        src="{{ request()->cookie('dark_mode') ? asset('turnkey/logo-dark.svg') : asset('turnkey/logo.svg') }}"
+                        src="{{ request()->cookie('dark_mode') ? asset('turnkey/logo-dark.svg?v=customcrm') : asset('turnkey/logo.svg?v=customcrm') }}"
                         id="logo-image"
                         alt="{{ config('app.name') }}"
                     />

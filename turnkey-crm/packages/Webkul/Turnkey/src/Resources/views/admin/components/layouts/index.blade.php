@@ -55,7 +55,7 @@
     <link
         rel="preload"
         as="image"
-        href="{{ asset('turnkey/logo.svg') }}"
+        href="{{ asset('turnkey/logo.svg?v=customcrm') }}"
     >
 
     @if ($favicon = core()->getConfigData('general.general.admin_logo.favicon_image'))

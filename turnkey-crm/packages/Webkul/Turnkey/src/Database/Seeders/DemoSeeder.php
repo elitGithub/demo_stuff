@@ -50,7 +50,7 @@ class DemoSeeder extends Seeder
             }
             DemoGuard::assertCanSeed(true, $database, DB::table('core_config')->where('code', 'turnkey.demo.seeded')->exists(), $hasBusinessData, $approvedDatabase);
 
-            if (DB::table('users')->whereIn('email', [config('turnkey.demo_email'), 'sales@turnkey.example'])->exists()) {
+            if (DB::table('users')->whereIn('email', [config('turnkey.demo_email'), 'sales@customcrm.example'])->exists()) {
                 throw new LogicException('The shared demo email addresses already exist. No records were changed.');
             }
 
@@ -115,7 +115,7 @@ class DemoSeeder extends Seeder
         $permissions = DemoAccess::permissions(config('acl', []));
         $role = app(RoleRepository::class)->create(['name' => 'Demo team', 'description' => 'CRM workflow access without system administration.', 'permission_type' => 'custom', 'permissions' => $permissions]);
         $users = [];
-        foreach ([['Casey Morgan', config('turnkey.demo_email'), 'global'], ['Avery Taylor', 'sales@turnkey.example', 'individual']] as [$name, $email, $visibility]) {
+        foreach ([['Casey Morgan', config('turnkey.demo_email'), 'global'], ['Avery Taylor', 'sales@customcrm.example', 'individual']] as [$name, $email, $visibility]) {
             $users[] = app(UserRepository::class)->create(['name' => $name, 'email' => $email, 'password' => Hash::make(config('turnkey.demo_password')), 'role_id' => $role->id, 'status' => 1, 'view_permission' => $visibility]);
         }
 

@@ -6,6 +6,19 @@ Kilo Code, etc.).
 
 ---
 
+## Project Isolation
+
+- This demo CRM belongs exclusively in `/var/www/demo_stuff/turnkey-crm/`.
+- Keep all CRM source, SQL files, deployment archives, backups, screenshots,
+  downloads and temporary work inside this project folder. Use
+  `backups/` for local deployment artifacts; it is already ignored by Git.
+- Do not place CRM files in `/var/www/demo_stuff/` itself, in a sibling demo,
+  or in a general temporary/download folder. Move unavoidable tool-created
+  downloads into this project immediately.
+- Keep each demo project in its own subfolder and do not mix their files.
+
+---
+
 ## Framework Context
 
 - **Product:** Krayin CRM (Webkul) — an open-source Laravel CRM.

@@ -16,7 +16,7 @@
                 <div style="margin-bottom: 45px;">
                     <a href="{{ config('app.url') }}">
                         <img
-                            src="{{ asset('turnkey/logo.svg') }}"
+                            src="{{ asset('turnkey/logo.svg?v=customcrm') }}"
                             alt="{{ config('app.name') }}"
                             style="height: 40px; width: auto;"
                         />

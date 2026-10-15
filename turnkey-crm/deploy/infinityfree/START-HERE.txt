@@ -1,4 +1,4 @@
-Turnkey CRM - InfinityFree installation
+CustomCRM - InfinityFree installation
 
 Target: https://turnkey-demo.is-great.org
 Database: if0_43175351_turnkey
@@ -26,7 +26,7 @@ setup key, but NO local .env, database dump, sessions, logs or existing accounts
    Keep this link private. It grants installer access for one hour in that browser.
    Reopen it if access expires before installation finishes.
 6. In the Krayin browser installer use:
-   App name: Turnkey CRM
+   App name: CustomCRM
    App URL: https://turnkey-demo.is-great.org
    Timezone: Asia/Jerusalem
    Language: English
@@ -62,7 +62,7 @@ The shared demo login will work only after demo accounts/data are imported.
 
 Verify before sharing:
 - _app/composer.json remains forbidden.
-- /admin/login shows Turnkey branding.
+- /admin/login shows CustomCRM branding.
 - The shared demo user can view contacts, opportunities, activities and quotes.
 - Attempts to save/delete are rejected in APP_ENV=demo.
 - Quotes generate PDFs and all assets load over HTTPS.

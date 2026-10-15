@@ -8,7 +8,7 @@ if (is_file(__DIR__.'/storage/turnkey-demo-preparing') && ! defined('TURNKEY_DEM
     header('Content-Type: text/plain; charset=UTF-8');
     header('Cache-Control: no-store');
     header('Retry-After: 60');
-    exit('Turnkey CRM is being prepared. Please try again shortly.');
+    exit('CustomCRM is being prepared. Please try again shortly.');
 }
 
 if (! is_file(__DIR__.'/storage/installed')) {
@@ -36,7 +36,7 @@ if (! is_file(__DIR__.'/storage/installed')) {
     if (! is_string($expected) || strlen($expected) !== 64 || ! is_string($cookie) || ! hash_equals($expected, $cookie)) {
         http_response_code(403);
         header('Content-Type: text/plain; charset=UTF-8');
-        exit('Turnkey CRM is being prepared. Use the private setup link supplied with the deployment package.');
+        exit('CustomCRM is being prepared. Use the private setup link supplied with the deployment package.');
     }
 
     unset($expected, $query, $cookie, $tokenFile);

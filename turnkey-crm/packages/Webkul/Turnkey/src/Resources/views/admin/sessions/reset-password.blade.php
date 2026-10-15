@@ -16,7 +16,7 @@
             @else
                 <img
                     class="w-max"
-                    src="{{ asset('turnkey/logo.svg') }}"
+                    src="{{ asset('turnkey/logo.svg?v=customcrm') }}"
                     alt="{{ config('app.name') }}"
                 />
             @endif

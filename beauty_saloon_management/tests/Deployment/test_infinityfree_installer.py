@@ -4,6 +4,7 @@ import importlib.util
 import io
 from pathlib import Path
 import re
+import subprocess
 import tempfile
 import unittest
 import zipfile
@@ -35,6 +36,9 @@ class InfinityFreeInstallerTest(unittest.TestCase):
                 self.assertIn("studio/_app/.installation/", setup.namelist())
                 self.assertIn("studio/_app/storage/fonts/", setup.namelist())
                 self.assertNotIn("studio/index.php", setup.namelist())
+                self.assertNotIn("__DIR__.'/index.html'", script)
+                self.assertNotIn("__DIR__.'/index.php'", script)
+                self.assertNotIn("Open demo collection", script)
             payloads = {}
             for name in ("02-studio-payload.zip", "03-studio-payload.zip"):
                 self.assertIn(hashlib.sha256((output / name).read_bytes()).hexdigest(), script)
@@ -47,8 +51,7 @@ class InfinityFreeInstallerTest(unittest.TestCase):
                         payloads[item] = archive.read(item)
             self.assertEqual(b"existing database", payloads["studio/_app/database/database.sqlite"])
             self.assertEqual(b"fixed private application key", payloads["studio/_app/.env"])
-            with zipfile.ZipFile(output / "Studio-InfinityFree.zip") as download:
-                self.assertEqual(["01-setup.zip", "02-studio-payload.zip", "03-studio-payload.zip", "START-HERE.txt"], download.namelist())
+            self.assertEqual({"01-setup.zip", "02-studio-payload.zip", "03-studio-payload.zip", "START-HERE.txt"}, {path.name for path in output.iterdir()})
 
     def test_builder_never_overwrites_an_existing_handoff(self):
         with tempfile.TemporaryDirectory() as temporary:
@@ -60,6 +63,25 @@ class InfinityFreeInstallerTest(unittest.TestCase):
             with self.assertRaises(ValueError):
                 installer.build(root / "release", output)
             self.assertEqual("preserve existing installation code", (output / "START-HERE.txt").read_text())
+
+    def test_extracted_files_work_without_archives_or_empty_zip_directories(self):
+        with tempfile.TemporaryDirectory() as temporary:
+            root = Path(temporary)
+            required = ["studio/.htaccess", "studio/_app/.htaccess", "studio/_app/.env", "studio/_app/artisan", "studio/_app/bootstrap/app.php", "studio/_app/config/database.php", "studio/_app/database/database.sqlite", "studio/_app/vendor/autoload.php", "studio/_app/vendor/composer/autoload_real.php", "studio/assets/studio.css", "studio/assets/studio.js", "studio/assets/salon-hero.jpg"]
+            for name in required:
+                path = root / name
+                path.parent.mkdir(parents=True, exist_ok=True)
+                path.write_text("fixture")
+            script = (installer.SOURCE / "bin/infinityfree/install-studio.php.template").read_text()
+            for key, value in {"PARTS": "[]", "CODE_HASH": hashlib.sha256(b"test-code").hexdigest(), "RELEASE_HASH": "test", "PUBLIC_INDEX": "YWN0aXZhdGlvbg=="}.items():
+                script = script.replace("{{" + key + "}}", value)
+            (root / "install-studio.php").write_text(script)
+            result = subprocess.run(["php", "-r", "$_SERVER['REQUEST_METHOD']='POST'; $_POST=['code'=>'test-code']; require 'install-studio.php';"], cwd=root, capture_output=True, text=True, check=True)
+            self.assertIn("The extracted application files are present", result.stdout)
+            self.assertIn("Finish installation", result.stdout)
+            self.assertNotIn("Another installation step is running", result.stdout)
+            for name in (".installation", "bootstrap/cache", "storage/framework/views", "storage/framework/sessions", "storage/framework/cache/data", "storage/fonts", "storage/logs"):
+                self.assertTrue((root / "studio/_app" / name).is_dir(), name)
 
 
 if __name__ == "__main__":

@@ -1,0 +1,4 @@
+storage/
+public/
+test-results/
+*.log

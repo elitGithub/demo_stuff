@@ -80,6 +80,15 @@ class HostingAccessTest(unittest.TestCase):
                 # Finished installations no longer need the temporary setup cookie.
                 (root / "storage/installed").write_text("installed")
                 self.assertEqual(request(port, "/admin/login")[2], "ALLOWED")
+                # Preparation takes precedence over the installed marker and setup cookie.
+                (root / "storage/turnkey-demo-preparing").write_text("preparing")
+                for path in ["/admin/login", "/admin/dashboard", "/install"]:
+                    status, headers, body = request(port, path, "turnkey_setup=" + token)
+                    self.assertEqual(status, 503)
+                    self.assertNotIn("ALLOWED", body)
+                    self.assertIn("no-store", headers["Cache-Control"])
+                (root / "storage/turnkey-demo-preparing").unlink()
+                self.assertEqual(request(port, "/admin/login")[2], "ALLOWED")
                 (root / "storage/installed").unlink()
                 (root / "setup-token.php").unlink()
                 self.assertEqual(request(port, "/install")[0], 403)

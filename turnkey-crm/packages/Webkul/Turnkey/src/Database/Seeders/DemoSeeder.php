@@ -27,17 +27,17 @@ use Webkul\User\Repositories\UserRepository;
 
 class DemoSeeder extends Seeder
 {
-    public function run(): void
+    public function run(?string $approvedDatabase = null): void
     {
         $connection = config('database.default');
         $database = (string) config('database.connections.'.$connection.'.database');
-        DemoGuard::assertCanSeed((bool) config('turnkey.demo'), $database, false, false);
+        DemoGuard::assertCanSeed((bool) config('turnkey.demo'), $database, false, false, $approvedDatabase);
 
         if (! Schema::hasTable('core_config') || ! Schema::hasTable('leads')) {
             throw new LogicException('Initialize the dedicated demo database with the Krayin installer first.');
         }
 
-        DB::transaction(function () use ($database) {
+        DB::transaction(function () use ($database, $approvedDatabase) {
             // Lock the initialized owner row so simultaneous preparations serialize.
             $owner = DB::table('users')->orderBy('id')->lockForUpdate()->first();
             if (! $owner || Hash::check('admin123', $owner->password)) {
@@ -48,7 +48,7 @@ class DemoSeeder extends Seeder
             foreach (['organizations', 'persons', 'leads', 'activities', 'products', 'quotes'] as $table) {
                 $hasBusinessData = $hasBusinessData || DB::table($table)->exists();
             }
-            DemoGuard::assertCanSeed(true, $database, DB::table('core_config')->where('code', 'turnkey.demo.seeded')->exists(), $hasBusinessData);
+            DemoGuard::assertCanSeed(true, $database, DB::table('core_config')->where('code', 'turnkey.demo.seeded')->exists(), $hasBusinessData, $approvedDatabase);
 
             if (DB::table('users')->whereIn('email', [config('turnkey.demo_email'), 'sales@turnkey.example'])->exists()) {
                 throw new LogicException('The shared demo email addresses already exist. No records were changed.');

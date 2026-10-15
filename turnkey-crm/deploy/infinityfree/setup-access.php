@@ -1,5 +1,16 @@
 <?php
 
+define('TURNKEY_DEMO_GATE_VERSION', 1);
+
+// The private setup page can resume preparation; every normal CRM request waits.
+if (is_file(__DIR__.'/storage/turnkey-demo-preparing') && ! defined('TURNKEY_DEMO_PREPARATION')) {
+    http_response_code(503);
+    header('Content-Type: text/plain; charset=UTF-8');
+    header('Cache-Control: no-store');
+    header('Retry-After: 60');
+    exit('Turnkey CRM is being prepared. Please try again shortly.');
+}
+
 if (! is_file(__DIR__.'/storage/installed')) {
     header('Cache-Control: no-store');
     header('Referrer-Policy: no-referrer');

@@ -141,3 +141,15 @@ The initial sidebar preview used an anonymous layout and missed a stylesheet ord
 The workspace root `.gitignore` explicitly allows `turnkey-crm`; this directory's own rules then exclude `.env` variants, credentials, dependencies, caches, runtime storage and generated builds. Source, docs, example environments and dependency lockfiles remain eligible for Git. Nothing was staged or committed.
 
 The existing compiled browser assets remain on disk for the local demo but are ignored by Git. A fresh source checkout therefore needs the frontend assets built or supplied in a release artifact before serving the CRM. Preserve the runtime storage directory skeleton when packaging a release.
+
+## Hosted read-only demo on InfinityFree
+
+After the operator finishes the browser installer, the temporary `deploy/infinityfree/turnkey-demo-setup.php` page can prepare the dedicated `if0_43175351_turnkey` database on `sql206.infinityfree.com`. Upload the small demo setup package into `htdocs`, preserving its `_app` paths. It contains no environment file or setup token; it reuses the installation's private setup key. Open the private URL from the generated START-HERE file and press **Load demo data and enable read-only**.
+
+Only that authenticated, signed POST bootstraps the CRM and accesses its database. It validates the exact host/database/site, requires file sessions/cache and InnoDB tables, and refuses existing business data. The existing demo seeder preserves the installer owner and commits the sample records and seed marker in one transaction. A repeat after an interrupted response skips a committed seed and finishes the environment change.
+
+Before creating demo accounts, the page closes normal CRM requests behind a persistent preparation marker. A failed or interrupted request leaves this gate closed, while the private setup page remains usable for retries. After seeding, the page atomically sets `APP_ENV=demo`, `TURNKEY_DEMO=true` and `APP_DEBUG=false`, preserving all other environment settings. The existing application-level query guard blocks database writes on subsequent requests; the hosting database user's grants are unchanged. The default shared login is `demo@turnkey.example` / `TurnkeyDemo!2026`, unless the demo password was configured differently before seeding.
+
+The maintenance gate opens only after the environment switch succeeds. The completion marker then disables the temporary page. Delete `htdocs/turnkey-demo-setup.php` and the earlier `turnkey-check.php` after success. Then sign in using the demo account and check the dashboard, contacts, opportunities, activities and quotes; mutation controls should be hidden and the read-only banner visible. Keep the private `_app` folder and the installed marker. No reinstall or reset is part of this operation.
+
+The setup page is tested against an isolated PHP fixture without a CRM application or database. Environment rewrites, exact-target checks and seeding guards have pure unit coverage. These checks do not substitute for the operator's hosted import and browser verification.

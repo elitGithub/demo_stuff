@@ -4,6 +4,8 @@ This changelog consists of the bug & security fixes and new features being inclu
 
 ## **v2.2.7 (Upcoming)**
 
+* [feature] Added a private hosted-demo preparation page that preserves the installer owner, seeds once and activates read-only mode.
+
 * [fixed] Selected InnoDB explicitly for shared-hosting installations to support Unicode indexes, transactions and foreign keys.
 
 * [feature] Added an InfinityFree upload bundle with protected application files, private installer access, production dependencies and storage without symlinks.

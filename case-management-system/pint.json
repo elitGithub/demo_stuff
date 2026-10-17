@@ -1,0 +1,46 @@
+{
+    "preset": "laravel",
+    "rules": {
+        "control_structure_braces": true,
+        "declare_strict_types": false,
+        "no_superfluous_phpdoc_tags": false,
+        "phpdoc_scalar": false,
+        "phpdoc_types": false,
+        "fully_qualified_strict_types": {
+            "import_symbols": true,
+            "phpdoc_tags": [
+                "phpstan-property",
+                "phpstan-property-read",
+                "phpstan-property-write",
+                "phpstan-var",
+                "property",
+                "property-read",
+                "property-write",
+                "psalm-property",
+                "psalm-property-read",
+                "psalm-property-write",
+                "psalm-var",
+                "see",
+                "var",
+                "extends",
+                "implements",
+                "use",
+                "phpstan-extends",
+                "phpstan-implements",
+                "phpstan-use",
+                "psalm-extends",
+                "psalm-implements",
+                "psalm-use",
+                "mixin",
+                "param-closure-this",
+                "phpstan-assert",
+                "phpstan-assert-if-true",
+                "phpstan-assert-if-false",
+                "phpstan-self-out",
+                "phpstan-this-out",
+                "phpstan-require-extends",
+                "phpstan-require-implements"
+            ]
+        }
+    }
+}

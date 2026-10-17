@@ -1,0 +1,864 @@
+{
+  "scope": "real_estate_demo/Real-Estate",
+  "recorded_on": "2026-10-15",
+  "purpose": "Legacy reference inventory; remove the inventoried directory only after standalone application verification.",
+  "file_count": 171,
+  "total_bytes": 7021418,
+  "files": [
+    {
+      "path": "Real-Estate/PackersAndMovers.php",
+      "bytes": 13289,
+      "sha256": "c7b71da2f60d532903b920db00b1a94df0b1d8f59bc6d584d047417e78ea2fc8"
+    },
+    {
+      "path": "Real-Estate/README.md",
+      "bytes": 258,
+      "sha256": "7868f5d054d085c5ecb6ae18be8cb997dbf2c508471273c2176d2fb5324c0ac7"
+    },
+    {
+      "path": "Real-Estate/RealEstate.erdplus",
+      "bytes": 12019,
+      "sha256": "8ae661b4bd619f3accfc221dfc2226d962cef6b23ae3b2390564d4a61a7542c7"
+    },
+    {
+      "path": "Real-Estate/about.html",
+      "bytes": 10882,
+      "sha256": "23a9e6d82301f85c6d2f93f85f35a27d55b13ded25735e8edd454a518f3b94d6"
+    },
+    {
+      "path": "Real-Estate/addprojectrent.php",
+      "bytes": 16895,
+      "sha256": "f4478180c92b15c8239ea960f93c30748e359b49775c8d0cbf1ad0eaef3d0564"
+    },
+    {
+      "path": "Real-Estate/addprojectsale.php",
+      "bytes": 16143,
+      "sha256": "dd9155d9f92bbf1cb6cb07bb902b1fe31ff9c6fb42bc3c0dec78440dff7b84e9"
+    },
+    {
+      "path": "Real-Estate/addup.php",
+      "bytes": 11276,
+      "sha256": "fd5d29bcbeaaeb74ec2cde3838189c91b0059861d19f5dc69d7f758c386c91fe"
+    },
+    {
+      "path": "Real-Estate/builderHome.php",
+      "bytes": 9430,
+      "sha256": "05a806feba9b2b2873f77a09a2d312b5ad313f1842b0d5c92876352bf80b6c09"
+    },
+    {
+      "path": "Real-Estate/categories.html",
+      "bytes": 33006,
+      "sha256": "fb3ceaec85f50799a5fd1b8258daf8d309fa704f1e9f5b0a73a9caea9f62598b"
+    },
+    {
+      "path": "Real-Estate/contact.html",
+      "bytes": 7975,
+      "sha256": "eb936374c28280e4ecdf71dc4a371da6cfb10a1f479cf378cc5d84d6e3df6e03"
+    },
+    {
+      "path": "Real-Estate/css/animate.css",
+      "bytes": 75052,
+      "sha256": "75a33bdccbadc38c64bf09f76d24d7a1b3fdf61c0915169cc3e7d9b5b07405c5"
+    },
+    {
+      "path": "Real-Estate/css/bootstrap.min.css",
+      "bytes": 144877,
+      "sha256": "2c0f3dcfe93d7e380c290fe4ab838ed8cadff1596d62697f5444be460d1f876d"
+    },
+    {
+      "path": "Real-Estate/css/font-awesome.min.css",
+      "bytes": 31030,
+      "sha256": "87a47b5cc1f7f079bf0daa6064d7024e5769af3a3efa272b9bc0c9c73059158b"
+    },
+    {
+      "path": "Real-Estate/css/magnific-popup.css",
+      "bytes": 5304,
+      "sha256": "962c56eb337b025565a6531a586a17f3b37d9160c0b4e95c068fc0797c19dd74"
+    },
+    {
+      "path": "Real-Estate/css/owl.carousel.css",
+      "bytes": 4028,
+      "sha256": "87b34f2c1c4c30f70478efc10c6c026f9311019f028157314717e6ddfa4c1f4b"
+    },
+    {
+      "path": "Real-Estate/css/style.css",
+      "bytes": 35763,
+      "sha256": "06d6db12b46a7bb03c45b3e1c95d047185c995364dc48aadb70e3b358f5c28d6"
+    },
+    {
+      "path": "Real-Estate/fonts/Futura.woff",
+      "bytes": 26568,
+      "sha256": "771761f9f69ed4f549f627e8f13de6362bccd2bbe41329d1210156112c5aec45"
+    },
+    {
+      "path": "Real-Estate/fonts/Futura1.woff",
+      "bytes": 19584,
+      "sha256": "98ea43cc416e1bee0d0adf4879261e9dfe1ff5fa61b60027eb26984654e1661e"
+    },
+    {
+      "path": "Real-Estate/fonts/WEB BASED RESULT PUBLICATION SYSTEM FOR EDUCATION BOARDS.pdf",
+      "bytes": 85398,
+      "sha256": "2e4ca68fb154bdbe944fa39f276b56a57a0d6b1c80cc26512ed6b39324fd7401"
+    },
+    {
+      "path": "Real-Estate/gallery/1.jpg",
+      "bytes": 91196,
+      "sha256": "ed3a4c3a03f856bdc55ffdec45e419f43f5c4ce911719c75a7dbffd5b63d47a5"
+    },
+    {
+      "path": "Real-Estate/gallery/2.jpg",
+      "bytes": 185062,
+      "sha256": "0a281ee066d39c8422e08f66c05df62e5d1dccc038f344a2a95ad5cfba8288e1"
+    },
+    {
+      "path": "Real-Estate/gallery/3.jpg",
+      "bytes": 68639,
+      "sha256": "c8652e3e1ebc161069693963ff657b34b5ccdead112b86a6fc838dd616cd5c04"
+    },
+    {
+      "path": "Real-Estate/gallery/4.jpg",
+      "bytes": 162668,
+      "sha256": "8350290d7b079505afeab94f70740dea7c571223da49f30034be82e797bf21fd"
+    },
+    {
+      "path": "Real-Estate/housing-co.sql",
+      "bytes": 10497,
+      "sha256": "e60008574c770bc328ce1ab5c605db1bba52f5ba69b8d240b57f50e2879a47e2"
+    },
+    {
+      "path": "Real-Estate/icon-fonts/fontawesome-webfont.eot",
+      "bytes": 165742,
+      "sha256": "7bfcab6db99d5cfbf1705ca0536ddc78585432cc5fa41bbd7ad0f009033b2979"
+    },
+    {
+      "path": "Real-Estate/icon-fonts/fontawesome-webfont.svg",
+      "bytes": 444379,
+      "sha256": "ad6157926c1622ba4e1d03d478f1541368524bfc46f51e42fe0d945f7ef323e4"
+    },
+    {
+      "path": "Real-Estate/icon-fonts/fontawesome-webfont.woff",
+      "bytes": 98024,
+      "sha256": "ba0c59deb5450f5cb41b3f93609ee2d0d995415877ddfa223e8a8a7533474f07"
+    },
+    {
+      "path": "Real-Estate/icon-fonts/fontawesome-webfont.woff2",
+      "bytes": 77160,
+      "sha256": "2adefcbc041e7d18fcf2d417879dc5a09997aa64d675b7a3c4b6ce33da13f3fe"
+    },
+    {
+      "path": "Real-Estate/img/about.jpg",
+      "bytes": 167281,
+      "sha256": "b101e82b8993a80f41ad9cfcfab1a3c604e880c515bb328404e51fea55ac0478"
+    },
+    {
+      "path": "Real-Estate/img/b1.jpg",
+      "bytes": 35598,
+      "sha256": "77848866a3c786c5bebaab0d72a3edad662eb576f7d04ee55c1e3c358fb8d06b"
+    },
+    {
+      "path": "Real-Estate/img/b12.jpg",
+      "bytes": 56074,
+      "sha256": "6cebd651854f2143d579423f81c12fca0d071192a62055a486d527c5850c85b4"
+    },
+    {
+      "path": "Real-Estate/img/b23.jpg",
+      "bytes": 238226,
+      "sha256": "8f652fff6b5514e1306a4f2fb3aec3bfac774bd3462540c534597f51b3e81f9d"
+    },
+    {
+      "path": "Real-Estate/img/bg.jpg",
+      "bytes": 165111,
+      "sha256": "4d74818c16a553690abf1cd1b607a9a9ec177ec7798d5e665ec22fff6ff85fd8"
+    },
+    {
+      "path": "Real-Estate/img/blog/1.jpg",
+      "bytes": 51370,
+      "sha256": "e22b9fcedc7fc58741a9698da5c7cb60dc04531add5f0c70f12eb0bfb0a3d30a"
+    },
+    {
+      "path": "Real-Estate/img/blog/2.jpg",
+      "bytes": 35192,
+      "sha256": "4fdca663bc65ee01d078fabd00a8f58cdfcbd4359272237fe024712874927e47"
+    },
+    {
+      "path": "Real-Estate/img/blog/3.jpg",
+      "bytes": 26850,
+      "sha256": "1684dbb37068c829177b1668f07a691f2c534aa6824fea89c1bc6af127835390"
+    },
+    {
+      "path": "Real-Estate/img/blog/4.jpg",
+      "bytes": 65534,
+      "sha256": "2584c926e8b79afaadb2e04702d0def2bcc7df9f688b4716fbe60157dace9eb8"
+    },
+    {
+      "path": "Real-Estate/img/blog/5.jpg",
+      "bytes": 29292,
+      "sha256": "7ade23ee386d612ae77d71a7c5c406db56873d7825a1045f041599c9b5d676b3"
+    },
+    {
+      "path": "Real-Estate/img/blog/6.jpg",
+      "bytes": 53672,
+      "sha256": "fbb5fb5e3ab25666809733aa6ba98a56234a4aed9cfc59e25286e7ea572cd8c8"
+    },
+    {
+      "path": "Real-Estate/img/blog/7.jpg",
+      "bytes": 24663,
+      "sha256": "c90a0df4c21db92598a1ea707ec8dc53a312444c8d86be75604f75900ef9691f"
+    },
+    {
+      "path": "Real-Estate/img/blog/8.jpg",
+      "bytes": 21072,
+      "sha256": "53ec8b04baa7c7e4487aac5dd1a435ab082b86c2df12e163718b0ea4170b11ae"
+    },
+    {
+      "path": "Real-Estate/img/blog/9.jpg",
+      "bytes": 34869,
+      "sha256": "1a14523c0c4bd85d30cfc52efe59dfc04676aabaa98fe1654293c134ca7aa557"
+    },
+    {
+      "path": "Real-Estate/img/blog/author.jpg",
+      "bytes": 12259,
+      "sha256": "31cd146c7d0c8f7e72dd81c6412f25db3b4f5fc7b480ced5cf192ccba49412fa"
+    },
+    {
+      "path": "Real-Estate/img/blog/comment/1.jpg",
+      "bytes": 4573,
+      "sha256": "70d4aed6ef18d5b5b2b631d7f960984f465b5e3f6cc43525187185deeada0b26"
+    },
+    {
+      "path": "Real-Estate/img/blog/comment/2.jpg",
+      "bytes": 5034,
+      "sha256": "748a68afd69e65ea39c3f984844ba314c0bd0d8d66d8c17da890b628ad063d72"
+    },
+    {
+      "path": "Real-Estate/img/blog/comment/3.jpg",
+      "bytes": 10584,
+      "sha256": "99a5a4685cb8465cef3a00ae928b9150ee8a028f0644091b37d341d27b64b471"
+    },
+    {
+      "path": "Real-Estate/img/blog/i1.jpg",
+      "bytes": 9905,
+      "sha256": "59a4253ad280f0e77f28caa35e4f607128a4f9231ade03346f8370d083ed80b9"
+    },
+    {
+      "path": "Real-Estate/img/blog/i10.jpg",
+      "bytes": 10682,
+      "sha256": "40e17b2be1f18453b4b3a1770f2ec389a6c6b816a03a77ce48fb86071cd47332"
+    },
+    {
+      "path": "Real-Estate/img/blog/i2.jpg",
+      "bytes": 9658,
+      "sha256": "5e21f3d1b58e13b446d744bc8c909bb38c6dccbee18df1cdfd23d0f2133a70bd"
+    },
+    {
+      "path": "Real-Estate/img/blog/i3.jpg",
+      "bytes": 9451,
+      "sha256": "e3a4ee04c9317f73b98a8359a4f747fea88c1ce0eabb2c34f32cd1a5b72c96f7"
+    },
+    {
+      "path": "Real-Estate/img/blog/i4.jpg",
+      "bytes": 11740,
+      "sha256": "1991d9d0d9325c284d713eb23753690a18d81128754c205c4d242f31e1d17410"
+    },
+    {
+      "path": "Real-Estate/img/blog/i5.jpg",
+      "bytes": 10280,
+      "sha256": "a0f22cf4b21285dca25c4285e3dec2a8d1980c580241422264af52d70ef5b2a1"
+    },
+    {
+      "path": "Real-Estate/img/blog/i6.jpg",
+      "bytes": 12486,
+      "sha256": "baa80ff24b2555c1341d05f4fdd7f48f5d0a2444d660c7447a61aac95d9fffb2"
+    },
+    {
+      "path": "Real-Estate/img/blog/i7.jpg",
+      "bytes": 11968,
+      "sha256": "295cd8a2ebee6d03cac548e7f0cdbc72c41664f1774b76aa0c5cbc2ef28d2d79"
+    },
+    {
+      "path": "Real-Estate/img/blog/i8.jpg",
+      "bytes": 11895,
+      "sha256": "419e5986dba5e21c4d7fea58e67b38c48ba7ce0763012575ea7282a10c7e4c80"
+    },
+    {
+      "path": "Real-Estate/img/blog/i9.jpg",
+      "bytes": 11575,
+      "sha256": "d553651f37c39b54585b929d40c88eda86fe2f26f4e97c15dd6b34ddb93c80a7"
+    },
+    {
+      "path": "Real-Estate/img/blog/single-blog.jpg",
+      "bytes": 88680,
+      "sha256": "bd1324d14a0e50655fe7a2198ffb5f132b642c70175425a70eac1310be2df226"
+    },
+    {
+      "path": "Real-Estate/img/contact.jpg",
+      "bytes": 43921,
+      "sha256": "f14b2168da7c0d9c6361597f58aa75975a6bf7ebb9ae61f23604df92c0530b39"
+    },
+    {
+      "path": "Real-Estate/img/download.jpg",
+      "bytes": 6678,
+      "sha256": "fb6161fcedba3d410f00972f00d08127d09d7c7a4c4b8ee219607eadd5f591d1"
+    },
+    {
+      "path": "Real-Estate/img/feature/1.jpg",
+      "bytes": 177817,
+      "sha256": "7f5ede8832bda94cb8225aaecf801e6200ce72d7cac8f8315f1531a15b6c86a2"
+    },
+    {
+      "path": "Real-Estate/img/feature/10.jpg",
+      "bytes": 61442,
+      "sha256": "149e1957966655dbc1bde721eeef91866e0ac276f95ffcc04718f7f5c8ddf046"
+    },
+    {
+      "path": "Real-Estate/img/feature/11.jpg",
+      "bytes": 50668,
+      "sha256": "d121faedbb0872f564b8c3e72b5a3acb9c0f535c985efa7ccb43b7f83afccafb"
+    },
+    {
+      "path": "Real-Estate/img/feature/12.jpg",
+      "bytes": 20218,
+      "sha256": "d599ce01ec6387e063d1953b9bbe0db6e78c3596e7de1fd7eba4fb23ef606e73"
+    },
+    {
+      "path": "Real-Estate/img/feature/2.jpg",
+      "bytes": 59075,
+      "sha256": "08b7591afa345264fc9893dccbf67a3f7a69eeac50136e471993c22a68965405"
+    },
+    {
+      "path": "Real-Estate/img/feature/3.jpg",
+      "bytes": 67623,
+      "sha256": "d6e47429abe41a2bd6e3278c2fa2ca9b0afc5d3714f2d132001c418816af6189"
+    },
+    {
+      "path": "Real-Estate/img/feature/4.jpg",
+      "bytes": 117774,
+      "sha256": "2d0b00670f22db6f6b78d4d88a6dd754fda97ca37255b08c5ba0beea9a4871f8"
+    },
+    {
+      "path": "Real-Estate/img/feature/5.jpg",
+      "bytes": 68030,
+      "sha256": "81c5223f3e59b72f7cb7d16d8eba355231f1722535e723bf0e119a22aa759193"
+    },
+    {
+      "path": "Real-Estate/img/feature/6.jpg",
+      "bytes": 61409,
+      "sha256": "232718bec992245d6e3423e298d12b9bbacbdcf50a4886b6ff1a98c0f05f8813"
+    },
+    {
+      "path": "Real-Estate/img/feature/7.jpg",
+      "bytes": 51979,
+      "sha256": "c499b5de4d1022e1fd9a9337a8aa41241a63f5e494bef833374c8dff8d41002d"
+    },
+    {
+      "path": "Real-Estate/img/feature/8.jpg",
+      "bytes": 54492,
+      "sha256": "2a12d95ba88d1eaa71bf70f082e103f2a2694823f60550ec183005c3968b0820"
+    },
+    {
+      "path": "Real-Estate/img/feature/9.jpg",
+      "bytes": 40361,
+      "sha256": "2435cc82260cfece8ffd53bac6a1e6672767d3f12431a00b3f9a3daa640f360b"
+    },
+    {
+      "path": "Real-Estate/img/feature/img.jpg",
+      "bytes": 15768,
+      "sha256": "beb203db530fbc632f330cd5b13c25f6b5a5722e0d1bfaddd7622735b500bf26"
+    },
+    {
+      "path": "Real-Estate/img/feature/img1.jpg",
+      "bytes": 13835,
+      "sha256": "ad40865d1881b697698cc5644b96394c1292d2a35c2e3ee819d391f591200237"
+    },
+    {
+      "path": "Real-Estate/img/feature/img10.jpg",
+      "bytes": 10767,
+      "sha256": "c241ee9b50ff0bf029b32ee91ab290f62ac7bb02e84646eea8d609c3817c6e4e"
+    },
+    {
+      "path": "Real-Estate/img/feature/img11.jpg",
+      "bytes": 12462,
+      "sha256": "48356a79f913afae52812de7bd1230cfdb661f30d79060615f15866c679aab7a"
+    },
+    {
+      "path": "Real-Estate/img/feature/img12.jpg",
+      "bytes": 13076,
+      "sha256": "eea49210d0ac5a05864f704eb24783a9028381344c24e0d83f6a39eae9f3d853"
+    },
+    {
+      "path": "Real-Estate/img/feature/img13.jpg",
+      "bytes": 14124,
+      "sha256": "4e7914a03b10204ba53c5a1d7be6f9afcb9f95c4a13ae9e60f386494643d444a"
+    },
+    {
+      "path": "Real-Estate/img/feature/img15.jpg",
+      "bytes": 11326,
+      "sha256": "3f446e0393ddd35453339d03c6610fae40456b051a65cd95be7945b1cd892ce4"
+    },
+    {
+      "path": "Real-Estate/img/feature/img16.jpg",
+      "bytes": 13514,
+      "sha256": "71a1c30b90dc475798dc5bcd0aeee82c41aa9af5726db38fa7ab3093bf7792f1"
+    },
+    {
+      "path": "Real-Estate/img/feature/img2.jpg",
+      "bytes": 11534,
+      "sha256": "a9a0a2d02cecd8041f3dd7aeb101d8a895e40e6ef7911dc331e0b5ea8a337292"
+    },
+    {
+      "path": "Real-Estate/img/feature/img3.jpg",
+      "bytes": 13915,
+      "sha256": "35c7ae639c22cea2c46ab350b9be3e55fd71f8240ffd25f8b18162f2b829b7e3"
+    },
+    {
+      "path": "Real-Estate/img/feature/img4.jpg",
+      "bytes": 21823,
+      "sha256": "e4217f18a8594bdb1198ac27ddb1f2469fbecfc52744cb87fa496b7be03710cd"
+    },
+    {
+      "path": "Real-Estate/img/feature/img5.jpg",
+      "bytes": 10163,
+      "sha256": "5640c4fe00797c762de51b3d32413207a2bb7a50f0f4bf9638b19297bedc8924"
+    },
+    {
+      "path": "Real-Estate/img/feature/img6.jpg",
+      "bytes": 8991,
+      "sha256": "2c62a98626c3702d6c33b62f577d59e212e2de3ba10c0103c788f018af68b8b8"
+    },
+    {
+      "path": "Real-Estate/img/feature/img7.jpg",
+      "bytes": 12258,
+      "sha256": "583449bdefd03262e03ccf4f7c17aabc38d63d250ca99dce376fef35317074a2"
+    },
+    {
+      "path": "Real-Estate/img/feature/img8.jpg",
+      "bytes": 10969,
+      "sha256": "bc3470521655ef6243cf17eba91feb3bb7b2d1c7f8cd0f43df8dee3699fed706"
+    },
+    {
+      "path": "Real-Estate/img/feature/img9.jpg",
+      "bytes": 84836,
+      "sha256": "70a1101ee29497d08ff940cab58ca5aa6278c874a0bd17f2156cefaa54300085"
+    },
+    {
+      "path": "Real-Estate/img/feature/r1.jpg",
+      "bytes": 49862,
+      "sha256": "c76e4f5c04441926666d2defae623d4dd35ecf1c90b7b8747dddf35c5fee9b03"
+    },
+    {
+      "path": "Real-Estate/img/feature/r2.jpg",
+      "bytes": 42377,
+      "sha256": "f226c96c4f7abc168dcac38503f45660a8f7d2826bf2a09ba8dc14e1b217ddaa"
+    },
+    {
+      "path": "Real-Estate/img/feature-cate/1.jpg",
+      "bytes": 89392,
+      "sha256": "2c4d3d4aaa3cc4897738422af63e04c9fdc84b971582b37e045a8dda137f1074"
+    },
+    {
+      "path": "Real-Estate/img/feature-cate/2.jpg",
+      "bytes": 53751,
+      "sha256": "2f376c973531939168a708d8228f0c39da535f74ab3e0fc46ee538beede1ab2d"
+    },
+    {
+      "path": "Real-Estate/img/feature-cate/3.jpg",
+      "bytes": 83119,
+      "sha256": "ea86866b45f379ccd5c1459172f232067c63974d35f37a434dac8d24d3b0b233"
+    },
+    {
+      "path": "Real-Estate/img/feature-cate/4.jpg",
+      "bytes": 74158,
+      "sha256": "3b64159fba77ce969a460799676af5069f5a8333e5682499d64999433b43660a"
+    },
+    {
+      "path": "Real-Estate/img/footer-bg.jpg",
+      "bytes": 34723,
+      "sha256": "07ab54bfea86ba68ddd96357b6f7fb18911d254bbc225632e6c8d1befa1ddf5b"
+    },
+    {
+      "path": "Real-Estate/img/gallery/1.jpg",
+      "bytes": 91196,
+      "sha256": "ed3a4c3a03f856bdc55ffdec45e419f43f5c4ce911719c75a7dbffd5b63d47a5"
+    },
+    {
+      "path": "Real-Estate/img/gallery/2.jpg",
+      "bytes": 185062,
+      "sha256": "0a281ee066d39c8422e08f66c05df62e5d1dccc038f344a2a95ad5cfba8288e1"
+    },
+    {
+      "path": "Real-Estate/img/gallery/3.jpg",
+      "bytes": 68639,
+      "sha256": "c8652e3e1ebc161069693963ff657b34b5ccdead112b86a6fc838dd616cd5c04"
+    },
+    {
+      "path": "Real-Estate/img/gallery/4.jpg",
+      "bytes": 162668,
+      "sha256": "8350290d7b079505afeab94f70740dea7c571223da49f30034be82e797bf21fd"
+    },
+    {
+      "path": "Real-Estate/img/img.jpg",
+      "bytes": 9179,
+      "sha256": "d189ba872d0fc09f28222714a14002c5563a33224b845e659f8b0639ffad6bcc"
+    },
+    {
+      "path": "Real-Estate/img/img1.jpg",
+      "bytes": 8600,
+      "sha256": "30c993f625b3a115c1cf9aa72b9b8d89f22f816c28ca120cfbdd42c1cb9a0440"
+    },
+    {
+      "path": "Real-Estate/img/img10.jpg",
+      "bytes": 11051,
+      "sha256": "e60d576984720ab861abc6e5f008f7d200d85a2fadd856b6dc1e3c3e78a50aa8"
+    },
+    {
+      "path": "Real-Estate/img/img11.jpg",
+      "bytes": 7363,
+      "sha256": "b8e883116033a74a24187353a1488748de9c08e915899112cdd798e1559b306d"
+    },
+    {
+      "path": "Real-Estate/img/img12.jpg",
+      "bytes": 7340,
+      "sha256": "1e983cdfc2ed9fff33098ee184fc5a27485398ac04065133d1863840bf896e5e"
+    },
+    {
+      "path": "Real-Estate/img/img13.jpg",
+      "bytes": 7561,
+      "sha256": "4eaf7253effe989a3c6b7a2eaaafb83b28b1a0b3b9321342feb3ed7cd27d4a6a"
+    },
+    {
+      "path": "Real-Estate/img/img14.jpg",
+      "bytes": 9763,
+      "sha256": "a19885313dd62a708d3617e57d6db172fa20c5e64f482507e42acc6575feb163"
+    },
+    {
+      "path": "Real-Estate/img/img15.jpg",
+      "bytes": 9829,
+      "sha256": "90120b6c2a0d386cbff09ebdd3c1db9ac822634db4cc62bb899f349a927e9aa1"
+    },
+    {
+      "path": "Real-Estate/img/img16.jpg",
+      "bytes": 6821,
+      "sha256": "2c5fa5f01e5e7e16e70c5bd3819472e34383a9e35cc1c02802e0276957503eae"
+    },
+    {
+      "path": "Real-Estate/img/img17.jpg",
+      "bytes": 7724,
+      "sha256": "b780dd1735f175373aa633b7c3906a17fc1d1ad2801b56e658ce8e8187d63e09"
+    },
+    {
+      "path": "Real-Estate/img/img18.jpg",
+      "bytes": 11927,
+      "sha256": "5586fc7d90a8d7943dab6d9185d96148b1e9c7c5cc7a6b777948a5b09d9d4acf"
+    },
+    {
+      "path": "Real-Estate/img/img19.jpg",
+      "bytes": 7503,
+      "sha256": "8ffc85f52012a431a09d240f041982854da7732b90f0d9f59f3837efc3ad9b82"
+    },
+    {
+      "path": "Real-Estate/img/img2.jpg",
+      "bytes": 7381,
+      "sha256": "5c324c147d8cb41f9bc8b79e78dd26574d4db77296bf48aa86b3b49e55b908d3"
+    },
+    {
+      "path": "Real-Estate/img/img20.jpg",
+      "bytes": 7515,
+      "sha256": "eac29a339b58b0d86ae4a60aeccbf76b83bac736af21c7b68c11a75210e3e8ef"
+    },
+    {
+      "path": "Real-Estate/img/img3.jpg",
+      "bytes": 8903,
+      "sha256": "62663808f080e5fc9328ad9ebfd6911758911cd95f8c46ab8e9bcc7b7f8b95a7"
+    },
+    {
+      "path": "Real-Estate/img/img4.jpg",
+      "bytes": 9620,
+      "sha256": "6548d87daa0e9afb4f4d60a0cb05f14cbc55982932feabc063efe5d2eb39206e"
+    },
+    {
+      "path": "Real-Estate/img/img5.jpg",
+      "bytes": 9223,
+      "sha256": "0ab92d285ce70afec475b839e0f7ed6cf7d41bd7f1ba778e5e7fe9cbce9408a2"
+    },
+    {
+      "path": "Real-Estate/img/img6.jpg",
+      "bytes": 11167,
+      "sha256": "f41d06adedfe4fa54f756835550a312407a10c7d957b6540d5fa1c867097f67f"
+    },
+    {
+      "path": "Real-Estate/img/img7.jpg",
+      "bytes": 8903,
+      "sha256": "62663808f080e5fc9328ad9ebfd6911758911cd95f8c46ab8e9bcc7b7f8b95a7"
+    },
+    {
+      "path": "Real-Estate/img/img8.jpg",
+      "bytes": 10443,
+      "sha256": "a27834f6fdc8f395b3367309fcc9306cd9c0e11c9c514b1fd515bbc6dc0d6b4e"
+    },
+    {
+      "path": "Real-Estate/img/img9.jpg",
+      "bytes": 9658,
+      "sha256": "cbdc9c9ed27a4d82c164e10f3b1627a7dbf1bf336692d227591648145eb34096"
+    },
+    {
+      "path": "Real-Estate/img/logo1.png",
+      "bytes": 9803,
+      "sha256": "ad3191009e85a60842a73f02c752fb7de5bb0b80e758c91b55ecb4bfbc345e3f"
+    },
+    {
+      "path": "Real-Estate/img/map-marker-1.png",
+      "bytes": 1176,
+      "sha256": "0b35d01d2bd4921114be513fc7d00251990fbd25a2b0eac5cb6969a99bf01286"
+    },
+    {
+      "path": "Real-Estate/img/map-marker-2.png",
+      "bytes": 2881,
+      "sha256": "8172df45e1a1b7ff3e2524309047de6887c70fa52909cb96db1e5b3969c80232"
+    },
+    {
+      "path": "Real-Estate/img/page-top-bg.jpg",
+      "bytes": 55283,
+      "sha256": "018767c13052491bc4fade224b67444a17b74311f6773f3d895c2474b98a2bd2"
+    },
+    {
+      "path": "Real-Estate/img/partner/1.jpg",
+      "bytes": 1,
+      "sha256": "01ba4719c80b6fe911b091a7c05124b64eeece964e09c058ef8f9805daca546b"
+    },
+    {
+      "path": "Real-Estate/img/partner/1.png",
+      "bytes": 4596,
+      "sha256": "f4e992dad2a2376aa304bfa1ff54e910d21871d715b5626e882879f5d13724cc"
+    },
+    {
+      "path": "Real-Estate/img/partner/2.png",
+      "bytes": 5287,
+      "sha256": "60eb1320d2870a421685464bd924a3d211d6675f3072584ca324dbd0c0e89507"
+    },
+    {
+      "path": "Real-Estate/img/partner/3.png",
+      "bytes": 3493,
+      "sha256": "211832a79b873e2d67aa32d0cd6efdf6a11a1fd07f7f0fae3181eda74052f9de"
+    },
+    {
+      "path": "Real-Estate/img/partner/4.png",
+      "bytes": 5035,
+      "sha256": "a6317082469653bbf7791d293221cde264e3767f85ed9a792da9c968e21ea940"
+    },
+    {
+      "path": "Real-Estate/img/partner/5.png",
+      "bytes": 6932,
+      "sha256": "5332fb4edd01713f064086a13b7b7fd9b5a3810b9c4b5597f62d0158b20d12b4"
+    },
+    {
+      "path": "Real-Estate/img/plan-sketch.jpg",
+      "bytes": 47961,
+      "sha256": "19475eb8bb5d90ab07fb569a6bbc2494d1f510f64d1e3f497a64eefbb45bf2a7"
+    },
+    {
+      "path": "Real-Estate/img/propertie/1.jpg",
+      "bytes": 42482,
+      "sha256": "93e9d91a1583696433ff5e8930aa73f314b9a2ceb7ae1876a982c82dee6cd062"
+    },
+    {
+      "path": "Real-Estate/img/propertie/2.jpg",
+      "bytes": 38403,
+      "sha256": "a7727bb9cab8824d5b272565a1d0bf04c999b0fe32f009a5d4aae018f9dd5c94"
+    },
+    {
+      "path": "Real-Estate/img/propertie/3.jpg",
+      "bytes": 34024,
+      "sha256": "97e7e32f2c7038049055994d3740410ac4c1111515405900b086fd88e2eb5380"
+    },
+    {
+      "path": "Real-Estate/img/propertie/4.jpg",
+      "bytes": 70573,
+      "sha256": "59e59ce4a92a46c0d59f400816499555cb944041840948697195efcf53269296"
+    },
+    {
+      "path": "Real-Estate/img/r3.jpg",
+      "bytes": 56942,
+      "sha256": "46330ce120f055a2785cffb54b7722865b71e45c0ec8205795ca3495a0033f9a"
+    },
+    {
+      "path": "Real-Estate/img/review-bg.jpg",
+      "bytes": 42721,
+      "sha256": "b9996f5fc55c7031e1be526b19a0abde0d49f4e3eccbef64ca12679edd956ec5"
+    },
+    {
+      "path": "Real-Estate/img/service-bg.jpg",
+      "bytes": 98209,
+      "sha256": "082c84f787fc64ba38463ede4e2a1dfc0c77167296a8ff14f34156585c511efe"
+    },
+    {
+      "path": "Real-Estate/img/service.jpg",
+      "bytes": 81217,
+      "sha256": "1e2b8a319f0571e08e9055696dc879aaf39058d73e5708e056a5c4ce47eb0b3b"
+    },
+    {
+      "path": "Real-Estate/img/single-list-slider/1.jpg",
+      "bytes": 176399,
+      "sha256": "43ecc5981427bc3ad838faf8e154573e8590b915fc174a49c723b258421a76cf"
+    },
+    {
+      "path": "Real-Estate/img/single-list-slider/2.jpg",
+      "bytes": 51148,
+      "sha256": "4af2e2648ab1499d2025ef733c4c2e481efb4f0fe53d736beaca65049e99db5a"
+    },
+    {
+      "path": "Real-Estate/img/single-list-slider/3.jpg",
+      "bytes": 62571,
+      "sha256": "325fe61442e1c21b356317b80fab575d246d215e141ac10f1d8d671324f0d9cc"
+    },
+    {
+      "path": "Real-Estate/img/single-list-slider/4.jpg",
+      "bytes": 111149,
+      "sha256": "5123bd2dceec4742ce4bf8ec6b3cc54c90b0a577e8296ffd993d2b550a360e8b"
+    },
+    {
+      "path": "Real-Estate/img/single-list-slider/5.jpg",
+      "bytes": 34185,
+      "sha256": "a92815266038cd6c6af5a2318e84174c65a6614cc03319e36c4085a08f5cb871"
+    },
+    {
+      "path": "Real-Estate/img/video-btn.png",
+      "bytes": 2307,
+      "sha256": "393462b4289175134c449be1816091bc1880ece1e8004c8b8c7a030409a2bb30"
+    },
+    {
+      "path": "Real-Estate/img/video.jpg",
+      "bytes": 35397,
+      "sha256": "281894d8318e3e37c8627adaa7f7fe50bb97d875cec34efdb3a352c7f666b067"
+    },
+    {
+      "path": "Real-Estate/index.html",
+      "bytes": 10085,
+      "sha256": "099313cffe686dd0cf1c2a840df7a447764754f21431233926b382afdd8f9b39"
+    },
+    {
+      "path": "Real-Estate/indexDB.php",
+      "bytes": 296,
+      "sha256": "b10cb648fa1db5c4a7787a06b79082f0fc44d1ebb80ca5f006aee797f4388d24"
+    },
+    {
+      "path": "Real-Estate/insertPandM.php",
+      "bytes": 277,
+      "sha256": "1b67b663c16abcd10771d33311ebb416caa9ee307c87ff64a510139b06ac370f"
+    },
+    {
+      "path": "Real-Estate/js/bootstrap.min",
+      "bytes": 1,
+      "sha256": "01ba4719c80b6fe911b091a7c05124b64eeece964e09c058ef8f9805daca546b"
+    },
+    {
+      "path": "Real-Estate/js/bootstrap.min.js",
+      "bytes": 48944,
+      "sha256": "e7ed36ceee5450b4243bbc35188afabdfb4280c7c57597001de0ed167299b01b"
+    },
+    {
+      "path": "Real-Estate/js/jquery-3.2.1.min.js",
+      "bytes": 86659,
+      "sha256": "87083882cc6015984eb0411a99d3981817f5dc5c90ba24f0940420c5548d82de"
+    },
+    {
+      "path": "Real-Estate/js/magnific-popup.min.js",
+      "bytes": 20219,
+      "sha256": "b0a45cd5aed66e27bd8ee861d0e3b782c8e79849bde32f90f078b9f2451a36f2"
+    },
+    {
+      "path": "Real-Estate/js/main.js",
+      "bytes": 4443,
+      "sha256": "500438e87c5bbf5e1a3d9827ca6c5e474e544ff03c460546d3fc6d0bdc445b6c"
+    },
+    {
+      "path": "Real-Estate/js/map-2.js",
+      "bytes": 2267,
+      "sha256": "464cef7ec1e53486bc945a0d331b75ebfd964b4444e5bda9280a98ed26446df6"
+    },
+    {
+      "path": "Real-Estate/js/map.js",
+      "bytes": 2267,
+      "sha256": "5533d79f62d71697f07ef5fddf1349961516bc844a7176871ee83cada22564e7"
+    },
+    {
+      "path": "Real-Estate/js/masonry.pkgd.min.js",
+      "bytes": 24167,
+      "sha256": "0f7a3ef1e4733316ba983f840d6ad2e6b31c11a0212129829d12dd43c912dade"
+    },
+    {
+      "path": "Real-Estate/js/owl.carousel.min.js",
+      "bytes": 42766,
+      "sha256": "b394d33b2a7ec654a6b037ebfda6618341b3f897a362be624c923c2711b54a43"
+    },
+    {
+      "path": "Real-Estate/loginuser.php",
+      "bytes": 11488,
+      "sha256": "027cac4be80dcffb094c9272132a3696c384f60a9a3deffb33e411dda3946f4a"
+    },
+    {
+      "path": "Real-Estate/logout.php",
+      "bytes": 60,
+      "sha256": "17fa863c919e8358f27e70db6efe383516ada5326e3241a056cff230eb3d72b5"
+    },
+    {
+      "path": "Real-Estate/normalHomeRent.php",
+      "bytes": 11922,
+      "sha256": "d2d39d5266a09896b0791823747231d178a9a8c6f209e68c645a3da51a3ac115"
+    },
+    {
+      "path": "Real-Estate/normalHomeSale.php",
+      "bytes": 11911,
+      "sha256": "593eb3f0cba57f4c32d9cd76532f630ce13fa5d788e1ebb95813f22e2e03f8df"
+    },
+    {
+      "path": "Real-Estate/pay.php",
+      "bytes": 921,
+      "sha256": "88f3ee69eccd1298af99d0328b9b4fdd77ca898ec07bace7fb5b8cec571fc79f"
+    },
+    {
+      "path": "Real-Estate/payment.php",
+      "bytes": 7028,
+      "sha256": "aad8c428d3dd91865b6f31a5a888824ee23bc9f4c53268b1f1ce236aa759dfd4"
+    },
+    {
+      "path": "Real-Estate/questions_builder.php",
+      "bytes": 10902,
+      "sha256": "5e2b8acc207460e4ebe4182b5a018e6a8e0ad7d575494e08346d7ac9b04c42ff"
+    },
+    {
+      "path": "Real-Estate/questions_user.php",
+      "bytes": 8374,
+      "sha256": "8658eaad4353ea2a628e9048c6d73d5adde98c66e7d3a1e1f8dfc9a02f64d46a"
+    },
+    {
+      "path": "Real-Estate/reg_builder.php",
+      "bytes": 11640,
+      "sha256": "b5d5f9bbae9019094d8260404e95186f1ef113e24a913561b1e4a1ad1843e475"
+    },
+    {
+      "path": "Real-Estate/register.php",
+      "bytes": 11579,
+      "sha256": "98ba03b22d98f8faf7bc4a9c754860462344a6a74add3a687b55f12f9f335938"
+    },
+    {
+      "path": "Real-Estate/schema.png",
+      "bytes": 192499,
+      "sha256": "f8f7c759124695265ea8bb727c0a5f88c2b3b505b1324e56e51ab0db999d08ef"
+    },
+    {
+      "path": "Real-Estate/single-list_rent.php",
+      "bytes": 15870,
+      "sha256": "501e8e9689f7bef6f8d13cf6a483fad1282cba18fc6389d9562cdadc4b5095f0"
+    },
+    {
+      "path": "Real-Estate/single-list_sale.php",
+      "bytes": 14902,
+      "sha256": "f0cd71fbcf4af8a37deebacc62e267a067eb3e65a2f16c0f0487bcdd4b6d1cab"
+    },
+    {
+      "path": "Real-Estate/upcomingprojects.php",
+      "bytes": 8769,
+      "sha256": "9a378a2b68ac7c1eb5920c24034658f623216a06783637fd21ea638c6ea210bf"
+    }
+  ]
+}

@@ -1,0 +1,3 @@
+# InfinityFree's Apache-compatible access control. Never remove this file.
+Order allow,deny
+Deny from all

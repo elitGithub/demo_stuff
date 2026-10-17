@@ -1,3 +1,9 @@
+# Read first: workspace rules
+
+The primary instructions for every demo in this workspace are in `/var/www/demo_stuff/CLAUDE.md` (its `AGENTS.md` is an identical copy). Read it before anything below; its operator laws and workflow override this file wherever they differ. In particular, never add or change a dependency, and never run the Laravel Boost installation steps mentioned below, without the operator's explicit approval.
+
+---
+
 <laravel-boost-guidelines>
 === foundation rules ===
 

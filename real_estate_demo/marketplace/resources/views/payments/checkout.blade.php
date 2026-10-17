@@ -1,0 +1,8 @@
+<x-app-layout title="Simulated checkout">
+    <a class="back-link" href="{{ route('requests.show', $job) }}">← Back to your project</a>
+    <div class="page-heading"><p class="eyebrow">ONE LAST THING</p><h1>All wrapped up.</h1><p>A simple checkout experience, shown with a simulated payment.</p></div>
+    <div class="checkout-grid">
+        <article class="content-panel padded"><p class="eyebrow">YOUR COMPLETED PROJECT</p><h2>{{ $job->title }}</h2><p class="muted">With {{ $job->acceptedQuote->provider->profile->business_name }}</p><hr><div class="row-between"><span>Agreed service price</span><strong>{{ \App\Support\Money::format($job->acceptedQuote->amount_cents) }}</strong></div><div class="row-between receipt-total"><span>Total · USD</span><strong>{{ \App\Support\Money::format($job->acceptedQuote->amount_cents) }}</strong></div><p class="field-hint">Based on your accepted proposal. No additional fees.</p></article>
+        <article class="content-panel padded"><span class="simulation-pill">DEMO PAYMENT</span><h2>Try the finish line.</h2><p>No payment details are needed. This creates a sample receipt for the agreed price.</p><div class="notice">Simulated payment - no money was charged.</div><form method="post" action="{{ route('payments.store', $job) }}" class="stack">@csrf<label class="check-label"><input type="checkbox" name="simulation_acknowledged" value="1" required><span>I understand this payment is simulated and no money will move.</span></label>@error('simulation_acknowledged')<p class="field-error">{{ $message }}</p>@enderror<button class="button primary full" @disabled(config('demo.read_only'))>Simulate payment<x-icon name="arrow" /></button></form></article>
+    </div>
+</x-app-layout>

@@ -1,0 +1,4 @@
+<div class="field"><label for="name-{{ $key }}">Service name</label><input id="name-{{ $key }}" name="name" value="{{ $category?->name }}" maxlength="80" required></div>
+<div class="field"><label for="description-{{ $key }}">Description</label><textarea id="description-{{ $key }}" name="description" rows="3" maxlength="500" required>{{ $category?->description }}</textarea></div>
+<div class="field"><label for="icon-{{ $key }}">Icon</label><select id="icon-{{ $key }}" name="icon">@foreach(['sparkles' => 'Sparkles', 'pipe' => 'Plumbing', 'bolt' => 'Electrical', 'brush' => 'Painting', 'leaf' => 'Garden', 'wrench' => 'Repairs'] as $value => $label)<option value="{{ $value }}" @selected($category?->icon === $value)>{{ $label }}</option>@endforeach</select></div>
+<input type="hidden" name="is_active" value="0"><label class="check-label"><input type="checkbox" name="is_active" value="1" @checked($category?->is_active ?? true)><span>Available for new requests</span></label>

@@ -1,0 +1,7 @@
+<x-app-layout title="Opportunities nearby">
+    <div class="page-heading"><p class="eyebrow">YOUR NEXT GOOD PROJECT</p><h1>A little closer to your next job.</h1><p>Open requests that match your services and neighborhoods.</p></div>
+    <form class="filter-bar content-panel" method="GET" action="{{ route('opportunities.index') }}"><x-field name="category" label="Service"><select id="category" name="category"><option value="">All your services</option>@foreach($categories as $category)<option value="{{ $category->id }}" @selected(request('category') == $category->id)>{{ $category->name }}</option>@endforeach</select></x-field><x-field name="area" label="Neighborhood"><select id="area" name="area"><option value="">All your areas</option>@foreach(config('marketplace.service_areas') as $area)<option @selected(request('area') === $area)>{{ $area }}</option>@endforeach</select></x-field><button type="submit" class="button primary">Find opportunities</button></form>
+    <p class="results-count">{{ $jobs->total() }} {{ \Illuminate\Support\Str::plural('opportunity', $jobs->total()) }} nearby</p>
+    <div class="stack">@forelse($jobs as $job)<x-job-card :job="$job" />@empty<x-empty-state title="A quiet moment in the neighborhood" description="New opportunities will appear here when they match your profile." icon="search" />@endforelse</div>
+    <div class="pagination">{{ $jobs->links() }}</div>
+</x-app-layout>

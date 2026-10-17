@@ -1,0 +1,59 @@
+%PDF-1.4
+%‚„œ”
+1 0 obj
+<< /Type /Catalog /Pages 2 0 R >>
+endobj
+2 0 obj
+<< /Type /Pages /Kids [3 0 R] /Count 1 >>
+endobj
+3 0 obj
+<< /Type /Page /Parent 2 0 R /MediaBox [0 0 612 792] /Resources << /Font << /F1 4 0 R >> >> /Contents 5 0 R >>
+endobj
+4 0 obj
+<< /Type /Font /Subtype /Type1 /BaseFont /Helvetica /Encoding /WinAnsiEncoding >>
+endobj
+5 0 obj
+<< /Length 1426 >>
+stream
+BT /F1 20 Tf 72.00 700 Td (Dufferin Plumbing) Tj ET
+0.6 0.6 0.6 RG 0.75 w 72 690 m 540 690 l S
+BT /F1 11 Tf 72.00 668 Td (Invoice 2291) Tj ET
+BT /F1 11 Tf 72.00 636 Td (Bill to: Dana Whitfield) Tj ET
+BT /F1 11 Tf 72.00 620 Td (Service address: 61 Brenwick Avenue, unit 3A, Toronto, Ontario) Tj ET
+BT /F1 11 Tf 72.00 604 Td (Work: furnace service and filter replacement) Tj ET
+BT /F1 11 Tf 72.00 572 Td (Service call and labour, 1.5 hours) Tj ET
+BT /F1 11 Tf 500.25 572 Td ($135.00) Tj ET
+BT /F1 11 Tf 72.00 556 Td (Furnace filter 16x25x1 MERV 8, 2 at $18.00) Tj ET
+BT /F1 11 Tf 506.36 556 Td ($36.00) Tj ET
+BT /F1 11 Tf 72.00 540 Td (Flame sensor cleaning and test) Tj ET
+BT /F1 11 Tf 506.36 540 Td ($29.00) Tj ET
+BT /F1 11 Tf 72.00 508 Td (Subtotal) Tj ET
+BT /F1 11 Tf 500.25 508 Td ($200.00) Tj ET
+BT /F1 11 Tf 72.00 492 Td (HST \(13%\)) Tj ET
+BT /F1 11 Tf 506.36 492 Td ($26.00) Tj ET
+BT /F1 11 Tf 72.00 476 Td (Total due) Tj ET
+BT /F1 11 Tf 500.25 476 Td ($226.00) Tj ET
+BT /F1 11 Tf 72.00 444 Td (All amounts are in Canadian dollars.) Tj ET
+BT /F1 11 Tf 72.00 428 Td (Terms: due within 30 days of the visit.) Tj ET
+BT /F1 11 Tf 72.00 412 Td (Payment by e-transfer to service@dufferinplumbing.example.) Tj ET
+BT /F1 11 Tf 72.00 396 Td (Technician notes: old filter heavily loaded. Venting checked and clear.) Tj ET
+BT /F1 11 Tf 72.00 364 Td (Sample document generated for the Casefile demo. All names are fictional.) Tj ET
+endstream
+endobj
+6 0 obj
+<< /Title (Dufferin Plumbing) /Producer (Casefile demo fixtures) >>
+endobj
+xref
+0 7
+0000000000 65535 f 
+0000000015 00000 n 
+0000000064 00000 n 
+0000000121 00000 n 
+0000000247 00000 n 
+0000000344 00000 n 
+0000001822 00000 n 
+trailer
+<< /Size 7 /Root 1 0 R /Info 6 0 R >>
+startxref
+1905
+%%EOF

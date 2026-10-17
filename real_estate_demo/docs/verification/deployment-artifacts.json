@@ -1,0 +1,17 @@
+[
+  {
+    "path": "/var/www/demo_stuff/real_estate_demo/.cache/haven-infinityfree-20261016-145819/haven-upload.zip",
+    "bytes": 8774127,
+    "sha256": "aa91f0ee4bfc99f450207839912ae68c7c5d9718259eb0b1b8d1b58375f9a4ae"
+  },
+  {
+    "path": "/var/www/demo_stuff/real_estate_demo/.cache/haven-infinityfree-20261016-145819/import-into-empty-database.sql",
+    "bytes": 64894,
+    "sha256": "d5b88bdf2286b2e8ddca42f337bd338f13aa23e3cf77a48c1a44317cd56ed82f"
+  },
+  {
+    "path": "/var/www/demo_stuff/real_estate_demo/.cache/haven-runtime-directories-fix.zip",
+    "bytes": 1378,
+    "sha256": "39b7e47584a9ae60222e7b66bf2070cbc902486ee57c749f2a9a148d2d49e59a"
+  }
+]

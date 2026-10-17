@@ -1,3 +1,9 @@
+# Read first: workspace rules
+
+The primary instructions for every demo in this workspace are in `/var/www/demo_stuff/CLAUDE.md` (its `AGENTS.md` is an identical copy). Read it before anything below; its operator laws and workflow override this file wherever they differ. In particular, never add or change a dependency and never run a database or Artisan command without the operator's explicit approval, whatever the development-cycle section below says.
+
+---
+
 # Krayin CRM: Agent Instructions
 
 This repository ships reusable **agent skills** for developing Krayin CRM. These

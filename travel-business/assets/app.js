@@ -1,7 +1,9 @@
 (() => {
-  // The hosting package supplies a PHP endpoint; local Node routes stay unchanged.
   const phpEndpoint = document.querySelector('meta[name="api-endpoint"]')?.content;
   window.elsewhereApi = path => phpEndpoint ? `${phpEndpoint}?route=${encodeURIComponent(path.replace(/^\/api\//, ''))}` : path;
+  if (document.getElementById('enquiry-form') || document.getElementById('admin-login')) {
+    window.elsewhereSandbox = new window.ElsewhereSandboxClient(window.elsewhereApi);
+  }
   const menuButton = document.querySelector('.menu-toggle');
   const mobileNav = document.getElementById('mobile-nav');
   function closeMenu() {
@@ -119,9 +121,30 @@
     const error = document.getElementById('form-error');
     const submit = form.querySelector('[type="submit"]');
     const originalLabel = submit.innerHTML;
+    const client = window.elsewhereSandbox;
+    const sandboxStatus = document.getElementById('sandbox-status');
+    const retry = document.getElementById('sandbox-retry');
+    const restart = document.getElementById('sandbox-restart');
+    let ready = false;
+    async function initialize() {
+      ready = false; submit.disabled = true; retry.hidden = true; restart.hidden = true;
+      sandboxStatus.textContent = 'Preparing your private demo…';
+      try {
+        const bootstrap = await client.initialize();
+        ready = true;
+        sandboxStatus.textContent = bootstrap.created ? 'A fresh demo is ready with sample data.' : 'Your private demo is ready. Your edits are still here.';
+      } catch (failure) {
+        if (failure.name === 'AbortError') { return; }
+        sandboxStatus.textContent = failure.message;
+        retry.hidden = false;
+      } finally { submit.disabled = !ready; }
+    }
+    retry.addEventListener('click', initialize);
+    restart.addEventListener('click', initialize);
+    initialize();
     form.addEventListener('submit', async event => {
       event.preventDefault();
-      if (!form.reportValidity()) return;
+      if (!ready || submit.disabled || !form.reportValidity()) return;
       error.hidden = true;
       submit.disabled = true;
       submit.textContent = 'Saving your demo enquiry…';
@@ -129,9 +152,7 @@
       data.travelers = Number(data.travelers);
       data.consent = form.elements.consent.checked;
       try {
-        const response = await fetch(window.elsewhereApi('/api/enquiries'), { method: 'POST', headers: { 'Content-Type': 'application/json' }, body: JSON.stringify(data) });
-        const body = await response.json();
-        if (!response.ok) throw new Error(body.error || 'We couldn’t save your enquiry. Please try again.');
+        const body = await client.request('/api/enquiries', { method: 'POST', body: data });
         document.getElementById('enquiry-reference').textContent = body.reference;
         form.hidden = true;
         const success = document.getElementById('enquiry-success');
@@ -139,10 +160,17 @@
         success.focus();
         success.scrollIntoView({ behavior: matchMedia('(prefers-reduced-motion: reduce)').matches ? 'instant' : 'smooth', block: 'center' });
       } catch (failure) {
+        if (failure.name === 'AbortError') { return; }
+        if (failure.code === 'sandbox_context') {
+          ready = false;
+          sandboxStatus.textContent = 'Your demo session ended or changed. Start a fresh demo to continue.';
+          restart.hidden = false;
+          restart.focus();
+        }
         error.textContent = failure instanceof TypeError ? 'The demo server is unavailable. Please try again in a moment.' : failure.message;
         error.hidden = false;
       } finally {
-        submit.disabled = false;
+        submit.disabled = !ready;
         submit.innerHTML = originalLabel;
       }
     });

@@ -1,0 +1,14 @@
+{
+  "schemaVersion": "1",
+  "enquiries": [
+    {"id":1,"reference":"EW-DEMO-001","firstName":"Olivia","lastName":"Bennett","email":"olivia@travel.example","destination":"italy","journey":"italian-slow-days","travelers":2,"budget":"$3,500–$5,000","message":"We’re celebrating an anniversary and would love a relaxed itinerary with a few cooking experiences.","status":"new","departureDays":75},
+    {"id":2,"reference":"EW-DEMO-002","firstName":"James","lastName":"Morgan","email":"james@travel.example","destination":"japan","journey":"japan-beyond","travelers":4,"budget":"$5,000–$8,000","message":"A family trip with two teenagers. We love food, art and exploring neighbourhoods on foot.","status":"proposal","departureDays":120},
+    {"id":3,"reference":"EW-DEMO-003","firstName":"Sophie","lastName":"Chen","email":"sophie@travel.example","destination":"bali","journey":"bali-unhurried","travelers":2,"budget":"$2,000–$3,500","message":"Hoping for a quiet escape with time in the rice terraces and a few nights near the ocean.","status":"contacted","departureDays":65},
+    {"id":4,"reference":"EW-DEMO-004","firstName":"Noah","lastName":"Williams","email":"noah@travel.example","destination":"tanzania","journey":"wild-tanzania","travelers":2,"budget":"$5,000–$8,000","message":"Our first safari. We’re interested in photography and a small, intimate camp.","status":"new","departureDays":160}
+  ],
+  "bookings": [
+    {"id":1,"reference":"BK-DEMO-001","firstName":"Amelia","lastName":"Parker","destination":"greece","journey":"greek-island-days","travelers":2,"value":5900,"status":"confirmed","departureDays":90},
+    {"id":2,"reference":"BK-DEMO-002","firstName":"Oliver","lastName":"Reed","destination":"maldives","journey":"maldives-barefoot","travelers":2,"value":7900,"status":"planning","departureDays":45},
+    {"id":3,"reference":"BK-DEMO-003","firstName":"Mia","lastName":"Collins","destination":"japan","journey":"japan-beyond","travelers":3,"value":14550,"status":"confirmed","departureDays":150}
+  ]
+}

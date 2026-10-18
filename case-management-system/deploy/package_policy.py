@@ -13,6 +13,7 @@ class PackagePolicy:
         "bootstrap/cache", "storage/app/sandboxes", "storage/framework/cache/data",
         "storage/framework/sessions", "storage/framework/views", "storage/logs",
     )
+    RUNTIME_MARKER = "<!-- Required Casefile runtime directory. Keep this file. -->\n"
     FIXTURES = (
         "furnace-filter-invoice.pdf", "snow-clearing-quote.pdf",
         "kitchen-sink-leak.png", "thermostat-error.png",
@@ -140,8 +141,9 @@ class PackagePolicy:
             if setting not in environment:
                 raise ValueError(f"Unsafe environment default: {setting}")
         for relative in cls.RUNTIME:
-            if not (site / "_app" / relative / "index.html").is_file():
-                raise ValueError(f"Missing runtime directory marker: {relative}")
+            marker = site / "_app" / relative / "index.html"
+            if not marker.is_file() or marker.read_text() != cls.RUNTIME_MARKER:
+                raise ValueError(f"Missing or empty runtime directory marker: {relative}")
         for filename in cls.FIXTURES:
             source = cls.ROOT / "database/fixtures/attachments" / filename
             shipped = site / "_app/database/fixtures/attachments" / filename
@@ -173,6 +175,8 @@ class PackagePolicy:
             if not cls.allowed(path.relative_to("casefile").as_posix()):
                 raise ValueError(f"Forbidden package file: {entry.filename}")
             if not entry.is_dir():
+                if entry.file_size == 0:
+                    raise ValueError(f"Empty archive file would be dropped by host extraction: {entry.filename}")
                 files += 1
                 total_bytes += entry.file_size
         if files == 0 or files >= cls.MAX_FILES or total_bytes > cls.MAX_BYTES:

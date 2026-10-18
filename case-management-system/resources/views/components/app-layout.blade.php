@@ -46,6 +46,7 @@
                 <x-notification-bell />
             @endauth
         </div>
+        <span id="theme-storage-notice" class="theme-storage-notice" data-theme-notice role="status" aria-live="polite"></span>
     </header>
     <x-demo-banner />
     <main id="main" class="app-main" tabindex="-1">

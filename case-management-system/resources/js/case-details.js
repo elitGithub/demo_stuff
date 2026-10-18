@@ -10,6 +10,10 @@ if (sheet) {
     let wasWide = wide.matches;
     let returnFocus = false;
 
+    /**
+     * @param {HTMLElement|null} preferredTarget
+     * @return {void}
+     */
     function openSheet(preferredTarget = null) {
         if (!wide.matches && !sheet.open) {
             sheet.showModal();
@@ -19,12 +23,19 @@ if (sheet) {
 
         openers.forEach((control) => control.setAttribute('aria-expanded', 'true'));
         const hashTarget = targets.includes(location.hash.slice(1)) ? document.getElementById(location.hash.slice(1)) : null;
-        const focusTarget = preferredTarget || sheet.querySelector('[aria-invalid="true"]') || hashTarget || document.getElementById('case-issue');
+        const firstField = document.getElementById('case-issue');
+        const focusTarget = preferredTarget
+            ? (preferredTarget.getClientRects().length > 0 ? preferredTarget : firstField)
+            : sheet.querySelector('[aria-invalid="true"]') || hashTarget || firstField;
         focusTarget.focus();
     }
 
+    /**
+     * @return {void}
+     */
     function configure() {
-        const keepOpen = initialized && !wasWide && sheet.open;
+        const focusedField = sheet.contains(document.activeElement) ? document.activeElement : null;
+        const keepOpen = initialized && sheet.open && (!wasWide || focusedField !== null);
         returnFocus = false;
 
         if (sheet.open) {
@@ -37,8 +48,8 @@ if (sheet) {
             sheet.open = true;
             openers.forEach((control) => control.setAttribute('aria-expanded', 'true'));
 
-            if (sheet.dataset.hasErrors === 'true' || targets.includes(location.hash.slice(1))) {
-                openSheet();
+            if (keepOpen || sheet.dataset.hasErrors === 'true' || targets.includes(location.hash.slice(1))) {
+                openSheet(focusedField);
             }
         } else {
             sheet.setAttribute('role', 'dialog');
@@ -46,8 +57,12 @@ if (sheet) {
             openers.forEach((control) => control.setAttribute('aria-expanded', 'false'));
 
             if (keepOpen || sheet.dataset.hasErrors === 'true' || targets.includes(location.hash.slice(1))) {
-                openSheet();
+                openSheet(focusedField);
             }
+        }
+
+        if (keepOpen && sheet.contains(document.activeElement)) {
+            document.activeElement.scrollIntoView({ block: 'nearest', inline: 'nearest' });
         }
 
         initialized = true;

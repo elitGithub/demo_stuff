@@ -89,6 +89,8 @@ class PackageTest(unittest.TestCase):
             "public-protection": (".htaccess", b"RewriteEngine On\n"),
             "private-protection": ("_app/.htaccess", b"Require all granted\n"),
             "runtime-marker": ("_app/storage/app/sandboxes/index.html", None),
+            "empty-runtime-marker": ("_app/bootstrap/cache/index.html", b""),
+            "empty-vendor-file": ("_app/vendor/autoload.php", b""),
             "font": ("build/assets/instrument-sans-400-normal-DRC__1Mx.woff2", None),
             "license": ("build/Instrument-Sans-OFL.txt", b"license missing"),
             "template": (self.policy.TEMPLATE, b"not sqlite"),

@@ -79,7 +79,7 @@
     document.addEventListener('DOMContentLoaded', () => {
         control = document.querySelector('[data-theme-control]');
         choices = Array.from(control.querySelectorAll('[data-theme-option]'));
-        notice = control.querySelector('[data-theme-notice]');
+        notice = document.querySelector('[data-theme-notice]');
         trigger = control.querySelector('[data-theme-trigger]');
         tooltip = control.querySelector('[data-theme-tooltip]');
 

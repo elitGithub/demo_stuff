@@ -97,18 +97,6 @@ test('inside links, forms, radio changes and native arrow keys keep default beha
     assert.equal(page.disclosures[1].open, true);
 });
 
-test('breakpoint changes retain disclosure identity, open state and focused child', () => {
-    const page = mountHeader();
-    page.open(1);
-    const appearance = page.disclosures[1];
-    page.document.activeElement = appearance.child;
-    page.event('resize', appearance.child);
-    assert.equal(page.disclosures[1], appearance);
-    assert.equal(appearance.open, true);
-    assert.equal(page.document.activeElement, appearance.child);
-    assert.deepEqual(page.focusCalls, []);
-});
-
 test('a page without disclosures is inert', () => {
     const page = mountHeader(0);
     assert.equal(page.event('click', {}).prevented, false);

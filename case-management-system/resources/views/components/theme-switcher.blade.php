@@ -28,5 +28,4 @@
             </fieldset>
         </div>
     </details>
-    <span id="theme-storage-notice" class="theme-storage-notice" data-theme-notice role="status" aria-live="polite"></span>
 </div>

@@ -46,7 +46,7 @@ Composer home/cache remain inside that generated workspace. No source dependency
 
 The output contains `casefile-upload.zip`, unpacked `casefile/`, a sibling `manifest.json` with byte lengths/SHA-256 values, `INSTRUCTIONS.txt`, this guide and the private generated build workspace. Keep the ZIP and manifest together for repeat verification. The manifest detects corruption; it is not a digital signature against an attacker replacing both files.
 
-Both normal extraction and extraction ignoring directory entries are audited. Real `index.html` marker files preserve writable runtime paths. Verification rejects unsafe paths, symlinks, duplicate ZIP entries, secrets/development files, missing protections, mismatched manifest, missing assets/fonts/license, changed fixtures, wrong production dependencies and invalid template. It checks writable extraction directories without starting the application; this does not prove remote permissions or HTTP access control.
+Both normal extraction and extraction ignoring directory entries are audited. Real `index.html` marker files preserve writable runtime paths; they are non-empty because InfinityFree File Manager extraction drops empty files and directories, and the verifier rejects any 0-byte archive file. Verification rejects unsafe paths, symlinks, duplicate ZIP entries, secrets/development files, missing protections, mismatched manifest, missing assets/fonts/license, changed fixtures, wrong production dependencies and invalid template. It checks writable extraction directories without starting the application; this does not prove remote permissions or HTTP access control.
 
 ## 4. Upload and configure
 

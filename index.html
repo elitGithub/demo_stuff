@@ -1,0 +1,172 @@
+<!doctype html>
+<html lang="en">
+<head>
+  <meta charset="utf-8">
+  <meta name="viewport" content="width=device-width, initial-scale=1">
+  <meta name="robots" content="noindex, nofollow">
+  <title>Demo websites</title>
+  <link rel="preconnect" href="https://fonts.googleapis.com">
+  <link rel="preconnect" href="https://fonts.gstatic.com" crossorigin>
+  <link href="https://fonts.googleapis.com/css2?family=Instrument+Serif:ital@0;1&amp;family=JetBrains+Mono:wght@400;500&amp;family=Plus+Jakarta+Sans:wght@500;600;700&amp;display=swap" rel="stylesheet">
+  <style>
+    :root {
+      color-scheme: light;
+      --white: #ffffff;
+      --ink: #0f172a;
+      --muted: #5e6e83;
+      --page: #f1f5f9;
+      --surface: #ffffff;
+      --line: #e2e8f0;
+      --soft: #f1f5f9;
+      --badge-text: #475569;
+      --hover-line: #cbd5e1;
+      --focus: #047857;
+      --visual-shadow: 0 20px 40px -15px rgba(15, 23, 42, 0.1);
+      --browser-red: #fda4af;
+      --browser-amber: #fcd34d;
+      --browser-green: #6ee7b7;
+      --salon-start: #f5ebe6;
+      --salon-end: #e6d5c3;
+      --salon-ink: #292524;
+      --salon-muted: #57534e;
+      --salon-badge-bg: #fffbeb;
+      --salon-badge-ink: #92400e;
+      --resto-start: #254c3b;
+      --resto-end: #173c2a;
+      --resto-ink: #f8f7f2;
+      --resto-muted: #e9d99a;
+      --resto-badge-bg: #ecf3ee;
+      --resto-badge-ink: #173c2a;
+      --crm-start: #1d4ed8;
+      --crm-end: #18304f;
+      --crm-muted: #dbeafe;
+      --crm-badge-bg: #eff6ff;
+      --crm-badge-ink: #1e40af;
+      --casefile-start: #4338ca;
+      --casefile-end: #312e81;
+      --casefile-muted: #e0e7ff;
+      --casefile-badge-bg: #eef2ff;
+      --casefile-badge-ink: #3730a3;
+      --travel-start: #0f3d3e;
+      --travel-end: #1b6b63;
+      --travel-muted: #99f6e4;
+      --travel-badge-bg: #f0fdfa;
+      --travel-badge-ink: #115e59;
+      --haven-start: #f5f4f1;
+      --haven-end: #e6e1d6;
+      --haven-ink: #18212b;
+      --haven-muted: #5c6571;
+      --haven-badge-bg: #f1efe9;
+      --haven-badge-ink: #18212b;
+    }
+    * { box-sizing: border-box; margin: 0; padding: 0; }
+    body { min-height: 100vh; display: flex; align-items: center; padding: 40px 20px; background: var(--page); color: var(--ink); font-family: 'Plus Jakarta Sans', -apple-system, BlinkMacSystemFont, sans-serif; line-height: 1.5; }
+    .container { width: 100%; max-width: 896px; margin: 0 auto; min-width: 0; }
+    h1, h2 { overflow-wrap: break-word; }
+    h1 { font-size: clamp(30px, 5vw, 36px); font-weight: 700; letter-spacing: -0.035em; line-height: 1.1; }
+    h2 { font-size: 24px; font-weight: 600; letter-spacing: -0.02em; line-height: 1.25; }
+    .heading { max-width: 576px; margin: 0 auto 32px; text-align: center; }
+    .path { color: var(--muted); font-family: 'JetBrains Mono', monospace; font-size: 12px; overflow-wrap: anywhere; }
+    .grid { display: grid; grid-template-columns: minmax(0, 1fr); gap: 24px; list-style: none; }
+    li { min-width: 0; }
+    a { color: inherit; text-decoration: none; }
+    a:focus-visible { outline: 3px solid var(--focus); outline-offset: 5px; }
+    .badge { display: inline-block; padding: 4px 12px; border: 1px solid var(--line); border-radius: 99px; background: var(--soft); color: var(--badge-text); font-size: 12px; font-weight: 500; }
+    .heading .badge { margin-bottom: 12px; background: var(--surface); font-weight: 600; }
+    .arrow { display: inline-flex; align-items: center; justify-content: center; flex-shrink: 0; }
+    .arrow svg { width: 16px; height: 16px; }
+    .intro { margin-top: 10px; font-size: 14px; color: var(--muted); line-height: 1.65; }
+    .browser-card { display: flex; flex-direction: column; height: 100%; border: 1px solid var(--line); border-radius: 20px; overflow: hidden; background: var(--surface); transition: transform 0.3s ease, border-color 0.3s ease, box-shadow 0.3s ease; }
+    .browser-bar { display: flex; align-items: center; gap: 8px; padding: 10px 14px; border-bottom: 1px solid var(--line); background: var(--surface); }
+    .browser-dot { width: 10px; height: 10px; flex-shrink: 0; border-radius: 50%; }
+    .browser-dot:nth-child(1) { background: var(--browser-red); }
+    .browser-dot:nth-child(2) { background: var(--browser-amber); }
+    .browser-dot:nth-child(3) { background: var(--browser-green); }
+    .browser-bar .path { min-width: 0; margin-left: 8px; overflow: hidden; white-space: nowrap; text-overflow: ellipsis; font-size: 11px; }
+    .artwork { display: flex; align-items: center; justify-content: center; min-height: 144px; overflow: hidden; }
+    .salon-art { background: linear-gradient(135deg, var(--salon-start), var(--salon-end)); color: var(--salon-ink); }
+    .resto-art { background: linear-gradient(135deg, var(--resto-start), var(--resto-end)); color: var(--resto-ink); }
+    .crm-art { background: linear-gradient(135deg, var(--crm-start), var(--crm-end)); color: var(--white); }
+    .casefile-art { background: linear-gradient(135deg, var(--casefile-start), var(--casefile-end)); color: var(--white); }
+    .travel-art { background: linear-gradient(135deg, var(--travel-start), var(--travel-end)); color: var(--white); }
+    .haven-art { background: linear-gradient(135deg, var(--haven-start), var(--haven-end)); color: var(--haven-ink); }
+    .preview-art { padding: 16px; text-align: center; transition: transform 0.5s ease; }
+    .art-eyebrow { display: block; margin-bottom: 4px; font-size: 10px; text-transform: uppercase; letter-spacing: 0.25em; }
+    .salon-art .art-eyebrow { color: var(--salon-muted); }
+    .resto-art .art-eyebrow { color: var(--resto-muted); }
+    .crm-art .art-eyebrow { color: var(--crm-muted); }
+    .casefile-art .art-eyebrow { color: var(--casefile-muted); }
+    .travel-art .art-eyebrow { color: var(--travel-muted); }
+    .haven-art .art-eyebrow { color: var(--haven-muted); }
+    .art-title { display: block; font-family: 'Instrument Serif', Georgia, serif; font-size: 30px; line-height: 1.2; }
+    .salon-art .art-title { font-style: italic; }
+    .browser-card-body { display: flex; flex: 1; align-items: center; justify-content: space-between; gap: 16px; padding: 20px; }
+    .browser-card-body > div { min-width: 0; }
+    .browser-card-body .badge { padding: 3px 10px; border: 0; border-radius: 6px; font-weight: 600; }
+    .salon-badge { background: var(--salon-badge-bg); color: var(--salon-badge-ink); }
+    .resto-badge { background: var(--resto-badge-bg); color: var(--resto-badge-ink); }
+    .crm-badge { background: var(--crm-badge-bg); color: var(--crm-badge-ink); }
+    .casefile-badge { background: var(--casefile-badge-bg); color: var(--casefile-badge-ink); }
+    .travel-badge { background: var(--travel-badge-bg); color: var(--travel-badge-ink); }
+    .haven-badge { background: var(--haven-badge-bg); color: var(--haven-badge-ink); }
+    .browser-card-body h2 { margin-top: 8px; font-size: 20px; font-weight: 700; }
+    .browser-card-body .arrow { width: 40px; height: 40px; border-radius: 50%; background: var(--soft); color: var(--badge-text); }
+    @media (min-width: 640px) {
+      body { padding: 64px 40px; }
+      .heading { margin-bottom: 40px; }
+      .grid { grid-template-columns: repeat(2, minmax(0, 1fr)); }
+      .intro { font-size: 16px; }
+      .artwork { min-height: 176px; }
+      .art-title { font-size: 36px; }
+      .browser-card-body { padding: 24px; }
+    }
+    @media (hover: hover) {
+      .browser-card:hover { transform: translateY(-5px); border-color: var(--hover-line); box-shadow: var(--visual-shadow); }
+      .browser-card:hover .preview-art { transform: scale(1.04); }
+    }
+    @media (prefers-reduced-motion: reduce) {
+      *, *::before, *::after { animation: none !important; transition: none !important; scroll-behavior: auto !important; }
+    }
+  </style>
+</head>
+<body>
+  <main class="container">
+    <header class="heading">
+      <span class="badge">Interactive Concepts</span><h1>Demo websites</h1>
+      <p class="intro">Select a live concept below to explore the layout and interactions.</p>
+    </header>
+    <ul class="grid">
+      <li><a href="/studio/" class="browser-card">
+        <div class="browser-bar"><span class="browser-dot" aria-hidden="true"></span><span class="browser-dot" aria-hidden="true"></span><span class="browser-dot" aria-hidden="true"></span><span class="path">/studio/</span></div>
+        <div class="artwork salon-art"><div class="preview-art"><span class="art-eyebrow">Botanical Hair &amp; Spa</span><span class="art-title">Atelier Studio</span></div></div>
+        <div class="browser-card-body"><div><span class="badge salon-badge">Salon demo</span><h2>Atelier Studio</h2></div><span class="arrow" aria-hidden="true"><svg fill="none" stroke="currentColor" stroke-width="2" viewBox="0 0 24 24"><path stroke-linecap="round" stroke-linejoin="round" d="M5 12h14M12 5l7 7-7 7"/></svg></span></div>
+      </a></li>
+      <li><a href="https://resto-chef-demo.infinityfree.me/" class="browser-card">
+        <div class="browser-bar"><span class="browser-dot" aria-hidden="true"></span><span class="browser-dot" aria-hidden="true"></span><span class="browser-dot" aria-hidden="true"></span><span class="path">resto-chef-demo.infinityfree.me</span></div>
+        <div class="artwork resto-art"><div class="preview-art"><span class="art-eyebrow">Made Fresh, Made for You</span><span class="art-title">Resto-Chef</span></div></div>
+        <div class="browser-card-body"><div><span class="badge resto-badge">Restaurant ordering demo</span><h2>Resto-Chef</h2></div><span class="arrow" aria-hidden="true"><svg fill="none" stroke="currentColor" stroke-width="2" viewBox="0 0 24 24"><path stroke-linecap="round" stroke-linejoin="round" d="M5 12h14M12 5l7 7-7 7"/></svg></span></div>
+      </a></li>
+      <li><a href="https://turnkey-demo.is-great.org/" class="browser-card">
+        <div class="browser-bar"><span class="browser-dot" aria-hidden="true"></span><span class="browser-dot" aria-hidden="true"></span><span class="browser-dot" aria-hidden="true"></span><span class="path">turnkey-demo.is-great.org</span></div>
+        <div class="artwork crm-art"><div class="preview-art"><span class="art-eyebrow">Sales Pipeline &amp; Quotes</span><span class="art-title">CustomCRM</span></div></div>
+        <div class="browser-card-body"><div><span class="badge crm-badge">CRM demo</span><h2>CustomCRM</h2></div><span class="arrow" aria-hidden="true"><svg fill="none" stroke="currentColor" stroke-width="2" viewBox="0 0 24 24"><path stroke-linecap="round" stroke-linejoin="round" d="M5 12h14M12 5l7 7-7 7"/></svg></span></div>
+      </a></li>
+      <li><a href="/haven/" class="browser-card">
+        <div class="browser-bar"><span class="browser-dot" aria-hidden="true"></span><span class="browser-dot" aria-hidden="true"></span><span class="browser-dot" aria-hidden="true"></span><span class="path">/haven/</span></div>
+        <div class="artwork haven-art"><div class="preview-art"><span class="art-eyebrow">Home Services, Handled</span><span class="art-title">Haven</span></div></div>
+        <div class="browser-card-body"><div><span class="badge haven-badge">Home services demo</span><h2>Haven</h2></div><span class="arrow" aria-hidden="true"><svg fill="none" stroke="currentColor" stroke-width="2" viewBox="0 0 24 24"><path stroke-linecap="round" stroke-linejoin="round" d="M5 12h14M12 5l7 7-7 7"/></svg></span></div>
+      </a></li>
+      <li><a href="/travel-agency-demo/" class="browser-card">
+        <div class="browser-bar"><span class="browser-dot" aria-hidden="true"></span><span class="browser-dot" aria-hidden="true"></span><span class="browser-dot" aria-hidden="true"></span><span class="path">/travel-agency-demo/</span></div>
+        <div class="artwork travel-art"><div class="preview-art"><span class="art-eyebrow">Bespoke Journeys</span><span class="art-title">Elsewhere</span></div></div>
+        <div class="browser-card-body"><div><span class="badge travel-badge">Travel agency demo</span><h2>Elsewhere</h2></div><span class="arrow" aria-hidden="true"><svg fill="none" stroke="currentColor" stroke-width="2" viewBox="0 0 24 24"><path stroke-linecap="round" stroke-linejoin="round" d="M5 12h14M12 5l7 7-7 7"/></svg></span></div>
+      </a></li>
+      <li><a href="/casefile/" class="browser-card">
+        <div class="browser-bar"><span class="browser-dot" aria-hidden="true"></span><span class="browser-dot" aria-hidden="true"></span><span class="browser-dot" aria-hidden="true"></span><span class="path">/casefile/</span></div>
+        <div class="artwork casefile-art"><div class="preview-art"><span class="art-eyebrow">Email to Case Tracking</span><span class="art-title">Casefile</span></div></div>
+        <div class="browser-card-body"><div><span class="badge casefile-badge">Case management demo</span><h2>Casefile</h2></div><span class="arrow" aria-hidden="true"><svg fill="none" stroke="currentColor" stroke-width="2" viewBox="0 0 24 24"><path stroke-linecap="round" stroke-linejoin="round" d="M5 12h14M12 5l7 7-7 7"/></svg></span></div>
+      </a></li>
+    </ul>
+  </main>
+</body>
+</html>

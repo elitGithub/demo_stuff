@@ -1,11 +1,11 @@
 @use('App\Enums\WorkspaceLayout')
 @props(['layout' => null])
 <details class="layout-switcher header-disclosure" data-header-disclosure>
-    <summary class="header-utility workspace-trigger" aria-label="Workspace: {{ $layout?->label() ?? 'Choose' }}">
+    <summary class="header-utility workspace-trigger" aria-label="Workspace: {{ $layout?->label() ?? 'Choose layout' }}">
         <x-icon name="workspace" class="workspace-icon" />
-        <span class="workspace-name">{{ $layout?->label() ?? 'Choose' }}</span>
+        <span class="workspace-name">{{ $layout?->label() ?? 'Choose layout' }}</span>
         <x-icon name="chevron" class="workspace-chevron" />
-        <span class="header-tooltip" aria-hidden="true">Workspace: {{ $layout?->label() ?? 'Choose' }}</span>
+        <span class="header-tooltip" aria-hidden="true">Workspace: {{ $layout?->label() ?? 'Choose layout' }}</span>
     </summary>
     <div class="layout-menu header-menu" aria-label="Workspace layout">
         <div class="header-menu-heading">Workspace layout</div>

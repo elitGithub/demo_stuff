@@ -72,7 +72,6 @@ function mountTheme(options = {}) {
     const control = {
         hidden: true,
         querySelector: (selector) => ({
-            '[data-theme-notice]': notice,
             '[data-theme-trigger]': trigger,
             '[data-theme-tooltip]': tooltip,
         })[selector] ?? null,
@@ -88,7 +87,7 @@ function mountTheme(options = {}) {
         documentElement: { dataset: {} },
         activeElement: draft,
         addEventListener: (name, callback) => documentListeners.set(name, callback),
-        querySelector: (selector) => selector === '[data-theme-control]' ? control : null,
+        querySelector: (selector) => ({ '[data-theme-control]': control, '[data-theme-notice]': notice })[selector] ?? null,
     };
     runInNewContext(source, { window, document, DOMException });
 

@@ -1,4 +1,6 @@
 storage/
+/storage/test-runs/
+/deploy/builds/
 public/
 test-results/
 *.log

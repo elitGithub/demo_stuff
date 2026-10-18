@@ -1,0 +1,535 @@
+<!doctype html>
+<html lang="en">
+<head>
+  <meta charset="utf-8">
+  <meta name="viewport" content="width=device-width, initial-scale=1.0">
+  <meta name="robots" content="noindex, nofollow">
+  <title>Demo Websites — Style Previews</title>
+  <link rel="preconnect" href="https://fonts.googleapis.com">
+  <link rel="preconnect" href="https://fonts.gstatic.com" crossorigin>
+  <link href="https://fonts.googleapis.com/css2?family=Instrument+Serif:ital@0;1&amp;family=Inter:wght@400;500;600;700&amp;family=JetBrains+Mono:wght@400;500&amp;family=Plus+Jakarta+Sans:wght@500;600;700&amp;display=swap" rel="stylesheet">
+  <style>
+    :root {
+      color-scheme: dark;
+      --shell-bg: #09090b;
+      --shell-panel: #18181b;
+      --shell-raised: #27272a;
+      --shell-border: #3f3f46;
+      --shell-text: #fafafa;
+      --shell-muted: #a1a1aa;
+      --shell-accent: #34d399;
+      --shell-accent-hover: #6ee7b7;
+      --shell-focus: #a7f3d0;
+      --shell-overlay: rgba(0, 0, 0, 0.8);
+      --shell-shadow: 0 25px 60px -15px rgba(0, 0, 0, 0.7);
+    }
+    * { box-sizing: border-box; }
+    body { margin: 0; background: var(--shell-bg); color: var(--shell-text); font-family: 'Inter', -apple-system, BlinkMacSystemFont, sans-serif; }
+    button, textarea { font: inherit; }
+    button { cursor: pointer; }
+    button:focus-visible, textarea:focus-visible, iframe:focus-visible { outline: 3px solid var(--shell-focus); outline-offset: 3px; }
+    .toolbar { position: sticky; top: 0; z-index: 2; padding: 12px; background: var(--shell-panel); border-bottom: 1px solid var(--shell-border); }
+    .toolbar-inner { display: flex; flex-wrap: wrap; align-items: center; justify-content: space-between; gap: 12px; max-width: 1200px; margin: auto; }
+    .style-tabs { display: grid; grid-template-columns: repeat(2, minmax(0, 1fr)); gap: 6px; width: 100%; }
+    .style-tab { min-width: 0; min-height: 44px; padding: 8px; border: 1px solid var(--shell-border); border-radius: 8px; background: var(--shell-panel); color: var(--shell-text); font-size: 12px; font-weight: 500; line-height: 1.45; text-align: left; }
+    .style-tab:hover { background: var(--shell-raised); }
+    .style-tab[aria-pressed="true"] { background: var(--shell-text); border-color: var(--shell-text); color: var(--shell-bg); }
+    .preview-actions { display: flex; align-items: center; justify-content: space-between; gap: 8px; width: 100%; }
+    .viewport-controls { display: flex; gap: 2px; padding: 2px; border: 1px solid var(--shell-border); border-radius: 9px; background: var(--shell-raised); }
+    .viewport-button, .action-button, .close-button { display: inline-flex; align-items: center; justify-content: center; gap: 6px; min-width: 44px; min-height: 44px; padding: 9px; border: 0; border-radius: 6px; font-size: 12px; font-weight: 600; }
+    .viewport-button { background: transparent; color: var(--shell-muted); }
+    .viewport-button[aria-pressed="true"] { background: var(--shell-border); color: var(--shell-text); }
+    .action-button { background: var(--shell-accent); color: var(--shell-bg); padding-inline: 12px; white-space: nowrap; }
+    .action-button:hover { background: var(--shell-accent-hover); }
+    .close-button { background: var(--shell-raised); color: var(--shell-text); }
+    button svg { width: 16px; height: 16px; flex-shrink: 0; }
+    .preview-label { display: flex; flex-wrap: wrap; justify-content: space-between; gap: 6px 16px; max-width: 1200px; margin: auto; padding: 12px 16px; color: var(--shell-muted); font-size: 11px; line-height: 1.5; }
+    .viewport-wrapper { width: 100%; margin: auto; }
+    .viewport-wrapper.viewport-mobile { width: 395px; max-width: calc(100% - 32px); margin: 12px auto 32px; border: 10px solid var(--shell-raised); border-radius: 36px; overflow: hidden; box-shadow: var(--shell-shadow); }
+    .preview-frame { display: block; width: 100%; border: 0; background: var(--shell-panel); }
+    .preview-frame[aria-busy="true"] { opacity: 0.6; }
+    dialog { width: min(800px, calc(100% - 24px)); max-height: calc(100dvh - 24px); padding: 0; border: 1px solid var(--shell-border); border-radius: 16px; background: var(--shell-panel); color: var(--shell-text); box-shadow: var(--shell-shadow); }
+    dialog::backdrop { background: var(--shell-overlay); }
+    dialog[open] { display: flex; flex-direction: column; }
+    .modal-header { display: flex; flex-wrap: wrap; align-items: flex-start; justify-content: space-between; gap: 16px; padding: 20px; border-bottom: 1px solid var(--shell-border); }
+    .modal-heading { flex: 1 1 240px; }
+    .modal-heading h2 { margin: 0; font-size: 16px; line-height: 1.5; }
+    .modal-heading p { margin: 6px 0 0; color: var(--shell-muted); font-size: 12px; line-height: 1.6; }
+    .modal-actions { display: flex; gap: 8px; }
+    .code-output { display: block; width: calc(100% - 32px); height: 50vh; min-height: 120px; margin: 16px; padding: 14px; resize: none; border: 1px solid var(--shell-border); border-radius: 8px; background: var(--shell-bg); color: var(--shell-text); font-family: 'JetBrains Mono', monospace; font-size: 12px; line-height: 1.6; }
+    .code-status { min-height: 20px; margin: 0 20px 16px; font-size: 12px; line-height: 1.5; color: var(--shell-muted); }
+    .toast { position: fixed; right: 16px; bottom: 16px; z-index: 3; max-width: min(420px, calc(100% - 32px)); padding: 14px 16px; border: 1px solid var(--shell-border); border-radius: 12px; background: var(--shell-panel); color: var(--shell-text); box-shadow: var(--shell-shadow); font-size: 13px; line-height: 1.6; pointer-events: none; }
+    .toast:empty { display: none; }
+    @media (min-width: 640px) {
+      .toolbar { padding: 12px 24px; }
+      .style-tabs { grid-template-columns: repeat(4, minmax(0, 1fr)); }
+      .style-tab { text-align: center; padding-inline: 12px; }
+      .preview-actions { width: auto; margin-left: auto; }
+    }
+    @media (min-width: 1100px) {
+      .style-tabs { display: flex; width: auto; }
+    }
+    @media (max-width: 480px) {
+      .viewport-wrapper.viewport-mobile { width: 375px; max-width: 100%; margin: 0 auto; border: 0; border-radius: 0; box-shadow: none; }
+      .viewport-button svg { display: none; }
+    }
+    @media (prefers-reduced-motion: reduce) {
+      *, *::before, *::after { animation: none !important; transition: none !important; scroll-behavior: auto !important; }
+    }
+  </style>
+</head>
+<body>
+  <header class="toolbar" id="toolbar">
+    <div class="toolbar-inner">
+      <div class="style-tabs" role="group" aria-label="Choose a design">
+        <button type="button" id="tab-editorial" class="style-tab" aria-pressed="true" onclick="setStyle('editorial')">1. Editorial Studio</button>
+        <button type="button" id="tab-swiss" class="style-tab" aria-pressed="false" onclick="setStyle('swiss')">2. Swiss Index</button>
+        <button type="button" id="tab-visual" class="style-tab" aria-pressed="false" onclick="setStyle('visual')">3. Visual Browser Cards</button>
+        <button type="button" id="tab-dark" class="style-tab" aria-pressed="false" onclick="setStyle('dark')">4. Dark Obsidian</button>
+      </div>
+      <div class="preview-actions">
+        <div class="viewport-controls" role="group" aria-label="Preview width">
+          <button type="button" id="vp-desktop" class="viewport-button" aria-pressed="true" onclick="setViewport('desktop')" title="Use the available screen width">
+            <svg aria-hidden="true" fill="none" stroke="currentColor" viewBox="0 0 24 24"><rect x="2" y="3" width="20" height="14" rx="2" stroke-width="2"/><path d="M8 21h8m-4-4v4" stroke-width="2"/></svg>
+            Desktop
+          </button>
+          <button type="button" id="vp-mobile" class="viewport-button" aria-pressed="false" onclick="setViewport('mobile')" title="375px mobile viewport, or smaller to fit your screen">
+            <svg aria-hidden="true" fill="none" stroke="currentColor" viewBox="0 0 24 24"><rect x="5" y="2" width="14" height="20" rx="2" stroke-width="2"/><path d="M12 18h.01" stroke-width="2"/></svg>
+            Mobile
+          </button>
+        </div>
+        <button type="button" class="action-button" id="exportButton" onclick="openCodeModal()">
+          <svg aria-hidden="true" fill="none" stroke="currentColor" viewBox="0 0 24 24"><path d="m16 18 6-6-6-6M8 6l-6 6 6 6" stroke-width="2" stroke-linecap="round" stroke-linejoin="round"/></svg>
+          Get HTML
+        </button>
+      </div>
+    </div>
+  </header>
+  <main aria-label="Design preview">
+    <div class="preview-label" id="previewLabel" aria-live="polite">
+      <span id="previewName">Editorial Studio</span>
+      <span id="previewSize">Loading preview…</span>
+    </div>
+    <div id="viewportFrame" class="viewport-wrapper">
+      <iframe id="previewFrame" class="preview-frame" title="Editorial Studio preview" sandbox="allow-same-origin" height="680" aria-busy="true"></iframe>
+    </div>
+  </main>
+  <dialog id="codeModal" aria-labelledby="modalTitle" aria-describedby="modalDescription">
+    <div class="modal-header">
+      <div class="modal-heading">
+        <h2 id="modalTitle">Standalone HTML — Editorial Studio</h2>
+        <p id="modalDescription">The exact design shown in the preview. Save as index.html. Layout and artwork use plain HTML and CSS; Google Fonts are optional.</p>
+      </div>
+      <div class="modal-actions">
+        <button type="button" class="action-button" onclick="copyStandaloneCode()">Copy Code</button>
+        <button type="button" class="close-button" aria-label="Close HTML dialog" onclick="closeCodeModal()" autofocus>
+          <svg aria-hidden="true" fill="none" stroke="currentColor" viewBox="0 0 24 24"><path d="m6 18 12-12M6 6l12 12" stroke-width="2" stroke-linecap="round"/></svg>
+        </button>
+      </div>
+    </div>
+    <textarea id="codeOutput" class="code-output" aria-label="Standalone HTML code" readonly spellcheck="false"></textarea>
+    <p class="code-status" id="codeStatus" role="status"></p>
+  </dialog>
+  <div id="toast" class="toast" role="status" aria-live="polite"></div>
+  <noscript>This preview requires JavaScript. Enable JavaScript to compare the four designs.</noscript>
+
+  <script>
+    const styleNames = Object.freeze({
+      editorial: 'Editorial Studio',
+      swiss: 'Swiss Agency Index',
+      visual: 'Visual Browser Cards',
+      dark: 'Dark Obsidian Portal'
+    });
+
+    const designCSS = `
+    :root {
+      color-scheme: light;
+      --white: #ffffff;
+      --ink: #1c1917;
+      --muted: #706963;
+      --subtle: #706963;
+      --page: #f7f5f0;
+      --surface: #ffffff;
+      --line: #e7e5e4;
+      --soft: #f5f5f4;
+      --badge-text: #44403c;
+      --status: #059669;
+      --focus: #047857;
+      --editorial-shadow: 0 16px 32px -12px rgba(28, 25, 23, 0.08);
+      --visual-shadow: 0 20px 40px -15px rgba(15, 23, 42, 0.1);
+      --dark-shadow: 0 16px 36px -10px rgba(0, 0, 0, 0.6);
+      --browser-red: #fda4af;
+      --browser-amber: #fcd34d;
+      --browser-green: #6ee7b7;
+      --salon-start: #f5ebe6;
+      --salon-end: #e6d5c3;
+      --salon-ink: #292524;
+      --salon-muted: #57534e;
+      --salon-badge-bg: #fffbeb;
+      --salon-badge-ink: #92400e;
+      --travel-start: #0f3d3e;
+      --travel-end: #1b6b63;
+      --travel-muted: #99f6e4;
+      --travel-badge-bg: #f0fdfa;
+      --travel-badge-ink: #115e59;
+    }
+    * { box-sizing: border-box; margin: 0; padding: 0; }
+    body { min-height: 100vh; display: flex; align-items: center; padding: 40px 20px; background: var(--page); color: var(--ink); font-family: 'Inter', -apple-system, BlinkMacSystemFont, sans-serif; line-height: 1.5; }
+    .container { width: 100%; max-width: 768px; margin: 0 auto; min-width: 0; }
+    h1, h2 { overflow-wrap: break-word; }
+    h1 { font-size: clamp(30px, 6vw, 48px); font-weight: 600; letter-spacing: -0.035em; line-height: 1.1; }
+    h2 { font-size: 24px; font-weight: 600; letter-spacing: -0.02em; line-height: 1.25; }
+    .heading { margin-bottom: 32px; }
+    .mono, .path { font-family: 'JetBrains Mono', monospace; }
+    .eyebrow { margin-bottom: 8px; color: var(--muted); font-size: 12px; font-weight: 600; letter-spacing: 0.1em; text-transform: uppercase; }
+    .path { color: var(--subtle); font-size: 12px; overflow-wrap: anywhere; }
+    .grid { display: grid; grid-template-columns: minmax(0, 1fr); gap: 16px; list-style: none; }
+    li { min-width: 0; }
+    a { color: inherit; text-decoration: none; }
+    a:focus-visible { outline: 3px solid var(--focus); outline-offset: 5px; }
+    .card { display: flex; flex-direction: column; justify-content: space-between; gap: 32px; min-height: 200px; height: 100%; padding: 24px; border: 1px solid var(--line); border-radius: 16px; background: var(--surface); transition: transform 0.25s ease, border-color 0.25s ease, box-shadow 0.25s ease; }
+    .card-top { display: flex; align-items: center; justify-content: space-between; gap: 12px; }
+    .badge { display: inline-block; padding: 4px 12px; border: 1px solid var(--line); border-radius: 99px; background: var(--soft); color: var(--badge-text); font-size: 12px; font-weight: 500; }
+    .arrow { display: inline-flex; align-items: center; justify-content: center; flex-shrink: 0; }
+    .arrow svg { width: 16px; height: 16px; }
+    .card .path { margin-top: 4px; }
+    .status { display: inline-flex; align-items: center; gap: 6px; color: var(--muted); font-size: 12px; font-weight: 500; }
+    .status-dot { display: inline-block; width: 8px; height: 8px; flex-shrink: 0; border-radius: 50%; background: var(--status); }
+    .theme-editorial h1, .theme-editorial h2 { font-family: 'Instrument Serif', Georgia, serif; font-weight: 400; }
+    .theme-editorial h1 { font-size: clamp(36px, 7vw, 48px); }
+    .theme-editorial h2 { font-size: 30px; }
+    .theme-editorial .heading { display: flex; flex-direction: column; gap: 16px; padding-bottom: 24px; border-bottom: 1px solid var(--line); }
+    .theme-editorial .arrow { width: 36px; height: 36px; border: 1px solid var(--line); border-radius: 50%; color: var(--muted); transition: transform 0.2s ease, background-color 0.2s ease, color 0.2s ease; }
+    .theme-swiss { --page: #ffffff; --ink: #09090b; --muted: #71717a; --subtle: #71717a; --line: #e4e4e7; --soft: #fafafa; --button-line: #d4d4d8; }
+    .theme-swiss .eyebrow { font-weight: 400; }
+    .index-list { list-style: none; border-top: 1px solid var(--ink); }
+    .swiss-row { border-bottom: 1px solid var(--line); transition: background-color 0.2s ease; }
+    .swiss-link { display: flex; flex-direction: column; gap: 16px; padding: 24px 0; }
+    .swiss-project { display: grid; grid-template-columns: 20px minmax(0, 1fr); align-items: baseline; gap: 12px; }
+    .project-number { color: var(--subtle); font-size: 12px; }
+    .swiss-project h2 { font-size: 20px; }
+    .category { color: var(--muted); font-size: 14px; margin-top: 2px; }
+    .swiss-detail { display: flex; flex-wrap: wrap; align-items: center; justify-content: space-between; gap: 12px; padding-left: 32px; }
+    .swiss-cta { display: inline-flex; align-items: center; gap: 6px; min-height: 44px; padding: 10px 14px; border: 1px solid var(--button-line); border-radius: 99px; font-size: 12px; font-weight: 500; flex-shrink: 0; transition: background-color 0.2s ease, color 0.2s ease; }
+    .theme-visual { --page: #f1f5f9; --ink: #0f172a; --muted: #5e6e83; --subtle: #5e6e83; --line: #e2e8f0; --soft: #f1f5f9; --badge-text: #475569; --hover-line: #cbd5e1; font-family: 'Plus Jakarta Sans', -apple-system, sans-serif; }
+    .theme-visual .container { max-width: 896px; }
+    .theme-visual .heading { max-width: 576px; margin-inline: auto; text-align: center; }
+    .theme-visual h1 { font-size: clamp(30px, 5vw, 36px); font-weight: 700; }
+    .theme-visual .heading .badge { margin-bottom: 12px; background: var(--surface); font-weight: 600; }
+    .intro { margin-top: 10px; font-size: 14px; color: var(--muted); line-height: 1.65; }
+    .theme-visual .grid { gap: 24px; }
+    .browser-card { display: flex; flex-direction: column; height: 100%; border: 1px solid var(--line); border-radius: 20px; overflow: hidden; background: var(--surface); transition: transform 0.3s ease, border-color 0.3s ease, box-shadow 0.3s ease; }
+    .browser-bar { display: flex; align-items: center; gap: 8px; padding: 10px 14px; border-bottom: 1px solid var(--line); background: var(--surface); }
+    .browser-dot { width: 10px; height: 10px; flex-shrink: 0; border-radius: 50%; }
+    .browser-dot:nth-child(1) { background: var(--browser-red); }
+    .browser-dot:nth-child(2) { background: var(--browser-amber); }
+    .browser-dot:nth-child(3) { background: var(--browser-green); }
+    .browser-bar .path { min-width: 0; margin-left: 8px; overflow: hidden; white-space: nowrap; text-overflow: ellipsis; font-size: 11px; }
+    .artwork { display: flex; align-items: center; justify-content: center; min-height: 144px; overflow: hidden; }
+    .salon-art { background: linear-gradient(135deg, var(--salon-start), var(--salon-end)); color: var(--salon-ink); }
+    .travel-art { background: linear-gradient(135deg, var(--travel-start), var(--travel-end)); color: var(--white); }
+    .preview-art { padding: 16px; text-align: center; transition: transform 0.5s ease; }
+    .art-eyebrow { display: block; margin-bottom: 4px; font-size: 10px; text-transform: uppercase; letter-spacing: 0.25em; }
+    .salon-art .art-eyebrow { color: var(--salon-muted); }
+    .travel-art .art-eyebrow { color: var(--travel-muted); }
+    .art-title { display: block; font-family: 'Instrument Serif', Georgia, serif; font-size: 30px; line-height: 1.2; }
+    .salon-art .art-title { font-style: italic; }
+    .browser-card-body { display: flex; flex: 1; align-items: center; justify-content: space-between; gap: 16px; padding: 20px; }
+    .browser-card-body > div { min-width: 0; }
+    .browser-card-body .badge { padding: 3px 10px; border: 0; border-radius: 6px; font-weight: 600; }
+    .salon-badge { background: var(--salon-badge-bg); color: var(--salon-badge-ink); }
+    .travel-badge { background: var(--travel-badge-bg); color: var(--travel-badge-ink); }
+    .browser-card-body h2 { margin-top: 8px; font-size: 20px; font-weight: 700; }
+    .browser-card-body .arrow { width: 40px; height: 40px; border-radius: 50%; background: var(--soft); color: var(--badge-text); }
+    .theme-dark { color-scheme: dark; --page: #09090b; --ink: #fafafa; --muted: #a1a1aa; --subtle: #a1a1aa; --line: #2a2a30; --soft: #27272a; --badge-text: #d4d4d8; --surface: #18181b; --status: #34d399; --focus: #a7f3d0; --glow: rgba(120, 119, 198, 0.14); --card-start: #18181b; --card-end: #0f0f12; --hover-line: #52525b; background-image: radial-gradient(circle at 50% 0%, var(--glow), transparent 55%); }
+    .theme-dark .status { gap: 8px; padding: 4px 12px; margin-bottom: 16px; border: 1px solid var(--line); border-radius: 99px; background: var(--surface); }
+    .theme-dark .status-dot { animation: pulse 2s ease-in-out infinite; }
+    .theme-dark .card { min-height: 195px; background: linear-gradient(180deg, var(--card-start), var(--card-end)); }
+    .theme-dark .badge { padding-inline: 10px; border-color: var(--hover-line); border-radius: 6px; }
+    .theme-dark .arrow { color: var(--muted); }
+    .theme-dark .arrow svg { width: 20px; height: 20px; }
+    @keyframes pulse { 50% { opacity: 0.45; } }
+    @media (min-width: 640px) {
+      body { padding: 64px 40px; }
+      .heading { margin-bottom: 40px; }
+      .grid { grid-template-columns: repeat(2, minmax(0, 1fr)); gap: 24px; }
+      .card { padding: 28px; }
+      .theme-editorial .heading { flex-direction: row; justify-content: space-between; align-items: flex-end; }
+      .theme-editorial .status { white-space: nowrap; }
+      .swiss-link { flex-direction: row; align-items: center; justify-content: space-between; padding: 32px 0; gap: 20px; }
+      .swiss-project h2 { font-size: 24px; }
+      .swiss-detail { justify-content: flex-end; padding-left: 0; }
+      .intro { font-size: 16px; }
+      .artwork { min-height: 176px; }
+      .art-title { font-size: 36px; }
+      .browser-card-body { padding: 24px; }
+      .theme-dark .grid { gap: 20px; }
+    }
+    @media (hover: hover) {
+      .theme-editorial .card:hover { transform: translateY(-4px); border-color: var(--ink); box-shadow: var(--editorial-shadow); }
+      .theme-editorial .card:hover .arrow { transform: translate(3px, -3px); background: var(--ink); color: var(--white); }
+      .swiss-row:hover { background: var(--soft); }
+      .swiss-link:hover .swiss-cta { background: var(--ink); color: var(--white); }
+      .browser-card:hover { transform: translateY(-5px); border-color: var(--hover-line); box-shadow: var(--visual-shadow); }
+      .browser-card:hover .preview-art { transform: scale(1.04); }
+      .theme-dark .card:hover { transform: translateY(-3px); border-color: var(--hover-line); box-shadow: var(--dark-shadow); }
+    }
+    @media (prefers-reduced-motion: reduce) {
+      *, *::before, *::after { animation: none !important; transition: none !important; scroll-behavior: auto !important; }
+    }`;
+
+    const diagonalArrow = '<span class="arrow" aria-hidden="true"><svg fill="none" stroke="currentColor" stroke-width="2" viewBox="0 0 24 24"><path stroke-linecap="round" stroke-linejoin="round" d="M7 17L17 7M7 7h10v10"/></svg></span>';
+    const forwardArrow = '<span class="arrow" aria-hidden="true"><svg fill="none" stroke="currentColor" stroke-width="2" viewBox="0 0 24 24"><path stroke-linecap="round" stroke-linejoin="round" d="M5 12h14M12 5l7 7-7 7"/></svg></span>';
+    const browserDots = '<span class="browser-dot" aria-hidden="true"></span><span class="browser-dot" aria-hidden="true"></span><span class="browser-dot" aria-hidden="true"></span>';
+
+    const designMarkup = Object.freeze({
+      editorial: `
+    <header class="heading">
+      <div><p class="eyebrow">Client Preview Directory</p><h1>Demo websites</h1></div>
+      <span class="status"><span class="status-dot" aria-hidden="true"></span>2 concepts available</span>
+    </header>
+    <ul class="grid">
+      <li><a href="/studio/" class="card">
+        <div class="card-top"><span class="badge">Salon demo</span>${diagonalArrow}</div>
+        <div><h2>Atelier Studio</h2><p class="path">/studio/</p></div>
+      </a></li>
+      <li><a href="/travel-agency-demo/" class="card">
+        <div class="card-top"><span class="badge">Travel agency demo</span>${diagonalArrow}</div>
+        <div><h2>Elsewhere</h2><p class="path">/travel-agency-demo/</p></div>
+      </a></li>
+    </ul>`,
+      swiss: `
+    <header class="heading"><p class="eyebrow mono">Index // 01–02</p><h1>Demo websites</h1></header>
+    <ul class="index-list">
+      <li class="swiss-row"><a href="/studio/" class="swiss-link">
+        <div class="swiss-project"><span class="project-number mono">01</span><div><h2>Atelier Studio</h2><p class="category">Salon demo</p></div></div>
+        <div class="swiss-detail"><span class="path">/studio/</span><span class="swiss-cta">Open <span aria-hidden="true">↗</span></span></div>
+      </a></li>
+      <li class="swiss-row"><a href="/travel-agency-demo/" class="swiss-link">
+        <div class="swiss-project"><span class="project-number mono">02</span><div><h2>Elsewhere</h2><p class="category">Travel agency demo</p></div></div>
+        <div class="swiss-detail"><span class="path">/travel-agency-demo/</span><span class="swiss-cta">Open <span aria-hidden="true">↗</span></span></div>
+      </a></li>
+    </ul>`,
+      visual: `
+    <header class="heading">
+      <span class="badge">Interactive Concepts</span><h1>Demo websites</h1>
+      <p class="intro">Select a live concept below to explore the layout and interactions.</p>
+    </header>
+    <ul class="grid">
+      <li><a href="/studio/" class="browser-card">
+        <div class="browser-bar">${browserDots}<span class="path">/studio/</span></div>
+        <div class="artwork salon-art"><div class="preview-art"><span class="art-eyebrow">Botanical Hair &amp; Spa</span><span class="art-title">Atelier Studio</span></div></div>
+        <div class="browser-card-body"><div><span class="badge salon-badge">Salon demo</span><h2>Atelier Studio</h2></div>${forwardArrow}</div>
+      </a></li>
+      <li><a href="/travel-agency-demo/" class="browser-card">
+        <div class="browser-bar">${browserDots}<span class="path">/travel-agency-demo/</span></div>
+        <div class="artwork travel-art"><div class="preview-art"><span class="art-eyebrow">Bespoke Journeys</span><span class="art-title">Elsewhere</span></div></div>
+        <div class="browser-card-body"><div><span class="badge travel-badge">Travel agency demo</span><h2>Elsewhere</h2></div>${forwardArrow}</div>
+      </a></li>
+    </ul>`,
+      dark: `
+    <header class="heading">
+      <span class="status"><span class="status-dot" aria-hidden="true"></span>Staging Environment</span>
+      <h1>Demo websites</h1>
+    </header>
+    <ul class="grid">
+      <li><a href="/studio/" class="card">
+        <div class="card-top"><span class="badge">Salon demo</span>${diagonalArrow}</div>
+        <div><h2>Atelier Studio</h2><p class="path">/studio/</p></div>
+      </a></li>
+      <li><a href="/travel-agency-demo/" class="card">
+        <div class="card-top"><span class="badge">Travel agency demo</span>${diagonalArrow}</div>
+        <div><h2>Elsewhere</h2><p class="path">/travel-agency-demo/</p></div>
+      </a></li>
+    </ul>`
+    });
+
+    let currentStyle = 'editorial';
+    let currentViewport = 'desktop';
+    let frameObserver;
+    let toastTimer;
+    let modalOpener;
+    let modalSession = 0;
+
+    /** @param {string} style @return {string} */
+    function getStandaloneHTML(style) {
+      if (!Object.hasOwn(styleNames, style)) {
+        throw new RangeError('Unknown preview style');
+      }
+      return `<!doctype html>
+<html lang="en">
+<head>
+  <meta charset="utf-8">
+  <meta name="viewport" content="width=device-width, initial-scale=1">
+  <meta name="robots" content="noindex, nofollow">
+  <title>Demo websites — ${styleNames[style]}</title>
+  <link rel="preconnect" href="https://fonts.googleapis.com">
+  <link rel="preconnect" href="https://fonts.gstatic.com" crossorigin>
+  <link href="https://fonts.googleapis.com/css2?family=Instrument+Serif:ital@0;1&amp;family=Inter:wght@400;500;600;700&amp;family=JetBrains+Mono:wght@400;500&amp;family=Plus+Jakarta+Sans:wght@500;600;700&amp;display=swap" rel="stylesheet">
+  <style>${designCSS}
+  </style>
+</head>
+<body class="theme-${style}">
+  <main class="container">${designMarkup[style]}
+  </main>
+</body>
+</html>`;
+    }
+
+    /** @return {void} */
+    function updatePreviewURL() {
+      const url = new URL(window.location.href);
+      url.searchParams.set('style', currentStyle);
+      url.searchParams.set('viewport', currentViewport);
+      window.history.replaceState(null, '', url);
+    }
+
+    /** @param {string} style @return {void} */
+    function setStyle(style) {
+      if (!Object.hasOwn(styleNames, style)) {
+        return;
+      }
+      currentStyle = style;
+      for (const styleName of Object.keys(styleNames)) {
+        document.getElementById('tab-' + styleName).setAttribute('aria-pressed', String(styleName === style));
+      }
+      if (frameObserver) {
+        frameObserver.disconnect();
+      }
+      const frame = document.getElementById('previewFrame');
+      frame.setAttribute('aria-busy', 'true');
+      frame.title = styleNames[style] + ' preview';
+      document.getElementById('previewName').textContent = styleNames[style];
+      document.getElementById('previewSize').textContent = 'Loading preview…';
+      frame.srcdoc = getStandaloneHTML(style);
+      updatePreviewURL();
+    }
+
+    /** @param {string} mode @return {void} */
+    function setViewport(mode) {
+      if (mode !== 'desktop' && mode !== 'mobile') {
+        return;
+      }
+      currentViewport = mode;
+      document.getElementById('viewportFrame').classList.toggle('viewport-mobile', mode === 'mobile');
+      document.getElementById('vp-desktop').setAttribute('aria-pressed', String(mode === 'desktop'));
+      document.getElementById('vp-mobile').setAttribute('aria-pressed', String(mode === 'mobile'));
+      requestAnimationFrame(fitPreview);
+      updatePreviewURL();
+    }
+
+    /** @return {void} */
+    function fitPreview() {
+      const frame = document.getElementById('previewFrame');
+      const frameDocument = frame.contentDocument;
+      const content = frameDocument && frameDocument.querySelector('.container');
+      if (!content) {
+        return;
+      }
+      const bodyStyle = frame.contentWindow.getComputedStyle(frameDocument.body);
+      const contentHeight = Math.ceil(content.getBoundingClientRect().height + parseFloat(bodyStyle.paddingTop) + parseFloat(bodyStyle.paddingBottom));
+      const chromeHeight = document.getElementById('toolbar').offsetHeight + document.getElementById('previewLabel').offsetHeight;
+      const minimumHeight = currentViewport === 'mobile' ? 667 : Math.max(480, window.innerHeight - chromeHeight);
+      frame.setAttribute('height', String(Math.max(minimumHeight, contentHeight)));
+      document.getElementById('previewSize').textContent = frame.clientWidth + 'px viewport · ' + (currentViewport === 'mobile' ? 'Mobile' : 'Responsive desktop');
+    }
+
+    /** @param {string} message @return {void} */
+    function showToast(message) {
+      document.getElementById('toast').textContent = message;
+      clearTimeout(toastTimer);
+      toastTimer = setTimeout(() => {
+        document.getElementById('toast').textContent = '';
+      }, 4000);
+    }
+
+    /** @return {void} */
+    function openCodeModal() {
+      modalSession += 1;
+      modalOpener = document.activeElement;
+      document.getElementById('modalTitle').textContent = 'Standalone HTML — ' + styleNames[currentStyle];
+      document.getElementById('codeOutput').value = getStandaloneHTML(currentStyle);
+      document.getElementById('codeStatus').textContent = '';
+      document.getElementById('codeModal').showModal();
+    }
+
+    /** @return {void} */
+    function closeCodeModal() {
+      document.getElementById('codeModal').close();
+    }
+
+    /** @return {Promise<void>} */
+    async function copyStandaloneCode() {
+      const code = document.getElementById('codeOutput');
+      const status = document.getElementById('codeStatus');
+      const dialog = document.getElementById('codeModal');
+      const copiedCode = code.value;
+      const copiedStyle = currentStyle;
+      const copiedStyleName = styleNames[copiedStyle];
+      const copiedSession = modalSession;
+      try {
+        await navigator.clipboard.writeText(copiedCode);
+        if (!dialog.open || copiedSession !== modalSession || copiedStyle !== currentStyle || copiedCode !== code.value) {
+          return;
+        }
+        status.textContent = 'Copied ' + copiedStyleName + ' HTML.';
+      } catch (clipboardError) {
+        if (!dialog.open || copiedSession !== modalSession || copiedStyle !== currentStyle || copiedCode !== code.value) {
+          return;
+        }
+        code.focus();
+        code.select();
+        try {
+          if (!document.execCommand('copy')) {
+            throw new Error('Clipboard access unavailable');
+          }
+          status.textContent = 'Copied ' + copiedStyleName + ' HTML.';
+        } catch (copyError) {
+          status.textContent = 'Automatic copy is unavailable. The code is selected; use your device’s Copy command.';
+        }
+      }
+    }
+
+    /** @return {void} */
+    function initializePreview() {
+      const frame = document.getElementById('previewFrame');
+      frame.addEventListener('load', () => {
+        const frameDocument = frame.contentDocument;
+        const content = frameDocument.querySelector('.container');
+        if (!content) {
+          return;
+        }
+        frame.setAttribute('aria-busy', 'false');
+        frameDocument.addEventListener('click', (event) => {
+          const link = event.target.closest('a');
+          if (link) {
+            event.preventDefault();
+            showToast('Preview link: ' + link.getAttribute('href') + ' — links work normally in the exported HTML.');
+          }
+        });
+        if (frameObserver) {
+          frameObserver.disconnect();
+        }
+        frameObserver = new ResizeObserver(fitPreview);
+        frameObserver.observe(content);
+        fitPreview();
+      });
+      document.getElementById('codeModal').addEventListener('close', () => {
+        if (modalOpener) {
+          modalOpener.focus();
+        }
+      });
+      window.addEventListener('resize', fitPreview);
+      const params = new URLSearchParams(window.location.search);
+      const requestedStyle = params.get('style');
+      const requestedViewport = params.get('viewport');
+      setStyle(Object.hasOwn(styleNames, requestedStyle) ? requestedStyle : 'editorial');
+      setViewport(requestedViewport === 'mobile' ? 'mobile' : 'desktop');
+    }
+
+    if (typeof document !== 'undefined') {
+      initializePreview();
+    }
+  </script>
+</body>
+</html>

@@ -72,7 +72,7 @@ for item in (workspace / "vendor").rglob("*"):
 for relative in PackagePolicy.RUNTIME:
     directory = private / relative
     directory.mkdir(parents=True, exist_ok=True)
-    (directory / "index.html").write_text("", encoding="utf-8")
+    (directory / "index.html").write_text(PackagePolicy.RUNTIME_MARKER, encoding="utf-8")
 for filename in PackagePolicy.FIXTURES:
     source = PackagePolicy.scoped(root / "database/fixtures/attachments" / filename, root)
     destination = private / "database/fixtures/attachments" / filename

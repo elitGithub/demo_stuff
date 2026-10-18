@@ -1,12 +1,62 @@
 # InfinityFree deployment
 
+## Current upgrade ZIP — 2026-10-18
+
+Use `storage/infinityfree/releases/2026-10-18-fixes/casefile-upload.zip`.
+The dedicated release folder contains only this ZIP.
+
+| File | Bytes | Files | SHA-256 |
+| --- | ---: | ---: | --- |
+| `casefile-upload.zip` | 8,640,343 | 6,704 | `a2b25c2b02fbef0d5dc41af7d6d488f528f1a2f50acdb119bcad68fcb6d5d47e` |
+
+This upgrade starts with the retained `storage/infinityfree/20261018-121013-136261/casefile-upload.zip`
+(SHA-256 `cbf5eaaecc63c73c559ca0287602a6f3449fcd47c9ad926eb3bf4f9f4ba7e9ef`).
+The reviewed application payload preserves vendor and other non-build bytes,
+except for the four reviewed current shared views: `app-layout`, `layout-switcher`,
+`theme-script` and `theme-switcher`. Its complete build tree comes from the tested
+`storage/framework/testing/css-audit-20261018/public/build/final-06`, retaining
+the baseline Instrument Sans license. Font CSS/JSON URLs are remapped from
+`/build/final-06/` to `/casefile/build/` and every asset reference resolves.
+The current `public/build` was stale and was not used.
+
+The current ZIP is an existing-install overlay. It excludes every member under
+`_app/storage/`, `_app/bootstrap/cache/` and
+`_app/database/fixtures/attachments/`, and contains no real `.env`, database,
+credentials or runtime state. Normal merging extraction therefore preserves the
+hosted environment and APP_KEY, template, visitor databases, attachments,
+sessions, logs and caches. It cannot provision a fresh installation.
+
+The entry point selects the compiled Blade extension
+`casefile-dacaa58f5476547191c0c502.php` after configuration loads and before service
+providers boot. This content-derived release namespace creates fresh compiled
+views in the existing writable views directory, even if old compiled files have
+future timestamps. Old cache files remain in place; no manual cache deletion is
+needed. `deploy/package-upgrade.py` reproduces this transformation from the
+retained reviewed full ZIP at
+`storage/infinityfree/upgrade-fix-input-20261018/casefile-reviewed-full.zip`
+(SHA-256 `f6e3184f7b66977a8c6eed1c9eab705ef8852699f84b6cd827459997ead877ef`).
+
+The final06 CSS is `app-D-VNy6s6.css` (SHA-256
+`7d68fffc5b32ecf7ed8f5f985f359d05850346b141bb3e3ca0a0ddd80ea93f35`),
+and JavaScript is `app-CBc_cVwR.js` (SHA-256
+`52c0149aa070011edbcf444f76dfdbb94521dd3e0380a3eac250490fe16a6e0c`).
+The [CSS audit record](verification/2026-10-18-css-audit.md) records the fresh
+production build, actual browser asset URLs, scoped final06 focus regression
+and independent review. Unaffected earlier screenshots are reused as documented
+there. No full source hash snapshot was retained at build time, so this provenance
+does not establish cryptographic proof of every source-to-bundle input.
+
+Static release checks passed without opening SQLite, installing dependencies,
+bootstrapping Laravel or rebuilding. Nothing has been uploaded or accepted on
+InfinityFree. Keep the listing blocked until the real hosted checks below pass.
+
 ## 1. Confirm the host with the check file
 
 The operator first uploads only `deploy/casefile-check.php` to a temporary location under the intended account and visits it over HTTPS. It prints PHP version, `pdo_sqlite`, `sqlite3`, SQLite library version and `disable_functions`; it does not open a database or bootstrap Laravel. Require PHP 8.4+ and `pdo_sqlite`. `sqlite3` supplies the library-version diagnostic; Laravel uses PDO. Remove the diagnostic after recording the result. Never leave `phpinfo`, setup scripts or database importers online.
 
 Target: `https://demo-sites.infinityfree.me/casefile/`, beside the other demos. Nothing in this delivery uploads or publishes it. Remote PHP extensions, Apache behavior and account limits have not been verified. [InfinityFree advertises PHP 8.4](https://www.infinityfree.com/); the actual account check decides whether this package is viable.
 
-Historical dark-mode release: `storage/infinityfree/dark-mode-20261017/casefile-upload.zip` and its [dark-mode verification record](verification/2026-10-17-casefile-dark-mode-verification.md) describe the earlier Theme-segments interface. That build produced `app-DGK12e4o.css` (52.79 kB) and `app-BXtwaOZi.js`; the Theme script was inline in the shared document head. Its isolated browser preview used an existing development hot file and served source CSS from `127.0.0.1:5173/resources/css/app.css`, so those visual checks did not prove that the production bundle was served. Preserve this archive and the earlier `task16-20261017` package as historical releases. Use the Header correction delivery section below for the current controls, assets and verification status.
+Historical dark-mode release: `storage/infinityfree/dark-mode-20261017/casefile-upload.zip` and its [dark-mode verification record](verification/2026-10-17-casefile-dark-mode-verification.md) describe the earlier Theme-segments interface. That build produced `app-DGK12e4o.css` (52.79 kB) and `app-BXtwaOZi.js`; the Theme script was inline in the shared document head. Its isolated browser preview used an existing development hot file and served source CSS from `127.0.0.1:5173/resources/css/app.css`, so those visual checks did not prove that the production bundle was served. Preserve this archive and the earlier `task16-20261017` package as historical releases. The current upgrade ZIP section above supersedes the historical deliveries below.
 
 ## 2. Check the file budget
 
@@ -14,7 +64,18 @@ The local verifier prints `Files: N` and rejects 12,000 or more files. Account l
 
 ## 3. Prepare locally
 
-Use the source lockfiles, the built `public/build` directory and the four generated fixture attachments. Prerequisites are Composer, PHP 8.4+, Python 3.10+, and existing frontend build dependencies. The packager never invokes Artisan, a build command or a migration. Any missing template must be built separately with exact operator approval. Never substitute an application database or a visitor sandbox for the immutable seed template.
+For this existing-install upgrade use the current ZIP above and continue to
+section 4. Do not rebuild fixtures, templates or assets, rerun the old packager,
+or recreate the hosted environment. The historical full-build workflow below
+is separate from this static artifact assembly.
+
+For a future fresh installation or separately approved full rebuild, use the
+source lockfiles, a newly verified production build and the four generated fixture
+attachments. Do not use the stale current `public/build` for this release.
+Prerequisites are Composer, PHP 8.4+, Python 3.10+, and existing frontend build
+dependencies. The packager never invokes Artisan, a build command or a migration.
+Any missing template must be built separately with exact operator approval.
+Never substitute an application database or a visitor sandbox for the immutable seed template.
 
 For a fresh installation only, these operator-run commands create the inputs:
 
@@ -34,7 +95,7 @@ PYTHONDONTWRITEBYTECODE=1 python3 deploy/package.py --template /var/www/demo_stu
 PYTHONDONTWRITEBYTECODE=1 python3 deploy/verify-package.py /var/www/demo_stuff/case-management-system/storage/infinityfree/task16-20261017/casefile-upload.zip
 ```
 
-The output root must be new and below this project's `storage`; source symlinks are rejected. Expected template SHA-256: `1a28150d776cf08f5beee0e64539cc4b92a0698575b6d2929a8c66bfeddb2f43`. Packaging checks its SQLite integrity, 16 cases, 43 mailbox messages, 20 script entries and the current migration version using an immutable read-only connection. It verifies the source hash afterward. These reads still require operator approval.
+The output root must be new and below this project's `storage`; source symlinks are rejected. The historical 2026-10-17 template SHA-256 was `1a28150d776cf08f5beee0e64539cc4b92a0698575b6d2929a8c66bfeddb2f43`. The reviewed full ZIP carried the 2026-10-18 baseline template as opaque archive bytes, SHA-256 `46c88ea91a77eb1dfe7b607682fa9a9757abd05253fde9c2640f88d817a29d87`; the current upgrade excludes that member so the hosted template survives extraction. It was not opened as SQLite during this release task. The full packager checks SQLite integrity, 16 cases, 43 mailbox messages, 20 script entries and the current migration version using an immutable read-only connection. It verifies the source hash afterward. Those reads still require operator approval; do not run `package.py` or `verify-package.py` to transfer this upgrade.
 
 The script creates a separate workspace, copies the lockfiles there, and runs exactly:
 
@@ -50,7 +111,31 @@ Both normal extraction and extraction ignoring directory entries are audited. Re
 
 ## 4. Upload and configure
 
-Upload only the ZIP's `casefile/` directory into `htdocs`, preserving dotfiles. Do not upload the outer output folder, ZIP, manifest, Composer workspace, tests or diagnostics. No SSH, host Artisan, workers or migrations are used. The package is fixed to `/casefile`; its generated font CSS/manifest URLs use `/casefile/build/`. Renaming the directory requires a reviewed package URL adjustment as well as environment/cookie changes.
+### Existing installation upgrade
+
+Use InfinityFree File Manager's archive extraction for this upgrade. Select the
+target domain's actual `htdocs`; accounts with multiple domains may have several.
+
+1. Confirm the ZIP filename, byte size and SHA-256 above. Keep a private backup
+   of the existing installation before the upgrade. Complete any outstanding
+   host capability checks from section 1 separately.
+2. Upload `casefile-upload.zip` into that `htdocs` and extract it there, enabling
+   overwrite of matching files and merging existing directories. The ZIP's
+   `casefile/` must map to `htdocs/casefile/`; extracting inside the existing
+   `casefile/` would create an incorrect second level.
+3. Keep all existing folders and remote-only files. No folder deletion, file
+   skip list, environment edit, key change, migration or cache clearing is
+   needed. Wait until extraction completes successfully before using the site,
+   then perform section 5's hosted checks.
+
+Extraction updates multiple files and is not atomic; use a quiet maintenance
+window and avoid submitting changes while it runs. The local overlay test
+proves preservation with normal merging extraction; actual hosted extraction and
+acceptance remain operator checks. Keep the listing blocked if they fail.
+
+No SSH, host Artisan, workers or migrations are used. The package is fixed to
+`/casefile`; font CSS/manifest URLs use `/casefile/build/`. Renaming the directory
+requires a reviewed package URL adjustment as well as environment/cookie changes.
 
 ```text
 htdocs/casefile/
@@ -61,17 +146,21 @@ htdocs/casefile/
     .htaccess
     .env.example
     app/ bootstrap/ config/ routes/ resources/ database/ vendor/
-    storage/app/template/casefile-template.sqlite
-    storage/app/sandboxes/index.html
-    storage/framework/cache/data/index.html
-    storage/framework/sessions/index.html
-    storage/framework/views/index.html
-    storage/logs/index.html
 ```
+
+Existing `_app/.env`, `_app/storage/`, `_app/bootstrap/cache/` and private fixture
+attachments remain on the host and are absent from this upgrade ZIP.
 
 The root rewrite rule denies `_app` access; `_app/.htaccess` separately denies all access. Both must survive upload. Private attachments remain at `_app/database/fixtures/attachments`, matching `config/casefile.php`; serve them only through authorized attachment routes. There is no public storage symlink.
 
-Create `_app/.env` privately from the shipped `.env.example`. It is deliberately absent from the ZIP. Set a new secret APP_KEY generated locally, not an example key. One non-Artisan key-generation command for the operator is:
+### Fresh installation only
+
+The current upgrade ZIP cannot create a fresh installation. The following
+configuration notes apply only to a separately approved full-install package.
+For an approved new installation,
+create `_app/.env` privately from the shipped `.env.example`. It is deliberately
+absent from the ZIP. Set a new secret APP_KEY generated locally, not an example
+key. One non-Artisan key-generation command for the operator is:
 
 ```sh
 php -r 'echo "base64:".base64_encode(random_bytes(32)).PHP_EOL;'
@@ -90,13 +179,17 @@ The operator performs these checks on the real HTTPS account:
 - `/casefile/` as a guest reaches `/casefile/sign-in`; sign-in and sign-out stay within the subdirectory. Check `/casefile/up` for the health response.
 - Direct URLs `/casefile/_app/.env`, `/casefile/_app/vendor/autoload.php`, `/casefile/_app/storage/app/template/casefile-template.sqlite`, `/casefile/_app/database/fixtures/attachments/kitchen-sink-leak.png`, `/casefile/_app/storage/logs/laravel.log` and dotfiles return 403/404 without file content. Stop deployment if either protection fails.
 - `/casefile/build/manifest.json` and its referenced CSS/JS/font files load from `/casefile/build`. Inspect the browser network, console and computed Instrument Sans font. No missing assets or CDN font requests should be necessary.
+- Confirm the actual network responses use `app-D-VNy6s6.css` and `app-CBc_cVwR.js`; no `final-06`, localhost, stale bundle or development hot-file URL appears. Recheck phone and desktop Light/Dark screens, Workspace/Appearance menus and dismissal, first paint, persistence and no-JavaScript device fallback. At 1499→1500→1499px, Desk/Mail open editors retain Notes drafts and visible focus; when Close details hides, focus moves to Issue. Recheck long Sender labels, native/enhanced pickers, phone dialogs and visible loading feedback. The local audit documents limits on loading-paint, zoom and OS preference evidence; hosted acceptance must record actual observations.
 - Follow the [client walkthrough](DEMO.md) in all layouts. Open authorized PDF/PNG attachments. Confirm save/reply/status results, script controls, notifications, combined search and reset.
 - Use two independent browser profiles: sign both in, change a case and sender in one, and prove the second profile's data/totals are unchanged. Reset one and prove the other remains unchanged. Inspect the distinct session cookies and correct path; never publish their values.
 - Sign out and revisit protected URLs, confirm redirect, then confirm unauthorized attachments cannot be read. Verify no debug exception details are shown.
 - Check remaining file capacity after sandbox provisioning and that rate-limit responses are usable. Sweeping runs on provisioning, not a worker. Do not assume a cron job exists.
 - Confirm Laravel receives the genuine client IP through the host's proxy chain: provisioning and action rate limits depend on it. Do not blindly trust arbitrary forwarded headers. If the host requires trusted-proxy configuration, identify its actual trusted proxies/header contract and treat that configuration and spoofing tests as host-specific work before sharing the demo.
 
-Local automated checks do not replace these remote checks. Use the [verification record](verification/2026-10-17-casefile-verification.md) to record outstanding work honestly.
+Local automated checks do not replace these remote checks. Record the hosted
+date, hostname, current ZIP checksum, capability/privacy/isolation results and
+actual browser observations beside the [CSS audit record](verification/2026-10-18-css-audit.md).
+Keep the listing blocked until acceptance is recorded; no deployment success is claimed here.
 
 ## MySQL fallback decision
 
@@ -112,10 +205,10 @@ PYTHONDONTWRITEBYTECODE=1 CASEFILE_PACKAGE_TEMPLATE=/var/www/demo_stuff/case-man
 
 Missing Composer/npm/PHP or unset isolated paths produce a visible skip, not a pass. The integration build uses prebuilt assets and does not install npm dependencies. Retained release output is not automatically deleted.
 
-## Header correction delivery
+## Historical header correction delivery
 
 The header correction groups layouts and occasional account actions inside Workspace, and System/Light/Dark inside Appearance. Its archive path is `storage/infinityfree/header-20261017/casefile-upload.zip`. Check the [header verification record](verification/2026-10-17-casefile-header-verification.md) for the actual package status, size and SHA-256 before using the archive; the path alone does not establish a passing package. The final build produced `app-CZkSi_rH.css` and `app-CH8RY8l8.js`. Verify the archive contains those matching stylesheet/bundle assets and manifest, the Workspace forms, Appearance trigger and tooltip, and disclosure behavior. The theme controller remains inline in the shared document head.
 
-The source-only [2026-10-18 pointer-dismissal correction](verification/2026-10-18-theme-dismissal-verification.md) is newer than that archive. It requires no asset rebuild, but a newly authorized package build is required to include the updated inline theme controller before deployment. The historical archive and its recorded hash remain unchanged.
+The [2026-10-18 pointer-dismissal correction](verification/2026-10-18-theme-dismissal-verification.md) is newer than that historical archive. The current upgrade ZIP at the top includes the reviewed current inline theme controller and subsequent final06 CSS/focus corrections. The historical archive and its recorded hash remain unchanged.
 
 The isolated browser preview uses the existing development hot file to load Vite source assets. Those browser observations establish source behavior; the verification record separately records production build/archive consistency and any production-serving checks actually performed. Preserve the earlier packages. On the hosted path, recheck phone menu bounds, keyboard dismissal, first paint, persistence, device fallback without JavaScript and Demo reset before accepting delivery. Open case and Board Status and Search Sender menus; supporting browsers should show the enhanced picker, while others retain a native menu. Check the phone case dialog and a long Sender label.

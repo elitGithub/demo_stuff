@@ -3,19 +3,39 @@
 Operator-only deployment to `https://demo-sites.infinityfree.me/travel-agency-demo/`.
 No upload or publication is performed by the local verification workflow.
 
+## Current upgrade ZIP — 2026-10-18
+
+Use `storage/infinityfree/releases/2026-10-18-fixes/elsewhere-upload.zip`.
+The dedicated release folder contains only this ZIP.
+
+| File | Bytes | Files | SHA-256 |
+| --- | ---: | ---: | --- |
+| `elsewhere-upload.zip` | 2,470,258 | 69 | `7cfe4b03241950d08471131b482358503199e068f13a35c40f8507250a4a4121` |
+
+This is an unchanged copy of the reviewed
+`deploy/builds/visitor-sandboxes-release/travel-demo.zip`, including the isolated
+visitor fixes. Static checks confirm archive CRC, safe paths, matching current
+release inputs and exclusion of runtime, databases, tests, diagnostics and secrets.
+It contains only the inner `travel-agency-demo/` directory. No upload or hosted
+acceptance is claimed; the listing remains blocked until the checks below pass.
+
 ## Prepare and preserve
 
 Require PHP 8.4, PDO SQLite, private writable storage, same-directory atomic
 replacement and advisory locks shared across concurrent PHP requests. The local
 Apache result does not prove InfinityFree supplies these capabilities.
 
-Back up the existing Elsewhere files privately. Preserve all legacy databases,
-sessions, `private/runtime/`, and the private directory's Apache denial. The new
+Keep a private backup of the existing installation before the upgrade. If a
+consistent point-in-time runtime backup is required, quiesce requests and wait
+for admitted work to finish before taking it.
+Preserve all legacy databases, sessions, `private/runtime/`, and the private
+directory's Apache denial. The new
 runtime is `private/runtime/sandbox-runtime/`; it never reads or reseeds a legacy
 shared database. Do not change the root hub, root `.htaccess`, `/studio/` or any
 other demo. The package includes only `travel-agency-demo/`.
 
-Build from the reviewed source with Node 24 and Python 3:
+For this upgrade use the ZIP above; no local rebuild is needed. A future,
+separately reviewed release can be built from source with Node 24 and Python 3:
 
 ```bash
 node --disable-warning=ExperimentalWarning bin/package-infinityfree.mjs --output deploy/builds/visitor-sandboxes-release
@@ -60,21 +80,42 @@ writes bounded known marker files only in `private/runtime/preflight-v1/`.
 `finish` removes `marker.tmp` and `marker.json`; it retains the empty persistent
 `fixture.lock` inode to prevent lock replacement races. It never deletes unknown
 files or touches `sandbox-runtime/`. After concurrent checks finish, the operator
-removes the diagnostic, secret, and its known diagnostic fixture/lock directory.
-Confirm public diagnostic access is gone. Removal remains an operator action.
+completes the idle `finish` action, requiring HTTP 200 with `finished: true`,
+then removes the diagnostic, secret, and its known diagnostic fixture/lock
+directory. Confirm public diagnostic access is gone before maintenance and
+replacement. This is the single cleanup point; do not call the removed endpoint
+during final acceptance. Removal remains an operator action.
 
 If any capability or private-file denial fails, keep public mutations disabled
 and do not publish the listing.
 
 ## Replace the release
 
-Temporarily disable public enquiry and dashboard mutations during replacement.
-Upload/extract the complete reviewed API, helpers, canonical inputs, HTML and
-versioned assets together. Preserve private runtime/legacy files while replacing
-release files. `private/config.php` pins the exact external origin and subsite
-cookie path; do not infer HTTPS or identity from forwarded client headers.
-Keep the private `.htaccess` active throughout. No SSH, Artisan, worker, migration
-or application database access is needed.
+This procedure upgrades the existing hosted subsite using InfinityFree File
+Manager's archive extraction. Select the target domain's actual `htdocs`; an
+account with multiple domains can have more than one.
+
+1. Confirm the ZIP filename, byte size and SHA-256 above. Keep the private backup
+   described above. Complete outstanding protected capability checks and their
+   diagnostic removal separately before using the release.
+2. Upload `elsewhere-upload.zip` into that `htdocs` and extract it there,
+   enabling overwrite of matching files and merging existing directories. Its
+   inner `travel-agency-demo/` must map to `htdocs/travel-agency-demo/` without a
+   second nested directory. Dotfiles, including both guards, are in the ZIP.
+3. Keep all existing folders and remote-only files. The archive contains no
+   runtime tree, live database, session or credential files, so no skip list,
+   folder deletion or cache clearing is needed. Wait for successful extraction,
+   then complete the hosted acceptance sequence below.
+
+Extraction updates multiple files and is not atomic; use a quiet maintenance
+window and avoid submitting changes while it runs. Normal merging extraction
+preserves existing runtime and legacy state in the local overlay test. Actual
+hosted extraction and acceptance remain operator checks; keep the listing
+blocked if they fail.
+
+`private/config.php` pins the exact external origin and subsite cookie path; do
+not infer HTTPS or identity from forwarded client headers. No SSH, Artisan,
+worker, migration or application database access is needed for transfer.
 
 Protocol 1 uses new `elsewhere_sandbox_v1` and `elsewhere_dashboard_v1` HttpOnly,
 SameSite=Strict cookies scoped to `/travel-agency-demo/`, Secure on configured
@@ -106,7 +147,9 @@ checksum, capability results and actual browser observations in
 5. Check error/retry behavior and normal capacity without deliberately exhausting
    the public shared account. Default caps are 100 slots, 100 enquiries per slot,
    1 MiB per database and 128 MiB managed storage; physical cleanup is opportunistic.
-6. Run `finish`, remove diagnostic/secret fixtures, then repeat public-file denial.
+6. Confirm the earlier diagnostic/secret/fixture cleanup remains complete and
+   public diagnostic access is absent or denied (403/404). Repeat private-file
+   denial checks; do not call the removed `finish` endpoint again.
 
 This host has no workers; cleanup occurs on later API requests that reach the
 serialized runtime, including requests subsequently rejected. Only admitted

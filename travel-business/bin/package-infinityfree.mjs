@@ -10,11 +10,29 @@ const value = (flag, fallback) => { const index = args.indexOf(flag); return ind
 const output = resolve(value('--output', join(root, 'deploy', 'builds', 'visitor-sandboxes')));
 const origin = value('--origin', 'https://demo-sites.infinityfree.me');
 const basePath = '/travel-agency-demo';
+const publicFiles = new Set(['index.html', 'destinations.html', 'journeys.html', 'about.html', 'journal.html', 'contact.html', 'admin.html', 'robots.txt', 'assets']);
+
+/** @param {string} directory @param {boolean} topLevel @returns {Promise<void>} */
+async function verifyPublicBuild(directory, topLevel = true) {
+  for (const entry of await readdir(directory, { withFileTypes: true })) {
+    const path = join(directory, entry.name);
+    if (entry.isSymbolicLink() || (topLevel && !publicFiles.has(entry.name)) || /^(?:private|runtime|sandbox-runtime|tests?|test-runs|registry(?:\..*)?|preflight(?:[-.].*)?)$/i.test(entry.name) || /\.(?:sqlite|sqlite3|db)(?:[-.].*)?$|(?:^|\.)journal$|(?:^|\.)env(?:\..*)?$/i.test(entry.name)) {
+      throw new Error(`Unexpected public build artifact: ${path}`);
+    }
+    if (entry.isDirectory()) {
+      await verifyPublicBuild(path, false);
+    } else if (!entry.isFile() || (topLevel && entry.name === 'assets')) {
+      throw new Error(`Unexpected public build artifact: ${path}`);
+    }
+  }
+}
+
 if (new URL(origin).origin !== origin) throw new Error('Origin must be a complete HTTP(S) origin without a trailing slash.');
 if (!/^https?:/.test(origin)) throw new Error('Unsupported origin.');
 try { if ((await readdir(output)).length) throw new Error('Output directory must be new or empty.'); } catch (error) { if (error.code !== 'ENOENT') throw error; }
 const build = spawnSync(process.execPath, [join(root, 'build.mjs')], { cwd: root, stdio: 'inherit' });
 if (build.status !== 0) throw new Error('Site build failed.');
+await verifyPublicBuild(join(root, 'public'));
 const site = join(output, 'htdocs', basePath);
 const privateDir = join(site, 'private');
 await mkdir(privateDir, { recursive: true });

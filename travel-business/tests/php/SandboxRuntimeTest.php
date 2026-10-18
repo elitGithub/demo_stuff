@@ -101,6 +101,84 @@ final class SandboxRuntimeTest
     }
 
     /** @return void */
+    public function loginRotationRejectsOldAuthorization(): void
+    {
+        $runtime = $this->runtime('login-rotation');
+        $original = $this->login($runtime, $this->visitor($runtime));
+        $this->clock++;
+        $current = $this->login($runtime, $original);
+        $this->check($current->dashboardToken !== $original->dashboardToken, 'authorized login rotates dashboard token');
+        $digest = hash('sha256', $current->sandboxToken);
+        $path = $runtime->registry->root.'/'.$digest.'/demo.sqlite';
+        $databaseBefore = file_get_contents($path);
+        $registryBefore = file_get_contents($runtime->registry->root.'/registry.json');
+        $leaseBefore = $this->registry($runtime)->sandboxes[$digest]->lastActivity;
+        $this->clock += 10;
+        $error = $this->failure(fn () => $runtime->execute(SandboxOperation::UpdateStatus, $original, new StatusChange(id: 1, status: EnquiryStatus::Contacted)), ErrorCode::DashboardAccess);
+        $this->check($error->cookies === [] && $this->registry($runtime)->sandboxes[$digest]->lastActivity === $leaseBefore, 'superseded dashboard token cannot renew lease or cookies');
+        $this->check(file_get_contents($path) === $databaseBefore && file_get_contents($runtime->registry->root.'/registry.json') === $registryBefore, 'superseded dashboard token cannot mutate registry or database');
+        $overview = $runtime->execute(SandboxOperation::Overview, $current)->payload;
+        $this->check($overview->enquiries[3]->status === EnquiryStatus::New, 'current rotated token retains access and original record status');
+    }
+
+    /** @return void */
+    public function exactRateWindowBoundary(): void
+    {
+        $runtime = $this->runtime('rate-boundary', $this->config(['allocationLimit' => 1, 'loginLimit' => 1, 'enquiryLimit' => 1]));
+        $startedAt = $this->clock;
+        $identity = $this->login($runtime, $this->visitor($runtime));
+        $runtime->execute(SandboxOperation::CreateEnquiry, $identity, $this->input());
+        $digest = hash('sha256', $identity->sandboxToken);
+        $path = $runtime->registry->root.'/'.$digest.'/demo.sqlite';
+        $databaseBefore = file_get_contents($path);
+        $registryBefore = file_get_contents($runtime->registry->root.'/registry.json');
+        $this->clock = $startedAt + $runtime->config->rateWindowSeconds - 1;
+        $actions = [
+            fn () => $runtime->execute(SandboxOperation::Bootstrap, new RequestIdentity(remoteAddress: $identity->remoteAddress)),
+            fn () => $runtime->execute(SandboxOperation::Login, $identity),
+            fn () => $runtime->execute(SandboxOperation::CreateEnquiry, $identity, $this->input()),
+        ];
+        foreach ($actions as $action) {
+            $error = $this->failure($action, ErrorCode::RateLimited);
+            $this->check($error->retryAfter === 1 && $error->cookies === [], 'rate action denied one second before exact rollover');
+        }
+        $this->check(file_get_contents($path) === $databaseBefore && file_get_contents($runtime->registry->root.'/registry.json') === $registryBefore, 'rate-window denials preserve lease, buckets and database');
+        $this->clock++;
+        $this->visitor($runtime);
+        $identity = $this->login($runtime, $identity);
+        $created = $runtime->execute(SandboxOperation::CreateEnquiry, $identity, $this->input())->payload;
+        $this->check($created->id === 6, 'enquiry admitted exactly at rate-window expiry');
+        $registry = $this->registry($runtime);
+        $this->check(count($registry->rateBuckets) === 3, 'exact rollover preserves separate action buckets');
+        foreach ($registry->rateBuckets as $bucket) {
+            $this->check($bucket->hits === 1 && $bucket->expiresAt === $startedAt + 2 * $runtime->config->rateWindowSeconds, 'new fixed rate window starts with exactly one hit');
+        }
+    }
+
+    /** @return void */
+    public function expiredTargetOutsideCleanupBatch(): void
+    {
+        $runtime = $this->runtime('expiry-beyond-cleanup');
+        $visitors = [];
+        for ($index = 0; $index < 12; $index++) { $visitors[] = $this->login($runtime, $this->visitor($runtime, '192.0.2.'.($index + 1))); }
+        $target = $visitors[11];
+        $digest = hash('sha256', $target->sandboxToken);
+        $path = $runtime->registry->root.'/'.$digest.'/demo.sqlite';
+        $targetBefore = $this->registry($runtime)->sandboxes[$digest];
+        $databaseBefore = file_get_contents($path);
+        $this->clock += $runtime->config->idleSeconds - 1;
+        $live = $this->login($runtime, $this->visitor($runtime, '192.0.2.13'));
+        $livePath = $runtime->registry->root.'/'.hash('sha256', $live->sandboxToken).'/demo.sqlite';
+        $liveBefore = file_get_contents($livePath);
+        $this->clock++;
+        $error = $this->failure(fn () => $runtime->execute(SandboxOperation::UpdateStatus, $target, new StatusChange(id: 1, status: EnquiryStatus::Contacted)), ErrorCode::SandboxContext);
+        $registry = $this->registry($runtime);
+        $this->check(count($registry->sandboxes) === 3 && isset($registry->sandboxes[$digest]) && is_file($path), 'expired target remains physically present beyond ten-item cleanup batch');
+        $this->check($registry->sandboxes[$digest] == $targetBefore && $error->cookies === [], 'expired undeleted target cannot renew lease or authorization');
+        $this->check(file_get_contents($path) === $databaseBefore && file_get_contents($livePath) === $liveBefore, 'expired target request mutates neither expired nor live database');
+    }
+
+    /** @return void */
     public function expiry(): void
     {
         $runtime = $this->runtime('expiry');
@@ -334,6 +412,6 @@ final class SandboxRuntimeTest
 
 $tests = new SandboxRuntimeTest();
 try {
-    foreach (['lifecycle', 'expiry', 'limits', 'cleanup', 'storage', 'unsafe', 'validation', 'crashPhases', 'storeBoundaries'] as $method) { $tests->$method(); echo 'PASS '.$method.PHP_EOL; }
+    foreach (['lifecycle', 'loginRotationRejectsOldAuthorization', 'exactRateWindowBoundary', 'expiredTargetOutsideCleanupBatch', 'expiry', 'limits', 'cleanup', 'storage', 'unsafe', 'validation', 'crashPhases', 'storeBoundaries'] as $method) { $tests->$method(); echo 'PASS '.$method.PHP_EOL; }
     echo $tests->assertions.' PHP runtime assertions passed.'.PHP_EOL;
 } finally { $tests->removeFixture($tests->workspace); }

@@ -167,7 +167,7 @@ test('SQLite retains enquiries and status changes across reopening without dupli
 });
 
 test('public JavaScript and CSS are self-hosted with no third-party runtime requests', async () => {
-  for (const path of ['assets/app.js', 'assets/admin.js', 'assets/styles.css']) {
+  for (const path of ['assets/sandbox.js', 'assets/dashboard-pagination.js', 'assets/app.js', 'assets/admin.js', 'assets/styles.css']) {
     const source = await readFile(join(root, path), 'utf8');
     assert.doesNotMatch(source, /https?:\/\//);
   }

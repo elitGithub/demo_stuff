@@ -20,8 +20,9 @@ npm start
 - Use `npm run dev` to build and start the Node watcher. After editing templates,
   styles or browser scripts, run `npm run build` and refresh the page.
 
-The initial database is created automatically with four fictional enquiries and
-three sample bookings. Subsequent restarts preserve records and never reseed them.
+Opening Contact or the dashboard creates a private browser sandbox with four
+fictional enquiries and three sample bookings. Ordinary public pages allocate
+nothing. Each sandbox has its own SQLite file; restarts preserve valid sandboxes.
 
 ## A suggested client walkthrough
 
@@ -57,8 +58,12 @@ reduced-motion support, local photographs/fonts and page metadata are included.
 - `src/data.mjs` contains the destination, itinerary and journal content.
 - `assets/` contains CSS, browser scripts, photographs, fonts and favicon.
 - `server.mjs` serves only `public/` and exposes the enquiry/dashboard JSON APIs.
-- `src/store.mjs` validates inputs and persists records with SQLite prepared statements.
-- `storage/demo.sqlite` is created at runtime and excluded from Git.
+- `src/store.mjs` exposes an explicit visitor store; `src/sandbox/` owns identity,
+  serialized lifecycle operations, reservations and cleanup.
+- `config/sandbox.json`, `src/schema.sql`, `src/demo-seed.json` and
+  `config/enquiry-budgets.json` are canonical shared Node/PHP inputs.
+- `storage/sandbox-runtime/` contains private runtime state and is excluded from Git.
+  Legacy `storage/demo.sqlite` is unused and must be preserved.
 - `public/` is generated and excluded from Git. Run the build on a fresh checkout.
 
 ### Configuration
@@ -67,13 +72,35 @@ reduced-motion support, local photographs/fonts and page metadata are included.
 | --- | --- | --- |
 | `PORT` | `8089` | HTTP port |
 | `HOST` | `127.0.0.1` | Bind address; use `0.0.0.0` only when intentionally sharing |
-| `DB_PATH` | `storage/demo.sqlite` | SQLite path; parent directory is created automatically |
-| `PUBLIC_ORIGIN` | request's HTTP origin | Exact external origin when using an HTTPS reverse proxy |
+| `SANDBOX_ROOT` | `storage/sandbox-runtime` | Dedicated private runtime directory, never a shared legacy database |
+| `SANDBOX_CONFIG_FILE` | canonical defaults | Optional JSON file of validated sandbox-limit overrides |
+| `PUBLIC_ORIGIN` | bound loopback origin | Exact external HTTP(S) origin, required beyond loopback; no trailing slash |
 
 For external hosting, use a host that supports a persistent Node 24 process and
 writable persistent storage. Configure HTTPS at the reverse proxy and set
 `PUBLIC_ORIGIN=https://your-demo-domain.example` (without a trailing slash).
 Static-only hosting can display the pages but cannot save enquiries or run the dashboard.
+
+Run exactly one Node process per runtime root. Its queue is process-local; Node
+cluster or multiple replicas sharing a root are unsupported. PHP instead uses a
+persistent lock inode across requests. Never expose either runtime directory.
+
+Canonical limits are 100 allocated slots (pending/failed slots count), 100
+enquiries per sandbox including the four seeds, 20 rows per dashboard page,
+1 MiB per SQLite main file and 128 MiB total managed storage. Registry, journal
+and staging reserves are 2 MiB each. Cleanup considers at most ten expired slots
+per API request that reaches the serialized runtime, including requests subsequently
+rejected; failed deletion stays charged. Rate limits per server-seen
+IP are ten allocations, 50 enquiries and 50 dashboard entries per one-hour window,
+with at most 1,000 buckets. Forwarding headers do not change that identity.
+The runtime waits at most two seconds for a lock, retrying every 25 ms.
+
+The API returns typed `code` values. `sandbox_context` requires an explicit fresh
+demo action, then a separate submit or dashboard entry; mutations are never
+replayed automatically. `dashboard_access` requires dashboard entry.
+`capacity`, `busy` and `rate_limited` include bounded retry guidance through
+`Retry-After`; `sandbox_full` means the record or database limit was reached.
+`unavailable` reports private storage failures without exposing paths or credentials.
 
 ### InfinityFree deployment
 
@@ -86,23 +113,27 @@ The hosted version uses the same static frontend with a PHP/SQLite API:
 Create a fresh deployment package with Node 24 and Python 3:
 
 ```bash
-node --disable-warning=ExperimentalWarning bin/package-infinityfree.mjs --output storage/travel-demo
+node --disable-warning=ExperimentalWarning bin/package-infinityfree.mjs --output deploy/builds/visitor-sandboxes-release
 ```
 
-The output directory must be empty or new. Upload and extract `travel-demo.zip`
-inside the hosting account's `/htdocs`. It contains the root `index.html` and
-`travel-agency-demo/` only; it does not modify the existing `/studio/` demo or
-root `.htaccess`. The included root index links to both demos.
+The output directory must be empty or new. `travel-demo.zip` contains only
+`travel-agency-demo/`; it excludes databases, runtime state, tests, diagnostic
+scripts and diagnostic secrets. It never replaces the root hub, root `.htaccess`
+or another demo. Building uses canonical JSON/SQL inputs without opening a database.
 
-The PHP API creates a fresh seeded SQLite database and session files under
-`travel-agency-demo/private/runtime/`. Apache rules deny public access to all
-of `private/`. Never remove that directory or its protection during updates.
-Runtime data is excluded from packages, so uploading updated files preserves
-saved enquiries. PHP requires PDO SQLite and write access to `private/`.
+The PHP API creates private visitor files under
+`travel-agency-demo/private/runtime/sandbox-runtime/`. Apache rules deny all of
+`private/`. Preserve its protection, old databases and session files during
+updates. Old shared data is never migrated into visitor sandboxes.
+PHP 8.4 requires PDO SQLite, private writes, atomic replacement and cross-request
+advisory locking, verified on the actual host for each deployment.
 
 The API adapter, Apache rules and root index source live in `deploy/infinityfree/`.
 For a different domain, pass `--origin https://your-domain.example` to the
 packager; the subsite path remains `/travel-agency-demo/`.
+Follow [the deployment guide](deploy/infinityfree/DEPLOY.md) for the protected
+operator preflight, complete-release replacement and hosted acceptance gates.
+The public listing stays blocked until hosted acceptance evidence is recorded.
 
 ## Demo boundaries
 
@@ -111,14 +142,21 @@ are demonstration content. The site does not send email, take payments, reserve
 inventory, confirm travel arrangements or verify live availability.
 
 The dashboard deliberately offers public demo access. **Use fictional data only.**
-Anyone using the demo login can view and update saved enquiries. It is not a
-production customer portal. Do not put real customer data in this database.
+Records are private to one browser cookie context. Tabs in that context share
+edits; separate browser profiles/private contexts receive separate sandboxes.
+There is no cross-device recovery. Leaving the dashboard revokes dashboard access
+but retains edits until expiry. Clearing cookies loses access; possession of a
+visitor's bearer cookies grants that visitor's access. This is not a production
+customer portal. Do not enter real customer data.
 For production, replace demo access with individual authenticated staff accounts,
 define access/retention rules, and connect the desired mail or booking service.
 
 The demo uses HttpOnly SameSite session cookies, same-origin API checks, bounded
 JSON requests, server-side validation, rate limits, prepared statements and a
-Content Security Policy. Sessions expire after four hours and on server restart.
+Content Security Policy. Access expires strictly at four idle hours; admitted
+operations renew the deadline. Rejected admission does not. Physical deletion is
+opportunistic on later API requests that reach the serialized runtime, including
+requests subsequently rejected, so expiry is not an exact deletion promise.
 There is no analytics or external runtime request. Demo pages are marked noindex;
 replace that setting and add the real canonical URL/sitemap when launching a real brand.
 
@@ -129,12 +167,16 @@ npm test
 python3 tests/infinityfree.py
 ```
 
-The tests use a temporary database and a separate random local port. They cover
+The tests use only generated fixtures under `storage/test-runs/` and random
+loopback ports, then remove their own fixtures. They cover
 page/link/asset delivery, private-file protection, session access, cross-origin
 requests, input validation, persistent enquiry creation, status changes,
 single-use booking conversion and logout. They do not modify the demo database.
-The hosting test requires local Apache/PHP with PDO SQLite and validates the actual
-ZIP under a temporary Apache server, including nested URLs and private-file denial.
+The hosting test requires local Apache/PHP with PDO SQLite and validates a generated
+ZIP under temporary Apache workers, including nested URLs, private-file denial,
+concurrency and the separately copied protected preflight. Local verification
+does not establish hosted behavior. Actual results and pending acceptance work
+are in [the verification record](docs/verification/2026-10-18-visitor-sandboxes.md).
 
 ## Asset credits
 

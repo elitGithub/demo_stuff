@@ -7,6 +7,7 @@ import json
 import os
 from pathlib import Path
 import select
+import secrets
 import signal
 import socket
 import subprocess
@@ -177,11 +178,53 @@ DocumentRoot "{web}"
                     raise AssertionError((temp / 'error.log').read_text() if (temp / 'error.log').exists() else (temp / 'process.log').read_text())
                 time.sleep(.1)
         check(public.request('/')[1] == b'ROOT HUB SENTINEL', 'root hub remains byte-identical')
+        diagnostic = '/travel-agency-demo/preflight.php'
+        (web / 'travel-agency-demo/preflight.php').write_bytes(b"<?php ini_set('display_errors', '1'); ?>" + (ROOT / 'deploy/infinityfree/preflight.php').read_bytes())
+        fixture = private / 'runtime/preflight-v1'
+        token = secrets.token_hex(32)
+        authorization = {'X-Elsewhere-Preflight': token}
+        check(public.request(diagnostic, {'action': 'check'}, headers=authorization)[0] == 403 and not fixture.exists(), 'preflight missing secret fails before fixture work')
+        secret_file = private / 'preflight-secret.php'
+        secret_file.write_text('<?php return ' + php_string(hashlib.sha256(token.encode()).hexdigest()) + ';\n')
+        for headers in [{}, {'X-Elsewhere-Preflight': '0' * 64}]:
+            check(public.request(diagnostic, {'action': 'check'}, headers=headers)[0] == 403 and not fixture.exists(), 'preflight missing or wrong token performs no fixture work')
+        check(public.request('/travel-agency-demo/private/preflight-secret.php')[0] == 403, 'preflight secret protected by Apache')
+        rejected = public.request(diagnostic, method='GET', headers=authorization)
+        check(rejected[0] == 405 and rejected[2].get('Allow') == 'POST' and not fixture.exists(), 'preflight accepts only authorized POST')
+        for body, expected, extra in [(b'[]', 400, {}), (b'{', 400, {}), ({'action': 'unknown'}, 400, {}), ({'action': 'check', 'extra': True}, 400, {}), (b' ' * 1025, 413, {}), ({'action': 'check'}, 415, {'Content-Type': 'text/plain'})]:
+            check(public.request(diagnostic, body, headers={**authorization, **extra})[0] == expected and not fixture.exists(), 'preflight rejects invalid input before fixture work')
+        checked = public.request(diagnostic, {'action': 'check'}, headers=authorization)
+        check(checked[0] == 200 and json.loads(checked[1]) == {'acquired': True, 'pdoSqlite': True, 'privateWritable': True, 'atomicReplace': True} and checked[2].get('Cache-Control') == 'no-store', 'preflight reports actual SQLite capability and atomic marker verification')
+        previous_marker = (fixture / 'marker.json').read_bytes()
+        check(public.request(diagnostic, {'action': 'check'}, headers=authorization)[0] == 200 and (fixture / 'marker.json').read_bytes() != previous_marker and not (fixture / 'marker.tmp').exists(), 'preflight atomically replaces an existing bounded marker')
+        fixture.chmod(0o500)
+        try:
+            failed_preflight = public.request(diagnostic, {'action': 'check'}, headers=authorization)
+            check(failed_preflight[0] == 503 and json.loads(failed_preflight[1]) == {'error': 'Preflight fixture unavailable.'} and str(temp).encode() not in failed_preflight[1], 'preflight storage failure stays generic even with host display_errors enabled')
+        finally:
+            fixture.chmod(0o700)
+        with concurrent.futures.ThreadPoolExecutor(max_workers=1) as pool:
+            started = time.monotonic()
+            hold = pool.submit(lambda: Client(origin).request(diagnostic, {'action': 'hold'}, headers=authorization))
+            for attempt in range(30):
+                probe = public.request(diagnostic, {'action': 'probe'}, headers=authorization)
+                if json.loads(probe[1]).get('acquired') is False:
+                    break
+                time.sleep(.02)
+            check(probe[0] == 200 and json.loads(probe[1]) == {'acquired': False}, 'concurrent Apache request cannot acquire held preflight lock')
+            check(public.request(diagnostic, {'action': 'finish'}, headers=authorization)[0] == 409 and (fixture / 'marker.json').exists(), 'preflight finish never removes fixtures while lock held')
+            held = hold.result(timeout=6)
+            check(held[0] == 200 and json.loads(held[1]) == {'acquired': True, 'heldMilliseconds': 3000} and 2.8 <= time.monotonic() - started < 5, 'preflight lock hold bounded to three seconds')
+        check(json.loads(public.request(diagnostic, {'action': 'probe'}, headers=authorization)[1]) == {'acquired': True}, 'later Apache request acquires released preflight lock')
+        sentinel = fixture / 'unrelated-sentinel'
+        sentinel.write_text('DO NOT REMOVE')
+        check(json.loads(public.request(diagnostic, {'action': 'finish'}, headers=authorization)[1]) == {'acquired': True, 'finished': True} and not (fixture / 'marker.json').exists() and sentinel.read_text() == 'DO NOT REMOVE' and (fixture / 'fixture.lock').is_file(), 'finish removes only known marker files and retains persistent lock inode')
+        check(not runtime_root.exists() and (legacy / 'demo.sqlite').read_bytes() == b'LEGACY SQLITE SENTINEL', 'standalone preflight never initializes app runtime or opens legacy database')
         for page in ['', 'destinations.html', 'journeys.html', 'about.html', 'journal.html', 'contact.html', 'admin.html']:
             status, raw, headers = public.request('/travel-agency-demo/' + page)
             check(status == 200 and b'name="api-endpoint" content="api.php"' in raw, 'nested endpoint: ' + (page or 'home'))
             check("script-src 'self'" in headers.get('Content-Security-Policy', ''), 'CSP: ' + (page or 'home'))
-        for path in ['assets/styles.css', 'assets/app.js', 'assets/admin.js', 'assets/fonts/dm-serif.ttf', 'assets/images/hero-lake.jpg']:
+        for path in ['assets/styles.css', 'assets/sandbox.js', 'assets/dashboard-pagination.js', 'assets/app.js', 'assets/admin.js', 'assets/fonts/dm-serif.ttf', 'assets/images/hero-lake.jpg']:
             check(public.request('/travel-agency-demo/' + path)[0] == 200, 'asset: ' + path)
         for path in ['private/', 'private/config.php', 'private/demo-seed.json', 'private/sandbox.json', 'private/schema.sql', 'private/api.php', 'private/classes/SandboxRuntime.php', 'private/runtime/demo.sqlite', '.htaccess']:
             check(public.request('/travel-agency-demo/' + path)[0] == 403, 'private denial: ' + path)

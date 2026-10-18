@@ -126,27 +126,31 @@
     const retry = document.getElementById('sandbox-retry');
     const restart = document.getElementById('sandbox-restart');
     let ready = false;
-    async function initialize() {
+    async function initialize(recovery = false) {
       ready = false; submit.disabled = true; retry.hidden = true; restart.hidden = true;
       sandboxStatus.textContent = 'Preparing your private demo…';
       try {
         const bootstrap = await client.initialize();
         ready = true;
+        error.hidden = true; error.textContent = '';
         sandboxStatus.textContent = bootstrap.created ? 'A fresh demo is ready with sample data.' : 'Your private demo is ready. Your edits are still here.';
+        if (recovery) { submit.disabled = false; submit.focus(); }
       } catch (failure) {
         if (failure.name === 'AbortError') { return; }
         sandboxStatus.textContent = failure.message;
         retry.hidden = false;
+        retry.focus();
       } finally { submit.disabled = !ready; }
     }
-    retry.addEventListener('click', initialize);
-    restart.addEventListener('click', initialize);
+    retry.addEventListener('click', () => initialize(true));
+    restart.addEventListener('click', () => initialize(true));
     initialize();
     form.addEventListener('submit', async event => {
       event.preventDefault();
       if (!ready || submit.disabled || !form.reportValidity()) return;
       error.hidden = true;
       submit.disabled = true;
+      restart.disabled = true; retry.disabled = true;
       submit.textContent = 'Saving your demo enquiry…';
       const data = Object.fromEntries(new FormData(form));
       data.travelers = Number(data.travelers);
@@ -165,12 +169,14 @@
           ready = false;
           sandboxStatus.textContent = 'Your demo session ended or changed. Start a fresh demo to continue.';
           restart.hidden = false;
+          restart.disabled = false;
           restart.focus();
         }
         error.textContent = failure instanceof TypeError ? 'The demo server is unavailable. Please try again in a moment.' : failure.message;
         error.hidden = false;
       } finally {
         submit.disabled = !ready;
+        restart.disabled = false; retry.disabled = false;
         submit.innerHTML = originalLabel;
       }
     });

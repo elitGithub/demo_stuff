@@ -31,14 +31,14 @@ final class SandboxRuntimeTest
     /** @param SandboxRuntime $runtime @param string $address @return RequestIdentity */
     public function visitor(SandboxRuntime $runtime, string $address = '127.0.0.1'): RequestIdentity
     {
-        $bootstrap = $runtime->execute(SandboxOperation::Bootstrap, new RequestIdentity(remoteAddress: $address));
+        $bootstrap = $runtime->execute(SandboxOperation::BOOTSTRAP, new RequestIdentity(remoteAddress: $address));
         $this->check($bootstrap->payload->created && $bootstrap->payload->protocolVersion === 1 && $bootstrap->payload->pageSize === 20 && $bootstrap->payload->idleSeconds === $runtime->config->idleSeconds, 'bootstrap protocol');
         return new RequestIdentity(remoteAddress: $address, sandboxToken: $bootstrap->cookies[0]->value, contextToken: $bootstrap->payload->csrfToken);
     }
     /** @param SandboxRuntime $runtime @param RequestIdentity $identity @return RequestIdentity */
     public function login(SandboxRuntime $runtime, RequestIdentity $identity): RequestIdentity
     {
-        $result = $runtime->execute(SandboxOperation::Login, $identity);
+        $result = $runtime->execute(SandboxOperation::LOGIN, $identity);
         return new RequestIdentity(remoteAddress: $identity->remoteAddress, sandboxToken: $identity->sandboxToken, dashboardToken: $result->cookies[1]->value, contextToken: $identity->contextToken);
     }
     /** @param string $message @return EnquiryInput */
@@ -70,33 +70,33 @@ final class SandboxRuntimeTest
         $runtime = $this->runtime('lifecycle');
         $first = $this->login($runtime, $this->visitor($runtime));
         $second = $this->login($runtime, $this->visitor($runtime, '127.0.0.2'));
-        $initial = $runtime->execute(SandboxOperation::Overview, $first)->payload;
+        $initial = $runtime->execute(SandboxOperation::OVERVIEW, $first)->payload;
         $encoded = json_decode(json_encode($initial, JSON_THROW_ON_ERROR), flags: JSON_THROW_ON_ERROR);
         $this->check(count($encoded->enquiries) === 4 && count($encoded->bookings) === 3 && is_int($encoded->enquiries[0]->id) && is_int($encoded->bookings[0]->value), 'seed counts and JSON types');
         $this->check($encoded->enquiries[3]->departure === gmdate('Y-m-d', $this->clock + 75 * 86400), 'relative seed date');
         $this->check($encoded->bookings[0]->enquiryId === null && !isset($encoded->catalog->journeys[0]->price) && !isset($encoded->catalog->budgets), 'wire field parity');
-        $created = $runtime->execute(SandboxOperation::CreateEnquiry, $first, $this->input())->payload;
+        $created = $runtime->execute(SandboxOperation::CREATE_ENQUIRY, $first, $this->input())->payload;
         $this->check($created->id === 5 && preg_match('/^EW-[A-F0-9]{8}$/D', $created->reference) === 1, 'created record wire contract');
-        $this->check(count($runtime->execute(SandboxOperation::Overview, $second)->payload->enquiries) === 4, 'two contexts isolated');
-        $runtime->execute(SandboxOperation::UpdateStatus, $first, new StatusChange(id: 5, status: EnquiryStatus::Contacted));
-        $runtime->execute(SandboxOperation::CreateBooking, $first, new EnquiryId(id: 5));
+        $this->check(count($runtime->execute(SandboxOperation::OVERVIEW, $second)->payload->enquiries) === 4, 'two contexts isolated');
+        $runtime->execute(SandboxOperation::UPDATE_STATUS, $first, new StatusChange(id: 5, status: EnquiryStatus::Contacted));
+        $runtime->execute(SandboxOperation::CREATE_BOOKING, $first, new EnquiryId(id: 5));
         $this->clock += 10;
-        $conflict = $this->failure(fn () => $runtime->execute(SandboxOperation::CreateBooking, $first, new EnquiryId(id: 5)), ErrorCode::Conflict);
+        $conflict = $this->failure(fn () => $runtime->execute(SandboxOperation::CREATE_BOOKING, $first, new EnquiryId(id: 5)), ErrorCode::Conflict);
         $this->check(count($conflict->cookies) === 2 && $this->registry($runtime)->sandboxes[hash('sha256', $first->sandboxToken)]->lastActivity === $this->clock, 'admitted business error renews cookie and lease');
-        $this->failure(fn () => $runtime->execute(SandboxOperation::UpdateStatus, $first, new StatusChange(id: 5, status: EnquiryStatus::New)), ErrorCode::Conflict);
-        $this->failure(fn () => $runtime->execute(SandboxOperation::CreateBooking, $first, new EnquiryId(id: 999)), ErrorCode::NotFound);
-        $logout = $runtime->execute(SandboxOperation::Logout, $first);
+        $this->failure(fn () => $runtime->execute(SandboxOperation::UPDATE_STATUS, $first, new StatusChange(id: 5, status: EnquiryStatus::New)), ErrorCode::Conflict);
+        $this->failure(fn () => $runtime->execute(SandboxOperation::CREATE_BOOKING, $first, new EnquiryId(id: 999)), ErrorCode::NotFound);
+        $logout = $runtime->execute(SandboxOperation::LOGOUT, $first);
         $this->check($logout->cookies[1]->maxAge === 0 && $logout->cookies[1]->name === $runtime->config->dashboardCookie, 'logout clears dashboard only');
-        $this->failure(fn () => $runtime->execute(SandboxOperation::Overview, $first), ErrorCode::DashboardAccess);
+        $this->failure(fn () => $runtime->execute(SandboxOperation::OVERVIEW, $first), ErrorCode::DashboardAccess);
         $restarted = $this->runtime('lifecycle');
         $first = $this->login($restarted, $first);
-        $this->check(count($restarted->execute(SandboxOperation::Overview, $first)->payload->enquiries) === 5, 'restart/logout retain records');
+        $this->check(count($restarted->execute(SandboxOperation::OVERVIEW, $first)->payload->enquiries) === 5, 'restart/logout retain records');
         $forged = new RequestIdentity(remoteAddress: '127.0.0.1', sandboxToken: $second->sandboxToken, dashboardToken: $first->dashboardToken, contextToken: $second->contextToken);
-        $this->failure(fn () => $runtime->execute(SandboxOperation::Overview, $forged), ErrorCode::DashboardAccess);
+        $this->failure(fn () => $runtime->execute(SandboxOperation::OVERVIEW, $forged), ErrorCode::DashboardAccess);
         $stale = new RequestIdentity(remoteAddress: '127.0.0.1', sandboxToken: $second->sandboxToken, dashboardToken: $second->dashboardToken, contextToken: $first->contextToken);
         $before = $this->registry($runtime)->sandboxes[hash('sha256', $second->sandboxToken)]->lastActivity;
         $this->clock += 5;
-        $this->failure(fn () => $runtime->execute(SandboxOperation::Overview, $stale), ErrorCode::SandboxContext);
+        $this->failure(fn () => $runtime->execute(SandboxOperation::OVERVIEW, $stale), ErrorCode::SandboxContext);
         $this->check($this->registry($runtime)->sandboxes[hash('sha256', $second->sandboxToken)]->lastActivity === $before, 'rejected generation does not renew');
     }
 
@@ -114,10 +114,10 @@ final class SandboxRuntimeTest
         $registryBefore = file_get_contents($runtime->registry->root.'/registry.json');
         $leaseBefore = $this->registry($runtime)->sandboxes[$digest]->lastActivity;
         $this->clock += 10;
-        $error = $this->failure(fn () => $runtime->execute(SandboxOperation::UpdateStatus, $original, new StatusChange(id: 1, status: EnquiryStatus::Contacted)), ErrorCode::DashboardAccess);
+        $error = $this->failure(fn () => $runtime->execute(SandboxOperation::UPDATE_STATUS, $original, new StatusChange(id: 1, status: EnquiryStatus::Contacted)), ErrorCode::DashboardAccess);
         $this->check($error->cookies === [] && $this->registry($runtime)->sandboxes[$digest]->lastActivity === $leaseBefore, 'superseded dashboard token cannot renew lease or cookies');
         $this->check(file_get_contents($path) === $databaseBefore && file_get_contents($runtime->registry->root.'/registry.json') === $registryBefore, 'superseded dashboard token cannot mutate registry or database');
-        $overview = $runtime->execute(SandboxOperation::Overview, $current)->payload;
+        $overview = $runtime->execute(SandboxOperation::OVERVIEW, $current)->payload;
         $this->check($overview->enquiries[3]->status === EnquiryStatus::New, 'current rotated token retains access and original record status');
     }
 
@@ -127,16 +127,16 @@ final class SandboxRuntimeTest
         $runtime = $this->runtime('rate-boundary', $this->config(['allocationLimit' => 1, 'loginLimit' => 1, 'enquiryLimit' => 1]));
         $startedAt = $this->clock;
         $identity = $this->login($runtime, $this->visitor($runtime));
-        $runtime->execute(SandboxOperation::CreateEnquiry, $identity, $this->input());
+        $runtime->execute(SandboxOperation::CREATE_ENQUIRY, $identity, $this->input());
         $digest = hash('sha256', $identity->sandboxToken);
         $path = $runtime->registry->root.'/'.$digest.'/demo.sqlite';
         $databaseBefore = file_get_contents($path);
         $registryBefore = file_get_contents($runtime->registry->root.'/registry.json');
         $this->clock = $startedAt + $runtime->config->rateWindowSeconds - 1;
         $actions = [
-            fn () => $runtime->execute(SandboxOperation::Bootstrap, new RequestIdentity(remoteAddress: $identity->remoteAddress)),
-            fn () => $runtime->execute(SandboxOperation::Login, $identity),
-            fn () => $runtime->execute(SandboxOperation::CreateEnquiry, $identity, $this->input()),
+            fn () => $runtime->execute(SandboxOperation::BOOTSTRAP, new RequestIdentity(remoteAddress: $identity->remoteAddress)),
+            fn () => $runtime->execute(SandboxOperation::LOGIN, $identity),
+            fn () => $runtime->execute(SandboxOperation::CREATE_ENQUIRY, $identity, $this->input()),
         ];
         foreach ($actions as $action) {
             $error = $this->failure($action, ErrorCode::RateLimited);
@@ -146,7 +146,7 @@ final class SandboxRuntimeTest
         $this->clock++;
         $this->visitor($runtime);
         $identity = $this->login($runtime, $identity);
-        $created = $runtime->execute(SandboxOperation::CreateEnquiry, $identity, $this->input())->payload;
+        $created = $runtime->execute(SandboxOperation::CREATE_ENQUIRY, $identity, $this->input())->payload;
         $this->check($created->id === 6, 'enquiry admitted exactly at rate-window expiry');
         $registry = $this->registry($runtime);
         $this->check(count($registry->rateBuckets) === 3, 'exact rollover preserves separate action buckets');
@@ -171,7 +171,7 @@ final class SandboxRuntimeTest
         $livePath = $runtime->registry->root.'/'.hash('sha256', $live->sandboxToken).'/demo.sqlite';
         $liveBefore = file_get_contents($livePath);
         $this->clock++;
-        $error = $this->failure(fn () => $runtime->execute(SandboxOperation::UpdateStatus, $target, new StatusChange(id: 1, status: EnquiryStatus::Contacted)), ErrorCode::SandboxContext);
+        $error = $this->failure(fn () => $runtime->execute(SandboxOperation::UPDATE_STATUS, $target, new StatusChange(id: 1, status: EnquiryStatus::Contacted)), ErrorCode::SandboxContext);
         $registry = $this->registry($runtime);
         $this->check(count($registry->sandboxes) === 3 && isset($registry->sandboxes[$digest]) && is_file($path), 'expired target remains physically present beyond ten-item cleanup batch');
         $this->check($registry->sandboxes[$digest] == $targetBefore && $error->cookies === [], 'expired undeleted target cannot renew lease or authorization');
@@ -184,12 +184,12 @@ final class SandboxRuntimeTest
         $runtime = $this->runtime('expiry');
         $identity = $this->login($runtime, $this->visitor($runtime));
         $this->clock += 14399;
-        $runtime->execute(SandboxOperation::Overview, $identity);
+        $runtime->execute(SandboxOperation::OVERVIEW, $identity);
         $this->clock += 14399;
-        $this->check(!$runtime->execute(SandboxOperation::Bootstrap, $identity)->payload->created, 'sliding lease admitted at boundary minus one');
+        $this->check(!$runtime->execute(SandboxOperation::BOOTSTRAP, $identity)->payload->created, 'sliding lease admitted at boundary minus one');
         $this->clock += 14400;
-        $this->failure(fn () => $runtime->execute(SandboxOperation::Overview, $identity), ErrorCode::SandboxContext);
-        $fresh = $runtime->execute(SandboxOperation::Bootstrap, $identity);
+        $this->failure(fn () => $runtime->execute(SandboxOperation::OVERVIEW, $identity), ErrorCode::SandboxContext);
+        $fresh = $runtime->execute(SandboxOperation::BOOTSTRAP, $identity);
         $this->check($fresh->payload->created && $fresh->payload->csrfToken !== $identity->contextToken, 'exact expiry requires new allocation');
     }
 
@@ -200,17 +200,17 @@ final class SandboxRuntimeTest
         $first = $this->visitor($runtime);
         $this->visitor($runtime);
         $this->failure(fn () => $this->visitor($runtime), ErrorCode::Capacity);
-        $this->failure(fn () => $runtime->execute(SandboxOperation::CreateEnquiry, $first, $this->input()), ErrorCode::SandboxFull);
+        $this->failure(fn () => $runtime->execute(SandboxOperation::CREATE_ENQUIRY, $first, $this->input()), ErrorCode::SandboxFull);
         $rate = $this->runtime('rates', $this->config(['allocationLimit' => 1, 'loginLimit' => 1, 'enquiryLimit' => 1]));
         $identity = $this->visitor($rate);
         $blocked = $this->failure(fn () => $this->visitor($rate), ErrorCode::RateLimited);
         $this->check($blocked->retryAfter === 3600 && $blocked->cookies === [], 'allocation limit survives reset');
         $identity = $this->login($rate, $identity);
-        $this->failure(fn () => $rate->execute(SandboxOperation::Login, $identity), ErrorCode::RateLimited);
-        $rate->execute(SandboxOperation::CreateEnquiry, $identity, $this->input());
+        $this->failure(fn () => $rate->execute(SandboxOperation::LOGIN, $identity), ErrorCode::RateLimited);
+        $rate->execute(SandboxOperation::CREATE_ENQUIRY, $identity, $this->input());
         $lease = $this->registry($rate)->sandboxes[hash('sha256', $identity->sandboxToken)]->lastActivity;
         $this->clock++;
-        $this->failure(fn () => $rate->execute(SandboxOperation::CreateEnquiry, $identity, $this->input()), ErrorCode::RateLimited);
+        $this->failure(fn () => $rate->execute(SandboxOperation::CREATE_ENQUIRY, $identity, $this->input()), ErrorCode::RateLimited);
         $this->check($this->registry($rate)->sandboxes[hash('sha256', $identity->sandboxToken)]->lastActivity === $lease, 'rate denial has no activity');
         $buckets = $this->runtime('buckets', $this->config(['maxRateBuckets' => 1]));
         $this->visitor($buckets);
@@ -241,7 +241,7 @@ final class SandboxRuntimeTest
         $after = $this->registry($crash);
         $this->check(count($after->sandboxes) === 2 && $after->sandboxes[$record->digest]->state === SandboxState::Failed && file_exists($directory.'/seed.sqlite'), 'failed actual cleanup remains charged');
         chmod($directory, 0700);
-        $crash->execute(SandboxOperation::Bootstrap, $fresh);
+        $crash->execute(SandboxOperation::BOOTSTRAP, $fresh);
         $this->check(!file_exists($directory) && count($this->registry($crash)->sandboxes) === 1, 'pending crash artifact eventually reclaimed');
     }
 
@@ -254,31 +254,31 @@ final class SandboxRuntimeTest
         $this->visitor($runtime, '127.0.0.2');
         $journal = $runtime->registry->root.'/'.hash('sha256', $first->sandboxToken).'/demo.sqlite-journal';
         file_put_contents($journal, str_repeat('x', 4096)); chmod($journal, 0600);
-        $this->failure(fn () => $runtime->execute(SandboxOperation::Bootstrap, $first), ErrorCode::Capacity);
+        $this->failure(fn () => $runtime->execute(SandboxOperation::BOOTSTRAP, $first), ErrorCode::Capacity);
         unlink($journal);
         $quota = $this->runtime('quota', $this->config(['maxDatabaseBytes' => 32768, 'enquiryLimit' => 100]));
         $identity = $this->login($quota, $this->visitor($quota));
         $filled = false;
         for ($index = 0; $index < 96; $index++) {
-            try { $quota->execute(SandboxOperation::CreateEnquiry, $identity, $this->input(str_repeat('界', 2000))); }
+            try { $quota->execute(SandboxOperation::CREATE_ENQUIRY, $identity, $this->input(str_repeat('界', 2000))); }
             catch (DemoError $error) { $this->check($error->errorCode === ErrorCode::SandboxFull, 'multibyte page cap maps only quota'); $filled = true; break; }
         }
         $this->check($filled, 'small page cap reached');
-        $before = $quota->execute(SandboxOperation::Overview, $identity)->payload;
+        $before = $quota->execute(SandboxOperation::OVERVIEW, $identity)->payload;
         $path = $quota->registry->root.'/'.hash('sha256', $identity->sandboxToken).'/demo.sqlite';
         $this->check(filesize($path) <= 32768, 'database never exceeds page cap');
         $database = new PDO('sqlite:'.$path);
         $database->exec("CREATE TRIGGER reject_conversion BEFORE UPDATE OF status ON enquiries WHEN NEW.status = 'converted' BEGIN SELECT RAISE(ABORT, 'fixture IO failure'); END");
         $database = null;
-        $error = $this->failure(fn () => $quota->execute(SandboxOperation::CreateBooking, $identity, new EnquiryId(id: 1)), ErrorCode::Unavailable);
+        $error = $this->failure(fn () => $quota->execute(SandboxOperation::CREATE_BOOKING, $identity, new EnquiryId(id: 1)), ErrorCode::Unavailable);
         $this->check($error->getPrevious() === null, 'complete schema rejection is fail closed');
         $database = new PDO('sqlite:'.$path); $database->exec('DROP TRIGGER reject_conversion'); $database = null;
-        $after = $quota->execute(SandboxOperation::Overview, $identity)->payload;
+        $after = $quota->execute(SandboxOperation::OVERVIEW, $identity)->payload;
         $this->check(count($after->bookings) === count($before->bookings) && $after->enquiries[count($after->enquiries) - 1]->status === EnquiryStatus::New, 'failed mutation leaves no partial records');
         $io = $this->runtime('io');
         $owner = $this->visitor($io);
         chmod($io->registry->root, 0500);
-        $error = $this->failure(fn () => $io->execute(SandboxOperation::Bootstrap, $owner), ErrorCode::Unavailable);
+        $error = $this->failure(fn () => $io->execute(SandboxOperation::BOOTSTRAP, $owner), ErrorCode::Unavailable);
         $this->check($error->getPrevious() !== null && $error->status === 503, 'IO error retains private cause and is not quota');
         chmod($io->registry->root, 0700);
         $reopen = new VisitorStore(path: $path, config: $quota->config, catalog: $this->catalog, now: fn (): int => $this->clock, create: false);
@@ -303,7 +303,7 @@ final class SandboxRuntimeTest
         $runtime = $this->runtime('nonempty');
         mkdir($runtime->registry->root, 0700);
         file_put_contents($runtime->registry->root.'/sentinel', 'preserve');
-        $this->failure(fn () => $runtime->execute(SandboxOperation::Bootstrap, new RequestIdentity(remoteAddress: '127.0.0.1')), ErrorCode::Unavailable);
+        $this->failure(fn () => $runtime->execute(SandboxOperation::BOOTSTRAP, new RequestIdentity(remoteAddress: '127.0.0.1')), ErrorCode::Unavailable);
         $this->check(file_get_contents($runtime->registry->root.'/sentinel') === 'preserve' && !file_exists($runtime->registry->root.'/runtime.lock'), 'nonempty root preserved without initialization');
         foreach (['unknown', 'corrupt', 'missing-registry', 'missing', 'schema', 'symlink', 'hardlink'] as $kind) {
             $runtime = $this->runtime('unsafe-'.$kind);
@@ -317,7 +317,7 @@ final class SandboxRuntimeTest
             if ($kind === 'schema') { $database = new PDO('sqlite:'.$path); $database->exec('CREATE VIEW surprise AS SELECT id FROM enquiries'); $database = null; }
             if ($kind === 'symlink') { rename($path, $this->workspace.'/linked-database'); symlink($this->workspace.'/linked-database', $path); }
             if ($kind === 'hardlink') { link($path, $this->workspace.'/hardlink-database'); }
-            $action = $kind === 'schema' ? SandboxOperation::CreateEnquiry : SandboxOperation::Bootstrap;
+            $action = $kind === 'schema' ? SandboxOperation::CREATE_ENQUIRY : SandboxOperation::BOOTSTRAP;
             $this->failure(fn () => $runtime->execute($action, $identity, $kind === 'schema' ? $this->input() : null), ErrorCode::Unavailable);
             $this->check($kind === 'missing-registry' ? !file_exists($root.'/registry.json') && is_file($path) : file_exists($root.'/registry.json'), 'unsafe state preserved: '.$kind);
         }
@@ -346,7 +346,7 @@ final class SandboxRuntimeTest
         $calls = 0;
         $clock = function () use (&$calls, $root): int { $calls++; if ($calls === 2) { chmod($root, 0500); } return $this->clock; };
         $runtime = new SandboxRuntime(root: $root, config: $this->config(['maxSandboxes' => 1]), catalog: $this->catalog, now: $clock);
-        try { $error = $this->failure(fn () => $runtime->execute(SandboxOperation::Bootstrap, new RequestIdentity(remoteAddress: '127.0.0.1')), ErrorCode::Unavailable); }
+        try { $error = $this->failure(fn () => $runtime->execute(SandboxOperation::BOOTSTRAP, new RequestIdentity(remoteAddress: '127.0.0.1')), ErrorCode::Unavailable); }
         finally { chmod($root, 0700); }
         $this->check($error->getPrevious() !== null, 'failed ready registry save retains private IO cause');
         $registry = $this->registry($runtime);

@@ -1,0 +1,5 @@
+<?php
+
+/** @var \Elsewhere\Destination $destination */
+?>
+<button class="destination-card" data-dialog="destination-<?= htmlspecialchars($destination->id) ?>" data-region="<?= htmlspecialchars($destination->region) ?>" data-search="<?= htmlspecialchars(strtolower($destination->name.' '.$destination->region.' '.$destination->places)) ?>"><img src="assets/images/<?= htmlspecialchars($destination->image) ?>.jpg" alt="<?= htmlspecialchars($destination->imageAlt) ?>" loading="lazy" width="640" height="800"><span class="destination-region"><?= htmlspecialchars($destination->region) ?></span><span class="destination-caption"><span><strong><?= htmlspecialchars($destination->name) ?></strong><span><?= htmlspecialchars($destination->line) ?></span></span><span class="round-arrow">↗</span></span></button>

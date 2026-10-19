@@ -1,5 +1,5 @@
 #!/usr/bin/env python3
-"""Exercise generated fixture packages with real parallel Apache and PHP-FPM workers."""
+"""Exercise the release package with real parallel Apache and PHP-FPM workers, and bin/router.php on a copy of site/."""
 import concurrent.futures
 import contextlib
 import hashlib
@@ -7,7 +7,9 @@ import http.cookiejar
 import json
 import os
 from pathlib import Path
+import re
 import select
+import shutil
 import signal
 import socket
 import sqlite3
@@ -37,6 +39,43 @@ def php_string(value):
 def wait_output(process):
     assert select.select([process.stdout], [], [], 10)[0], 'worker did not signal readiness'
     assert process.stdout.readline().strip() == 'READY', process.stderr.read() if process.poll() is not None else 'worker failed'
+
+
+class NoRedirect(urllib.request.HTTPRedirectHandler):
+    def redirect_request(self, *arguments):
+        return None
+
+
+def unfollowed(url):
+    try:
+        response = urllib.request.build_opener(NoRedirect).open(url, timeout=10)
+    except urllib.error.HTTPError as error:
+        response = error
+    with response:
+        return response.status, response.headers
+
+
+def run_packager(script_root, output):
+    result = subprocess.run(['php', 'bin/package.php', '--output', str(output)], cwd=script_root, capture_output=True, text=True)
+    report = dict(line.split(': ', 1) for line in result.stdout.splitlines() if ': ' in line)
+    return result, report
+
+
+def packaged(name):
+    relative = name.removeprefix('travel-agency-demo/')
+    return not (re.search(r'\.sqlite', relative, re.IGNORECASE) or relative.lower().endswith('.log') or (relative.startswith('private/sandboxes/') and relative != 'private/sandboxes/.htaccess'))
+
+
+PAGES = [
+    ('index.php', ['app.js'], '<h1>Go somewhere<br>that <em>stays<br>with you.</em></h1>'),
+    ('destinations.php', ['app.js'], '<h1>So many places.<br><em>So many possibilities.</em></h1>'),
+    ('journeys.php', ['app.js'], '<h1>There’s a journey<br><em>with your name on it.</em></h1>'),
+    ('about.php', ['app.js'], '<h1>More than a place.<br><em>A way of feeling.</em></h1>'),
+    ('journal.php', ['app.js'], '<h1>The Elsewhere<br><em>journal.</em></h1>'),
+    ('contact.php', ['sandbox.js', 'app.js'], '<h1>A little hello.<br><em>A world of possibility.</em></h1>'),
+    ('admin.php', ['sandbox.js', 'dashboard-pagination.js', 'app.js', 'admin.js'], '<h1>A thoughtful trip.<br><em>A clear overview.</em></h1>'),
+]
+HOME_HEADING = PAGES[0][2]
 
 
 class Client:
@@ -105,7 +144,15 @@ with tempfile.TemporaryDirectory(prefix='infinityfree-', dir=fixture_parent) as 
         port = reserved_socket.getsockname()[1]
     origin = f'http://127.0.0.1:{port}'
     package = temp / 'package'
-    subprocess.run(['node', 'bin/package-infinityfree.mjs', '--output', str(package), '--origin', origin], cwd=ROOT, check=True)
+    build, report = run_packager(ROOT, package)
+    check(build.returncode == 0 and build.stderr == '', 'package.php builds the release archive' + ('' if build.returncode == 0 else ': ' + build.stderr))
+    archive_path = package / 'travel-demo.zip'
+    archive_hash = hashlib.sha256(archive_path.read_bytes()).hexdigest()
+    check(sorted(report) == ['bytes', 'files', 'path', 'sha256'] and report['path'] == str(archive_path.resolve()) and int(report['bytes']) == archive_path.stat().st_size and report['sha256'] == archive_hash, 'package.php prints path, bytes, files and sha256 of the archive')
+    check([entry.name for entry in package.iterdir()] == ['travel-demo.zip'], 'package output holds only the archive')
+    refused = run_packager(ROOT, package)[0]
+    check(refused.returncode != 0 and 'new or empty' in refused.stderr and hashlib.sha256(archive_path.read_bytes()).hexdigest() == archive_hash, 'second package run into the same output is refused with new or empty')
+    check(not (ROOT / 'deploy/infinityfree/preflight.php').exists(), 'no preflight script remains')
     web = temp / 'web'
     web.mkdir()
     (web / 'index.html').write_text('ROOT HUB SENTINEL')
@@ -114,15 +161,90 @@ with tempfile.TemporaryDirectory(prefix='infinityfree-', dir=fixture_parent) as 
     stale_names = ['Registry.php', 'RateBucket.php', 'SandboxState.php']
     for name in stale_names:
         (stale_classes / name).write_text("<?php throw new Error('stale class loaded');")
-    with zipfile.ZipFile(package / 'travel-demo.zip') as archive:
+    stale_page = web / 'travel-agency-demo/index.html'
+    stale_page.write_text('STALE HTML SENTINEL')
+    site = ROOT / 'site'
+    with zipfile.ZipFile(archive_path) as archive:
         files = archive.namelist()
-        check(all(name.startswith('travel-agency-demo/') for name in files), 'package_is_only_elsewhere')
-        check(not any(name.endswith(('.sqlite', '.db', '.zip', '.log', '.mjs')) or 'runtime' in name for name in files), 'package excludes runtime and test state')
-        check('travel-agency-demo/private/sandboxes/.htaccess' in files and 'travel-agency-demo/private/registry-schema.sql' in files, 'package ships the sandboxes folder guard and registry schema')
+        check(len(files) > 30 and len(files) == int(report['files']) and all(name.startswith('travel-agency-demo/') for name in files), 'package_is_only_elsewhere')
+        check(not any(name.endswith(('.sqlite', '.db', '.zip', '.log', '.mjs')) or re.search(r'\.sqlite|runtime|registry\.|preflight|test-runs|root-index|/bin/|/tests/', name) for name in files), 'package excludes runtime, build and test state')
+        check([name for name in files if name.startswith('travel-agency-demo/private/sandboxes/')] == ['travel-agency-demo/private/sandboxes/.htaccess'] and 'travel-agency-demo/private/registry-schema.sql' in files, 'package ships the sandboxes folder guard and registry schema')
+        site_files = sorted(str(path.relative_to(site)) for path in site.rglob('*') if path.is_file() and packaged(str(path.relative_to(site))))
+        check(sorted(name.removeprefix('travel-agency-demo/') for name in files) == site_files and all(archive.read(name) == (site / name.removeprefix('travel-agency-demo/')).read_bytes() for name in files), 'archive mirrors site/ byte for byte, dotfiles included')
+        check(archive.read('travel-agency-demo/private/.htaccess') == b'Require all denied\n' and archive.read('travel-agency-demo/private/sandboxes/.htaccess') == b'Require all denied\n', 'private and sandboxes guards deny all')
+        committed_config = archive.read('travel-agency-demo/private/config.php').decode()
+        check("__DIR__.'/sandboxes'" in committed_config and re.search(r"sandbox_root.*__DIR__.*/sandboxes'", committed_config) and not re.search(r'test|clock|visitor|csrfToken', committed_config), 'committed config.php uses the private sandboxes folder and no test state')
         archive.extractall(web)
     private = web / 'travel-agency-demo/private'
     check(all((stale_classes / name).read_text() == "<?php throw new Error('stale class loaded');" for name in stale_names), 'stale 2026-10-18 class sentinels survive the overwrite extract')
+    check(stale_page.read_text() == 'STALE HTML SENTINEL', 'stale index.html survives the overwrite extract')
+    origin_probes = [subprocess.run(['php', '-r', 'echo (require $argv[1])["origin"];', str(private / 'config.php')], capture_output=True, text=True, env=environment) for environment in [{'PATH': os.environ['PATH']}, {'PATH': os.environ['PATH'], 'ELSEWHERE_ORIGIN': 'http://127.0.0.1:1'}]]
+    check(all(probe.returncode == 0 and probe.stdout == 'https://demo-sites.infinityfree.me' and probe.stderr == '' for probe in origin_probes), 'packaged config.php returns the hosted origin without the router constant, whatever the environment')
     check((private / 'sandboxes').is_dir() and (private / 'sandboxes/.htaccess').read_text() == 'Require all denied\n', 'extraction creates the private sandboxes folder')
+
+    tree = temp / 'local-run'
+    shutil.copytree(site, tree / 'site')
+    (tree / 'bin').mkdir()
+    for script in ['router.php', 'package.php']:
+        shutil.copyfile(ROOT / 'bin' / script, tree / 'bin' / script)
+    local_sandboxes = tree / 'site/private/sandboxes'
+    with socket.socket() as reserved_socket:
+        reserved_socket.bind(('127.0.0.1', 0))
+        router_port = reserved_socket.getsockname()[1]
+    router_origin = f'http://127.0.0.1:{router_port}'
+    router_log_path = temp / 'router.log'
+    router_log = router_log_path.open('w')
+    router = subprocess.Popen(['php', '-S', f'127.0.0.1:{router_port}', 'bin/router.php'], cwd=tree, env={**os.environ, 'ELSEWHERE_ORIGIN': router_origin}, stdout=router_log, stderr=router_log, start_new_session=True)
+    try:
+        local = Client(router_origin)
+        for attempt in range(50):
+            try:
+                local.request('/travel-agency-demo/robots.txt')
+                break
+            except (urllib.error.URLError, ConnectionError):
+                if router.poll() is not None:
+                    raise AssertionError(router_log_path.read_text())
+                time.sleep(.1)
+        redirect_status, redirect_headers = unfollowed(router_origin + '/')
+        check(redirect_status == 302 and redirect_headers.get('Location') == '/travel-agency-demo/', 'router redirects / to /travel-agency-demo/')
+        status, raw = local.request('/travel-agency-demo/')[:2]
+        check(status == 200 and HOME_HEADING.encode() in raw, 'router folder URL serves index.php')
+        for page, scripts, heading in PAGES:
+            status, raw = local.request('/travel-agency-demo/' + page)[:2]
+            check(status == 200 and heading.encode() in raw, 'router renders ' + page)
+        status, raw, headers = local.request('/travel-agency-demo/assets/styles.css')
+        check(status == 200 and headers.get('Content-Type', '').startswith('text/css') and raw == (site / 'assets/styles.css').read_bytes(), 'router streams assets/styles.css as text/css')
+        for path in ['private', 'private/', 'private/config.php', 'private/catalog.json', 'private/views/layout.php', 'private/views/pages/index.php', 'private/classes/ApiController.php', 'private/sandboxes/.htaccess', '.htaccess', 'assets/%2e%2e/private/config.php', '/private/config.php', 'PRIVATE/config.php', 'Private/views/layout.php']:
+            check(local.request('/travel-agency-demo/' + path)[0] == 403, 'router denial: ' + path)
+        for path in ['nope.php', 'assets/nope.css', 'assets/', 'api.php/extra']:
+            check(local.request('/travel-agency-demo/' + path)[0] == 404, 'router not found: ' + path)
+        before = sorted(entry.name for entry in local_sandboxes.iterdir())
+        bootstrap = local.api('sandbox', {})
+        runtime_files = sorted(set(entry.name for entry in local_sandboxes.iterdir()) - set(before))
+        check(bootstrap[0] == 200 and bootstrap[1]['created'] and 'registry.sqlite' in (before + runtime_files) and any(re.fullmatch(r'[0-9a-f]{64}\.sqlite', name) for name in runtime_files), 'router bootstrap leaves runtime files in the copied site/private/sandboxes/')
+        check(local.request('/travel-agency-demo/private/sandboxes/registry.sqlite')[0] == 403, 'router denies the live registry')
+        (local_sandboxes / 'stale.sqlite-journal').write_text('FICTIONAL JOURNAL SENTINEL')
+        (tree / 'site/assets/stale.sqlite-journal').write_text('FICTIONAL JOURNAL SENTINEL')
+        (tree / 'site/assets/debug.log').write_text('FICTIONAL LOG SENTINEL')
+        local_build, local_report = run_packager(tree, temp / 'local-package')
+        check(local_build.returncode == 0 and int(local_report['files']) == len(files), 'package after a local run succeeds with the same file count')
+        with zipfile.ZipFile(temp / 'local-package/travel-demo.zip') as local_archive:
+            local_files = local_archive.namelist()
+        check(sorted(local_files) == sorted(files) and not any(name.endswith('/' + runtime) for name in local_files for runtime in runtime_files + ['registry.sqlite', 'stale.sqlite-journal', 'debug.log']), 'package after a local run excludes every runtime file')
+        check(all((local_sandboxes / name).exists() for name in runtime_files), 'packaging leaves the local runtime files in place')
+        inside_site = run_packager(tree, tree / 'site/newbuild')[0]
+        check(inside_site.returncode != 0 and 'outside the site folder' in inside_site.stderr and not (tree / 'site/newbuild').exists(), 'output inside site/ is refused and creates no folder')
+        escaping = run_packager(tree, tree / 'missing/../site/escape')[0]
+        check(escaping.returncode != 0 and 'outside the site folder' in escaping.stderr and not (tree / 'site/escape').exists() and not (tree / 'missing').exists(), 'output reaching site/ through .. is refused and creates no folder')
+        default_build = subprocess.run(['php', 'bin/package.php'], cwd=tree, capture_output=True, text=True)
+        default_folders = list((tree / 'deploy/builds').iterdir()) if (tree / 'deploy/builds').is_dir() else []
+        check(default_build.returncode == 0 and len(default_folders) == 1 and re.fullmatch(r'\d{8}-\d{6}', default_folders[0].name) and (default_folders[0] / 'travel-demo.zip').is_file(), 'default output is deploy/builds/<date>-<time>/')
+        (tree / 'site/assets/notes.bak').write_text('FICTIONAL STRAY SENTINEL')
+        stray = run_packager(tree, temp / 'stray-package')[0]
+        check(stray.returncode != 0 and 'assets/notes.bak' in stray.stderr and not (temp / 'stray-package').exists(), 'a file outside the allowlist fails packaging by name and creates no ZIP or folder')
+    finally:
+        stop(router)
+        router_log.close()
     error_log = private / 'sandboxes/php-errors.log'
     legacy = private / 'runtime'
     legacy.mkdir()
@@ -253,13 +375,22 @@ DocumentRoot "{web}"
         status, raw, headers = public.request('/travel-agency-demo/sqlite-check.php')
         check(status == 200 and headers.get('Content-Type', '').startswith('text/plain') and raw.decode().split('\n')[1:] == ['pdo_sqlite: yes', ''] and raw.startswith(b'PHP 8.4.'), 'sqlite check prints the PHP version and pdo_sqlite on two lines')
         sqlite_check.unlink()
-        for page in ['', 'destinations.html', 'journeys.html', 'about.html', 'journal.html', 'contact.html', 'admin.html']:
+        status, raw, headers = public.request('/travel-agency-demo/')
+        check(status == 200 and b'STALE HTML SENTINEL' not in raw and HOME_HEADING.encode() in raw, 'folder URL serves index.php')
+        versions = {name: hashlib.sha256((web / 'travel-agency-demo/assets' / name).read_bytes()).hexdigest()[:10] for name in ['styles.css', 'sandbox.js', 'dashboard-pagination.js', 'app.js', 'admin.js']}
+        for page, scripts, heading in PAGES:
             status, raw, headers = public.request('/travel-agency-demo/' + page)
-            check(status == 200 and b'name="api-endpoint" content="api.php"' in raw, 'nested endpoint: ' + (page or 'home'))
-            check("script-src 'self'" in headers.get('Content-Security-Policy', ''), 'CSP: ' + (page or 'home'))
+            text = raw.decode()
+            check(status == 200 and '<meta name="api-endpoint" content="api.php">' in text, 'page served with the api endpoint: ' + page)
+            check("script-src 'self'" in headers.get('Content-Security-Policy', ''), 'CSP: ' + page)
+            found = re.findall(r'<script src="assets/([a-z-]+\.js)\?v=([0-9a-f]{10})" defer></script>', text)
+            check(text.count('<script') == len(scripts) and [script for script, version in found] == scripts and all(version == versions[script] for script, version in found) and f'href="assets/styles.css?v={versions["styles.css"]}"' in text, 'scripts in order with content versions: ' + page)
+            check(heading in text, 'main heading: ' + page)
+            if page == 'journeys.php':
+                check('Culture &amp; discovery' in text and 'Culture & discovery' not in text, 'catalog ampersands render escaped on the journeys page')
         for path in ['assets/styles.css', 'assets/sandbox.js', 'assets/dashboard-pagination.js', 'assets/app.js', 'assets/admin.js', 'assets/fonts/dm-serif.ttf', 'assets/images/hero-lake.jpg']:
             check(public.request('/travel-agency-demo/' + path)[0] == 200, 'asset: ' + path)
-        for path in ['private/', 'private/config.php', 'private/demo-seed.json', 'private/sandbox.json', 'private/schema.sql', 'private/registry-schema.sql', 'private/api.php', 'private/classes/SandboxRuntime.php', 'private/runtime/demo.sqlite', 'private/sandboxes/', 'private/sandboxes/.htaccess', '.htaccess']:
+        for path in ['private/', 'private/config.php', 'private/demo-seed.json', 'private/sandbox.json', 'private/schema.sql', 'private/registry-schema.sql', 'private/api.php', 'private/catalog.json', 'private/enquiry-budgets.json', 'private/views/layout.php', 'private/views/pages/index.php', 'private/classes/ApiController.php', 'private/classes/SandboxRuntime.php', 'private/runtime/demo.sqlite', 'private/sandboxes/', 'private/sandboxes/.htaccess', '.htaccess']:
             check(public.request('/travel-agency-demo/' + path)[0] == 403, 'private denial: ' + path)
         check(public.api('admin/overview')[1]['code'] == 'sandbox_context', 'missing generation precedes dashboard authorization')
         check(public.api('sandbox', {}, origin=False)[0] == 403, 'missing Origin rejected')
@@ -272,7 +403,7 @@ DocumentRoot "{web}"
         check(public.api('sandbox', {}, headers={'Content-Type': 'text/plain'})[0] == 415 and untouched(), 'non-JSON content type rejected before lock')
         first = Client(origin)
         initial, cookie_headers = first.initialize()
-        check(initial['created'] and initial['protocolVersion'] == 1 and initial['idleSeconds'] == 14400 and initial['pageSize'] == 20 and isinstance(initial['expiresAt'], int), 'php_node_contract_parity bootstrap')
+        check(initial['created'] and initial['protocolVersion'] == 1 and initial['idleSeconds'] == 14400 and initial['pageSize'] == 20 and isinstance(initial['expiresAt'], int), 'php_contract_parity bootstrap')
         check(all('Path=/travel-agency-demo/' in value and 'HttpOnly' in value and 'SameSite=Strict' in value and 'Max-Age=14400' in value and 'Secure' not in value for value in cookie_headers.get_all('Set-Cookie')), 'HTTP edge cookie attributes')
         first.login()
         second = Client(origin); second.initialize(); second.login()
@@ -287,6 +418,8 @@ DocumentRoot "{web}"
         overview = first.api('admin/overview')[1]
         check(len(overview['enquiries']) == 5 and len(second.api('admin/overview')[1]['enquiries']) == 4, 'separate visitor records')
         check(len(overview['bookings']) == 3 and isinstance(overview['enquiries'][0]['travelers'], int), 'seed counts and numeric JSON fields')
+        catalog = json.loads((private / 'catalog.json').read_text())
+        check(overview['catalog'] == {'destinations': [{'id': entry['id'], 'name': entry['name']} for entry in catalog['destinations']], 'journeys': [{'id': entry['id'], 'title': entry['title']} for entry in catalog['journeys']]}, 'overview catalog exposes only destination id/name and journey id/title')
         check(overview['enquiries'][-1]['departure'] > time.strftime('%Y-%m-%d', time.gmtime()), 'relative seed departure remains future')
         check(first.api('admin/enquiries/5', {'status': 'contacted'}, 'PATCH')[0] == 200, 'status update persists')
         with concurrent.futures.ThreadPoolExecutor(max_workers=2) as pool:
@@ -317,14 +450,13 @@ DocumentRoot "{web}"
             partial.sendall(('POST /travel-agency-demo/api.php?route=sandbox HTTP/1.1\r\nHost: 127.0.0.1:' + str(port) + '\r\nOrigin: ' + origin + '\r\nContent-Type: application/json\r\nContent-Length: 10000\r\n\r\n{').encode())
             started = time.monotonic()
             independent = Client(origin); independent.initialize()
-            check(time.monotonic() - started < 1.5, 'partial body holds no runtime lock')
+            check(time.monotonic() - started < 1.5, 'partial body holds no registry transaction')
         finally:
             partial.close()
         time.sleep(.1)
         check(len(registry()['sandboxes']) == 1, 'aborted body allocates no partial sandbox')
 
-        parallel_bytes = 2097152 + 6 * 32768
-        configure('parallel', {'maxSandboxes': 2, 'maxDatabaseBytes': 32768, 'journalReserveBytes': 65536, 'stagingReserveBytes': 65536, 'maxRuntimeBytes': parallel_bytes})
+        configure('parallel', {'maxSandboxes': 2, 'maxDatabaseBytes': 32768})
         def allocate(_):
             visitor = Client(origin)
             return visitor, visitor.api('sandbox', {})
@@ -332,7 +464,7 @@ DocumentRoot "{web}"
             admissions = list(pool.map(allocate, range(8)))
         check(sum(result[0] == 200 for _, result in admissions) == 2 and all(result[0] in [200, 503] for _, result in admissions), 'parallel PHP processes respect slot cap')
         check(len(registry()['sandboxes']) == 2 and all(result[1]['code'] == 'capacity' for _, result in admissions if result[0] != 200), 'parallel allocation state is complete and charged')
-        check(all(database(visitor).stat().st_size <= 32768 for visitor, result in admissions if result[0] == 200) and sum(path.stat().st_size for path in runtime_root.rglob('*') if path.is_file()) <= parallel_bytes, 'parallel allocation database and total managed byte caps')
+        check(all(database(visitor).stat().st_size <= 32768 for visitor, result in admissions if result[0] == 200) and len(list(runtime_root.glob('*.sqlite'))) == 3, 'parallel allocation database byte cap and file count')
 
         configure('rates', {'allocationLimit': 1})
         visitor = Client(origin); visitor.initialize()
@@ -472,7 +604,7 @@ DocumentRoot "{web}"
         status, initial, headers = secure.api('sandbox', {}, headers={'Origin': 'https://deployment.example', 'Host': 'forged.example', 'X-Forwarded-Proto': 'http'})
         check(status == 200 and all('; Secure' in value and 'Path=/travel-agency-demo/' in value for value in headers.get_all('Set-Cookie')), 'HTTPS configured origin controls Secure independently of request headers')
         check((legacy / 'demo.sqlite').read_bytes() == b'LEGACY SQLITE SENTINEL', 'failure/concurrency phases preserve legacy data')
-        log_lines = [line for log in [temp / 'error.log', fpm_log, error_log] if log.exists() for line in log.read_text().splitlines()]
+        log_lines = [line for log in [temp / 'error.log', fpm_log, error_log, router_log_path, local_sandboxes / 'php-errors.log'] if log.exists() for line in log.read_text().splitlines()]
         check(not any('stale class loaded' in line for line in log_lines), 'stale class sentinels never loaded')
         warning_lines = [line for line in log_lines if ('PHP Fatal' in line or 'PHP Warning' in line) and 'JIT is incompatible' not in line]
         check(not warning_lines, 'no PHP runtime warnings or fatals: ' + '\n'.join(warning_lines))

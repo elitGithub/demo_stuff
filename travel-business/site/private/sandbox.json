@@ -1,0 +1,18 @@
+{
+  "protocolVersion": 1,
+  "idleSeconds": 14400,
+  "maxSandboxes": 100,
+  "maxDatabaseBytes": 1048576,
+  "maxEnquiries": 100,
+  "cleanupBatch": 10,
+  "maxRateBuckets": 1000,
+  "allocationLimit": 10,
+  "enquiryLimit": 50,
+  "loginLimit": 50,
+  "rateWindowSeconds": 3600,
+  "pageSize": 20,
+  "sqlitePageBytes": 4096,
+  "busyTimeoutMilliseconds": 2000,
+  "sandboxCookie": "elsewhere_sandbox_v1",
+  "dashboardCookie": "elsewhere_dashboard_v1"
+}

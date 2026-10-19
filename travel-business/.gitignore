@@ -1,6 +1,6 @@
 storage/
 /storage/test-runs/
 /deploy/builds/
-public/
-test-results/
+site/private/sandboxes/*.sqlite*
+site/private/sandboxes/*.log
 *.log

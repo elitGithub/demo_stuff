@@ -1,0 +1,28 @@
+<?php
+
+use Elsewhere\Icon;
+
+/** @var \Elsewhere\SiteCatalog $catalog */
+?>
+<section class="hero"><img class="hero-photo" src="assets/images/hero-lake.jpg" alt="A wooden boat drifting across Lago di Braies beneath the Italian Dolomites" fetchpriority="high" width="2200" height="1467"><div class="hero-shade"></div><div class="container hero-content"><p class="eyebrow"><span class="tiny-line"></span> FOR THE WANDERER IN YOU</p><h1>Go somewhere<br>that <em>stays<br>with you.</em></h1><p class="hero-description">Thoughtfully crafted journeys. Extraordinary places.<br>Travel that feels a little more like you.</p><a class="button button-cream" href="journeys.php">Discover your next chapter <span aria-hidden="true">↗</span></a></div><div class="hero-foot container"><span><?= Icon::Pin->svg() ?> LAGO DI BRAIES, ITALY <span class="hero-coordinates">46.6944° N, 12.0856° E</span></span><a href="#explore">A world waiting to be discovered <span aria-hidden="true">↓</span></a></div><div class="vertical-caption">LESS ORDINARY. MORE ELSEWHERE.</div></section>
+  <section class="finder-wrap container" aria-label="Find your journey"><form class="journey-finder" action="journeys.php" method="get"><div class="finder-intro">A little daydreaming<br><em>starts here.</em></div><label><?= Icon::Pin->svg() ?><span><span class="field-label">WHERE TO?</span><select name="destination" aria-label="Choose a destination"><option value="">I’m open to anywhere</option><?php foreach ($catalog->destinations as $destination): ?>
+<option value="<?= htmlspecialchars($destination->id) ?>"><?= htmlspecialchars($destination->name) ?></option><?php endforeach ?>
+</select></span></label><label><?= Icon::Sun->svg() ?><span><span class="field-label">YOUR KIND OF JOURNEY</span><select name="style" aria-label="Choose a travel style"><option value="">A little of everything</option><?php foreach ($catalog->travelStyles() as $style): ?>
+<option><?= htmlspecialchars($style) ?></option><?php endforeach ?>
+</select></span></label><button class="button" type="submit">Find my journey <span aria-hidden="true">↗</span></button></form></section>
+  <section class="section container destinations-section" id="explore"><div class="section-heading"><div><p class="eyebrow">GOOD PLACES. GREAT POSSIBILITIES.</p><h2>The world is calling.<br><em>Where will you go?</em></h2></div><div class="section-heading-aside"><p>Somewhere new. Somewhere you’ve dreamed of.<br>Somewhere that feels like it was waiting for you.</p><a class="text-link" href="destinations.php">Explore all destinations <span aria-hidden="true">↗</span></a></div></div><div class="destination-grid home-destinations"><?php foreach (array_slice($catalog->destinations, 0, 3) as $destination): ?>
+<?php require dirname(__DIR__).'/destination-card.php' ?>
+<?php endforeach ?>
+</div></section>
+  <section class="approach-section" id="our-approach"><div class="container approach-grid"><div class="approach-photo"><img src="assets/images/bali.jpg" alt="A peaceful green escape in Bali" loading="lazy" width="800" height="1000"><span class="photo-note">A little further from the everyday.</span><div class="photo-stamp">TRAVEL<br><?= Icon::Sun->svg() ?><br>WITH FEELING</div></div><div class="approach-copy"><p class="eyebrow">THE ELSEWHERE WAY</p><h2>A great journey<br>is a <em>personal thing.</em></h2><p>It’s the tucked-away table. The road your guide grew up on. The extra day you’re so glad you took.</p><p>We believe the best travel is thoughtful, unhurried and made around you. So we start by listening, then bring the places you’ve imagined a little closer.</p><div class="approach-features"><div><?= Icon::Compass->svg() ?><span><strong>Made around you</strong><small>Your interests, your pace, your kind of wonderful.</small></span></div><div><?= Icon::Heart->svg() ?><span><strong>Human, from the very beginning</strong><small>A real conversation. A considered plan. The little details.</small></span></div><div><?= Icon::Leaf->svg() ?><span><strong>A little more thoughtful</strong><small>Local perspectives and a lighter way to explore.</small></span></div></div><a class="text-link" href="about.php">Get to know Elsewhere <span aria-hidden="true">↗</span></a></div></div></section>
+  <section class="section container"><div class="section-heading"><div><p class="eyebrow">A FEW OF OUR FAVOURITES</p><h2>Journeys worth<br><em>looking forward to.</em></h2></div><a class="text-link" href="journeys.php">Find your kind of adventure <span aria-hidden="true">↗</span></a></div><div class="journey-grid"><?php foreach (array_slice($catalog->journeys, 0, 3) as $journey): ?>
+<?php require dirname(__DIR__).'/journey-card.php' ?>
+<?php endforeach ?>
+</div><p class="sample-note">A little inspiration to start with. Every sample itinerary can be made your own.</p></section>
+  <section class="manifesto"><div class="container"><p class="eyebrow">COLLECT MOMENTS, NOT JUST MILES</p><p class="manifesto-quote">“The best part of getting away<br>is finding a little more<br><em>of yourself.”</em></p><span class="manifesto-signature">The Elsewhere philosophy</span><?= Icon::Sun->svg() ?>
+</div></section>
+  <section class="section container"><div class="section-heading"><div><p class="eyebrow">NOTES FROM ELSEWHERE</p><h2>A little inspiration<br><em>for the road.</em></h2></div><a class="text-link" href="journal.php">Step inside the journal <span aria-hidden="true">↗</span></a></div><div class="article-grid"><?php $featured = false ?>
+<?php foreach ($catalog->articles as $article): ?>
+<?php require dirname(__DIR__).'/article-card.php' ?>
+<?php endforeach ?>
+</div></section><?php require dirname(__DIR__).'/cta.php' ?>

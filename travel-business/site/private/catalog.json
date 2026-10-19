@@ -1,0 +1,224 @@
+{
+  "destinations": [
+    {
+      "id": "italy",
+      "name": "Italy",
+      "region": "Europe",
+      "image": "italy",
+      "imageAlt": "Colourful villages on the Italian coast",
+      "line": "A little slower. A little sweeter.",
+      "description": "Sun-warmed villages, long lunches and coastlines worth getting lost along. Find your own version of la dolce vita.",
+      "places": "Cinque Terre · Tuscany · The Dolomites",
+      "season": "April–June & September–October"
+    },
+    {
+      "id": "japan",
+      "name": "Japan",
+      "region": "Asia",
+      "image": "japan",
+      "imageAlt": "Traditional architecture and cherry blossoms in Japan",
+      "line": "Tradition meets the unexpected.",
+      "description": "Quiet gardens and electric cities. Small tea houses and extraordinary meals. Discover the beautiful contrasts that make Japan unforgettable.",
+      "places": "Tokyo · Kyoto · Hakone",
+      "season": "March–May & October–November"
+    },
+    {
+      "id": "bali",
+      "name": "Bali",
+      "region": "Asia",
+      "image": "bali",
+      "imageAlt": "Lush tropical scenery in Bali",
+      "line": "Find your own rhythm.",
+      "description": "Wake slowly among the palms, walk through emerald rice terraces and watch the sky turn pink above the Indian Ocean.",
+      "places": "Ubud · Sidemen · Uluwatu",
+      "season": "May–September"
+    },
+    {
+      "id": "tanzania",
+      "name": "Tanzania",
+      "region": "Africa",
+      "image": "safari",
+      "imageAlt": "Wildlife on an African savannah",
+      "line": "A world wonderfully untamed.",
+      "description": "Wide-open savannahs, extraordinary wildlife and evenings around the fire. A journey with room for wonder.",
+      "places": "Serengeti · Ngorongoro · Zanzibar",
+      "season": "June–October"
+    },
+    {
+      "id": "maldives",
+      "name": "Maldives",
+      "region": "Indian Ocean",
+      "image": "maldives",
+      "imageAlt": "Turquoise water and island villas in the Maldives",
+      "line": "Nowhere to be. Everything to feel.",
+      "description": "Barefoot mornings, clear lagoons and a horizon that goes on forever. Make space for the simple pleasure of doing very little.",
+      "places": "North Malé · Baa Atoll · Ari Atoll",
+      "season": "November–April"
+    },
+    {
+      "id": "greece",
+      "name": "Greece",
+      "region": "Europe",
+      "image": "greece",
+      "imageAlt": "Whitewashed architecture in Greece",
+      "line": "Follow the Aegean blue.",
+      "description": "Whitewashed lanes, hidden coves and tables that spill into the sunshine. Island time looks good on you.",
+      "places": "Athens · Naxos · Santorini",
+      "season": "May–June & September"
+    }
+  ],
+  "journeys": [
+    {
+      "id": "italian-slow-days",
+      "title": "The art of Italian slow living",
+      "destination": "italy",
+      "style": "Culture & discovery",
+      "days": 10,
+      "price": 3250,
+      "image": "italy",
+      "tag": "A LITTLE LA DOLCE VITA",
+      "route": "Florence → Tuscany → Cinque Terre",
+      "intro": "Market mornings, vineyard afternoons and a room with a sea view. An unhurried introduction to the Italy we dream about.",
+      "itinerary": [
+        {"day": "Days 1–3", "title": "Fall for Florence", "description": "Settle into a small city hotel, wander the artisan quarter and explore the markets with a local host."},
+        {"day": "Days 4–6", "title": "Take the Tuscan roads", "description": "Stay in a countryside retreat, cook a seasonal lunch and leave an afternoon free for the pool."},
+        {"day": "Days 7–10", "title": "Meet the coast", "description": "Follow the paths between colourful villages, take a sunset boat trip and enjoy one last very long lunch."}
+      ]
+    },
+    {
+      "id": "japan-beyond",
+      "title": "Japan, beyond the ordinary",
+      "destination": "japan",
+      "style": "Culture & discovery",
+      "days": 12,
+      "price": 4850,
+      "image": "japan",
+      "tag": "OLD SOUL, NEW PERSPECTIVES",
+      "route": "Tokyo → Hakone → Kyoto",
+      "intro": "Follow the thread from Tokyo’s backstreets to Kyoto’s quiet gardens, with a restorative stay in the mountains along the way.",
+      "itinerary": [
+        {"day": "Days 1–4", "title": "A different side of Tokyo", "description": "Explore neighbourhood food spots, independent shops and the city’s extraordinary contrasts."},
+        {"day": "Days 5–6", "title": "A pause in Hakone", "description": "Check into a traditional ryokan, soak in an onsen and enjoy a carefully prepared seasonal dinner."},
+        {"day": "Days 7–12", "title": "The quiet corners of Kyoto", "description": "Visit temple gardens, learn about tea and make time for a countryside day trip."}
+      ]
+    },
+    {
+      "id": "bali-unhurried",
+      "title": "Bali, beautifully unhurried",
+      "destination": "bali",
+      "style": "Rest & reconnect",
+      "days": 9,
+      "price": 2450,
+      "image": "bali",
+      "tag": "ROOM TO EXHALE",
+      "route": "Ubud → Sidemen → Uluwatu",
+      "intro": "Green valleys, creative villages and ocean air. A gentle journey designed around the pleasure of slowing down.",
+      "itinerary": [
+        {"day": "Days 1–3", "title": "Ease into Ubud", "description": "Visit a morning market, try a cooking class and spend a quiet afternoon among the palms."},
+        {"day": "Days 4–6", "title": "The slower side of Bali", "description": "Walk the Sidemen rice terraces with a local guide and settle into a peaceful valley retreat."},
+        {"day": "Days 7–9", "title": "Finish by the ocean", "description": "Head south for cliffside sunsets, beach mornings and a final dinner overlooking the water."}
+      ]
+    },
+    {
+      "id": "wild-tanzania",
+      "title": "Into the wild, together",
+      "destination": "tanzania",
+      "style": "Wild & adventurous",
+      "days": 11,
+      "price": 6250,
+      "image": "safari",
+      "tag": "LET WONDER LEAD",
+      "route": "Arusha → Serengeti → Zanzibar",
+      "intro": "The excitement of a first wildlife sighting, nights under an enormous sky and a few barefoot days by the sea.",
+      "itinerary": [
+        {"day": "Days 1–2", "title": "Arrive and settle in", "description": "Rest in Arusha before meeting your guide and setting out toward the highlands."},
+        {"day": "Days 3–7", "title": "Life on the savannah", "description": "Explore the Serengeti and Ngorongoro with a guide, with relaxed evenings at a small safari camp."},
+        {"day": "Days 8–11", "title": "Island time in Zanzibar", "description": "Trade the savannah for warm water, a Stone Town wander and long beach afternoons."}
+      ]
+    },
+    {
+      "id": "maldives-barefoot",
+      "title": "The barefoot escape",
+      "destination": "maldives",
+      "style": "Rest & reconnect",
+      "days": 7,
+      "price": 3950,
+      "image": "maldives",
+      "tag": "JUST YOU AND THE BLUE",
+      "route": "Malé → Your island retreat",
+      "intro": "A small island, a beautiful room and an entirely open diary. Sometimes, that is all the itinerary you need.",
+      "itinerary": [
+        {"day": "Day 1", "title": "Find your island", "description": "Arrive in Malé and transfer to your island retreat for a first swim before sunset."},
+        {"day": "Days 2–5", "title": "Follow your own pace", "description": "Snorkel the lagoon, book a sailing experience or simply enjoy the shade of a palm."},
+        {"day": "Days 6–7", "title": "One more ocean morning", "description": "Make time for a final sunrise and a slow breakfast before your return transfer."}
+      ]
+    },
+    {
+      "id": "greek-island-days",
+      "title": "A summer between islands",
+      "destination": "greece",
+      "style": "Culture & discovery",
+      "days": 10,
+      "price": 2950,
+      "image": "greece",
+      "tag": "SUNSHINE, SERVED SLOWLY",
+      "route": "Athens → Naxos → Santorini",
+      "intro": "Ancient stories, family-run tavernas and the kind of blue you thought only existed in photographs.",
+      "itinerary": [
+        {"day": "Days 1–2", "title": "Begin in Athens", "description": "Explore the historic centre, visit the Acropolis and enjoy the city’s lively food scene."},
+        {"day": "Days 3–6", "title": "Naxos at your own pace", "description": "Settle near the beach, visit mountain villages and try a hands-on island cooking class."},
+        {"day": "Days 7–10", "title": "A Santorini finale", "description": "Discover volcanic landscapes, walk the village lanes and sail into a memorable sunset."}
+      ]
+    }
+  ],
+  "articles": [
+    {
+      "id": "slow-travel",
+      "title": "The beautiful art of doing a little less",
+      "category": "Travel thoughtfully",
+      "image": "hero-lake",
+      "imageAlt": "A wooden boat on a quiet alpine lake",
+      "time": "4 min read",
+      "excerpt": "Why the best thing on your itinerary might be the space between plans.",
+      "paragraphs": [
+        "We tend to measure a trip by how much we fit into it. The museums visited, the cities ticked off, the reservations made. But the moments we remember often happen in between.",
+        "A second coffee in a sunny square. A conversation with a shopkeeper. Taking the longer route home because the light is particularly lovely. These are not interruptions to the journey. They are the journey.",
+        "Try building your next trip around fewer bases. Stay for three or four nights instead of moving every day. Choose one experience you are excited about, then leave the rest of the afternoon open.",
+        "Travelling slowly also gives you more time to choose small, locally owned places and learn something about the community hosting you. Ask questions, listen carefully and let curiosity shape the day.",
+        "A good itinerary should offer a sense of possibility. Give yourself permission to change your mind, take a nap or return to the café you liked yesterday. You do not have to see everything to feel somewhere."
+      ]
+    },
+    {
+      "id": "italian-riviera",
+      "title": "A love letter to the Italian Riviera",
+      "category": "Field notes",
+      "image": "italy",
+      "imageAlt": "A colourful village on the Italian coast",
+      "time": "5 min read",
+      "excerpt": "Pastel villages, salty air and the simple joy of a very long lunch.",
+      "paragraphs": [
+        "The Riviera rewards an early start, but not a hurried one. Wander down to the harbour while the village is waking up, find a coffee and watch the boats begin their day.",
+        "The villages of Cinque Terre are connected by trains and a network of walking paths. Check local trail conditions before setting out, and carry water, comfortable footwear and plenty of time.",
+        "Stay in one place for a few nights. Daylight brings bustle, but the early mornings and evenings have a different rhythm. You begin to recognise the same faces in the square.",
+        "For lunch, look for a short seasonal menu and a place where you would be happy to linger. Order something local, enjoy the view and resist the temptation to turn the meal into a checklist.",
+        "The loveliest souvenir may be a new habit: taking your time."
+      ]
+    },
+    {
+      "id": "japan-first-time",
+      "title": "Your first Japan journey, thoughtfully planned",
+      "category": "The travel edit",
+      "image": "japan",
+      "imageAlt": "Japanese temple and cherry blossoms",
+      "time": "6 min read",
+      "excerpt": "A little preparation leaves a lot more room for discovery.",
+      "paragraphs": [
+        "For a first journey, Tokyo and Kyoto make a wonderful pairing. Their different rhythms help you appreciate how many versions of Japan can exist in one trip.",
+        "Build in a quieter stop between the cities. A night or two in a ryokan offers space to slow down and experience a different style of hospitality.",
+        "Keep your daily plans geographically focused. Exploring one neighbourhood well often feels more rewarding than crossing a city repeatedly to visit a long list of sights.",
+        "Learn a few simple phrases, observe local signs and ask before photographing people. Small acts of care make travelling more comfortable for everyone.",
+        "Finally, leave room for the unexpected. The tiny restaurant near your hotel or a garden discovered by chance may become the part you talk about most."
+      ]
+    }
+  ]
+}

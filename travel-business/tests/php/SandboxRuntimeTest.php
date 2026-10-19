@@ -1,6 +1,6 @@
 <?php
 
-require dirname(__DIR__, 2).'/deploy/infinityfree/autoload.php';
+require dirname(__DIR__, 2).'/site/private/autoload.php';
 
 use Elsewhere\{SandboxConfig, Catalog, CatalogDestination, CatalogJourney, SandboxRuntime, RequestIdentity, SandboxOperation, EnquiryInput, EnquiryId, StatusChange, EnquiryStatus, DemoError, ErrorCode, VisitorStore, SandboxRecord};
 
@@ -21,7 +21,7 @@ final class SandboxRuntimeTest
     {
         $this->workspace = dirname(__DIR__, 2).'/storage/test-runs/php-'.bin2hex(random_bytes(8));
         mkdir($this->workspace, 0700, true);
-        $this->catalog = new Catalog(destinations: [new CatalogDestination(id: 'italy', name: 'Italy')], journeys: [new CatalogJourney(id: 'italian-slow-days', title: 'Italian Slow Days', destination: 'italy', price: 3250)], budgets: json_decode(file_get_contents(dirname(__DIR__, 2).'/config/enquiry-budgets.json'), flags: JSON_THROW_ON_ERROR));
+        $this->catalog = new Catalog(destinations: [new CatalogDestination(id: 'italy', name: 'Italy')], journeys: [new CatalogJourney(id: 'italian-slow-days', title: 'Italian Slow Days', destination: 'italy', price: 3250)], budgets: json_decode(file_get_contents(dirname(__DIR__, 2).'/site/private/enquiry-budgets.json'), flags: JSON_THROW_ON_ERROR));
     }
 
     /** @param array<string, int> $overrides @return SandboxConfig */
@@ -320,7 +320,7 @@ final class SandboxRuntimeTest
     /** @return void */
     public function busyRegistryReturnsBusy(): void
     {
-        $runtime = $this->runtime('busy-registry', $this->config(['lockWaitMilliseconds' => 200]));
+        $runtime = $this->runtime('busy-registry', $this->config(['busyTimeoutMilliseconds' => 200]));
         $identity = $this->visitor($runtime);
         $holder = new PDO('sqlite:'.$runtime->root.'/registry.sqlite');
         $holder->exec('BEGIN IMMEDIATE');
@@ -337,7 +337,7 @@ final class SandboxRuntimeTest
     /** @return void */
     public function busyVisitorDatabaseReturnsBusy(): void
     {
-        $runtime = $this->runtime('busy-visitor', $this->config(['lockWaitMilliseconds' => 200]));
+        $runtime = $this->runtime('busy-visitor', $this->config(['busyTimeoutMilliseconds' => 200]));
         $identity = $this->login($runtime, $this->visitor($runtime));
         $holder = new PDO('sqlite:'.$this->databasePath($runtime, $identity));
         $holder->exec('BEGIN IMMEDIATE');

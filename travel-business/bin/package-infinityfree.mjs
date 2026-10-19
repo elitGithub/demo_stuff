@@ -16,7 +16,7 @@ const publicFiles = new Set(['index.html', 'destinations.html', 'journeys.html',
 async function verifyPublicBuild(directory, topLevel = true) {
   for (const entry of await readdir(directory, { withFileTypes: true })) {
     const path = join(directory, entry.name);
-    if (entry.isSymbolicLink() || (topLevel && !publicFiles.has(entry.name)) || /^(?:private|runtime|sandbox-runtime|tests?|test-runs|registry(?:\..*)?|preflight(?:[-.].*)?)$/i.test(entry.name) || /\.(?:sqlite|sqlite3|db)(?:[-.].*)?$|(?:^|\.)journal$|(?:^|\.)env(?:\..*)?$/i.test(entry.name)) {
+    if (entry.isSymbolicLink() || (topLevel && !publicFiles.has(entry.name)) || /^(?:private|runtime|sandbox-runtime|tests?|test-runs|registry(?:\..*)?)$/i.test(entry.name) || /\.(?:sqlite|sqlite3|db)(?:[-.].*)?$|(?:^|\.)journal$|(?:^|\.)env(?:\..*)?$/i.test(entry.name)) {
       throw new Error(`Unexpected public build artifact: ${path}`);
     }
     if (entry.isDirectory()) {
@@ -45,12 +45,14 @@ for (const file of await readdir(site)) {
 await cp(join(root, 'deploy/infinityfree/website.htaccess'), join(site, '.htaccess'));
 await cp(join(root, 'deploy/infinityfree/api.php'), join(privateDir, 'api.php'));
 await writeFile(join(privateDir, '.htaccess'), 'Require all denied\n');
+await mkdir(join(privateDir, 'sandboxes'));
+await writeFile(join(privateDir, 'sandboxes', '.htaccess'), 'Require all denied\n');
 await writeFile(join(site, 'api.php'), "<?php\ndeclare(strict_types=1);\nrequire __DIR__.'/private/api.php';\n");
 const phpString = text => `'${text.replaceAll('\\', '\\\\').replaceAll("'", "\\'")}'`;
-await writeFile(join(privateDir, 'config.php'), `<?php\nreturn ['origin' => ${phpString(origin)}, 'base_path' => '${basePath}', 'sandbox_root' => __DIR__.'/runtime/sandbox-runtime', 'sandbox' => (object) []];\n`);
+await writeFile(join(privateDir, 'config.php'), `<?php\nreturn ['origin' => ${phpString(origin)}, 'base_path' => '${basePath}', 'sandbox_root' => __DIR__.'/sandboxes', 'sandbox' => (object) []];\n`);
 await cp(join(root, 'deploy/infinityfree/autoload.php'), join(privateDir, 'autoload.php'));
 await cp(join(root, 'deploy/infinityfree/classes'), join(privateDir, 'classes'), { recursive: true });
-for (const [source, target] of [['src/schema.sql', 'schema.sql'], ['src/demo-seed.json', 'demo-seed.json'], ['config/sandbox.json', 'sandbox.json'], ['config/enquiry-budgets.json', 'enquiry-budgets.json']]) {
+for (const [source, target] of [['src/schema.sql', 'schema.sql'], ['src/registry-schema.sql', 'registry-schema.sql'], ['src/demo-seed.json', 'demo-seed.json'], ['config/sandbox.json', 'sandbox.json'], ['config/enquiry-budgets.json', 'enquiry-budgets.json']]) {
   await cp(join(root, source), join(privateDir, target));
 }
 await writeFile(join(privateDir, 'catalog.json'), JSON.stringify({ destinations: destinations.map(({ id, name }) => ({ id, name })), journeys: journeys.map(({ id, title, destination, price }) => ({ id, title, destination, price })) }));

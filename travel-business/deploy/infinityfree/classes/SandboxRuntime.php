@@ -4,19 +4,19 @@ namespace Elsewhere;
 
 final class SandboxRuntime
 {
-    public readonly SandboxRegistry $registry;
-
-    /** @param string $root @param SandboxConfig $config @param Catalog $catalog @param \Closure $now */
+    /** @param string $root @param SandboxConfig $config @param Catalog $catalog @param \Closure $now @throws \TypeError */
     public function __construct(
-        string                        $root,
+        public readonly string        $root,
         public readonly SandboxConfig $config,
         public readonly Catalog       $catalog,
         public readonly \Closure      $now
     ) {
-        $this->registry = new SandboxRegistry(root: $root, config: $config);
+        if ($root === '' || !str_starts_with($root, '/') || preg_match('~(?:^|/)\.\.(?:/|$)~', $root) === 1) {
+            throw new \TypeError('Explicit absolute runtime root required.');
+        }
     }
 
-    /** @param SandboxOperation $operation @param RequestIdentity $identity @param EnquiryInput|StatusChange|EnquiryId|null $command @return ApiResult */
+    /** @param SandboxOperation $operation @param RequestIdentity $identity @param EnquiryInput|StatusChange|EnquiryId|null $command @return ApiResult @throws DemoError */
     public function execute(
         SandboxOperation                         $operation,
         RequestIdentity                          $identity,
@@ -31,7 +31,8 @@ final class SandboxRuntime
         if (!$validCommand) {
             throw new DemoError('Invalid action details.');
         }
-        $lock = $this->registry->acquire();
+        $registry = new SandboxRegistry(root: $this->root, config: $this->config);
+        $registry->begin();
         try {
             $timestamp = ($this->now)();
             if (!is_int($timestamp) || $timestamp < 0 || $timestamp > 9007199254740991 - max(
@@ -40,25 +41,32 @@ final class SandboxRuntime
                 )) {
                 throw new \TypeError('Invalid sandbox clock.');
             }
-            $registry = $this->reconcile($this->registry->load(), $timestamp);
+            $expired = $registry->expire($timestamp);
             $digest = $this->token($identity->sandboxToken) ? hash('sha256', $identity->sandboxToken) : null;
-            $record = $digest !== null && isset($registry->sandboxes[$digest]) ? $registry->sandboxes[$digest] : null;
-            $ready = $record !== null && $record->state === SandboxState::Ready && $timestamp < $record->lastActivity + $this->config->idleSeconds;
+            $record = $digest !== null ? $registry->find($digest) : null;
+            $ready = $record !== null && $timestamp < $record->lastActivity + $this->config->idleSeconds;
             $bootstrap = $operation === SandboxOperation::BOOTSTRAP;
-            if (!$bootstrap && (!$ready || !$this->same($identity->contextToken, $record->csrfToken))) {
-                throw new DemoError(
-                    'Your demo session ended or changed. Start a fresh demo.',
-                    409,
-                    ErrorCode::SandboxContext
-                );
-            }
+            $allocate = $bootstrap && !$ready;
             $authorized = $ready && $this->token(
                     $identity->dashboardToken
                 ) && $record->dashboardDigest !== null && $this->same(
                     hash('sha256', $identity->dashboardToken),
                     $record->dashboardDigest
                 );
-            if (in_array(
+            $action = match (true) {
+                $allocate                                       => RateAction::ALLOCATION,
+                $operation === SandboxOperation::CREATE_ENQUIRY => RateAction::ENQUIRY,
+                $operation === SandboxOperation::LOGIN          => RateAction::LOGIN,
+                default                                         => null,
+            };
+            $rejection = null;
+            if (!$bootstrap && (!$ready || !$this->same($identity->contextToken, $record->csrfToken))) {
+                $rejection = new DemoError(
+                    'Your demo session ended or changed. Start a fresh demo.',
+                    409,
+                    ErrorCode::SandboxContext
+                );
+            } elseif (in_array(
                     $operation,
                     [
                         SandboxOperation::LOGOUT,
@@ -68,79 +76,46 @@ final class SandboxRuntime
                     ],
                     true
                 ) && !$authorized) {
-                throw new DemoError('Enter the demo dashboard to continue.', 401, ErrorCode::DashboardAccess);
+                $rejection = new DemoError('Enter the demo dashboard to continue.', 401, ErrorCode::DashboardAccess);
+            } elseif ($allocate && $registry->count() >= $this->config->maxSandboxes) {
+                $rejection = new DemoError(
+                    'The demo is at capacity. Please try again later.', 503, ErrorCode::Capacity, 60
+                );
+            } elseif ($action !== null) {
+                $rejection = $registry->charge($identity->remoteAddress, $action, $timestamp);
             }
-            if ($bootstrap && !$ready) {
-                if (count($registry->sandboxes) >= $this->config->maxSandboxes) {
-                    throw new DemoError(
-                        'The demo is at capacity. Please try again later.', 503, ErrorCode::Capacity, 60
-                    );
-                }
-                $this->admit($registry, 1);
-                $registry = $this->charge($registry, $identity->remoteAddress, RateAction::ALLOCATION, $timestamp);
+            if ($rejection !== null) {
+                $registry->commit();
+                $registry->deleteFiles($expired);
+                throw $rejection;
+            }
+            if ($allocate) {
                 $sandboxToken = bin2hex(random_bytes(32));
                 $record = new SandboxRecord(
                     digest         : hash('sha256', $sandboxToken),
                     csrfToken      : bin2hex(random_bytes(32)),
                     dashboardDigest: null,
-                    lastActivity   : $timestamp,
-                    state          : SandboxState::Pending
+                    lastActivity   : $timestamp
                 );
-                $allocations = $registry->sandboxes;
-                if (isset($allocations[$record->digest])) {
-                    throw new DemoError('The demo storage is unavailable.', 503, ErrorCode::Unavailable);
-                }
-                $allocations[$record->digest] = $record;
-                $this->registry->save(new Registry(sandboxes: $allocations, rateBuckets: $registry->rateBuckets));
-                $seed = null;
                 try {
-                    $directory = $this->registry->root . '/' . $record->digest;
-                    if (!mkdir($directory, 0700)) {
-                        throw new \RuntimeException('Cannot create sandbox directory.');
-                    }
-                    $seed = new VisitorStore(
-                        path   : $directory . '/seed.sqlite',
+                    (new VisitorStore(
+                        path   : $this->root . '/' . $record->digest . '.sqlite',
                         config : $this->config,
                         catalog: $this->catalog,
                         now    : $this->now,
                         create : true
-                    );
-                    $seed->close();
-                    $seed = null;
-                    if (!rename($directory . '/seed.sqlite', $directory . '/demo.sqlite')) {
-                        throw new \RuntimeException('Cannot publish sandbox seed.');
-                    }
-                    $this->registry->syncDirectory($directory);
-                    $record = new SandboxRecord(
-                        digest         : $record->digest,
-                        csrfToken      : $record->csrfToken,
-                        dashboardDigest: null,
-                        lastActivity   : $timestamp,
-                        state          : SandboxState::Ready
-                    );
-                    $allocations[$record->digest] = $record;
-                    $this->registry->save(new Registry(sandboxes: $allocations, rateBuckets: $registry->rateBuckets));
-                    return new ApiResult(
-                        payload: $this->bootstrap($record, true), cookies: $this->cookies(
-                        $sandboxToken,
-                        null
-                    )
-                    );
+                    ))->close();
+                    $registry->insert($record);
+                    $registry->commit();
                 } catch (\Throwable $error) {
-                    throw $this->registry->unavailable($error);
-                } finally {
-                    if ($seed !== null) {
-                        $seed->close();
-                    }
+                    $registry->deleteFiles([$record->digest]);
+                    $registry->rollback();
+                    throw $registry->failure($error);
                 }
-            }
-            $this->admit($registry, 0);
-            if ($operation === SandboxOperation::CREATE_ENQUIRY || $operation === SandboxOperation::LOGIN) {
-                $registry = $this->charge(
-                    $registry,
-                    $identity->remoteAddress,
-                    $operation === SandboxOperation::LOGIN ? RateAction::LOGIN : RateAction::ENQUIRY,
-                    $timestamp
+                $registry->deleteFiles($expired);
+                return new ApiResult(
+                    payload: $this->bootstrap($record, true),
+                    cookies: $this->cookies($sandboxToken, null)
                 );
             }
             $dashboardToken = $authorized ? $identity->dashboardToken : null;
@@ -153,158 +128,60 @@ final class SandboxRuntime
             $record = new SandboxRecord(
                 digest         : $record->digest,
                 csrfToken      : $record->csrfToken,
-                dashboardDigest: $operation === SandboxOperation::LOGIN ? hash(
-                'sha256',
-                $dashboardToken
-            ) : ($operation === SandboxOperation::LOGOUT ? null : $record->dashboardDigest),
-                lastActivity   : $timestamp,
-                state          : $record->state
+                dashboardDigest: match ($operation) {
+                    SandboxOperation::LOGIN  => hash('sha256', $dashboardToken),
+                    SandboxOperation::LOGOUT => null,
+                    default                  => $record->dashboardDigest,
+                },
+                lastActivity   : $timestamp
             );
-            $records = $registry->sandboxes;
-            $records[$record->digest] = $record;
-            $this->registry->save(new Registry(sandboxes: $records, rateBuckets: $registry->rateBuckets));
-            $cookies = $this->cookies($identity->sandboxToken, $dashboardToken);
-            if ($operation === SandboxOperation::LOGOUT) {
-                $cookies[] = new CookieChange(
-                    name  : $this->config->dashboardCookie,
-                    value : '',
-                    path  : '/',
-                    maxAge: 0,
-                    secure: false
-                );
-            }
-            if ($bootstrap) {
-                return new ApiResult(payload: $this->bootstrap($record, false), cookies: $cookies);
-            }
-            if ($operation === SandboxOperation::LOGIN || $operation === SandboxOperation::LOGOUT) {
-                return new ApiResult(payload: new Acknowledgement(), cookies: $cookies);
-            }
-            $store = null;
-            try {
-                $store = new VisitorStore(
-                    path   : $this->registry->root . '/' . $record->digest . '/demo.sqlite',
-                    config : $this->config,
-                    catalog: $this->catalog,
-                    now    : $this->now,
-                    create : false
-                );
-                $payload = match ($operation) {
-                    SandboxOperation::CREATE_ENQUIRY => $store->createEnquiry($command),
-                    SandboxOperation::OVERVIEW       => $store->overview(),
-                    SandboxOperation::UPDATE_STATUS  => $store->updateStatus($command),
-                    SandboxOperation::CREATE_BOOKING => $store->convert($command),
-                    default                          => throw new \Exception('Unexpected match value'),
-                };
-                return new ApiResult(payload: $payload, cookies: $cookies);
-            } catch (\Throwable $error) {
-                $failure = $this->registry->unavailable($error);
-                $failure->cookies = $cookies;
-                throw $failure;
-            } finally {
-                $store?->close();
-            }
+            $registry->update($record);
+            $registry->commit();
+        } catch (\Throwable $error) {
+            $registry->rollback();
+            throw $error;
+        }
+        $registry->deleteFiles($expired);
+        $cookies = $this->cookies($identity->sandboxToken, $dashboardToken);
+        if ($operation === SandboxOperation::LOGOUT) {
+            $cookies[] = new CookieChange(
+                name  : $this->config->dashboardCookie,
+                value : '',
+                path  : '/',
+                maxAge: 0,
+                secure: false
+            );
+        }
+        if ($bootstrap) {
+            return new ApiResult(payload: $this->bootstrap($record, false), cookies: $cookies);
+        }
+        if ($operation === SandboxOperation::LOGIN || $operation === SandboxOperation::LOGOUT) {
+            return new ApiResult(payload: new Acknowledgement(), cookies: $cookies);
+        }
+        $store = null;
+        try {
+            $store = new VisitorStore(
+                path   : $this->root . '/' . $record->digest . '.sqlite',
+                config : $this->config,
+                catalog: $this->catalog,
+                now    : $this->now,
+                create : false
+            );
+            $payload = match ($operation) {
+                SandboxOperation::CREATE_ENQUIRY => $store->createEnquiry($command),
+                SandboxOperation::OVERVIEW       => $store->overview(),
+                SandboxOperation::UPDATE_STATUS  => $store->updateStatus($command),
+                SandboxOperation::CREATE_BOOKING => $store->convert($command),
+                default                          => throw new \Exception('Unexpected match value'),
+            };
+            return new ApiResult(payload: $payload, cookies: $cookies);
+        } catch (\Throwable $error) {
+            $failure = $registry->failure($error);
+            $failure->cookies = $cookies;
+            throw $failure;
         } finally {
-            flock($lock, LOCK_UN);
-            fclose($lock);
+            $store?->close();
         }
-    }
-
-    /** @param Registry $registry @param int $timestamp @return Registry */
-    public function reconcile(Registry $registry, int $timestamp): Registry
-    {
-        $buckets = $registry->rateBuckets;
-        $records = $registry->sandboxes;
-        $changed = false;
-        foreach ($buckets as $key => $bucket) {
-            if ($timestamp >= $bucket->expiresAt) {
-                unset($buckets[$key]);
-                $changed = true;
-            }
-        }
-        foreach ($records as $key => $record) {
-            if ($record->state === SandboxState::Pending) {
-                $records[$key] = new SandboxRecord(
-                    digest         : $record->digest,
-                    csrfToken      : $record->csrfToken,
-                    dashboardDigest: null,
-                    lastActivity   : $record->lastActivity,
-                    state          : SandboxState::Failed
-                );
-                $changed = true;
-            }
-        }
-        $cleaned = 0;
-        foreach ($records as $key => $record) {
-            if ($cleaned >= $this->config->cleanupBatch) {
-                break;
-            }
-            if ($record->state === SandboxState::Failed || $timestamp >= $record->lastActivity + $this->config->idleSeconds) {
-                $failed = new SandboxRecord(
-                    digest         : $record->digest,
-                    csrfToken      : $record->csrfToken,
-                    dashboardDigest: null,
-                    lastActivity   : $record->lastActivity,
-                    state          : SandboxState::Failed
-                );
-                $records[$key] = $failed;
-                $this->registry->save(new Registry(sandboxes: $records, rateBuckets: $buckets));
-                $cleaned++;
-                try {
-                    $this->registry->remove($failed);
-                    unset($records[$key]);
-                } catch (\Throwable $error) {
-                    error_log('Sandbox cleanup failed: ' . $error);
-                }
-                $changed = true;
-            }
-        }
-        if ($changed) {
-            $registry = new Registry(sandboxes: $records, rateBuckets: $buckets);
-            $this->registry->save($registry);
-        }
-        return $registry;
-    }
-
-    /** @param Registry $registry @param int $additionalSlots @return void */
-    public function admit(Registry $registry, int $additionalSlots): void
-    {
-        $required = (count(
-                         $registry->sandboxes
-                     ) + $additionalSlots) * $this->config->maxDatabaseBytes + $this->config->registryReserveBytes + $this->config->journalReserveBytes + $this->config->stagingReserveBytes + $this->registry->extraBytes(
-                $registry
-            );
-        if ($required > $this->config->maxRuntimeBytes) {
-            throw new DemoError('The demo is at capacity. Please try again later.', 503, ErrorCode::Capacity, 60);
-        }
-    }
-
-    /** @param Registry $registry @param string $address @param RateAction $action @param int $timestamp @return Registry */
-    public function charge(Registry $registry, string $address, RateAction $action, int $timestamp): Registry
-    {
-        $key = hash('sha256', $action->value . "\0" . $address);
-        $buckets = $registry->rateBuckets;
-        $previous = $buckets[$key] ?? null;
-        $limit = match ($action) {
-            RateAction::ALLOCATION => $this->config->allocationLimit,
-            RateAction::ENQUIRY    => $this->config->enquiryLimit,
-            RateAction::LOGIN      => $this->config->loginLimit
-        };
-        if (($previous !== null && $previous->hits >= $limit) || ($previous === null && count(
-                                                                                            $buckets
-                                                                                        ) >= $this->config->maxRateBuckets)) {
-            $retryAfter = $previous !== null ? $previous->expiresAt - $timestamp : min(
-                array_map(fn(RateBucket $bucket): int => $bucket->expiresAt - $timestamp, $buckets)
-            );
-            throw new DemoError(
-                'Please wait before trying this action again.', 429, ErrorCode::RateLimited, $retryAfter
-            );
-        }
-        $buckets[$key] = new RateBucket(
-            key      : $key,
-            hits     : $previous !== null ? $previous->hits + 1 : 1,
-            expiresAt: $previous !== null ? $previous->expiresAt : $timestamp + $this->config->rateWindowSeconds
-        );
-        return new Registry(sandboxes: $registry->sandboxes, rateBuckets: $buckets);
     }
 
     /** @param SandboxRecord $record @param bool $created @return Bootstrap */

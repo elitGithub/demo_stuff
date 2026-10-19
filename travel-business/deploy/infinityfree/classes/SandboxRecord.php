@@ -4,13 +4,12 @@ namespace Elsewhere;
 
 final readonly class SandboxRecord implements \JsonSerializable
 {
-    /** @param string $digest @param string $csrfToken @param ?string $dashboardDigest @param int $lastActivity @param SandboxState $state */
+    /** @param string $digest @param string $csrfToken @param ?string $dashboardDigest @param int $lastActivity */
     public function __construct(
-        public string       $digest,
-        public string       $csrfToken,
-        public ?string      $dashboardDigest,
-        public int          $lastActivity,
-        public SandboxState $state
+        public string  $digest,
+        public string  $csrfToken,
+        public ?string $dashboardDigest,
+        public int     $lastActivity
     ) {
         if (!preg_match('/^[a-f0-9]{64}$/D', $digest) || !preg_match(
                 '/^[a-f0-9]{64}$/D',
@@ -26,6 +25,6 @@ final readonly class SandboxRecord implements \JsonSerializable
     /** @return array<string, mixed> */
     public function jsonSerialize(): array
     {
-        return [...get_object_vars($this), 'state' => $this->state->value];
+        return get_object_vars($this);
     }
 }

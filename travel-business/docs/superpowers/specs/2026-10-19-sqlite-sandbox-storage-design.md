@@ -2,7 +2,7 @@
 
 Date: 2026-10-19
 
-Status: Draft. Awaiting builder check and operator approval.
+Status: Approved by the operator on 2026-10-19 after the builder check.
 
 ## Why
 
@@ -42,6 +42,10 @@ an ordinary application uses it.
   deployment guide keeps only a one-file `pdo_sqlite` check and plain steps.
 - Deletion is approved for `deploy/infinityfree/preflight.php` and
   `deploy/infinityfree/preflight-secret.example.php`.
+- Hosted failures go to a private log file the operator can read in the file
+  manager.
+- The local PHP test harness uses the installed PHP 8.4 (8.3 acceptable); no
+  package is installed.
 
 ## Goals
 
@@ -187,6 +191,21 @@ Node).
 - The `metadata` table and its seed insert are removed; nothing reads them once
   the verification code is gone.
 
+### Hosted error log
+
+`private/api.php` sets, before anything else runs:
+
+```php
+ini_set('log_errors', '1');
+ini_set('error_log', __DIR__.'/sandboxes/php-errors.log');
+```
+
+Every existing `error_log()` call then lands in
+`private/sandboxes/php-errors.log`, which the operator reads in the file manager.
+The file stays behind the private deny rules, and the website `.htaccess` already
+denies `.log` files. Only failures are logged, so growth is small. The operator
+deletes the file when convenient. Local Node keeps `console.error`.
+
 ### Configuration
 
 `config/sandbox.json` and both `SandboxConfig` classes:
@@ -255,8 +274,14 @@ preflight) are deleted. API behaviour tests stay and pass unchanged. New or
 adapted tests try to break:
 
 - the PHP suite run under `open_basedir` limited to the package root and the test
-  temp folder (the regression for this incident), through the existing Apache
-  harness in `tests/infinityfree.py`;
+  temp folder (the regression for this incident), through the Apache harness in
+  `tests/infinityfree.py`. Apache here only has a PHP 8.5 module, and 8.5 has no
+  SQLite on this machine, so the harness switches from `libphp*.so` to
+  `/usr/sbin/php-fpm8.4` behind `mod_proxy_fcgi`, with `open_basedir` set as a
+  `php_admin_value` in the pool file it generates. No package is installed;
+  `/usr/bin/php-cgi8.4` is the fallback if FPM proves unworkable;
+- a storage failure on the PHP side writes its cause to
+  `private/sandboxes/php-errors.log`;
 - isolation: two visitors with overlapping local record IDs never see each
   other's data;
 - expiry: an idle sandbox's row and file are removed, at most `cleanupBatch` per

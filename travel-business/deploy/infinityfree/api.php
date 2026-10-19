@@ -1,5 +1,8 @@
 <?php
 
+ini_set('log_errors', '1');
+ini_set('error_log', __DIR__ . '/sandboxes/php-errors.log');
+
 require __DIR__ . '/autoload.php';
 
 set_error_handler(function (int $severity, string $message, string $file, int $line): bool {

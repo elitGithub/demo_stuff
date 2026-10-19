@@ -10,51 +10,19 @@ final class VisitorStore
     public function __construct(string $path, public readonly SandboxConfig $config, public readonly Catalog $catalog, public readonly \Closure $now, bool $create)
     {
         try {
+            $options = [\PDO::ATTR_ERRMODE => \PDO::ERRMODE_EXCEPTION, \PDO::ATTR_STRINGIFY_FETCHES => false, \PDO::ATTR_DEFAULT_FETCH_MODE => \PDO::FETCH_ASSOC];
+            if (!$create) { $options[\Pdo\Sqlite::ATTR_OPEN_FLAGS] = \Pdo\Sqlite::OPEN_READWRITE; }
+            $this->database = new \PDO('sqlite:'.$path, options: $options);
+            $this->database->exec('PRAGMA busy_timeout = '.$config->lockWaitMilliseconds);
+            if ($create) { $this->database->exec('PRAGMA page_size = '.$config->sqlitePageBytes); }
+            $this->database->exec('PRAGMA journal_mode = DELETE');
+            $this->database->exec('PRAGMA foreign_keys = ON');
+            $this->database->exec('PRAGMA temp_store = MEMORY');
+            $this->database->exec('PRAGMA max_page_count = '.intdiv($config->maxDatabaseBytes, $config->sqlitePageBytes));
             if ($create) {
-                $descriptor = fopen($path, 'x+b');
-                if ($descriptor === false) { throw new \RuntimeException('Cannot create sandbox database.'); }
-                fclose($descriptor);
-                if (!chmod($path, 0600)) { throw new \RuntimeException('Cannot protect sandbox database.'); }
-            } else {
-                $information = lstat($path);
-                if ($information === false || ($information['mode'] & 0170000) !== 0100000 || is_link($path) || $information['size'] > $config->maxDatabaseBytes) { throw new DemoError('Invalid sandbox database.', 503, ErrorCode::Unavailable); }
-            }
-            $this->database = new \PDO('sqlite:'.$path, options: [\PDO::ATTR_ERRMODE => \PDO::ERRMODE_EXCEPTION, \PDO::ATTR_STRINGIFY_FETCHES => false, \PDO::ATTR_DEFAULT_FETCH_MODE => \PDO::FETCH_ASSOC]);
-            $dataDirectory = is_file(dirname(__DIR__).'/schema.sql') ? dirname(__DIR__) : dirname(__DIR__, 3).'/src';
-            $schema = file_get_contents($dataDirectory.'/schema.sql');
-            $seed = json_decode(file_get_contents($dataDirectory.'/demo-seed.json'), flags: JSON_THROW_ON_ERROR);
-            if (!$create) {
-                $definitions = $this->database->query('SELECT type, name, tbl_name, sql FROM sqlite_schema ORDER BY name')->fetchAll();
-                foreach ($definitions as &$definition) { if ($definition['sql'] !== null) { $definition['sql'] = preg_replace('/\s+/', ' ', trim($definition['sql'])); } }
-                unset($definition);
-                $expected = [];
-                foreach (explode(';', $schema) as $statement) {
-                    $statement = trim($statement);
-                    if ($statement === '') { continue; }
-                    if (preg_match('/^CREATE TABLE (\w+)/', $statement, $matches) !== 1) { throw new \RuntimeException('Invalid canonical schema.'); }
-                    $expected[] = ['type' => 'table', 'name' => $matches[1], 'tbl_name' => $matches[1], 'sql' => preg_replace('/\s+/', ' ', $statement)];
-                }
-                foreach (['enquiries' => 1, 'bookings' => 2, 'metadata' => 1] as $table => $count) {
-                    for ($index = 1; $index <= $count; $index++) { $expected[] = ['type' => 'index', 'name' => 'sqlite_autoindex_'.$table.'_'.$index, 'tbl_name' => $table, 'sql' => null]; }
-                }
-                usort($expected, fn (array $left, array $right): int => strcmp($left['name'], $right['name']));
-                if ($definitions !== $expected) { throw new DemoError('Invalid sandbox schema.', 503, ErrorCode::Unavailable); }
-                if ($this->database->query('SELECT key, value FROM metadata ORDER BY key')->fetchAll() !== [['key' => 'schemaVersion', 'value' => $seed->schemaVersion], ['key' => 'seeded', 'value' => '1']]) { throw new DemoError('Incomplete sandbox seed.', 503, ErrorCode::Unavailable); }
-                foreach ($seed->enquiries as $enquiry) {
-                    if ($this->query('SELECT id FROM enquiries WHERE id = ? AND reference = ?', [$enquiry->id, $enquiry->reference])->fetch() === false) { throw new DemoError('Incomplete sandbox seed.', 503, ErrorCode::Unavailable); }
-                }
-                foreach ($seed->bookings as $booking) {
-                    if ($this->query('SELECT id FROM bookings WHERE id = ? AND reference = ? AND enquiryId IS NULL', [$booking->id, $booking->reference])->fetch() === false) { throw new DemoError('Incomplete sandbox seed.', 503, ErrorCode::Unavailable); }
-                }
-                if ($this->database->query('PRAGMA integrity_check')->fetchColumn() !== 'ok' || $this->database->query('PRAGMA foreign_key_check')->fetchAll() !== [] || $this->database->query('PRAGMA journal_mode')->fetchColumn() !== 'delete') { throw new DemoError('Invalid sandbox database state.', 503, ErrorCode::Unavailable); }
-            }
-            $pages = intdiv($config->maxDatabaseBytes, $config->sqlitePageBytes);
-            $settings = ['page_size' => $config->sqlitePageBytes, 'journal_mode' => 'delete', 'foreign_keys' => 1, 'temp_store' => 2, 'cache_spill' => 0, 'cache_size' => $pages, 'max_page_count' => $pages];
-            foreach ($settings as $setting => $expectedValue) {
-                $this->database->exec('PRAGMA '.$setting.' = '.$expectedValue);
-                if ($this->database->query('PRAGMA '.$setting)->fetchColumn() !== $expectedValue) { throw new DemoError('Unsafe sandbox SQLite settings.', 503, ErrorCode::Unavailable); }
-            }
-            if ($create) {
+                $dataDirectory = is_file(dirname(__DIR__).'/schema.sql') ? dirname(__DIR__) : dirname(__DIR__, 3).'/src';
+                $schema = file_get_contents($dataDirectory.'/schema.sql');
+                $seed = json_decode(file_get_contents($dataDirectory.'/demo-seed.json'), flags: JSON_THROW_ON_ERROR);
                 $this->transaction(function () use ($schema, $seed): void {
                     $this->database->exec($schema);
                     $allocatedAt = ($this->now)();
@@ -65,12 +33,12 @@ final class VisitorStore
                     foreach ($seed->bookings as $booking) {
                         $this->query('INSERT INTO bookings (id, reference, firstName, lastName, destination, journey, departure, travelers, value, status, createdAt) VALUES (?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?)', [$booking->id, $booking->reference, $booking->firstName, $booking->lastName, $booking->destination, $booking->journey, gmdate('Y-m-d', $allocatedAt + $booking->departureDays * 86400), $booking->travelers, $booking->value, $booking->status, $createdAt]);
                     }
-                    $this->query("INSERT INTO metadata (key, value) VALUES ('schemaVersion', ?), ('seeded', '1')", [$seed->schemaVersion]);
                 });
             }
         } catch (\Throwable $error) {
             $this->close();
-            if ($error instanceof DemoError) { throw $error; }
+            $failure = $this->failure($error);
+            if ($failure instanceof DemoError) { throw $failure; }
             throw new DemoError('The sandbox database is unavailable.', 503, ErrorCode::Unavailable, previous: $error);
         }
     }
@@ -147,9 +115,17 @@ final class VisitorStore
             return $result;
         } catch (\Throwable $error) {
             if ($this->database->inTransaction()) { $this->database->exec('ROLLBACK'); }
-            if ($error instanceof \PDOException && isset($error->errorInfo[1]) && $error->errorInfo[1] === 13) { throw new DemoError('Your demo workspace has reached its storage limit.', 409, ErrorCode::SandboxFull, previous: $error); }
-            throw $error;
+            throw $this->failure($error);
         }
+    }
+
+    /** @param \Throwable $error @return \Throwable */
+    public function failure(\Throwable $error): \Throwable
+    {
+        $code = $error instanceof \PDOException && isset($error->errorInfo[1]) ? $error->errorInfo[1] : null;
+        if ($code === 13) { return new DemoError('Your demo workspace has reached its storage limit.', 409, ErrorCode::SandboxFull, previous: $error); }
+        if ($code === 5) { return new DemoError('The demo is busy. Please try again.', 503, ErrorCode::Busy, 2); }
+        return $error;
     }
 
     /** @return void */

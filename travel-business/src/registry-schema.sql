@@ -1,0 +1,11 @@
+CREATE TABLE IF NOT EXISTS sandboxes (
+  digest TEXT PRIMARY KEY,
+  csrfToken TEXT NOT NULL UNIQUE,
+  dashboardDigest TEXT UNIQUE,
+  lastActivity INTEGER NOT NULL
+);
+CREATE TABLE IF NOT EXISTS rate_buckets (
+  key TEXT PRIMARY KEY,
+  hits INTEGER NOT NULL,
+  expiresAt INTEGER NOT NULL
+);

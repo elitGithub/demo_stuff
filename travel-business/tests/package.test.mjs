@@ -25,13 +25,16 @@ test('package_is_only_elsewhere_and_database_free', () => {
     assert.ok(files.every(name => name.startsWith('travel-agency-demo/')));
     assert.ok(files.every(name => !/\.sqlite(?:-|$)|\.db$|registry\.|runtime|preflight|test-runs|\/tests\//.test(name)));
     const site = join(output, 'htdocs/travel-agency-demo');
-    for (const [sourceFile, target] of [['src/schema.sql', 'schema.sql'], ['src/demo-seed.json', 'demo-seed.json'], ['config/sandbox.json', 'sandbox.json'], ['config/enquiry-budgets.json', 'enquiry-budgets.json']]) {
+    for (const [sourceFile, target] of [['src/schema.sql', 'schema.sql'], ['src/registry-schema.sql', 'registry-schema.sql'], ['src/demo-seed.json', 'demo-seed.json'], ['config/sandbox.json', 'sandbox.json'], ['config/enquiry-budgets.json', 'enquiry-budgets.json']]) {
       assert.equal(readFileSync(join(site, 'private', target), 'utf8'), readFileSync(join(root, sourceFile), 'utf8'));
     }
     assert.match(readFileSync(join(site, 'contact.html'), 'utf8'), /<meta name="api-endpoint" content="api.php">/);
     assert.equal(readFileSync(join(site, 'private/.htaccess'), 'utf8'), 'Require all denied\n');
+    assert.equal(readFileSync(join(site, 'private/sandboxes/.htaccess'), 'utf8'), 'Require all denied\n');
+    assert.ok(files.includes('travel-agency-demo/private/sandboxes/.htaccess'));
+    assert.ok(!existsSync(join(root, 'deploy/infinityfree/preflight.php')));
     const config = readFileSync(join(site, 'private/config.php'), 'utf8');
-    assert.match(config, /sandbox_root.*__DIR__.*\/runtime\/sandbox-runtime/);
+    assert.match(config, /sandbox_root.*__DIR__.*\/sandboxes'/);
     assert.doesNotMatch(config, /test|clock|visitor|csrfToken/);
     const web = join(fixture, 'web'); mkdirSync(web);
     writeFileSync(join(web, 'index.html'), 'ROOT HUB SENTINEL');

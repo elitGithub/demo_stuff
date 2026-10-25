@@ -1,0 +1,10 @@
+@component('layouts.app', ['title' => 'Your inbox'])
+    <section class="booking-heading"><p class="eyebrow">{{ auth()->user()->role->label() }} PERSPECTIVE / {{ auth()->user()->name }}</p><h1>A little <em>update.</em></h1><p>{{ $unread }} unread · {{ $messages->total() }} {{ $messages->total() === 1 ? 'message' : 'messages' }} · Only your private demo updates appear here.</p></section>
+    @if(session('status'))<p class="success-notice" role="status">{{ session('status') }}</p>@endif
+    <x-field-errors :errors="$errors" />
+    <h2 class="inbox-section-heading" id="messages" tabindex="-1">Your messages</h2>
+    <div class="inbox-list">
+        @forelse($messages as $message)<article class="booking-panel inbox-message" id="message-{{ $message->id }}" tabindex="-1"><div class="inbox-message-heading"><span class="eyebrow">{{ $message->read_at ? 'READ' : 'UNREAD' }}</span><time datetime="{{ $message->created_at->toIso8601String() }}">{{ $message->created_at->setTimezone($message->booking->timezone)->format('d M · H:i') }} {{ $message->booking->timezone }}</time></div><h2>{{ $message->subject }}</h2><p>{{ $message->body }}</p><div class="inbox-actions"><a class="text-link" href="{{ route('bookings.show', $message->booking_id) }}">Open appointment →</a>@if(!$message->read_at)<form method="post" action="{{ route('inbox.read', $message->id) }}" data-loading-form>@csrf<x-actor-context /><input type="hidden" name="page" value="{{ $messages->currentPage() }}"><input type="hidden" name="appointments_page" value="{{ $appointmentsPage }}"><button class="text-button" type="submit">Mark as read</button><span data-loading-status role="status" hidden>Updating…</span></form>@endif</div></article>
+        @empty<div class="booking-panel"><h2>Your next look starts with a hello.</h2><p>Booking requests, decisions and simulated deposit updates will appear here.</p><a class="button" href="{{ route('discovery.index') }}">Discover stylists →</a></div>@endforelse
+    </div><x-pagination :paginator="$messages" label="Inbox" />
+@endcomponent

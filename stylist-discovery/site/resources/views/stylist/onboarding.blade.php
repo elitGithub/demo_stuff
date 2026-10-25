@@ -1,0 +1,29 @@
+@component('layouts.app', ['title' => 'Your studio'])
+    <section class="studio-heading">
+        <div><p class="eyebrow">YOUR STYLIST WORKSPACE</p><h1>A little setup.<br><em>A lasting impression.</em></h1><p>Welcome, {{ auth()->user()->name }}. Shape your studio page, build your menu, and help the right clients find you.</p></div>
+        <div class="studio-identity">@if($profile->portrait_asset)<img src="{{ asset('assets/seed/'.$profile->portrait_asset) }}" alt="" width="88" height="88">@endif<div><span class="specialty-tag">{{ $profile->status->label() }}</span><h2>{{ $profile->studio_name ?: 'Your studio, your story' }}</h2><p>{{ config('demo.locations.'.$profile->city_code.'.city') }} · {{ $profile->deposit_percent }}% deposit</p></div></div>
+    </section>
+    <x-status />
+    <x-field-errors :errors="$errors" />
+    @if($profile->status === \App\Enums\ProfileStatus::Pending)
+        <div class="studio-notice"><p class="eyebrow">SUBMITTED FOR REVIEW</p><h2>Your studio is ready for a decision.</h2><p>Try the demo admin perspective to review this submission and publish your studio.</p><form action="{{ route('role.update') }}" method="post" data-loading-form>@csrf<x-actor-context /><input type="hidden" name="role" value="admin"><x-loading-button label="Review as demo admin" progress="Opening admin workspace…" /></form></div>
+    @elseif($profile->status === \App\Enums\ProfileStatus::Published)
+        <div class="studio-notice"><p class="eyebrow">YOUR STUDIO IS LIVE</p><h2>Ready to be discovered.</h2><p>Keep your menu current so clients know what to expect.</p><a class="text-link" href="{{ route('stylists.show', $profile->id) }}">View your public profile <span aria-hidden="true">↗</span></a></div>
+    @elseif($profile->status === \App\Enums\ProfileStatus::Suspended)
+        <div class="studio-notice"><p class="eyebrow">PUBLICATION PAUSED</p><h2>Keep your studio up to date.</h2><p>Your profile is suspended and hidden from discovery. You can edit your content; the review team controls restoration.</p></div>
+    @endif
+    <div class="studio-section-title"><div><p class="eyebrow">MAKE IT FEEL LIKE YOU</p><h2>Your studio checklist</h2></div><p>{{ (int) $profileComplete + (int) $servicesComplete + (int) $hoursComplete }} of 3 essentials ready</p></div>
+    <div class="setup-grid">
+        <article class="setup-card"><div class="setup-card-top"><span class="card-number">01</span><span class="setup-state">{{ $profileComplete ? 'Ready' : 'To complete' }}</span></div><h3>Your story &amp; studio</h3><p>A name, a point of view and a place. Add the details clients need to feel at home, plus your deposit percentage.</p><a class="text-link" href="{{ route('stylist.profile.edit') }}">{{ $profileComplete ? 'Edit your profile' : 'Start with your profile' }} <span aria-hidden="true">→</span></a></article>
+        <article class="setup-card"><div class="setup-card-top"><span class="card-number">02</span><span class="setup-state">{{ $servicesComplete ? 'Ready' : 'To complete' }}</span></div><h3>Your service menu</h3><p>Bring your specialties to life with clear prices and appointment lengths. Keep at least one service active.</p><a class="text-link" href="{{ route('stylist.services.index') }}">{{ $servicesComplete ? 'Manage your services' : 'Build your menu' }} <span aria-hidden="true">→</span></a></article>
+        <article class="setup-card"><div class="setup-card-top"><span class="card-number">03</span><span class="setup-state">{{ $hoursComplete ? 'Ready' : 'To complete' }}</span></div><h3>Your time, thoughtfully set</h3><p>{{ $hoursComplete ? 'Your weekly hours are saved. Your studio timezone is '.$profile->timezone.'.' : 'Set your weekly rhythm and block any time away before submitting for review.' }}</p><a class="text-link" href="{{ route('stylist.availability.edit') }}">{{ $hoursComplete ? 'Manage your availability' : 'Set your availability' }} <span aria-hidden="true">→</span></a></article>
+    </div>
+    <section class="studio-notice"><p class="eyebrow">SHOW YOUR POINT OF VIEW</p><h2>A portfolio with personality.</h2><p>Add images and captions so clients can get a feel for your work.</p><a class="text-link" href="{{ route('stylist.portfolio.index') }}">Manage your portfolio <span aria-hidden="true">→</span></a></section>
+    <section class="studio-submit" id="review"><div><p class="eyebrow">{{ $profile->status === \App\Enums\ProfileStatus::Draft ? 'THE FINAL DETAIL' : 'KEEP YOUR STUDIO CURRENT' }}</p><h2>{{ match($profile->status) { \App\Enums\ProfileStatus::Published => 'A menu worth coming back to.', \App\Enums\ProfileStatus::Pending => 'Keep shaping your studio.', \App\Enums\ProfileStatus::Suspended => 'Your details are still yours to refine.', default => 'Ready for a first impression?' } }}</h2><p>{{ match($profile->status) { \App\Enums\ProfileStatus::Published => 'Refresh your services and prices as your work evolves. Existing bookings keep their agreed terms.', \App\Enums\ProfileStatus::Pending => 'You can still update your profile, services and hours before publication.', \App\Enums\ProfileStatus::Suspended => 'Editing keeps your content current. Your profile stays hidden until the review team restores publication.', default => 'Complete all three essentials, then send your profile for review. Saving your work always keeps your current publication status.' } }}</p></div>
+        @if($profile->status === \App\Enums\ProfileStatus::Draft)
+            <form action="{{ route('stylist.submit') }}" method="post" data-loading-form>@csrf<x-actor-context /><x-loading-button label="Submit for review" progress="Sending for review…" /></form>
+        @else
+            <a class="compact-button" href="{{ route('stylist.services.index') }}">Manage your service menu</a>
+        @endif
+    </section>
+@endcomponent

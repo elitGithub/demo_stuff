@@ -1,0 +1,42 @@
+{
+    "$schema": "https://getcomposer.org/schema.json",
+    "name": "strand-and-city/demo",
+    "type": "project",
+    "description": "Strand & City isolated stylist discovery demo.",
+    "license": "MIT",
+    "require": {
+        "php": "^8.4",
+        "laravel/framework": "13.36.0"
+    },
+    "require-dev": {
+        "laravel/pint": "1.32.1",
+        "mockery/mockery": "1.6.15",
+        "phpunit/phpunit": "12.5.39"
+    },
+    "autoload": {
+        "psr-4": {
+            "App\\": "app/",
+            "Database\\Factories\\": "database/factories/",
+            "Database\\Seeders\\": "database/seeders/"
+        }
+    },
+    "autoload-dev": {
+        "psr-4": {
+            "Tests\\": "tests/"
+        }
+    },
+    "scripts": {},
+    "extra": {
+        "laravel": {
+            "dont-discover": []
+        }
+    },
+    "config": {
+        "optimize-autoloader": true,
+        "preferred-install": "dist",
+        "sort-packages": true,
+        "allow-plugins": {}
+    },
+    "minimum-stability": "stable",
+    "prefer-stable": true
+}

@@ -1,0 +1,289 @@
+<!DOCTYPE html>
+<html lang="en">
+<head>
+    <meta charset="utf-8">
+    <meta name="viewport" content="width=device-width, initial-scale=1">
+    <meta name="color-scheme" content="light">
+    <title>Strand &amp; City — design preview</title>
+    <style>
+        :root {
+            --paper: #f4f3f7; --ink: #25232e; --muted: #676574; --faint: #8b8797;
+            --white: #fff; --glass: #ffffffb5; --line: #ffffffdc; --outline: #e3dfe9;
+            --accent: #69518c; --accent-soft: #ede6f6; --accent-deep: #493264;
+            --sage: #577467; --sage-soft: #edf3ef; --peach: #f2dfcf; --rose: #dac3cd;
+            --shadow: #3c294012; --focus: #73529b; --backdrop-a: #e5dcf3; --backdrop-b: #e3ede8;
+            --art-cream: #eadbd0; --art-clay: #b78f7c; --art-skin: #cc9e80; --art-skin-light: #ddb392;
+            --art-hair: #3b2927; --art-hair-light: #9e7053; --art-gold: #c6a476; --art-shirt: #ece7e0;
+            --radius: 24px; --space: clamp(20px, 4vw, 58px);
+        }
+        * { box-sizing: border-box; }
+        body { margin: 0; color: var(--ink); background: var(--paper); font-family: Inter, -apple-system, BlinkMacSystemFont, 'Segoe UI', sans-serif; }
+        button, input, select { font: inherit; }
+        button, a, select { -webkit-tap-highlight-color: transparent; }
+        button, select { cursor: pointer; }
+        button { color: inherit; }
+        a { color: inherit; text-decoration: none; }
+        :focus-visible { outline: 3px solid var(--focus); outline-offset: 4px; }
+        button:disabled { cursor: default; }
+        .preview-bar { padding: 12px 20px; background: var(--ink); color: var(--white); display: flex; align-items: center; justify-content: center; flex-wrap: wrap; gap: 12px 24px; font-size: 12px; }
+        .preview-bar p { margin: 0; }
+        .preview-modes { display: flex; gap: 5px; }
+        .preview-modes button { background: transparent; color: var(--white); border: 1px solid var(--faint); padding: 6px 12px; border-radius: 7px; font-size: 12px; }
+        .preview-modes button[aria-pressed="true"] { background: var(--white); color: var(--ink); border-color: var(--white); }
+        .stage { padding: 26px; }
+        .site { max-width: 1460px; margin: auto; min-width: 0; background: var(--paper); border-radius: 30px; overflow: clip; box-shadow: 0 20px 80px var(--shadow); position: relative; isolation: isolate; container-type: inline-size; }
+        .site::before { content: ''; position: absolute; z-index: -1; inset: 0; background: radial-gradient(ellipse at 75% 9%, var(--backdrop-a), transparent 40%), radial-gradient(ellipse at 12% 38%, var(--backdrop-b), transparent 36%); }
+        .site.phone { max-width: 390px; }
+        .navigation { margin: 20px var(--space) 0; padding: 13px 17px; border-radius: 100px; background: var(--glass); border: 1px solid var(--line); box-shadow: 0 6px 28px var(--shadow); display: flex; align-items: center; gap: 22px; }
+        @supports (backdrop-filter: blur(20px)) { .navigation, .search, .floating-note { backdrop-filter: blur(20px); } }
+        @supports not (backdrop-filter: blur(20px)) { .navigation, .search, .floating-note { background: var(--white); } }
+        .brand { display: inline-flex; align-items: center; gap: 10px; font-family: Georgia, serif; font-size: 22px; letter-spacing: -0.8px; white-space: nowrap; }
+        .brand-mark { width: 32px; height: 32px; border: 1px solid var(--accent); color: var(--accent); display: grid; place-items: center; border-radius: 50%; font: 19px Georgia, serif; }
+        .nav-links { display: flex; gap: 24px; margin: auto; font-size: 13px; }
+        .nav-links a:first-child { color: var(--accent); }
+        .nav-actions { display: flex; gap: 8px; align-items: center; }
+        .plain-button, .solid-button { min-height: 42px; border: 0; border-radius: 40px; padding: 10px 18px; font-size: 13px; font-weight: 600; }
+        .plain-button { background: transparent; }
+        .solid-button { background: var(--ink); color: var(--white); }
+        .hero { padding: 64px var(--space) 36px; display: grid; grid-template-columns: 1.2fr 0.8fr; gap: 36px; align-items: center; }
+        .eyebrow { display: flex; align-items: center; gap: 9px; color: var(--accent-deep); font-size: 10px; font-weight: 700; letter-spacing: 2.3px; text-transform: uppercase; }
+        .eyebrow::before { content: ''; width: 22px; height: 1px; background: currentColor; }
+        h1 { font-size: clamp(42px, 5.2vw, 76px); line-height: 1.05; font-weight: 450; letter-spacing: -4px; margin: 22px 0; }
+        h1 em { font-family: Georgia, 'Times New Roman', serif; color: var(--accent); font-weight: 400; }
+        .hero-copy > p { color: var(--muted); font-size: 15px; line-height: 1.75; max-width: 380px; margin: 0; }
+        .hero-meta { margin-top: 28px; display: flex; flex-wrap: wrap; gap: 12px; font-size: 11px; color: var(--muted); }
+        .hero-meta span + span::before { content: '/'; margin-right: 12px; color: var(--faint); }
+        .hero-art { position: relative; max-width: 380px; width: 100%; justify-self: center; padding: 10px 20px 20px; }
+        .art-window { aspect-ratio: 1.15; border-radius: 47% 47% 18px 18px; overflow: hidden; background: var(--rose); box-shadow: 0 16px 40px var(--shadow); transform: rotate(3deg); }
+        .art-window svg { width: 100%; height: 100%; display: block; }
+        .floating-note { position: absolute; left: -10px; bottom: 15px; display: flex; align-items: center; gap: 13px; background: var(--glass); border: 1px solid var(--line); padding: 15px 20px; border-radius: 20px; box-shadow: 0 10px 30px var(--shadow); transform: rotate(-3deg); }
+        .note-symbol { width: 36px; height: 36px; display: grid; place-items: center; background: var(--white); color: var(--accent); border-radius: 50%; font: 23px Georgia, serif; }
+        .floating-note strong { font-size: 12px; font-weight: 600; display: block; }
+        .floating-note small { font-size: 11px; color: var(--muted); display: block; margin-top: 4px; }
+        .art-stamp { position: absolute; right: 0; top: 4px; border: 1px solid var(--accent); color: var(--accent); border-radius: 50%; width: 73px; height: 73px; display: grid; place-content: center; text-align: center; font: 12px/1.4 Georgia, serif; transform: rotate(10deg); background: var(--paper); }
+        .search { margin: 0 var(--space); display: grid; grid-template-columns: 1fr 1fr auto; padding: 11px; gap: 10px; border-radius: 24px; background: var(--glass); border: 1px solid var(--line); box-shadow: 0 12px 30px var(--shadow); }
+        .search-field { display: grid; gap: 7px; padding: 8px 18px; }
+        .search-field + .search-field { border-left: 1px solid var(--outline); }
+        .search-field label { color: var(--muted); font-size: 10px; font-weight: 700; letter-spacing: 1px; text-transform: uppercase; }
+        .search-field select { width: 100%; min-width: 0; border: 0; background: transparent; color: var(--ink); font-size: 14px; padding: 0 20px 0 0; min-height: 24px; }
+        .search-button { background: var(--accent-deep); color: var(--white); border: 0; border-radius: 17px; padding: 0 26px; min-height: 58px; font-size: 13px; font-weight: 600; }
+        .discover { padding: 44px var(--space) 32px; }
+        .section-top { display: flex; justify-content: space-between; align-items: end; gap: 20px; margin-bottom: 24px; }
+        h2 { margin: 0 0 8px; font-size: 25px; letter-spacing: -0.8px; font-weight: 500; }
+        .section-top p { margin: 0; color: var(--muted); font-size: 12px; }
+        .sort-control { display: flex; gap: 6px; font-size: 12px; white-space: nowrap; align-items: center; }
+        .sort-control label { color: var(--muted); }
+        .sort-control select { border: 0; background: transparent; color: var(--ink); min-height: 40px; }
+        .results-layout { display: grid; grid-template-columns: 160px minmax(0, 1fr); gap: 30px; }
+        .filters { min-width: 0; }
+        .filters summary { font-size: 11px; font-weight: 700; text-transform: uppercase; letter-spacing: 1.4px; list-style: none; pointer-events: none; padding: 8px 0 18px; }
+        .filter-options { display: grid; gap: 7px; }
+        .filter-chip { display: flex; align-items: center; justify-content: space-between; text-align: left; min-height: 42px; padding: 9px 12px; background: transparent; border: 1px solid transparent; border-radius: 12px; font-size: 12px; }
+        .filter-chip[aria-pressed="true"] { background: var(--accent-soft); color: var(--accent-deep); }
+        .filter-chip small { font-size: 10px; }
+        .filter-note { margin-top: 24px; padding-top: 20px; border-top: 1px solid var(--outline); color: var(--muted); font-size: 11px; line-height: 1.7; }
+        .cards { display: grid; grid-template-columns: repeat(3, minmax(0, 1fr)); gap: 19px; align-content: start; }
+        .stylist-card { min-width: 0; border-radius: 20px; background: var(--white); padding: 8px 8px 17px; box-shadow: 0 6px 25px var(--shadow); }
+        .stylist-card[hidden] { display: none; }
+        .portrait { position: relative; aspect-ratio: 0.92; overflow: hidden; border-radius: 14px; background: var(--art-cream); }
+        .portrait svg { height: 100%; width: 100%; display: block; }
+        .portrait-tag { position: absolute; bottom: 10px; left: 10px; background: var(--white); padding: 6px 9px; border-radius: 20px; font-size: 9px; letter-spacing: 0.2px; }
+        .card-info { padding: 14px 9px 0; }
+        .city { font-size: 9px; letter-spacing: 1.4px; font-weight: 600; text-transform: uppercase; color: var(--muted); }
+        h3 { margin: 7px 0 5px; font: 23px/1.1 Georgia, serif; letter-spacing: -0.4px; }
+        .studio { font-size: 11px; color: var(--muted); margin: 0; }
+        .card-bottom { display: flex; justify-content: space-between; align-items: center; gap: 8px; border-top: 1px solid var(--outline); margin-top: 16px; padding-top: 12px; }
+        .price { font-size: 14px; font-weight: 600; }
+        .price small { font-weight: 400; color: var(--muted); font-size: 10px; }
+        .profile-button { min-height: 32px; background: var(--accent-soft); color: var(--accent-deep); border: 0; border-radius: 50px; padding: 6px 10px; font-size: 10px; }
+        .empty { grid-column: 1 / -1; padding: 48px 0; color: var(--muted); }
+        .bottom-line { margin-top: 28px; text-align: center; color: var(--muted); font-size: 11px; }
+        footer { margin: 0 var(--space); padding: 24px 0; border-top: 1px solid var(--outline); display: flex; justify-content: space-between; gap: 16px; font-size: 10px; color: var(--muted); }
+        .art-background { fill: var(--art-cream); } .art-background-rose { fill: var(--rose); } .art-background-sage { fill: var(--backdrop-b); }
+        .art-skin { fill: var(--art-skin); } .art-skin-light { fill: var(--art-skin-light); } .art-hair { fill: var(--art-hair); }
+        .art-hair-light { fill: var(--art-hair-light); } .art-shirt { fill: var(--art-shirt); } .art-gold { fill: var(--art-gold); }
+        .hair-stroke { fill: none; stroke: var(--art-gold); stroke-width: 2; opacity: 0.5; } .face-stroke { fill: none; stroke: var(--art-hair); stroke-width: 2; stroke-linecap: round; }
+        dialog { max-width: min(440px, calc(100% - 32px)); border: 1px solid var(--outline); border-radius: 24px; padding: 30px; color: var(--ink); background: var(--white); box-shadow: 0 20px 80px var(--shadow); }
+        dialog::backdrop { background: var(--shadow); backdrop-filter: blur(6px); }
+        dialog p { font-size: 14px; line-height: 1.7; color: var(--muted); }
+        dialog button { float: right; }
+        @container (max-width: 760px) {
+            .navigation { margin: 15px 20px 0; padding: 11px 13px; gap: 10px; }
+            .brand { font-size: 18px; gap: 8px; }
+            .nav-links, .nav-actions .plain-button { display: none; }
+            .nav-actions { margin-left: auto; }
+            .nav-actions .solid-button { padding: 8px 13px; font-size: 11px; }
+            .hero { grid-template-columns: 1fr; padding: 39px 24px 30px; gap: 26px; }
+            h1 { font-size: 48px; letter-spacing: -2.5px; }
+            .hero-copy > p { font-size: 13px; max-width: 330px; }
+            .hero-art { max-width: 285px; }
+            .art-window { aspect-ratio: 1.45; }
+            .art-stamp { width: 60px; height: 60px; font-size: 10px; }
+            .floating-note { padding: 10px 14px; bottom: 7px; left: -4px; }
+            .search { margin: 0 20px; grid-template-columns: 1fr; gap: 3px; padding: 10px; }
+            .search-field { padding: 10px; }
+            .search-field + .search-field { border-left: 0; border-top: 1px solid var(--outline); }
+            .search-field select { min-height: 30px; }
+            .search-button { min-height: 46px; margin-top: 6px; }
+            .discover { padding: 30px 20px 24px; }
+            .section-top { display: block; margin-bottom: 15px; }
+            h2 { font-size: 25px; }
+            .sort-control { margin-top: 10px; justify-content: space-between; }
+            .results-layout { grid-template-columns: 1fr; gap: 16px; }
+            .filters { border-bottom: 1px solid var(--outline); padding-bottom: 12px; }
+            .filters summary { pointer-events: auto; cursor: pointer; padding: 10px 0; }
+            .filters summary::after { content: '+'; float: right; }
+            .filter-options { grid-template-columns: 1fr 1fr; }
+            .filter-note { display: none; }
+            .cards { grid-template-columns: 1fr 1fr; gap: 14px; }
+            .card-info { padding-left: 5px; padding-right: 5px; }
+            h3 { font-size: 21px; }
+            .card-bottom { flex-wrap: wrap; }
+            footer { margin: 0 20px; flex-direction: column; gap: 7px; }
+        }
+        @container (max-width: 480px) {
+            .cards { grid-template-columns: 1fr; }
+            .portrait { aspect-ratio: 1.15; }
+            .card-info { padding: 15px 12px 0; }
+            h3 { font-size: 28px; }
+            .studio { font-size: 12px; }
+            .card-bottom { flex-wrap: nowrap; }
+            .profile-button { min-height: 44px; font-size: 12px; padding: 10px 15px; }
+            .price { font-size: 17px; }
+            .hero-meta { font-size: 10px; gap: 8px; }
+            .hero-meta span + span::before { margin-right: 8px; }
+        }
+        @media (max-width: 600px) { .stage { padding: 0; } .site { border-radius: 0; } .preview-bar { padding: 10px 15px; font-size: 10px; } }
+        @media (prefers-reduced-motion: reduce) { *, *::before, *::after { scroll-behavior: auto; transition: none; } }
+    </style>
+</head>
+<body>
+    <div class="preview-bar">
+        <p>Design preview · Fictional profiles · Booking is not connected</p>
+        <div class="preview-modes" aria-label="Preview width">
+            <button type="button" data-mode="desktop" aria-pressed="true">Desktop</button>
+            <button type="button" data-mode="phone" aria-pressed="false">Phone</button>
+        </div>
+    </div>
+    <div class="stage">
+        <main class="site" id="preview-site">
+            <nav class="navigation" aria-label="Main navigation">
+                <a class="brand" href="#discovery"><span class="brand-mark" aria-hidden="true">s</span>strand &amp; city</a>
+                <div class="nav-links"><a href="#discovery">Discover stylists</a><a href="#how-it-works">How it works</a></div>
+                <div class="nav-actions"><button class="plain-button" type="button" data-preview="Stylist onboarding">For stylists</button><button class="solid-button" type="button" data-preview="Your private demo">Explore demo</button></div>
+            </nav>
+            <section class="hero" aria-labelledby="hero-heading">
+                <div class="hero-copy">
+                    <div class="eyebrow">Good hair. Great company.</div>
+                    <h1 id="hero-heading">Your style.<br>Your <em>kind of stylist.</em></h1>
+                    <p>Find independent hair artists who understand you. Explore their work, find your match, and make time for yourself.</p>
+                    <div class="hero-meta"><span>Independent artists</span><span>Clear pricing</span><span>Space for your style</span></div>
+                </div>
+                <div class="hero-art">
+                    <div class="art-window">
+                        <svg viewBox="0 0 360 310" role="img" aria-label="Original abstract illustration of flowing hair">
+                            <rect class="art-background-rose" width="360" height="310"/>
+                            <path class="art-shirt" d="M48 310c14-63 55-88 115-88s119 17 147 88z"/>
+                            <path class="art-skin" d="M150 177h62l8 67c-13 25-59 23-77-1z"/>
+                            <path class="art-hair" d="M94 201C59 120 97 28 176 26c73-4 125 51 100 132-10 31 22 62 4 93-14 25-52 34-68 16l-79-28z"/>
+                            <path class="art-skin-light" d="M139 86c4-24 69-31 91 9l-9 81c-5 36-28 58-52 49-35-13-46-52-40-92z"/>
+                            <path class="art-hair" d="M98 132c4-61 23-99 80-92 42 4 65 23 71 56-46 10-76-6-90-28-4 32-22 49-61 64z"/>
+                            <path class="art-hair-light" d="M162 34C91 67 135 116 102 151c-21 24-13 45 14 59 24 13 28 37 9 54-18 16-41 15-52 10 28-10 37-24 17-42-41-37-50-61-19-96 27-31 6-83 57-99z"/>
+                            <path class="hair-stroke" d="M151 37C101 72 127 117 96 151c-22 24-5 45 17 58 20 12 26 40 4 55M134 40C91 83 109 121 84 152c-23 30 4 53 21 66 21 16 13 35-6 49"/>
+                            <path class="face-stroke" d="M156 142q7-5 14 0m27-1q7-4 13 1m-34 42q11 7 23-2"/>
+                            <circle class="art-gold" cx="132" cy="175" r="5"/>
+                        </svg>
+                    </div>
+                    <div class="art-stamp" aria-hidden="true">A little<br>you-time</div>
+                    <div class="floating-note"><span class="note-symbol" aria-hidden="true">s</span><div><strong>Find your next good hair day</strong><small>In a new city. Or just around the corner.</small></div></div>
+                </div>
+            </section>
+            <form class="search" id="search-form">
+                <div class="search-field"><label for="city">Where are you looking?</label><select id="city"><option value="all">Every city</option><option value="Paris">Paris, France</option><option value="Lisbon">Lisbon, Portugal</option><option value="Barcelona">Barcelona, Spain</option></select></div>
+                <div class="search-field"><label for="service">What feels like you?</label><select id="service"><option value="all">All specialties</option><option value="Colour">Colour &amp; balayage</option><option value="Curls">Curls &amp; texture</option><option value="Cuts">Cuts &amp; styling</option></select></div>
+                <button class="search-button" type="submit">Find my stylist <span aria-hidden="true">↗</span></button>
+            </form>
+            <section class="discover" id="discovery" aria-labelledby="discover-heading">
+                <div class="section-top"><div><h2 id="discover-heading">Meet your next stylist.</h2><p id="result-count" aria-live="polite">3 artists. A style for every version of you.</p></div><div class="sort-control"><label for="sort">Sort by</label><select id="sort"><option value="name">Name</option><option value="price">Starting price</option></select></div></div>
+                <div class="results-layout">
+                    <details class="filters" open><summary>Make it yours</summary><div class="filter-options"><button class="filter-chip" type="button" data-specialty="all" aria-pressed="true">All specialties <small>03</small></button><button class="filter-chip" type="button" data-specialty="Colour" aria-pressed="false">Colour &amp; balayage <small>01</small></button><button class="filter-chip" type="button" data-specialty="Curls" aria-pressed="false">Curls &amp; texture <small>01</small></button><button class="filter-chip" type="button" data-specialty="Cuts" aria-pressed="false">Cuts &amp; styling <small>01</small></button></div><div class="filter-note" id="how-it-works">Find your stylist.<br>Request your time.<br>Pay a deposit after acceptance.<br><br>This preview uses original illustrations. Final portfolios will use fictional demo imagery.</div></details>
+                    <div class="cards" id="stylist-cards">
+                        <article class="stylist-card" data-city="Paris" data-specialty="Colour" data-price="65" data-name="Amelie Rowan">
+                            <div class="portrait"><svg viewBox="0 0 260 285" role="img" aria-label="Illustrated warm balayage hairstyle"><rect class="art-background" width="260" height="285"/><path class="art-shirt" d="M12 285c18-48 49-65 105-65 70 0 113 22 129 65z"/><path class="art-skin-light" d="M107 178h49l6 57c-17 15-40 15-58 0z"/><path class="art-hair-light" d="M59 208C32 147 54 53 112 37c57-15 102 24 96 84-3 36 24 57 7 91-16 34-48 49-73 26l-43-16z"/><ellipse class="art-skin-light" cx="132" cy="130" rx="46" ry="67"/><path class="art-hair-light" d="M78 122c-8-50 19-82 60-80 37 1 67 28 61 62-35-3-61-13-72-36-6 29-21 46-49 54z"/><path class="art-hair" d="M120 42C65 84 105 129 78 157c-18 23-6 40 9 54 18 17 8 36-7 40-31-14-42-47-27-77 21-45-8-96 37-122z"/><path class="hair-stroke" d="M133 46c67 40 21 84 46 123 18 27 17 45-2 67M143 47c62 51 18 82 47 120 18 24 12 53-5 71"/><path class="face-stroke" d="M108 133q6-4 12 0m23-1q6-4 12 0m-35 35q10 6 20-1"/></svg><span class="portrait-tag">Colour that feels like you</span></div>
+                            <div class="card-info"><span class="city">Paris, France</span><h3>Amélie Rowan</h3><p class="studio">Maison Aube · Colour specialist</p><div class="card-bottom"><span class="price"><small>from</small> €65</span><button type="button" class="profile-button" data-preview="Amélie Rowan">View profile <span aria-hidden="true">↗</span></button></div></div>
+                        </article>
+                        <article class="stylist-card" data-city="Lisbon" data-specialty="Curls" data-price="55" data-name="Nia Vale">
+                            <div class="portrait"><svg viewBox="0 0 260 285" role="img" aria-label="Illustrated textured curly hairstyle"><rect class="art-background-sage" width="260" height="285"/><path class="art-shirt" d="M20 285c8-55 47-69 108-69s100 22 114 69z"/><path class="art-skin" d="M108 177h45l6 61c-12 16-39 15-54 0z"/><path class="art-hair" d="M41 137c-23-19-13-44 3-52-8-22 10-41 29-39 2-26 30-32 45-22 19-20 47-14 56 6 25-7 50 12 47 33 24 5 28 33 16 49 15 19 7 47-8 55 1 31-28 47-45 35-10 29-44 28-59 8-23 21-53 8-55-13-30 4-47-24-29-43z"/><ellipse class="art-skin" cx="134" cy="137" rx="46" ry="62"/><path class="art-hair" d="M78 125c4-34 13-50 33-59 31-14 69-1 78 34-17 6-30-5-32-15-12 18-26 22-41 16-9 16-23 23-38 24z"/><path class="face-stroke" d="M110 139q7-4 14 0m21 0q7-4 13 0m-34 33q11 8 23-1"/><circle class="art-gold" cx="88" cy="167" r="6"/><circle class="art-gold" cx="178" cy="167" r="6"/></svg><span class="portrait-tag">Let your curls be curls</span></div>
+                            <div class="card-info"><span class="city">Lisbon, Portugal</span><h3>Nia Vale</h3><p class="studio">Forma Studio · Curl specialist</p><div class="card-bottom"><span class="price"><small>from</small> €55</span><button type="button" class="profile-button" data-preview="Nia Vale">View profile <span aria-hidden="true">↗</span></button></div></div>
+                        </article>
+                        <article class="stylist-card" data-city="Barcelona" data-specialty="Cuts" data-price="45" data-name="Sol Mercer">
+                            <div class="portrait"><svg viewBox="0 0 260 285" role="img" aria-label="Illustrated sculpted bob hairstyle"><rect class="art-background-rose" width="260" height="285"/><path class="art-hair" d="M34 285c14-54 44-69 95-69 56 0 95 19 112 69z"/><path class="art-skin-light" d="M105 176h52l4 56c-17 16-39 16-59 0z"/><path class="art-hair" d="M63 196c-25-35-12-133 34-151 36-15 82-4 101 29 19 32 20 83 4 120-24 17-111 21-139 2z"/><ellipse class="art-skin-light" cx="132" cy="133" rx="45" ry="64"/><path class="art-hair" d="M79 118c-3-48 21-72 57-73 39-1 65 30 56 77-35 0-55-4-72-37-8 19-18 30-41 33z"/><path class="face-stroke" d="M108 139q6-4 13 0m22 0q6-4 13 0m-35 33q11 5 22-1"/><path class="hair-stroke" d="M86 67c-29 51-19 96-9 121M177 62c32 45 28 88 15 126"/><circle class="art-gold" cx="86" cy="164" r="5"/></svg><span class="portrait-tag">A fresh shape. A fresh start.</span></div>
+                            <div class="card-info"><span class="city">Barcelona, Spain</span><h3>Sol Mercer</h3><p class="studio">Studio Nacre · Precision cuts</p><div class="card-bottom"><span class="price"><small>from</small> €45</span><button type="button" class="profile-button" data-preview="Sol Mercer">View profile <span aria-hidden="true">↗</span></button></div></div>
+                        </article>
+                        <p class="empty" id="empty-state" hidden>No preview stylist matches those filters. Try another city or specialty.</p>
+                    </div>
+                </div>
+                <p class="bottom-line">Showing <span id="visible-count">3</span> of 3 fictional preview profiles</p>
+            </section>
+            <footer><span>strand &amp; city · A little confidence, wherever you are.</span><span>Independent portfolio demonstration</span></footer>
+        </main>
+    </div>
+    <dialog id="preview-dialog" aria-labelledby="dialog-title"><h2 id="dialog-title">Design preview</h2><p id="dialog-copy"></p><form method="dialog"><button class="solid-button">Back to discovery</button></form></dialog>
+    <script>
+        const previewSite = document.getElementById('preview-site');
+        const citySelect = document.getElementById('city');
+        const serviceSelect = document.getElementById('service');
+        const sortSelect = document.getElementById('sort');
+        const stylistCards = [...document.querySelectorAll('.stylist-card')];
+        const cardsContainer = document.getElementById('stylist-cards');
+        const previewDialog = document.getElementById('preview-dialog');
+
+        /** @return {void} */
+        function updateResults() {
+            let visibleCount = 0;
+            const orderedCards = [...stylistCards].sort(compareCards);
+            for (const card of orderedCards) {
+                card.hidden = (citySelect.value !== 'all' && card.dataset.city !== citySelect.value) || (serviceSelect.value !== 'all' && card.dataset.specialty !== serviceSelect.value);
+                if (!card.hidden) { visibleCount += 1; }
+                cardsContainer.append(card);
+            }
+            document.getElementById('empty-state').hidden = visibleCount !== 0;
+            document.getElementById('visible-count').textContent = visibleCount;
+            document.getElementById('result-count').textContent = `${visibleCount} ${visibleCount === 1 ? 'artist' : 'artists'}. A style for every version of you.`;
+            for (const button of document.querySelectorAll('[data-specialty]')) { button.setAttribute('aria-pressed', String(button.dataset.specialty === serviceSelect.value)); }
+        }
+
+        /** @param {HTMLElement} firstCard @param {HTMLElement} secondCard @return {number} */
+        function compareCards(firstCard, secondCard) {
+            if (sortSelect.value === 'price') { return Number(firstCard.dataset.price) - Number(secondCard.dataset.price); }
+            return firstCard.dataset.name.localeCompare(secondCard.dataset.name);
+        }
+
+        /** @param {SubmitEvent} event @return {void} */
+        function submitSearch(event) { event.preventDefault(); updateResults(); document.getElementById('discovery').scrollIntoView({block: 'start'}); }
+
+        /** @param {MouseEvent} event @return {void} */
+        function selectSpecialty(event) { serviceSelect.value = event.currentTarget.dataset.specialty; updateResults(); }
+
+        /** @param {MouseEvent} event @return {void} */
+        function selectMode(event) {
+            const selectedMode = event.currentTarget.dataset.mode;
+            previewSite.classList.toggle('phone', selectedMode === 'phone');
+            for (const button of document.querySelectorAll('[data-mode]')) { button.setAttribute('aria-pressed', String(button.dataset.mode === selectedMode)); }
+        }
+
+        /** @param {MouseEvent} event @return {void} */
+        function showPreview(event) {
+            document.getElementById('dialog-title').textContent = event.currentTarget.dataset.preview;
+            document.getElementById('dialog-copy').textContent = 'This screen previews the visual direction. The planned demo will connect stylist portfolios, availability, booking requests, stylist acceptance, simulated deposits and a private demo inbox.';
+            previewDialog.showModal();
+        }
+
+        document.getElementById('search-form').addEventListener('submit', submitSearch);
+        sortSelect.addEventListener('change', updateResults);
+        for (const button of document.querySelectorAll('[data-specialty]')) { button.addEventListener('click', selectSpecialty); }
+        for (const button of document.querySelectorAll('[data-mode]')) { button.addEventListener('click', selectMode); }
+        for (const button of document.querySelectorAll('[data-preview]')) { button.addEventListener('click', showPreview); }
+    </script>
+</body>
+</html>

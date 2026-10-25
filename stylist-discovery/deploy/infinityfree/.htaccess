@@ -1,0 +1,10 @@
+Options -Indexes -MultiViews
+DirectoryIndex index.php
+RewriteEngine On
+RewriteBase /stylist-discovery/
+RewriteRule (^|/)(?:_app|\.) - [F,L,NC]
+RewriteRule \.(?:sqlite(?:-journal|-wal|-shm)?|log|ini|json|lock|env|bak)$ - [F,L,NC]
+RewriteRule (^|/)(?:private-config[^/]*|composer[^/]*)$ - [F,L,NC]
+RewriteCond %{REQUEST_FILENAME} !-d
+RewriteCond %{REQUEST_FILENAME} !-f
+RewriteRule ^ index.php [L]

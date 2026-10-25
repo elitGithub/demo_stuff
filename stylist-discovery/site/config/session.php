@@ -1,0 +1,25 @@
+<?php
+
+return [
+    'driver' => 'bounded-registry',
+    'lifetime' => 240,
+    'block' => true,
+    'block_store' => 'database',
+    'block_lock_seconds' => 120,
+    'block_wait_seconds' => 2,
+    'expire_on_close' => false,
+    'encrypt' => true,
+    'files' => storage_path('framework/sessions'),
+    'connection' => 'registry',
+    'table' => 'sessions',
+    'store' => null,
+    'lottery' => [0, 100],
+    'cookie' => 'strand_city_session',
+    'path' => env('SESSION_PATH', '/stylist-discovery'),
+    'domain' => null,
+    'secure' => env('SESSION_SECURE_COOKIE', true),
+    'http_only' => true,
+    'same_site' => 'lax',
+    'partitioned' => false,
+    'serialization' => 'json',
+];

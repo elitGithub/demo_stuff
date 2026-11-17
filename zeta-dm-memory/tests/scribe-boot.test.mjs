@@ -2,8 +2,12 @@ import assert from 'node:assert/strict';
 import { readFileSync } from 'node:fs';
 import test from 'node:test';
 import vm from 'node:vm';
+import FakeEvent from './support/FakeEvent.mjs';
 import FakeLocks from './support/FakeLocks.mjs';
+import FakeSendDocument from './support/FakeSendDocument.mjs';
+import FakeSendWindow from './support/FakeSendWindow.mjs';
 import FakeStorage from './support/FakeStorage.mjs';
+import FakeTextArea from './support/FakeTextArea.mjs';
 import FakeTimers from './support/FakeTimers.mjs';
 import FakeZeta from './support/FakeZeta.mjs';
 
@@ -19,6 +23,7 @@ function load() {
         ['core', 'ScribeGateway'],
         ['page', 'ZetaSource'],
         ['page', 'ScribeStore'],
+        ['page', 'ScribeFrame'],
         ['page', 'ScribeBoot'],
     ];
     for (const [folder, name] of files) {
@@ -29,7 +34,30 @@ function load() {
     return loaded;
 }
 
-const { ScribeStore, ScribeBoot } = load();
+const { ScribeStore, ScribeFrame, ScribeBoot } = load();
+
+/**
+ * @return {object}
+ */
+function realSender() {
+    const separate = vm.createContext({ TextEncoder });
+    for (const path of ['../scribe/core/ScribeText.js', '../scribe/page/ScribeSender.js']) {
+        const url = new URL(path, import.meta.url);
+        vm.runInContext(readFileSync(url, 'utf8'), separate, { filename: url.pathname });
+    }
+    return vm.runInContext('ScribeSender', separate);
+}
+
+const RealSender = realSender();
+const START_SOURCE = readFileSync(new URL('../scribe/page/ScribeStart.js', import.meta.url), 'utf8');
+const ZETA = 'https://zeta-ai.io';
+const PINGPONG = 'https://frame.pingpong.ai';
+const CHAT_SRC = 'https://frame.pingpong.ai/v1/index.html#run=1';
+const NATIVE = Object.getOwnPropertyDescriptor(FakeTextArea.prototype, 'value');
+const BRIDGE = 'bridge-token-test-0123456789';
+const OTHER = 'other-tab-token-9876543210';
+const TOKEN_NAME = 'scribe-bridge';
+const APPENDED = '\n@: [Scribe] Day 1, the mill.';
 
 const START = Date.UTC(2026, 10, 15, 9, 0, 0);
 const DAY = '2026-11-15';
@@ -260,6 +288,8 @@ function standIns(timers) {
         replyFailure: null,
         detachFailure: null,
         hostless: false,
+        appended: null,
+        offerAtOpen: null,
     };
     context.ScribeKeeper = {
         Defaults: DEFAULTS,
@@ -275,11 +305,12 @@ function standIns(timers) {
             record.claimed = typeof options.claim === 'function' ? options.claim() : null;
             world.order.push(`keeper ${options.roomId}`);
             world.keepers.push(record);
+            record.reader = true;
             record.handle = {
                 /**
-                 * @return {{ phase: string }}
+                 * @return {{ phase: string, reader: boolean }}
                  */
-                view: () => ({ phase: record.phase }),
+                view: () => ({ phase: record.phase, reader: record.reader }),
 
                 /**
                  * @return {Promise<void>}
@@ -315,10 +346,50 @@ function standIns(timers) {
          * @return {object}
          */
         open(options) {
-            const record = { roomId: options.roomId, options, replies: [], closes: 0, outgoing: [], sent: [], live: null };
+            const record = {
+                roomId: options.roomId,
+                options,
+                replies: [],
+                closes: 0,
+                outgoing: [],
+                sent: [],
+                live: null,
+                ready: world.offerAtOpen,
+                suggestion: null,
+                afterView: null,
+                reads: [],
+                went: [],
+            };
             world.order.push(`live ${options.roomId}`);
             world.lives.push(record);
             const live = {
+                /**
+                 * @return {{ ready: string|null }}
+                 */
+                view: () => {
+                    record.reads.push('view');
+                    if (record.afterView !== null) {
+                        record.ready = record.afterView;
+                        record.afterView = null;
+                    }
+                    return { ready: record.ready };
+                },
+
+                /**
+                 * @return {{ ready: string|null, suggestion: string|null }}
+                 */
+                lines: () => {
+                    record.reads.push('lines');
+                    return { ready: record.ready, suggestion: record.suggestion };
+                },
+
+                /**
+                 * @param {{ ready: string|null, suggestion: string|null }} lines
+                 * @return {void}
+                 */
+                went: (lines) => {
+                    record.went.push(`${lines.ready} | ${lines.suggestion}`);
+                },
                 /**
                  * @param {*} message
                  * @return {void}
@@ -336,7 +407,7 @@ function standIns(timers) {
                  */
                 outgoing(...values) {
                     record.outgoing.push(`${this === live} ${values.join(' ')}`);
-                    return 'the outgoing words';
+                    return world.appended === null ? 'the outgoing words' : `${values[0]}${world.appended}`;
                 },
 
                 /**
@@ -474,7 +545,111 @@ function pageDocument(body) {
     document.removeEventListener = (type, listener) => {
         document.listeners = document.listeners.filter((entry) => entry.type !== type || entry.listener !== listener);
     };
+    document.frames = [];
+    document.searches = 0;
+    /**
+     * @param {string} selector
+     * @return {object[]}
+     * @throws {Error}
+     */
+    document.querySelectorAll = (selector) => {
+        if (selector !== 'iframe') {
+            throw new Error(`The fake document cannot answer ${selector}`);
+        }
+        document.searches++;
+        return [...document.frames];
+    };
     return document;
+}
+
+/**
+ * @param {object} run
+ * @param {{ src?: string, width?: number, height?: number }} choices
+ * @return {{ element: object, window: { posted: object[], failing: number, postMessage: Function }, box: { width: number, height: number } }}
+ */
+function frameIn(run, choices = {}) {
+    const target = {
+        posted: [],
+        failing: 0,
+        /**
+         * @param {object} message
+         * @param {string} origin
+         * @return {void}
+         * @throws {Error}
+         */
+        postMessage: (message, origin) => {
+            if (target.failing > 0) {
+                target.failing--;
+                throw new Error(`The object could not be cloned: ${message.token}`);
+            }
+            target.posted.push({
+                kind: message.kind,
+                seq: message.seq,
+                token: message.token,
+                ready: message.ready,
+                suggestion: message.suggestion,
+                tag: message.zetaScribe,
+                origin,
+            });
+        },
+    };
+    const box = { width: choices.width ?? 800, height: choices.height ?? 600 };
+    const element = {
+        src: choices.src ?? CHAT_SRC,
+        contentWindow: target,
+        /**
+         * @return {{ width: number, height: number }}
+         */
+        getBoundingClientRect: () => box,
+    };
+    run.document.frames.push(element);
+    return { element, window: target, box };
+}
+
+/**
+ * @param {object} run
+ * @param {{ origin: string, source: *, data: *, isTrusted?: * }} event
+ * @return {Promise<void>}
+ */
+async function deliver(run, event) {
+    const isTrusted = Object.hasOwn(event, 'isTrusted') ? event.isTrusted : true;
+    for (const entry of run.page.listeners.filter((listening) => listening.type === 'message')) {
+        entry.listener({ type: 'message', isTrusted, origin: event.origin, source: event.source, data: event.data });
+    }
+    await settle();
+}
+
+/**
+ * @param {*} source
+ * @return {{ origin: string, source: *, data: object }}
+ */
+function readyFrom(source) {
+    return { origin: PINGPONG, source, data: { zetaScribe: 1, kind: 'ready' } };
+}
+
+/**
+ * @param {*} source
+ * @param {number} seq
+ * @param {boolean} ready
+ * @param {boolean} suggestion
+ * @return {{ origin: string, source: *, data: object }}
+ */
+function sentFrom(source, seq, ready, suggestion) {
+    return { origin: PINGPONG, source, data: { zetaScribe: 1, kind: 'sent', seq, ready, suggestion } };
+}
+
+/**
+ * @param {object} run
+ * @param {object} live
+ * @param {string|null} ready
+ * @param {string|null} suggestion
+ * @return {Promise<void>}
+ */
+async function offer(run, live, ready, suggestion = null) {
+    live.ready = ready;
+    live.suggestion = suggestion;
+    live.options.notify();
+    await settle();
 }
 
 /**
@@ -532,6 +707,7 @@ function harness(choices = {}) {
         clock: null,
         environment: null,
         boot: null,
+        made: 0,
     };
     run.clock = {
         day: DAY,
@@ -559,6 +735,10 @@ function harness(choices = {}) {
         },
         clock: run.clock,
         tabId: choices.tabId ?? 'tab-one',
+        random: () => {
+            run.made++;
+            return choices.made ?? BRIDGE;
+        },
         locks: choices.locks ?? null,
         confirm: () => true,
         download: () => undefined,
@@ -816,6 +996,7 @@ test('the watcher is installed before anything else', async () => {
         documentElement: document.documentElement,
         addEventListener: document.addEventListener,
         removeEventListener: document.removeEventListener,
+        querySelectorAll: document.querySelectorAll,
     };
     Object.defineProperty(run.page.location, 'pathname', {
         get: () => {
@@ -1372,10 +1553,11 @@ test('keys typed in the panel stay in the panel', async () => {
     run.environment.storage = noted(run.storage, ['get', 'set', 'remove', 'list'], 'storage', note);
     start(run);
     await settle();
-    assert.deepEqual(touched.slice(0, 4), ['listener wrapped', 'listener wrapped', 'listener wrapped', 'timer wrapped']);
+    assert.deepEqual(touched.slice(0, 6), ['listener wrapped', 'listener wrapped', 'listener wrapped', 'listener wrapped', 'storage wrapped', 'storage wrapped']);
+    assert.equal(touched.includes('timer wrapped'), true);
     assert.deepEqual(
         run.page.listeners.map((entry) => `${entry.type} ${entry.capture}`),
-        ['keydown true', 'keyup true', 'keypress true'],
+        ['keydown true', 'keyup true', 'keypress true', 'message false'],
     );
     const host = run.world.panels[0].host;
     const field = { name: 'the key field', parentNode: host };
@@ -1828,7 +2010,7 @@ test('one boot per page', async () => {
     await pass(run, 3000);
     assert.equal(run.world.keepers.length, 1);
     assert.deepEqual(run.lines, ['The scribe is already running on this page']);
-    assert.equal(run.page.listeners.length, 3);
+    assert.equal(run.page.listeners.length, 4);
     second.stop();
     assert.equal(run.page.fetch === run.original, false);
     assert.equal(run.world.order.length, 4);
@@ -2202,6 +2384,864 @@ test('each role has its own timeout', async () => {
     run.boot.stop();
     assert.equal(await stateOf(unanswered), 'settled');
     assert.equal((await unanswered).message, 'The chat has been left');
+});
+
+/**
+ * @param {{ origin: string, top: boolean, ancestors: string[]|undefined, parented: boolean }} where
+ * @param {?string} stored
+ * @return {{ booted: number, framed: number, storage: number, asked: string[], window: boolean, options: ?object, environment: ?object }}
+ */
+function startIn(where, stored = null) {
+    const seen = { booted: 0, framed: 0, storage: 0, asked: [], window: false, options: null, environment: null };
+    const page = { location: { origin: where.origin, ancestorOrigins: where.ancestors } };
+    page.top = where.top ? page : { name: 'the top window' };
+    page.parent = where.parented ? { name: 'the parent window' } : page;
+    /**
+     * @param {string} name
+     * @return {*}
+     */
+    const counted = (name) => {
+        seen.storage++;
+        seen.asked.push(name);
+        return name === TOKEN_NAME ? stored : null;
+    };
+    const sandbox = {
+        unsafeWindow: page,
+        document: { kind: 'document' },
+        window: { confirm: () => true },
+        navigator: { locks: null },
+        crypto: { randomUUID: () => 'a-random-value-0123456789' },
+        console,
+        GM_getValue: counted,
+        GM_setValue: counted,
+        GM_deleteValue: counted,
+        GM_listValues: counted,
+        GM_xmlhttpRequest: counted,
+        ScribeBoot: {
+            Settings: ScribeBoot.Settings,
+            day: ScribeBoot.day,
+            start: (environment) => {
+                seen.booted++;
+                seen.window = environment.pageWindow === page;
+                seen.environment = environment;
+            },
+        },
+        ScribeFrame: {
+            Bridge: ScribeFrame.Bridge,
+            Role: ScribeFrame.Role,
+            role: (values) => ScribeFrame.role(values),
+            start: (options) => {
+                seen.framed++;
+                seen.window = options.window === page;
+                seen.options = options;
+            },
+        },
+    };
+    vm.runInContext(START_SOURCE, vm.createContext(sandbox));
+    return seen;
+}
+
+/**
+ * @param {object} choices
+ * @return {Promise<{ run: object, chat: object, live: object, keeper: object }>}
+ */
+async function bridged(choices = {}) {
+    const run = harness(choices);
+    start(run);
+    await settle();
+    const chat = frameIn(run);
+    return { run, chat, live: run.world.lives[0], keeper: run.world.keepers[0] };
+}
+
+test('the start picks its case', () => {
+    const top = startIn({ origin: ZETA, top: true, ancestors: [], parented: false });
+    assert.deepEqual([top.booted, top.framed, top.storage, top.window], [1, 0, 0, true]);
+    for (const ancestors of [[ZETA], undefined]) {
+        const framed = startIn({ origin: PINGPONG, top: false, ancestors, parented: true });
+        assert.deepEqual([framed.booted, framed.framed, framed.storage, framed.window], [0, 1, 0, true], String(ancestors));
+    }
+    const nothing = [
+        ['a Zeta sub-frame', { origin: ZETA, top: false, ancestors: [ZETA], parented: true }],
+        ['a Pingpong page on top', { origin: PINGPONG, top: true, ancestors: [], parented: false }],
+        ['a Pingpong frame under another site', { origin: PINGPONG, top: false, ancestors: ['https://elsewhere.example'], parented: true }],
+    ];
+    for (const [label, where] of nothing) {
+        const seen = startIn(where);
+        assert.deepEqual([seen.booted, seen.framed, seen.storage], [0, 0, 0], label);
+    }
+});
+
+test('a frame is armed only after it has spoken', async () => {
+    const { run, chat, live, keeper } = await bridged();
+    await offer(run, live, 'Remember the mill.');
+    keeper.options.notify({ kind: 'Changed' });
+    await pass(run, 20000);
+    assert.equal(keeper.ticks.length, 1);
+    assert.equal(chat.window.posted.length, 0);
+    assert.equal(run.document.searches, 0);
+    await deliver(run, readyFrom(chat.window));
+    assert.equal(chat.window.posted.length, 1);
+    assert.deepEqual(chat.window.posted[0], { kind: 'arm', seq: 1, token: BRIDGE, ready: 'Remember the mill.', suggestion: null, tag: 1, origin: PINGPONG });
+    run.boot.stop();
+});
+
+test('only an iframe of this page is heard', async () => {
+    const { run, chat, live, keeper } = await bridged();
+    await offer(run, live, 'Remember the mill.');
+    const other = frameIn(run, { src: 'https://elsewhere.example/widget' });
+    const lookalike = frameIn(run, { src: 'https://frame.pingpong.ai.example/v1/index.html' });
+    const gone = frameIn(run, { src: 'https://frame.pingpong.ai/v1/old.html' });
+    run.document.frames.splice(run.document.frames.indexOf(gone.element), 1);
+    const ready = { zetaScribe: 1, kind: 'ready' };
+    const sent = { zetaScribe: 1, kind: 'sent', seq: 1, ready: true, suggestion: false };
+    const ignored = [
+        { origin: 'https://elsewhere.example', source: chat.window, data: ready },
+        { origin: 'https://elsewhere.example', source: chat.window, data: sent },
+        { origin: PINGPONG, source: other.window, data: ready },
+        { origin: PINGPONG, source: run.page, data: ready },
+        { origin: PINGPONG, source: lookalike.window, data: ready },
+        { origin: PINGPONG, source: lookalike.window, data: sent },
+        { origin: PINGPONG, source: gone.window, data: ready },
+        { origin: PINGPONG, source: gone.window, data: sent },
+        { origin: PINGPONG, source: chat.window, data: { zetaScribe: 1, kind: 'sent', seq: 'one', ready: true, suggestion: false } },
+        { origin: PINGPONG, source: chat.window, data: { kind: 'ready' } },
+        { origin: PINGPONG, source: chat.window, data: 'ready' },
+    ];
+    for (const event of ignored) {
+        await deliver(run, event);
+    }
+    await pass(run, 16000);
+    for (const frame of [chat, other, lookalike, gone]) {
+        assert.equal(frame.window.posted.length, 0);
+    }
+    assert.deepEqual(live.went, []);
+    assert.deepEqual(keeper.ticks, []);
+    const searches = run.document.searches;
+    await deliver(run, { origin: 'https://elsewhere.example', source: chat.window, data: ready });
+    assert.equal(run.document.searches, searches);
+    await deliver(run, readyFrom(chat.window));
+    assert.equal(chat.window.posted.length, 1);
+    run.boot.stop();
+});
+
+test('the arm follows the lines', async () => {
+    const { run, chat, live, keeper } = await bridged();
+    await deliver(run, readyFrom(chat.window));
+    await offer(run, live, 'Remember the mill.');
+    await offer(run, live, 'Remember the bridge.');
+    await offer(run, live, null);
+    await offer(run, live, null);
+    keeper.options.notify({ kind: 'Changed' });
+    await settle();
+    assert.deepEqual(
+        chat.window.posted.map((message) => `${message.seq} ${message.ready}`),
+        ['1 null', '2 Remember the mill.', '3 Remember the bridge.', '4 null'],
+    );
+    run.boot.stop();
+});
+
+test('a sent under the last arm tells the live part', async () => {
+    const { run, chat, live, keeper } = await bridged();
+    live.ready = 'Remember the mill.';
+    live.suggestion = 'A stranger knocks.';
+    await deliver(run, readyFrom(chat.window));
+    assert.equal(chat.window.posted.length, 1);
+    await deliver(run, sentFrom(chat.window, 1, true, false));
+    assert.deepEqual(live.went, ['Remember the mill. | null']);
+    assert.equal(chat.window.posted.length, 2);
+    assert.equal(chat.window.posted[1].seq, 2);
+    await pass(run, 16000);
+    assert.deepEqual(keeper.ticks, [0, 5000, 15000]);
+    await deliver(run, sentFrom(chat.window, 2, false, false));
+    assert.deepEqual(live.went, ['Remember the mill. | null', 'null | null']);
+    assert.equal(chat.window.posted.length, 3);
+    assert.equal(chat.window.posted[2].seq, 3);
+    run.boot.stop();
+});
+
+test('a sent under an earlier kept arm still tells the live part', async () => {
+    const { run, chat, live } = await bridged();
+    live.ready = 'Remember the mill.';
+    await deliver(run, readyFrom(chat.window));
+    await offer(run, live, 'Remember the bridge.');
+    assert.deepEqual(chat.window.posted.map((message) => message.seq), [1, 2]);
+    /**
+     * @param {object} target
+     * @param {{ origin: string, source: *, data: object }} event
+     * @return {Promise<void>}
+     */
+    const reportTo = async (target, event) => {
+        const posted = target.window.posted.length;
+        await deliver(run, event);
+        assert.equal(run.timers.delays.includes(5000), true);
+        assert.equal(run.timers.delays.includes(15000), true);
+        assert.equal(target.window.posted.length, posted + 1);
+        await pass(run, 20000);
+    };
+    await reportTo(chat, sentFrom(chat.window, 1, true, false));
+    assert.deepEqual(live.went, ['Remember the mill. | null']);
+    await reportTo(chat, sentFrom(chat.window, 99, true, false));
+    assert.deepEqual(live.went, ['Remember the mill. | null']);
+    for (let step = 0; step < 9; step++) {
+        await offer(run, live, `Remember step ${step}.`);
+    }
+    const oldest = chat.window.posted.at(-9).seq;
+    await reportTo(chat, sentFrom(chat.window, oldest, true, false));
+    assert.deepEqual(live.went, ['Remember the mill. | null']);
+    const lastToOld = chat.window.posted.at(-1).seq;
+    run.document.frames.length = 0;
+    const fresh = frameIn(run);
+    await deliver(run, readyFrom(fresh.window));
+    assert.equal(fresh.window.posted.length, 1);
+    await reportTo(fresh, sentFrom(fresh.window, lastToOld, true, false));
+    assert.deepEqual(live.went, ['Remember the mill. | null']);
+    await reportTo(fresh, sentFrom(fresh.window, fresh.window.posted.at(-1).seq, true, false));
+    assert.deepEqual(live.went, ['Remember the mill. | null', 'Remember step 8. | null']);
+    run.boot.stop();
+});
+
+test('the lines are read after the live part is brought up to date', async () => {
+    const { run, chat, live } = await bridged();
+    await deliver(run, readyFrom(chat.window));
+    live.afterView = 'A fresh reminder.';
+    live.reads.length = 0;
+    await pass(run, 20000);
+    assert.deepEqual(live.reads.slice(0, 2), ['view', 'lines']);
+    assert.deepEqual(
+        chat.window.posted.map((message) => message.ready),
+        [null, 'A fresh reminder.'],
+    );
+    run.boot.stop();
+});
+
+test('leaving the chat disarms the frame', async () => {
+    const { run, chat, live, keeper } = await bridged();
+    live.ready = 'Remember the mill.';
+    live.suggestion = 'A stranger knocks.';
+    await deliver(run, readyFrom(chat.window));
+    go(run, '/');
+    await pass(run, 1000);
+    assert.deepEqual(
+        chat.window.posted.map((message) => `${message.seq} ${message.ready} ${message.suggestion}`),
+        ['1 Remember the mill. A stranger knocks.', '2 null null'],
+    );
+    const ticks = keeper.ticks.length;
+    await deliver(run, sentFrom(chat.window, 1, true, true));
+    await pass(run, 16000);
+    assert.deepEqual(live.went, []);
+    assert.equal(keeper.ticks.length, ticks);
+    assert.equal(chat.window.posted.length, 3);
+    go(run, '/rooms/harbour');
+    await pass(run, 1000);
+    assert.equal(run.world.lives.length, 2);
+    assert.equal(chat.window.posted.length, 4);
+    go(run, '/');
+    await pass(run, 1000);
+    assert.deepEqual(
+        chat.window.posted.map((message) => `${message.seq} ${message.ready} ${message.suggestion}`),
+        ['1 Remember the mill. A stranger knocks.', '2 null null', '3 null null', '4 null null', '5 null null'],
+    );
+    run.boot.stop();
+});
+
+test('a tab that is not the reader arms nothing to send', async () => {
+    const { run, chat, live, keeper } = await bridged();
+    keeper.reader = false;
+    live.ready = 'Remember the mill.';
+    live.suggestion = 'A stranger knocks.';
+    await deliver(run, readyFrom(chat.window));
+    await offer(run, live, 'Remember the bridge.', 'Another stranger.');
+    assert.deepEqual(
+        chat.window.posted.map((message) => `${message.ready} ${message.suggestion}`),
+        ['null null'],
+    );
+    keeper.reader = true;
+    keeper.options.notify({ kind: 'Changed' });
+    await settle();
+    assert.equal(chat.window.posted.at(-1).ready, 'Remember the bridge.');
+    run.boot.stop();
+});
+
+test('a new frame window is armed afresh', async () => {
+    const { run, chat, live } = await bridged();
+    live.ready = 'Remember the mill.';
+    await deliver(run, readyFrom(chat.window));
+    assert.equal(chat.window.posted.length, 1);
+    run.document.frames.length = 0;
+    const fresh = frameIn(run);
+    await offer(run, live, 'Remember the bridge.');
+    assert.equal(fresh.window.posted.length, 0);
+    assert.equal(chat.window.posted.length, 1);
+    await deliver(run, readyFrom(fresh.window));
+    assert.deepEqual(
+        fresh.window.posted.map((message) => message.ready),
+        ['Remember the bridge.'],
+    );
+    await deliver(run, readyFrom(chat.window));
+    await offer(run, live, 'Remember the ford.');
+    assert.equal(chat.window.posted.length, 1);
+    assert.equal(fresh.window.posted.length, 2);
+    run.document.frames.length = 0;
+    run.document.frames.push(chat.element);
+    await offer(run, live, 'Remember the weir.');
+    assert.equal(chat.window.posted.length, 1);
+    assert.equal(fresh.window.posted.length, 2);
+    await deliver(run, readyFrom(chat.window));
+    assert.deepEqual(
+        chat.window.posted.map((message) => message.ready),
+        ['Remember the mill.', 'Remember the weir.'],
+    );
+    assert.equal(fresh.window.posted.length, 2);
+    run.boot.stop();
+});
+
+test('a line too long is not armed', async () => {
+    const { run, chat, live } = await bridged();
+    live.ready = 'x'.repeat(6001);
+    live.suggestion = 'y'.repeat(6000);
+    await deliver(run, readyFrom(chat.window));
+    assert.equal(chat.window.posted.length, 1);
+    assert.equal(chat.window.posted[0].ready, null);
+    assert.equal(chat.window.posted[0].suggestion.length, 6000);
+    await offer(run, live, 'x'.repeat(6000), 'y'.repeat(6001));
+    assert.equal(chat.window.posted.length, 2);
+    assert.equal(chat.window.posted[1].ready.length, 6000);
+    assert.equal(chat.window.posted[1].suggestion, null);
+    run.boot.stop();
+});
+
+test('the top document\'s own hook still works', async () => {
+    const run = harness();
+    const sendWindow = new FakeSendWindow();
+    sendWindow.location = { href: `${SITE}/rooms/harbour`, pathname: '/rooms/harbour' };
+    const sendDocument = new FakeSendDocument(sendWindow);
+    sendDocument.body = { kind: 'body' };
+    sendDocument.visibilityState = 'visible';
+    sendDocument.documentElement = rootElement();
+    sendDocument.addEventListener = () => undefined;
+    sendDocument.removeEventListener = () => undefined;
+    const box = sendDocument.add(new FakeTextArea({ name: 'message' }));
+    const sentTexts = [];
+    box.addEventListener('keydown', (event) => {
+        if (event.key === 'Enter' && !event.shiftKey) {
+            sentTexts.push(box.value);
+            box.value = '';
+        }
+    });
+    run.environment.pageWindow = sendWindow;
+    run.environment.document = sendDocument;
+    run.world.hostless = true;
+    run.world.appended = APPENDED;
+    context.ScribeSender = RealSender;
+    start(run);
+    await settle();
+    assert.deepEqual(run.world.order, ['keeper harbour', 'live harbour', 'panel harbour']);
+    sendDocument.focus(box);
+    NATIVE.set.call(box, 'Hello');
+    box.dispatchEvent(new FakeEvent('input', { bubbles: true }));
+    box.forget();
+    sendWindow.dispatch(box, 'keydown', { key: 'Enter', keyCode: 13 });
+    sendWindow.advance(25);
+    assert.deepEqual(sentTexts, [`Hello${APPENDED}`]);
+    sendWindow.advance(100);
+    const live = run.world.lives[0];
+    assert.deepEqual(live.outgoing, ['true Hello']);
+    assert.deepEqual(live.sent, ['true ']);
+    run.boot.stop();
+});
+
+test('stop removes the listener', async () => {
+    const { run, chat } = await bridged();
+    await deliver(run, readyFrom(chat.window));
+    assert.equal(chat.window.posted.length, 1);
+    run.boot.stop();
+    const posted = chat.window.posted.length;
+    assert.equal(run.page.listeners.filter((entry) => entry.type === 'message').length, 0);
+    await deliver(run, readyFrom(chat.window));
+    assert.equal(chat.window.posted.length, posted);
+});
+
+test('a hidden frame is still armed and still heard', async () => {
+    const { run, chat, live } = await bridged();
+    live.ready = 'Remember the mill.';
+    await deliver(run, readyFrom(chat.window));
+    chat.box.width = 0;
+    await offer(run, live, null);
+    assert.deepEqual(
+        chat.window.posted.map((message) => message.ready),
+        ['Remember the mill.', null],
+    );
+    chat.box.width = 480;
+    await offer(run, live, 'Remember the bridge.');
+    const bridgeSeq = chat.window.posted.at(-1).seq;
+    chat.box.height = 0;
+    await deliver(run, sentFrom(chat.window, bridgeSeq, true, false));
+    assert.deepEqual(live.went, ['Remember the bridge. | null']);
+    assert.equal(chat.window.posted.length, 4);
+    run.boot.stop();
+});
+
+test('another pingpong iframe steals nothing', async () => {
+    const { run, chat, live } = await bridged();
+    const widget = frameIn(run, { src: 'https://frame.pingpong.ai/v1/widget.html', width: 1, height: 1 });
+    run.document.frames.unshift(run.document.frames.pop());
+    live.ready = 'Remember the mill.';
+    await deliver(run, readyFrom(chat.window));
+    await deliver(run, readyFrom(widget.window));
+    await offer(run, live, 'Remember the bridge.');
+    await offer(run, live, 'Remember the ford.');
+    assert.deepEqual(
+        chat.window.posted.map((message) => message.ready),
+        ['Remember the mill.', 'Remember the bridge.', 'Remember the ford.'],
+    );
+    assert.deepEqual(
+        widget.window.posted.map((message) => message.ready),
+        ['Remember the mill.', 'Remember the bridge.', 'Remember the ford.'],
+    );
+    const seqs = [...chat.window.posted, ...widget.window.posted].map((message) => message.seq).sort((first, second) => first - second);
+    assert.deepEqual(seqs, [1, 2, 3, 4, 5, 6]);
+    run.boot.stop();
+});
+
+test('a removed frame is forgotten', async () => {
+    const { run, chat, live } = await bridged();
+    await deliver(run, readyFrom(chat.window));
+    assert.equal(chat.window.posted.length, 1);
+    run.document.frames.length = 0;
+    await offer(run, live, 'Remember the mill.');
+    await pass(run, 20000);
+    assert.equal(chat.window.posted.length, 1);
+    run.document.frames.push(chat.element);
+    await offer(run, live, 'Remember the bridge.');
+    assert.equal(chat.window.posted.length, 1);
+    run.boot.stop();
+});
+
+test('one room\'s sent never reaches another room', async () => {
+    const { run, chat, live } = await bridged();
+    live.ready = 'Remember the harbour.';
+    await deliver(run, readyFrom(chat.window));
+    const harbourSeq = chat.window.posted[0].seq;
+    go(run, '/rooms/ford');
+    await pass(run, 1000);
+    const ford = run.world.lives[1];
+    assert.equal(ford.roomId, 'ford');
+    assert.deepEqual(
+        chat.window.posted.map((message) => `${message.seq} ${message.ready}`),
+        ['1 Remember the harbour.', '2 null', '3 null'],
+    );
+    await deliver(run, sentFrom(chat.window, harbourSeq, true, false));
+    assert.deepEqual(ford.went, []);
+    assert.deepEqual(live.went, []);
+    assert.equal(run.timers.delays.includes(5000), true);
+    assert.equal(run.timers.delays.includes(15000), true);
+    await pass(run, 1000);
+    await deliver(run, sentFrom(chat.window, 2, false, false));
+    assert.deepEqual(ford.went, []);
+    run.boot.stop();
+});
+
+test('arms carry the token and nothing leaks it', async () => {
+    const run = harness();
+    start(run);
+    await settle();
+    assert.equal(run.made, 1);
+    assert.equal(run.storage.values.get(TOKEN_NAME), BRIDGE);
+    const chat = frameIn(run);
+    const live = run.world.lives[0];
+    await deliver(run, readyFrom(chat.window));
+    await offer(run, live, 'Remember the mill.');
+    chat.window.failing = 1;
+    await offer(run, live, 'Remember the bridge.');
+    run.world.keepers[0].options.notify({ kind: 'Changed' });
+    await settle();
+    assert.deepEqual(
+        chat.window.posted.map((message) => message.token === BRIDGE),
+        [true, true, true],
+    );
+    assert.equal(run.lines.length, 1);
+    assert.equal(run.lines.some((line) => line.includes(BRIDGE)), false);
+    run.boot.stop();
+    const again = harness({ storage: run.storage });
+    start(again);
+    await settle();
+    assert.equal(again.made, 0);
+    assert.equal(run.storage.calls.filter((call) => call.operation === 'set' && call.name === TOKEN_NAME).length, 1);
+    const second = frameIn(again);
+    await deliver(again, readyFrom(second.window));
+    assert.equal(second.window.posted[0].token, BRIDGE);
+    again.boot.stop();
+    for (const [label, refuse] of [
+        ['unreadable', (storage) => storage.refuseGetsMatching(/^scribe-bridge$/)],
+        ['unsaveable', (storage) => storage.refuseSetsMatching(/^scribe-bridge$/)],
+    ]) {
+        const broken = harness();
+        refuse(broken.storage);
+        start(broken);
+        await settle();
+        const frame = frameIn(broken);
+        await deliver(broken, readyFrom(frame.window));
+        await offer(broken, broken.world.lives[0], 'Remember the mill.');
+        assert.equal(frame.window.posted.length, 0, label);
+        assert.equal(broken.lines.length, 1, label);
+        assert.equal(broken.lines[0].startsWith('The bridge to the chat frame could not be keyed: '), true, label);
+        assert.equal(broken.lines[0].includes(BRIDGE), false, label);
+        broken.boot.stop();
+    }
+    const echoing = harness();
+    const plainSet = echoing.storage.set.bind(echoing.storage);
+    /**
+     * @param {string} name
+     * @param {*} value
+     * @return {void}
+     * @throws {Error}
+     */
+    echoing.storage.set = (name, value) => {
+        if (name === TOKEN_NAME) {
+            throw new Error(`No room for ${value}`);
+        }
+        plainSet(name, value);
+    };
+    start(echoing);
+    await settle();
+    assert.deepEqual(echoing.lines, ['The bridge to the chat frame could not be keyed: the token could not be read, made or saved']);
+    echoing.boot.stop();
+});
+
+test('only a real message is a message', async () => {
+    const { run, chat, live, keeper } = await bridged();
+    live.ready = 'Remember the mill.';
+    await deliver(run, readyFrom(chat.window));
+    assert.equal(chat.window.posted.length, 1);
+    for (const isTrusted of [false, undefined, 'true', 1]) {
+        await deliver(run, { ...sentFrom(chat.window, 1, true, true), isTrusted });
+        await deliver(run, { ...readyFrom(chat.window), isTrusted });
+    }
+    await pass(run, 16000);
+    assert.deepEqual(live.went, []);
+    assert.deepEqual(keeper.ticks, []);
+    assert.equal(chat.window.posted.length, 1);
+    run.boot.stop();
+});
+
+test('a flood is ignored', async () => {
+    const { run, chat, live, keeper } = await bridged();
+    live.ready = 'Remember the mill.';
+    await deliver(run, readyFrom(chat.window));
+    for (let count = 0; count < 500; count++) {
+        await deliver(run, sentFrom(chat.window, chat.window.posted.at(-1).seq, true, false));
+    }
+    assert.equal(live.went.length, 10);
+    assert.equal(chat.window.posted.length, 11);
+    assert.equal(run.timers.count <= 32, true, `${run.timers.count} timers`);
+    await pass(run, 10000);
+    assert.deepEqual(keeper.ticks, [0, 3000, 6000]);
+    await deliver(run, sentFrom(chat.window, chat.window.posted.at(-1).seq, true, false));
+    assert.equal(live.went.length, 10);
+    await pass(run, 1);
+    await deliver(run, sentFrom(chat.window, chat.window.posted.at(-1).seq, true, false));
+    assert.equal(live.went.length, 11);
+    run.boot.stop();
+});
+
+test('a window still in the page is never pushed out', async () => {
+    const { run, chat, live } = await bridged();
+    live.ready = 'Remember the mill.';
+    await deliver(run, readyFrom(chat.window));
+    const decoys = [];
+    for (let count = 0; count < 24; count++) {
+        if (count === 8) {
+            await offer(run, live, 'Remember the bridge.');
+        }
+        decoys.push(frameIn(run, { src: `https://frame.pingpong.ai/v1/index.html#run=decoy-${count}` }));
+        await deliver(run, readyFrom(decoys[count].window));
+    }
+    await offer(run, live, 'Remember the ford.');
+    assert.deepEqual(
+        chat.window.posted.map((message) => message.ready),
+        ['Remember the mill.', 'Remember the bridge.', 'Remember the ford.'],
+    );
+    assert.deepEqual(
+        decoys.map((decoy) => decoy.window.posted.length),
+        [3, 3, 3, 3, 3, 3, 3, 3, 2, 2, 2, 2, 2, 2, 2, 0, 0, 0, 0, 0, 0, 0, 0, 0],
+    );
+    await deliver(run, sentFrom(chat.window, chat.window.posted.at(-1).seq, true, false));
+    assert.deepEqual(live.went, ['Remember the ford. | null']);
+    const seventeenth = decoys[15];
+    run.document.frames.splice(run.document.frames.indexOf(decoys[0].element), 1);
+    await deliver(run, readyFrom(seventeenth.window));
+    assert.deepEqual(
+        seventeenth.window.posted.map((message) => message.ready),
+        ['Remember the ford.'],
+    );
+    assert.equal(decoys[16].window.posted.length, 0);
+    run.boot.stop();
+});
+
+test('the token is read when it is used', async () => {
+    const { run, chat, live } = await bridged();
+    await deliver(run, readyFrom(chat.window));
+    run.storage.values.set(TOKEN_NAME, OTHER);
+    await offer(run, live, 'Remember the mill.');
+    assert.deepEqual(
+        chat.window.posted.map((message) => message.token),
+        [BRIDGE, OTHER],
+    );
+    const remade = 'remade-token-test-0123456789';
+    /**
+     * @return {string}
+     */
+    run.environment.random = () => remade;
+    run.storage.values.set(TOKEN_NAME, 'z'.repeat(15));
+    await offer(run, live, 'Remember the bridge.');
+    assert.equal(chat.window.posted.at(-1).token, remade);
+    assert.equal(run.storage.values.get(TOKEN_NAME), remade);
+    run.boot.stop();
+    const made = 'made-token-test-0123456789';
+    for (const [label, stored] of [
+        ['fifteen', 'x'.repeat(15)],
+        ['two hundred and one', 'y'.repeat(201)],
+        ['not a string', Array(20).fill('w')],
+    ]) {
+        const fresh = harness({ made });
+        fresh.storage.values.set(TOKEN_NAME, stored);
+        start(fresh);
+        await settle();
+        assert.equal(fresh.storage.values.get(TOKEN_NAME), made, label);
+        const frame = frameIn(fresh);
+        await deliver(fresh, readyFrom(frame.window));
+        assert.deepEqual(
+            frame.window.posted.map((message) => message.token),
+            [made],
+            label,
+        );
+        fresh.boot.stop();
+    }
+    const short = harness({ made: 'short-token' });
+    start(short);
+    await settle();
+    const frame = frameIn(short);
+    await deliver(short, readyFrom(frame.window));
+    await offer(short, short.world.lives[0], 'Remember the mill.');
+    assert.equal(frame.window.posted.length, 0);
+    assert.equal(short.storage.values.has(TOKEN_NAME), false);
+    assert.deepEqual(short.lines, ['The bridge to the chat frame could not be keyed: no usable token was made']);
+    /**
+     * @return {string}
+     */
+    short.environment.random = () => made;
+    await offer(short, short.world.lives[0], 'Remember the bridge.');
+    assert.deepEqual(
+        frame.window.posted.map((message) => message.token),
+        [made],
+    );
+    /**
+     * @return {string}
+     */
+    short.environment.random = () => 'short-token';
+    short.storage.values.delete(TOKEN_NAME);
+    await offer(short, short.world.lives[0], 'Remember the ford.');
+    await offer(short, short.world.lives[0], 'Remember the weir.');
+    assert.equal(frame.window.posted.length, 1);
+    assert.equal(short.lines.length, 2);
+    short.boot.stop();
+});
+
+test('honest sends are not dropped', async () => {
+    const { run, chat, live } = await bridged();
+    const other = frameIn(run, { src: 'https://frame.pingpong.ai/v1/index.html#second' });
+    live.ready = 'Remember the mill.';
+    live.suggestion = 'A gull cries.';
+    await deliver(run, readyFrom(chat.window));
+    await deliver(run, readyFrom(other.window));
+    await deliver(run, sentFrom(chat.window, chat.window.posted.at(-1).seq, false, true));
+    await pass(run, 80);
+    await deliver(run, sentFrom(chat.window, chat.window.posted.at(-1).seq, true, false));
+    assert.deepEqual(live.went, ['null | A gull cries.', 'Remember the mill. | null']);
+    for (let count = 0; count < 9; count++) {
+        await pass(run, 500);
+        await deliver(run, sentFrom(chat.window, chat.window.posted.at(-1).seq, true, true));
+    }
+    assert.equal(live.went.length, 10);
+    await deliver(run, sentFrom(other.window, other.window.posted.at(-1).seq, true, true));
+    assert.equal(live.went.length, 11);
+    /**
+     * @return {number}
+     */
+    run.clock.now = () => run.timers.now() - 60000;
+    await deliver(run, sentFrom(chat.window, chat.window.posted.at(-1).seq, true, false));
+    assert.equal(live.went.length, 12);
+    run.boot.stop();
+});
+
+test('a new session is armed afresh', async () => {
+    const { run, chat } = await bridged();
+    await deliver(run, readyFrom(chat.window));
+    go(run, '/rooms/ford');
+    await pass(run, 1000);
+    const ford = run.world.lives[1];
+    assert.equal(ford.roomId, 'ford');
+    assert.deepEqual(
+        chat.window.posted.map((message) => `${message.seq} ${message.ready} ${message.suggestion}`),
+        ['1 null null', '2 null null', '3 null null'],
+    );
+    await deliver(run, sentFrom(chat.window, 3, false, false));
+    assert.deepEqual(ford.went, ['null | null']);
+    run.boot.stop();
+});
+
+test('no token in a log line', async () => {
+    const locked = harness();
+    locked.storage.values.set(TOKEN_NAME, BRIDGE);
+    const plainGet = locked.storage.get.bind(locked.storage);
+    /**
+     * @param {string} name
+     * @param {*} fallback
+     * @return {*}
+     * @throws {Error}
+     */
+    locked.storage.get = (name, fallback) => {
+        if (name === TOKEN_NAME) {
+            throw new Error(`storage is locked; last value ${BRIDGE}`);
+        }
+        return plainGet(name, fallback);
+    };
+    start(locked);
+    await settle();
+    assert.equal(locked.lines.length, 1);
+    assert.equal(locked.lines[0].includes(BRIDGE), false);
+    locked.boot.stop();
+    const run = harness();
+    start(run);
+    await settle();
+    ScribeStore.setKey(run.storage, KEY);
+    run.storage.values.set(TOKEN_NAME, OTHER);
+    const plainSet = run.storage.set.bind(run.storage);
+    /**
+     * @param {string} name
+     * @param {*} value
+     * @return {void}
+     * @throws {Error}
+     */
+    run.storage.set = (name, value) => {
+        if (name.includes('spent')) {
+            throw new Error(`storage is full; ${TOKEN_NAME}=${OTHER}`);
+        }
+        plainSet(name, value);
+    };
+    const scene = run.world.lives[0].options.ask(ScribeBoot.Role.Scribe, SYSTEM, USER);
+    await settle();
+    answer(run.sent.calls[0], 200, completion('The scene.', 3));
+    assert.equal((await scene).cost, 3);
+    assert.equal(run.lines.some((line) => line.startsWith('The spending could not be saved')), true);
+    assert.equal(run.lines.some((line) => line.includes(OTHER)), false);
+    run.boot.stop();
+});
+
+test('a failing post is logged once', async () => {
+    const { run, chat, live } = await bridged();
+    const other = frameIn(run, { src: 'https://frame.pingpong.ai/v1/index.html#second' });
+    await deliver(run, readyFrom(chat.window));
+    await deliver(run, readyFrom(other.window));
+    chat.window.failing = 5;
+    other.window.failing = 1;
+    for (let step = 1; step <= 5; step++) {
+        await offer(run, live, `Step ${step}.`);
+    }
+    assert.equal(run.lines.length, 2);
+    assert.equal(chat.window.posted.length, 1);
+    assert.equal(other.window.posted.length, 5);
+    await offer(run, live, 'Step 6.');
+    assert.equal(chat.window.posted.at(-1).ready, 'Step 6.');
+    chat.window.failing = 1;
+    await offer(run, live, 'Step 7.');
+    assert.equal(run.lines.length, 3);
+    run.boot.stop();
+});
+
+test('an arm that could not be posted is tried again', async () => {
+    const { run, chat, live, keeper } = await bridged();
+    live.ready = 'Remember the mill.';
+    await deliver(run, readyFrom(chat.window));
+    chat.window.failing = 1;
+    await offer(run, live, 'Remember the bridge.');
+    assert.equal(chat.window.posted.length, 1);
+    assert.equal(run.lines.length, 1);
+    assert.equal(run.lines[0].startsWith('The chat frame could not be armed: '), true);
+    keeper.options.notify({ kind: 'Changed' });
+    await settle();
+    assert.deepEqual(
+        chat.window.posted.map((message) => message.ready),
+        ['Remember the mill.', 'Remember the bridge.'],
+    );
+    run.boot.stop();
+});
+
+test('eight arms are kept for a window', async () => {
+    const { run, chat, live } = await bridged();
+    live.ready = 'Step 0.';
+    await deliver(run, readyFrom(chat.window));
+    for (let step = 1; step <= 9; step++) {
+        await offer(run, live, `Step ${step}.`);
+    }
+    assert.equal(chat.window.posted.length, 10);
+    const ninth = chat.window.posted.at(-9);
+    await deliver(run, sentFrom(chat.window, ninth.seq, true, false));
+    assert.deepEqual(live.went, []);
+    await pass(run, 1000);
+    const eighth = chat.window.posted.at(-8);
+    await deliver(run, sentFrom(chat.window, eighth.seq, true, false));
+    assert.deepEqual(live.went, [`${eighth.ready} | null`]);
+    run.boot.stop();
+});
+
+test('a session that finishes building arms at once', async () => {
+    const run = harness();
+    run.world.plans.push(HOLD);
+    run.world.offerAtOpen = 'Remember the mill.';
+    start(run);
+    await settle();
+    const chat = frameIn(run);
+    await deliver(run, readyFrom(chat.window));
+    assert.deepEqual(
+        chat.window.posted.map((message) => message.ready),
+        [null],
+    );
+    run.world.keepers[0].finish();
+    await settle();
+    assert.deepEqual(
+        chat.window.posted.map((message) => message.ready),
+        [null, 'Remember the mill.'],
+    );
+    run.boot.stop();
+});
+
+test('the start gives each role only what it needs', async () => {
+    const framed = startIn({ origin: PINGPONG, top: false, ancestors: [ZETA], parented: true }, BRIDGE);
+    assert.equal(framed.framed, 1);
+    assert.deepEqual([...Object.keys(framed.options)].sort(), ['document', 'token', 'window']);
+    assert.equal(framed.storage, 0);
+    assert.equal(framed.options.token(), BRIDGE);
+    assert.deepEqual(framed.asked, [TOKEN_NAME]);
+    const topless = startIn({ origin: PINGPONG, top: true, ancestors: undefined, parented: false });
+    assert.deepEqual([topless.booted, topless.framed, topless.storage], [0, 0, 0]);
+    const top = startIn({ origin: ZETA, top: true, ancestors: [], parented: false });
+    assert.equal(top.booted, 1);
+    assert.equal(top.environment.random(), 'a-random-value-0123456789');
+    const cloned = [];
+    /**
+     * @param {object} value
+     * @return {object}
+     */
+    const clone = (value) => {
+        cloned.push(value.kind);
+        return { ...value };
+    };
+    const { run, chat } = await bridged({ clone });
+    await deliver(run, readyFrom(chat.window));
+    assert.deepEqual(cloned, ['arm']);
+    assert.equal(chat.window.posted.length, 1);
+    run.boot.stop();
 });
 
 test('the day is the local date', () => {

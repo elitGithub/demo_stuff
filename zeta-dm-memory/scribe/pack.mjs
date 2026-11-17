@@ -56,6 +56,7 @@ export const ScribePack = Object.freeze({
         'scribe/page/ScribeMuse.js',
         'scribe/page/ScribeLive.js',
         'scribe/page/ScribeSender.js',
+        'scribe/page/ScribeFrame.js',
         'scribe/page/PanelStyle.js',
         'scribe/page/PanelView.js',
         'scribe/page/ScribePanel.js',

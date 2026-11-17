@@ -45,6 +45,15 @@ const ScribeBoot = Object.freeze({
         AbortEvent: 'abort',
         KeyEvents: Object.freeze(['keydown', 'keyup', 'keypress']),
         VisibilityEvent: 'visibilitychange',
+        MessageEvent: 'message',
+        FrameTag: 'iframe',
+        KeptArms: 8,
+        KeptFrames: 16,
+        SentLimit: 10,
+        SentWindowMs: 10000,
+        TokenShortest: 16,
+        TokenLongest: 200,
+        NothingOffered: Object.freeze({ ready: null, suggestion: null }),
         Capture: true,
         Hidden: 'hidden',
         ResponseType: 'text',
@@ -65,6 +74,7 @@ const ScribeBoot = Object.freeze({
         DateJoint: '-',
         FirstEntry: 0,
         NotFound: -1,
+        Last: -1,
         NoSpending: 0,
         Nothing: '',
         ObjectType: 'object',
@@ -91,6 +101,12 @@ const ScribeBoot = Object.freeze({
             Silent: 'it did not answer',
             NotRecorded: 'The spending could not be saved; it is kept until it can be: ',
             Unrecorded: 'The spending could not be recorded, so nothing more is asked until it is',
+            NotArmed: 'The chat frame could not be armed: ',
+            NotHeard: 'A message from the chat frame could not be handled: ',
+            NotTold: 'The live part could not be told what went: ',
+            NoBridge: 'The bridge to the chat frame could not be keyed: ',
+            NoToken: 'no usable token was made',
+            NoStore: 'the token could not be read, made or saved',
         }),
     }),
 
@@ -139,7 +155,18 @@ const ScribeBoot = Object.freeze({
     say(boot, text) {
         const settings = ScribeBoot.Settings;
         ScribeBoot.token(boot);
+        let stored = null;
+        try {
+            stored = boot.environment.storage.get(ScribeFrame.Bridge.TokenName, null);
+        } catch {
+            stored = null;
+        }
         let told = text;
+        for (const secret of [boot.bridge, stored]) {
+            if (ScribeBoot.usable(secret)) {
+                told = told.replaceAll(secret, settings.Mask);
+            }
+        }
         for (const token of boot.tokens) {
             for (const secret of [token, ScribeBoot.bare(token)]) {
                 if (secret !== settings.Nothing) {
@@ -673,6 +700,315 @@ const ScribeBoot = Object.freeze({
 
     /**
      * @param {object} session
+     * @return {void}
+     */
+    stir(session) {
+        if (!session.ticking) {
+            return;
+        }
+        for (const delay of ScribeBoot.Settings.AfterTraffic) {
+            ScribeBoot.later(
+                session,
+                delay,
+                /**
+                 * @return {void}
+                 */
+                () => {
+                    ScribeBoot.askTick(session);
+                },
+                null,
+            );
+        }
+    },
+
+    /**
+     * @param {object} boot
+     * @return {object[]}
+     */
+    prune(boot) {
+        const settings = ScribeBoot.Settings;
+        const present = [];
+        for (const frame of boot.environment.document.querySelectorAll(settings.FrameTag)) {
+            if (typeof frame.src === settings.StringType && frame.src.startsWith(ScribeFrame.Bridge.FramePrefix)) {
+                present.push(frame.contentWindow);
+            }
+        }
+        boot.frames = boot.frames.filter(
+            /**
+             * @param {{ target: object }} entry
+             * @return {boolean}
+             */
+            (entry) => present.includes(entry.target),
+        );
+        return present;
+    },
+
+    /**
+     * @param {object} boot
+     * @return {object[]}
+     */
+    targets(boot) {
+        return boot.frames.map(
+            /**
+             * @param {{ target: object }} entry
+             * @return {object}
+             */
+            (entry) => entry.target,
+        );
+    },
+
+    /**
+     * @param {*} token
+     * @return {boolean}
+     */
+    usable(token) {
+        const settings = ScribeBoot.Settings;
+        return typeof token === settings.StringType && token.length >= settings.TokenShortest && token.length <= settings.TokenLongest;
+    },
+
+    /**
+     * @param {object} boot
+     * @return {string|null}
+     */
+    keyed(boot) {
+        const messages = ScribeBoot.Settings.Messages;
+        const environment = boot.environment;
+        const name = ScribeFrame.Bridge.TokenName;
+        let token = null;
+        let reason = messages.NoStore;
+        try {
+            const stored = environment.storage.get(name, null);
+            if (ScribeBoot.usable(stored)) {
+                token = stored;
+            } else {
+                const made = environment.random();
+                if (ScribeBoot.usable(made)) {
+                    environment.storage.set(name, made);
+                    token = made;
+                } else {
+                    reason = messages.NoToken;
+                }
+            }
+        } catch {
+            token = null;
+        }
+        if (token === null) {
+            if (!boot.unkeyed) {
+                ScribeBoot.say(boot, `${messages.NoBridge}${reason}`);
+            }
+            boot.unkeyed = true;
+            return null;
+        }
+        boot.unkeyed = false;
+        boot.bridge = token;
+        return token;
+    },
+
+    /**
+     * @param {object} boot
+     * @param {object} target
+     * @return {?{ target: object, last: ?object, kept: object[], sends: number[], failed: boolean }}
+     */
+    remember(boot, target) {
+        const known = boot.frames.find(
+            /**
+             * @param {{ target: object }} entry
+             * @return {boolean}
+             */
+            (entry) => entry.target === target,
+        );
+        if (known !== undefined) {
+            return known;
+        }
+        if (boot.frames.length >= ScribeBoot.Settings.KeptFrames) {
+            return null;
+        }
+        const entry = { target, last: null, kept: [], sends: [], failed: false };
+        boot.frames.push(entry);
+        return entry;
+    },
+
+    /**
+     * @param {*} line
+     * @return {string|null}
+     */
+    fit(line) {
+        return typeof line === ScribeBoot.Settings.StringType && line.length <= ScribeFrame.Bridge.LongestLine ? line : null;
+    },
+
+    /**
+     * @param {object} boot
+     * @return {Readonly<{ ready: string|null, suggestion: string|null }>}
+     */
+    offered(boot) {
+        const session = boot.session;
+        if (session === null || session.closed || session.live === null || session.keeper.view().reader !== true) {
+            return ScribeBoot.Settings.NothingOffered;
+        }
+        session.live.view();
+        const lines = session.live.lines();
+        return Object.freeze({ ready: ScribeBoot.fit(lines.ready), suggestion: ScribeBoot.fit(lines.suggestion) });
+    },
+
+    /**
+     * @param {object} boot
+     * @param {{ target: object, last: ?object, kept: object[], failed: boolean }} entry
+     * @param {Readonly<{ ready: string|null, suggestion: string|null }>} lines
+     * @return {void}
+     */
+    post(boot, entry, lines) {
+        const settings = ScribeBoot.Settings;
+        const bridge = ScribeFrame.Bridge;
+        const seq = boot.seq + 1;
+        const message = {
+            [bridge.TagName]: bridge.Tag,
+            kind: bridge.Kind.Arm,
+            seq,
+            token: boot.bridge,
+            ready: lines.ready,
+            suggestion: lines.suggestion,
+        };
+        const clone = boot.environment.clone;
+        try {
+            entry.target.postMessage(clone === null ? message : clone(message), bridge.FrameOrigin);
+        } catch (error) {
+            if (!entry.failed) {
+                ScribeBoot.say(boot, `${settings.Messages.NotArmed}${ScribeBoot.words(error)}`);
+            }
+            entry.failed = true;
+            return;
+        }
+        entry.failed = false;
+        boot.seq = seq;
+        const session = boot.session !== null && !boot.session.closed ? boot.session : null;
+        const arm = Object.freeze({ seq, ready: lines.ready, suggestion: lines.suggestion, session });
+        entry.last = arm;
+        entry.kept.push(arm);
+        entry.kept.splice(settings.FirstEntry, Math.max(entry.kept.length - settings.KeptArms, settings.FirstEntry));
+    },
+
+    /**
+     * @param {object} boot
+     * @param {object[]} forced
+     * @return {void}
+     */
+    arm(boot, forced) {
+        const settings = ScribeBoot.Settings;
+        if (boot.frames.length === settings.FirstEntry || boot.arming) {
+            return;
+        }
+        boot.arming = true;
+        try {
+            ScribeBoot.prune(boot);
+            if (boot.frames.length === settings.FirstEntry || ScribeBoot.keyed(boot) === null) {
+                return;
+            }
+            const lines = ScribeBoot.offered(boot);
+            for (const entry of boot.frames) {
+                const last = entry.last;
+                const same = last !== null && last.ready === lines.ready && last.suggestion === lines.suggestion;
+                if (!same || forced.includes(entry.target)) {
+                    ScribeBoot.post(boot, entry, lines);
+                }
+            }
+        } catch (error) {
+            ScribeBoot.say(boot, `${settings.Messages.NotArmed}${ScribeBoot.words(error)}`);
+        } finally {
+            boot.arming = false;
+        }
+    },
+
+    /**
+     * @param {object} boot
+     * @param {{ kept: object[] }} entry
+     * @param {{ seq: number, ready: boolean, suggestion: boolean }} report
+     * @return {void}
+     */
+    reported(boot, entry, report) {
+        const session = boot.session;
+        if (session === null || session.closed) {
+            return;
+        }
+        const kept = entry.kept.find(
+            /**
+             * @param {{ seq: number }} arm
+             * @return {boolean}
+             */
+            (arm) => arm.seq === report.seq,
+        );
+        const live = session.live;
+        if (kept !== undefined && kept.session === session && live !== null) {
+            const lines = Object.freeze({ ready: report.ready ? kept.ready : null, suggestion: report.suggestion ? kept.suggestion : null });
+            ScribeBoot.attempt(
+                boot,
+                ScribeBoot.Settings.Messages.NotTold,
+                /**
+                 * @return {*}
+                 */
+                () => live.went(lines),
+            );
+        }
+        ScribeBoot.stir(session);
+    },
+
+    /**
+     * @param {object} boot
+     * @param {{ origin: *, source: *, data: * }} event
+     * @return {void}
+     */
+    hear(boot, event) {
+        const bridge = ScribeFrame.Bridge;
+        try {
+            if (event.isTrusted !== true || event.origin !== bridge.FrameOrigin) {
+                return;
+            }
+            const report = ScribeFrame.report(event.data);
+            if (report === null) {
+                return;
+            }
+            const source = event.source;
+            if (!ScribeBoot.prune(boot).includes(source)) {
+                return;
+            }
+            const entry = ScribeBoot.remember(boot, source);
+            if (entry === null) {
+                return;
+            }
+            if (report.kind === bridge.Kind.Sent) {
+                const settings = ScribeBoot.Settings;
+                const now = boot.environment.clock.now();
+                if (
+                    entry.sends.some(
+                        /**
+                         * @param {number} time
+                         * @return {boolean}
+                         */
+                        (time) => time > now,
+                    )
+                ) {
+                    entry.sends = [];
+                }
+                entry.sends = entry.sends.filter(
+                    /**
+                     * @param {number} time
+                     * @return {boolean}
+                     */
+                    (time) => now - time <= settings.SentWindowMs,
+                );
+                if (entry.sends.length >= settings.SentLimit) {
+                    return;
+                }
+                entry.sends.push(now);
+                ScribeBoot.reported(boot, entry, report);
+            }
+            ScribeBoot.arm(boot, [source]);
+        } catch (error) {
+            ScribeBoot.say(boot, `${ScribeBoot.Settings.Messages.NotHeard}${ScribeBoot.words(error)}`);
+        }
+    },
+
+    /**
+     * @param {object} session
      * @param {*} path
      * @return {boolean}
      */
@@ -714,6 +1050,7 @@ const ScribeBoot = Object.freeze({
             null,
         );
         ScribeBoot.contest(session);
+        ScribeBoot.arm(session.boot, []);
         ScribeBoot.attempt(
             session.boot,
             ScribeBoot.Settings.Messages.NotChecked,
@@ -1083,6 +1420,10 @@ const ScribeBoot = Object.freeze({
         ScribeBoot.withdraw(session);
         ScribeBoot.giveBack(session);
         ScribeBoot.repay(session);
+        for (const entry of boot.frames) {
+            entry.kept = [];
+        }
+        ScribeBoot.arm(boot, ScribeBoot.targets(boot));
         for (const ended of endings) {
             if (ended !== null) {
                 ended();
@@ -1171,6 +1512,7 @@ const ScribeBoot = Object.freeze({
                         }
                     }
                     ScribeBoot.redraw(session);
+                    ScribeBoot.arm(boot, []);
                     if (session.wanted) {
                         ScribeBoot.contest(session);
                     }
@@ -1214,6 +1556,7 @@ const ScribeBoot = Object.freeze({
                  */
                 notify: () => {
                     ScribeBoot.redraw(session);
+                    ScribeBoot.arm(boot, []);
                 },
             });
             session.live = live;
@@ -1265,6 +1608,7 @@ const ScribeBoot = Object.freeze({
                 settings.TickMs,
             );
             session.ticking = true;
+            ScribeBoot.arm(boot, ScribeBoot.targets(boot));
         } catch (error) {
             const abandoned = session.closed;
             ScribeBoot.close(session);
@@ -1390,6 +1734,12 @@ const ScribeBoot = Object.freeze({
             retry: null,
             tokens: [],
             debts: new Map(),
+            listener: null,
+            bridge: null,
+            unkeyed: false,
+            frames: [],
+            arming: false,
+            seq: 0,
         };
         if (boot.root !== null && boot.root.hasAttribute(settings.Mark)) {
             ScribeBoot.say(boot, messages.Running);
@@ -1415,6 +1765,16 @@ const ScribeBoot = Object.freeze({
                 environment.pageWindow.addEventListener(type, shield, settings.Capture);
             }
             boot.shield = shield;
+
+            /**
+             * @param {{ origin: *, source: *, data: * }} event
+             * @return {void}
+             */
+            const listener = (event) => {
+                ScribeBoot.hear(boot, event);
+            };
+            environment.pageWindow.addEventListener(settings.MessageEvent, listener);
+            boot.listener = listener;
         } catch (error) {
             ScribeBoot.say(boot, `${messages.NotWatched}${ScribeBoot.words(error)}`);
         }
@@ -1432,6 +1792,7 @@ const ScribeBoot = Object.freeze({
         };
         environment.document.addEventListener(settings.VisibilityEvent, visibility);
         boot.visibility = visibility;
+        ScribeBoot.keyed(boot);
         boot.request = ScribeBoot.request(environment.xmlHttpRequest);
         if (boot.watcher !== null) {
             boot.watcher.onTraffic(
@@ -1441,21 +1802,8 @@ const ScribeBoot = Object.freeze({
                  */
                 (traffic) => {
                     const session = boot.session;
-                    if (session === null || !session.ticking || !ScribeBoot.ours(session, traffic.path)) {
-                        return;
-                    }
-                    for (const delay of settings.AfterTraffic) {
-                        ScribeBoot.later(
-                            session,
-                            delay,
-                            /**
-                             * @return {void}
-                             */
-                            () => {
-                                ScribeBoot.askTick(session);
-                            },
-                            null,
-                        );
+                    if (session !== null && ScribeBoot.ours(session, traffic.path)) {
+                        ScribeBoot.stir(session);
                     }
                 },
             );
@@ -1493,6 +1841,10 @@ const ScribeBoot = Object.freeze({
                 if (boot.visibility !== null) {
                     environment.document.removeEventListener(settings.VisibilityEvent, boot.visibility);
                     boot.visibility = null;
+                }
+                if (boot.listener !== null) {
+                    environment.pageWindow.removeEventListener(settings.MessageEvent, boot.listener);
+                    boot.listener = null;
                 }
                 if (boot.root !== null) {
                     boot.root.removeAttribute(settings.Mark);

@@ -9,6 +9,8 @@ export default class WholeDocument extends PanelDocument {
         'textarea[name="message"]': (node) => node.tagName === 'TEXTAREA' && node.name === 'message',
         textarea: (node) => node.tagName === 'TEXTAREA',
         'input[type="text"]': (node) => node.tagName === 'INPUT' && node.type === 'text',
+        iframe: (node) => node.tagName === 'IFRAME',
+        'button[aria-label="Send"]': (node) => node.tagName === 'BUTTON' && typeof node.getAttribute === 'function' && node.getAttribute('aria-label') === 'Send',
     });
 
     /**
@@ -112,7 +114,7 @@ export default class WholeDocument extends PanelDocument {
         }
         const matches = WholeDocument.Selectors[selector];
         const found = [];
-        const waiting = [...this.page, ...this.body.children];
+        const waiting = [...this.page, ...(this.body === null ? [] : this.body.children)];
         for (let seen = 0; waiting.length > 0; seen++) {
             if (seen >= WholeDocument.MostNodes) {
                 throw new Error('The page holds more nodes than a walk may visit');

@@ -215,9 +215,11 @@ The scribe is a second userscript, separate from the notes widget above. It keep
 
 1. From this directory run `node scribe/pack.mjs`. It writes `scribe/scribe.user.js` from the sources under `scribe/core/` and `scribe/page/`. Run it again after any change to those files.
 2. In the Tampermonkey dashboard create a new script, paste the contents of `scribe/scribe.user.js` and save. Its name is **Zeta Scribe**.
-3. **Disable the old Zeta DM Memory script** while the scribe is enabled. Both hold Enter back and write into the message box; together they append twice.
+3. **Disable the Zeta DM Memory script** while the scribe is enabled. Both hold Enter back and write into the chat box; together they append twice.
 4. When Tampermonkey asks for a connection, allow only `openrouter.ai`.
 5. Open a Zeta room. The panel appears at the right edge; under 1,100 px of window width it starts collapsed behind a **Scribe** button.
+
+The chat box lives inside a frame served by `frame.pingpong.ai`, so the script runs in two places: on the room page, where it keeps the book, the key and the panel, and inside that frame, where it only adds the scribe's line to your message. The two talk by messages that each side checks for origin and sender. The key, the book and the settings never enter the frame.
 
 ### First evening
 

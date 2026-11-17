@@ -15,6 +15,7 @@ export default class WholeSite {
     constructor(builder) {
         this.rooms = new Map();
         this.requests = [];
+        this.clock = null;
         this.open(WholeSite.Room, builder);
     }
 
@@ -79,6 +80,8 @@ export default class WholeSite {
         const headers = options?.headers ?? {};
         this.requests.push({
             own: options?.own === true,
+            at: this.clock === null ? null : this.clock.now(),
+            origin: typeof receiver?.location?.origin === 'string' ? receiver.location.origin : null,
             method,
             url: String(url),
             authorization: typeof headers.Authorization === 'string' ? headers.Authorization : null,

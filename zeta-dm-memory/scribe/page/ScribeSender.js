@@ -3,7 +3,6 @@ const ScribeSender = Object.freeze({
         SettleMs: 1500,
         CheckMs: 100,
         ResendMs: 25,
-        SendZonePx: 180,
         NoWait: 0,
         Start: 0,
         ComposingKeyCode: 229,
@@ -21,28 +20,67 @@ const ScribeSender = Object.freeze({
         InputType: 'insertText',
         Value: 'value',
         Tracker: '_valueTracker',
-        TextArea: 'TEXTAREA',
-        Submit: 'submit',
-        Button: 'button',
-        Icon: 'svg',
         FunctionType: 'function',
-        Fields: Object.freeze(['TEXTAREA', 'INPUT']),
+        Newline: '\n',
+        NarratorLead: '@: ',
+        Box: 'textarea[name="message"]',
+        SendButton: 'button[aria-label="Send"]',
         Modifiers: Object.freeze(['Shift', 'Control', 'Alt', 'Meta']),
         Edits: Object.freeze(['beforeinput', 'paste', 'cut', 'drop', 'compositionstart']),
-        Boxes: Object.freeze(['textarea[name="message"]', 'textarea', 'input[type="text"]']),
+
+        /**
+         * @return {RegExp}
+         */
+        get Blank() {
+            return /^[\p{Z}\p{Cc}\p{Cf}]*$/u;
+        },
     }),
+
+    /**
+     * @param {string} text
+     * @param {{ ready: string|null, suggestion: string|null }} lines
+     * @param {number} limit
+     * @return {Readonly<{ text: string, ready: boolean, suggestion: boolean }>}
+     */
+    compose(text, lines, limit) {
+        const settings = ScribeSender.Settings;
+        if (settings.Blank.test(text)) {
+            return Object.freeze({ text, ready: false, suggestion: false });
+        }
+        const chosen = { ready: lines.ready, suggestion: lines.suggestion };
+        /**
+         * @return {string}
+         */
+        const whole = () => {
+            let joined = text;
+            for (const line of [chosen.ready, chosen.suggestion]) {
+                if (line !== null) {
+                    joined += settings.Newline + settings.NarratorLead + line;
+                }
+            }
+            return joined;
+        };
+        while (ScribeText.bytes(whole()) > limit) {
+            if (chosen.ready !== null) {
+                chosen.ready = null;
+            } else if (chosen.suggestion !== null) {
+                chosen.suggestion = null;
+            } else {
+                break;
+            }
+        }
+        return Object.freeze({ text: whole(), ready: chosen.ready !== null, suggestion: chosen.suggestion !== null });
+    },
 
     /**
      * @param {Document} document
      * @param {Element|null} ignore
-     * @return {HTMLTextAreaElement|HTMLInputElement|null}
+     * @return {HTMLTextAreaElement|null}
      */
     find(document, ignore) {
-        for (const selector of ScribeSender.Settings.Boxes) {
-            for (const element of document.querySelectorAll(selector)) {
-                if (ignore === null || !ignore.contains(element)) {
-                    return element;
-                }
+        for (const element of document.querySelectorAll(ScribeSender.Settings.Box)) {
+            if (ignore === null || !ignore.contains(element)) {
+                return element;
             }
         }
         return null;
@@ -63,7 +101,7 @@ const ScribeSender = Object.freeze({
 
     /**
      * @param {Event} event
-     * @param {HTMLTextAreaElement|HTMLInputElement|null} box
+     * @param {HTMLTextAreaElement|null} box
      * @return {boolean}
      */
     on(event, box) {
@@ -73,15 +111,13 @@ const ScribeSender = Object.freeze({
 
     /**
      * @param {Window} window
-     * @param {HTMLTextAreaElement|HTMLInputElement} box
+     * @param {HTMLTextAreaElement} box
      * @param {string} value
      * @return {void}
      */
     write(window, box, value) {
         const settings = ScribeSender.Settings;
-        const prototype =
-            box.tagName === settings.TextArea ? window.HTMLTextAreaElement.prototype : window.HTMLInputElement.prototype;
-        const setter = Object.getOwnPropertyDescriptor(prototype, settings.Value)?.set;
+        const setter = Object.getOwnPropertyDescriptor(window.HTMLTextAreaElement.prototype, settings.Value)?.set;
         const tracker = box[settings.Tracker];
         if (tracker !== undefined && tracker !== null) {
             tracker.setValue(box.value);
@@ -103,7 +139,7 @@ const ScribeSender = Object.freeze({
 
     /**
      * @param {Window} window
-     * @param {HTMLTextAreaElement|HTMLInputElement} box
+     * @param {HTMLTextAreaElement} box
      * @param {string} added
      * @return {void}
      */
@@ -136,7 +172,7 @@ const ScribeSender = Object.freeze({
 
     /**
      * @param {object} sender
-     * @param {HTMLTextAreaElement|HTMLInputElement} box
+     * @param {HTMLTextAreaElement} box
      * @return {boolean}
      */
     prepare(sender, box) {
@@ -285,7 +321,7 @@ const ScribeSender = Object.freeze({
             }
         };
         /**
-         * @param {HTMLTextAreaElement|HTMLInputElement} box
+         * @param {HTMLTextAreaElement} box
          * @return {void}
          */
         const again = (box) => {
@@ -334,11 +370,8 @@ const ScribeSender = Object.freeze({
                     }
                     return;
                 }
-                const active = document.activeElement;
-                if (active === null || !settings.Fields.includes(active.tagName)) {
-                    return;
-                }
-                if (active !== ScribeSender.find(document, ignore)) {
+                const active = ScribeSender.find(document, ignore);
+                if (active === null || document.activeElement !== active) {
                     return;
                 }
                 if (!ScribeSender.prepare(sender, active)) {
@@ -371,14 +404,9 @@ const ScribeSender = Object.freeze({
                 if (ScribeSender.inside(event, ignore)) {
                     return;
                 }
-                const button = event.target.closest(settings.Button);
+                const button = event.target.closest(settings.SendButton);
                 const box = ScribeSender.find(document, ignore);
-                const sending =
-                    button !== null &&
-                    box !== null &&
-                    (button.type === settings.Submit || button.querySelector(settings.Icon) !== null) &&
-                    button.getBoundingClientRect().bottom > window.innerHeight - settings.SendZonePx;
-                if (sending) {
+                if (button !== null && box !== null) {
                     ScribeSender.prepare(sender, box);
                     ScribeSender.watch(sender);
                 }

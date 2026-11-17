@@ -4,8 +4,8 @@
 // @version      0.1.0
 // @description  Keeps the book of a Zeta campaign, tells the scene what it knows, and checks replies against the book.
 // @match        https://zeta-ai.io/*
+// @match        https://frame.pingpong.ai/*
 // @run-at       document-start
-// @noframes
 // @grant        GM_getValue
 // @grant        GM_setValue
 // @grant        GM_deleteValue

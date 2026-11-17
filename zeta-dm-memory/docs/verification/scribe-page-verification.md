@@ -19,12 +19,13 @@ Result on 2026-11-16, each file run alone under that limit:
 | `scribe-reminder` | the line added to the player's message | 55 of 55 |
 | `scribe-pedant` | findings about a reply | 41 of 41 |
 | `scribe-muse` | suggestions and telling the scribe | 35 of 35 |
-| `scribe-live` | work at the newest message | 53 of 53 |
-| `scribe-sender` | the send hook on the message box | 24 of 24 |
+| `scribe-live` | work at the newest message | 56 of 56 |
+| `scribe-sender` | the send hook on the chat box | 26 of 26 |
+| `scribe-frame` | the part that runs inside the chat frame | 17 of 17 |
 | `scribe-panel` | the panel | 68 of 68 |
-| `scribe-boot` | wiring on the page, model requests, the reader's role | 45 of 45 |
-| `scribe-pack` | the packed userscript's text | 17 of 17 |
-| `scribe-whole` | the packed script walked over a fake page, 20 steps | 36 of 36 |
+| `scribe-boot` | wiring on the page, model requests, the reader's role, the bridge to the chat frame | 75 of 75 |
+| `scribe-pack` | the packed userscript's text | 19 of 19 |
+| `scribe-whole` | the packed script walked over a fake page whose chat is in a frame | 52 of 52 |
 
 The engine's files on the same day: text 58, intake 51, answer 59, facts 69, scenes 43, operator 48, knowledge 27, analyzer 29, gateway 30, adoption 32, serve 22, bench 49, all passing.
 
@@ -37,6 +38,22 @@ The first run of the walk passed 24 of 30 tests and showed five places where fin
 ## The owner's first run, 2026-11-17
 
 On the real site, with the first build: the panel appeared; the chat was pulled with the page's own login (`Last pull: 864 messages, ended NoCursor`); the key saved; Adopt started; the cost of a failed call was counted. Two faults showed and were fixed the same day: the reading model's answer was cut off at an 8,000-token cap (now 40,000, with ten minutes a call), and a tab that was not in front stopped working (now a hidden tab keeps working and yields only to another tab on the same chat). The boot and whole-walk counts above are from after those fixes; the rest of the first run is still to be done.
+
+## The chat frame, 2026-11-17
+
+The same day the site moved its chat box into a cross-origin frame (`frame.pingpong.ai`). The script now runs in two places: the room page keeps everything, and the copy inside the frame only adds the scribe's line to the message. The design is `docs/superpowers/specs/2026-11-17-scribe-chat-frame-design.md`. The bridge between the two was reviewed adversarially twice; the reviewer's attack scripts were run again against the final code. What they show: a hidden frame never sends an old line; one chat's line never goes out in another; a line posted to the frame without the bridge token is ignored; a script-made message event is ignored; the frame's copy makes one kind of storage call (reading the bridge token) and no request.
+
+Accepted limit: every page on `frame.pingpong.ai` that runs the script receives the bridge token. A page there that forwarded the messages it receives to its parent would let a hostile script in the Zeta page add a line to the player's messages.
+
+Owner checks for the frame, on the real page:
+
+- [ ] After rebuilding and reinstalling, Tampermonkey shows Zeta Scribe running on the room page and inside the chat frame.
+- [ ] With a book adopted and a reminder shown under **With your next message**: press Enter on a message. It appears in the chat ending with one `@: [Scribe] ...` line, sent once, and the panel no longer shows the reminder as waiting.
+- [ ] The same with the Send button.
+- [ ] "Suggested replies" and "Insert asterisk" with text in the box: nothing is added.
+- [ ] With DM Memory enabled only for this check, type in its notes box and press Enter: nothing from the scribe is added there. Then disable DM Memory again.
+
+What only the real page can show for the frame: that Tampermonkey runs the script inside the sandboxed frame; that the frame's copy reads a value the top page's copy saved after the frame started; that message events read as browser-delivered, with the right sender, through Tampermonkey's wrappers; how many Pingpong frames the room page holds.
 
 ## Not verified by any agent
 

@@ -29,6 +29,11 @@ const WIDE = 1280;
 const NARROW = 390;
 const QUARRY = 'quarry';
 const QUARRY_LENGTH = 61;
+const TOP_ORIGIN = 'https://zeta-ai.io';
+const FRAME_ORIGIN = 'https://frame.pingpong.ai';
+const BRIDGE = 'scribe-bridge';
+const BRIDGE_READ = 'GM_getValue("scribe-bridge", null)';
+const OFFICE = 'Day 1 | The ledger office | private | present: Halvard, Mirelle | They settle the debt\nCHANGED: yes';
 const OPENING = '[Scribe] Day 1, "The harbour market", public. Present: Halvard, Mirelle, and 1 other.';
 const HAIR = 'Mirelle, hair: "black, worn in a braid".';
 const OLD_HAIR = 'black, worn in a braid';
@@ -263,17 +268,22 @@ const ANSWERS = Object.freeze({
 });
 
 /**
- * @param {{ locks?: boolean, query?: boolean }} options
- * @return {{ clock: FakeTimers, site: WholeSite, model: WholeModel, storage: FakeStorage, locks: FakeLocks|null, query: boolean, tabs: WholeTab[], made: number }}
+ * @param {{ locks?: boolean, query?: boolean, layout?: string }} options
+ * @return {{ clock: FakeTimers, site: WholeSite, model: WholeModel, storage: FakeStorage, locks: FakeLocks|null, query: boolean, layout: string, posts: object[], tabs: WholeTab[], made: number }}
  */
 function world(options = {}) {
+    const clock = new FakeTimers(START);
+    const site = new WholeSite(campaign());
+    site.clock = clock;
     return {
-        clock: new FakeTimers(START),
-        site: new WholeSite(campaign()),
+        clock,
+        site,
         model: new WholeModel(PROMPTS, ANSWERS, COSTS),
         storage: new FakeStorage(),
         locks: options.locks === false ? null : new FakeLocks(),
         query: options.query !== false,
+        layout: options.layout ?? 'frame',
+        posts: [],
         tabs: [],
         made: 0,
     };
@@ -283,9 +293,10 @@ function world(options = {}) {
  * @param {object} walk
  * @param {string} path
  * @param {number} width
+ * @param {{ origin?: string, layout?: string }} extra
  * @return {WholeTab}
  */
-function install(walk, path, width = WIDE) {
+function install(walk, path, width = WIDE, extra = {}) {
     walk.made++;
     const tab = new WholeTab({
         name: `tab-${walk.made}`,
@@ -299,6 +310,9 @@ function install(walk, path, width = WIDE) {
         path,
         width,
         query: walk.query,
+        layout: extra.layout ?? walk.layout,
+        origin: extra.origin,
+        posts: walk.posts,
     });
     walk.tabs.push(tab);
     tab.run();
@@ -590,13 +604,19 @@ async function arrive(walk, tab, said, blocks) {
 
 /**
  * @param {string} budget
+ * @param {{ layout?: string }} options
  * @return {Promise<{ walk: object, tab: WholeTab }>}
  */
-async function replied(budget = '2') {
-    const { walk, tab } = await adopted(budget);
+async function replied(budget = '2', options = {}) {
+    const { walk, tab } = await adopted(budget, options);
     await arrive(walk, tab, ASKED, REPLY);
-    await until(walk, 'step 6: a reminder to be ready', () => typeof stored(walk, 'live')?.ready === 'string', 20000);
-    await pass(walk, TICK_MS);
+    await until(
+        walk,
+        'step 6: the new reply to be checked',
+        () => stored(walk, 'live')?.seen?.id === walk.site.messages.at(-1).id && typeof stored(walk, 'live')?.ready === 'string',
+        TICK_MS * 2,
+    );
+    await quiet(walk, 'step 6: after the check');
     return { walk, tab };
 }
 
@@ -660,8 +680,12 @@ test('2. a chat opens', async () => {
     const names = storedNames(walk);
     assert.equal(names.includes('scribe:head:harbour:campaign'), true);
     assert.deepEqual(
-        names.filter((name) => name.split(':')[2] !== ROOM),
+        names.filter((name) => name.startsWith('scribe:') && name.split(':')[2] !== ROOM),
         [],
+    );
+    assert.deepEqual(
+        names.filter((name) => !name.startsWith('scribe:')),
+        [BRIDGE],
     );
     assert.equal(stored(walk, 'campaign').messages.length, CHAT_LENGTH);
     assert.equal(walk.model.calls.length, 0);
@@ -807,8 +831,13 @@ test('6. a new reply arrives', async () => {
     const from = walk.model.calls.length;
     const reads = walk.site.scribeRequests().length;
     await arrive(walk, tab, ASKED, REPLY);
-    await until(walk, 'step 6: a reminder to be ready', () => typeof stored(walk, 'live')?.ready === 'string', 20000);
-    await pass(walk, TICK_MS);
+    await until(
+        walk,
+        'step 6: the new reply to be checked',
+        () => stored(walk, 'live')?.seen?.id === walk.site.messages.at(-1).id && typeof stored(walk, 'live')?.ready === 'string',
+        TICK_MS * 2,
+    );
+    await quiet(walk, 'step 6: after the check');
     const pulled = walk.site.scribeRequests().slice(reads);
     assert.equal(pulled.length > 0, true);
     assert.equal(new URL(pulled[0].url).searchParams.get('cursor'), null);
@@ -1524,7 +1553,10 @@ function carries(text, secrets) {
     return secrets.some((secret) => String(text).includes(secret));
 }
 
-test('18. secrets over the whole walk', async () => {
+/**
+ * @return {Promise<{ walk: object, tab: WholeTab, third: WholeTab, fourth: WholeTab, failing: number, spent: number, afterSpent: number, handed: number, handover: string }>}
+ */
+async function wholeWalk() {
     const walk = world();
     const first = install(walk, '/');
     first.ready();
@@ -1629,6 +1661,11 @@ test('18. secrets over the whole walk', async () => {
     fourth.go('/');
     third.go('/');
     await pass(walk, TICK_MS);
+    return { walk, tab, third, fourth, failing, spent, afterSpent, handed, handover };
+}
+
+test('18. secrets over the whole walk', async () => {
+    const { walk, tab, third, fourth, failing, spent, afterSpent, handed, handover } = await wholeWalk();
     assert.equal(walk.model.silenced, 0);
     assert.deepEqual(walk.model.strays, []);
     assert.equal(walk.model.of('Notes').length, 1);
@@ -1673,4 +1710,525 @@ test('18. secrets over the whole walk', async () => {
         assert.equal(carries(call.headers, tokens), false);
         assert.equal(carries(call.data, tokens), false);
     }
+});
+
+/**
+ * @param {object} walk
+ * @param {string} label
+ * @param {string} direction
+ * @return {object[]}
+ */
+function bridged(walk, label, direction) {
+    return walk.posts
+        .filter((post) => post.delivered && (direction === 'to' ? post.toLabel === label : post.fromLabel === label))
+        .map((post) => JSON.parse(post.data));
+}
+
+/**
+ * @param {object} walk
+ * @param {WholeTab} tab
+ * @return {object[]}
+ */
+function armsTo(walk, tab) {
+    return bridged(walk, `${tab.name}/frame`, 'to').filter((message) => message.kind === 'arm');
+}
+
+/**
+ * @param {object} walk
+ * @param {WholeTab} tab
+ * @return {object[]}
+ */
+function reportsFrom(walk, tab) {
+    return bridged(walk, `${tab.name}/frame`, 'from');
+}
+
+/**
+ * @param {object} walk
+ * @return {number}
+ */
+function posted(walk) {
+    return walk.site.requests.filter((request) => request.method === 'POST').length;
+}
+
+test('F1. the two copies start as they should', async () => {
+    const walk = world();
+    const tab = install(walk, '/');
+    tab.ready();
+    assert.deepEqual(tab.frame.gm, []);
+    assert.equal(tab.gm[0], 'GM_getValue("scribe-bridge", null)');
+    assert.equal(tab.gm[1], 'GM_setValue("scribe-bridge")');
+    await pass(walk, 1000);
+    tab.go(CHAT);
+    await tab.openPage();
+    await until(walk, 'step F1: the chat to be pulled', () => tab.panel.headline().startsWith('No book for this chat yet'), 15000);
+    await pass(walk, 5000);
+    const token = walk.storage.get(BRIDGE, null);
+    assert.equal(typeof token === 'string' && token.length >= 16 && token.length <= 200, true);
+    assert.equal(tab.panel.hosts(), 1);
+    assert.equal(tab.gm.some((call) => call.startsWith('GM_getValue("scribe:')), true);
+    assert.equal(tab.document.documentElement.hasAttribute('data-zeta-scribe'), true);
+    assert.equal(tab.window.listening('message'), 1);
+    assert.equal(tab.frame.gm.length > 0, true);
+    assert.equal(tab.frame.gm.every((call) => call === BRIDGE_READ), true);
+    assert.deepEqual(tab.frame.logs, []);
+    assert.equal(tab.frame.document.elements.length, 2);
+    assert.equal(tab.frame.document.documentElement.hasAttribute('data-zeta-scribe'), false);
+    assert.equal(tab.frame.window.listening('message'), 1);
+    const first = walk.posts.find((post) => post.fromLabel === `${tab.name}/frame`);
+    assert.deepEqual(JSON.parse(first.data), { zetaScribe: 1, kind: 'ready' });
+    assert.equal(first.target, TOP_ORIGIN);
+    assert.equal(first.delivered, true);
+    const arms = armsTo(walk, tab);
+    assert.equal(arms.length >= 1, true);
+    assert.deepEqual(arms[0], { zetaScribe: 1, kind: 'arm', seq: 1, token, ready: null, suggestion: null });
+    assert.equal(arms.every((arm) => arm.token === token), true);
+    assert.equal(
+        walk.posts.filter((post) => post.toLabel === `${tab.name}/frame`).every((post) => post.target === FRAME_ORIGIN),
+        true,
+    );
+    const readies = reportsFrom(walk, tab).filter((message) => message.kind === 'ready').length;
+    await pass(walk, 5000);
+    assert.equal(reportsFrom(walk, tab).filter((message) => message.kind === 'ready').length, readies);
+    assert.equal(walk.site.requests.filter((request) => request.origin === FRAME_ORIGIN).length, 0);
+    const alone = install(walk, '/v1/index.html', WIDE, { origin: FRAME_ORIGIN, layout: 'none' });
+    alone.ready();
+    await pass(walk, 3000);
+    assert.deepEqual(alone.gm, []);
+    assert.deepEqual(alone.logs, []);
+    assert.equal(alone.window.listening('message'), 0);
+    assert.equal(alone.window.listening('keydown'), 0);
+    assert.equal(alone.scriptTimers.count, 0);
+    assert.equal(alone.pageTimers.count, 0);
+    assert.equal(alone.document.elements.length, 2);
+    assert.equal(alone.document.documentElement.hasAttribute('data-zeta-scribe'), false);
+    assert.equal(walk.posts.filter((post) => post.fromLabel === alone.name).length, 0);
+    assert.equal(walk.storage.get(BRIDGE, null), token);
+});
+
+/**
+ * @param {boolean} button
+ * @return {Promise<void>}
+ */
+async function throughFrame(button) {
+    const { walk, tab } = await replied('2');
+    const ready = stored(walk, 'live').ready;
+    const armed = armsTo(walk, tab).at(-1);
+    assert.equal(armed.ready, ready);
+    const posts = posted(walk);
+    const reports = reportsFrom(walk, tab).length;
+    tab.type('I nod.');
+    if (button) {
+        tab.press('Send', true);
+    } else {
+        tab.enter();
+    }
+    await pass(walk, 2000);
+    const went = walk.site.requests.filter((request) => request.method === 'POST').slice(posts);
+    assert.equal(went.length, 1);
+    assert.equal(went[0].origin, FRAME_ORIGIN);
+    const text = JSON.parse(went[0].body).text;
+    assert.equal(text, `I nod.\n@: ${ready}`);
+    assert.equal(text.split('\n@: [Scribe] ').length - 1, 1);
+    assert.deepEqual(
+        reportsFrom(walk, tab)
+            .slice(reports)
+            .filter((message) => message.kind === 'sent')
+            .map((message) => [message.seq, message.ready, message.suggestion]),
+        [[armed.seq, true, false]],
+    );
+    assert.equal(stored(walk, 'live').ready, null);
+    assert.deepEqual(plain(stored(walk, 'live').findings.map((finding) => finding.status)), ['Reminded']);
+    assert.deepEqual(queued(tab), []);
+    const findings = findingRows(tab);
+    assert.equal(findings.length, 1);
+    assert.equal(tab.panel.walk(findings[0]).some((element) => element.ownText === WENT_OUT), true);
+    assert.equal(tab.box.value, '');
+    assert.deepEqual(tab.logs, []);
+    assert.deepEqual(tab.frame.logs, []);
+}
+
+test('F2. a reminder goes out through the frame by Enter', async () => {
+    await throughFrame(false);
+});
+
+test('F2. a reminder goes out through the frame by a press on Send', async () => {
+    await throughFrame(true);
+});
+
+test('F3. nothing lands in any other field of the top page or the frame', async () => {
+    const { walk, tab } = await replied('2');
+    const ready = stored(walk, 'live').ready;
+    const posts = posted(walk);
+    const reports = reportsFrom(walk, tab).length;
+    const { notes, title } = tab.addTool();
+    for (const field of [notes, title]) {
+        tab.enterIn(field, tab.document, tab.window, 'A note of my own.');
+        await pass(walk, 100);
+        assert.equal(field.value, 'A note of my own.');
+    }
+    for (const input of tab.inputs) {
+        tab.enterIn(input, tab.chatDocument, tab.chatWindow, 'Some other words.');
+        await pass(walk, 100);
+        assert.equal(input.value, 'Some other words.');
+    }
+    tab.type('I hesitate.');
+    const written = tab.box.writes.length;
+    tab.press('Suggested replies');
+    await pass(walk, 100);
+    tab.press('Insert asterisk');
+    await pass(walk, 2000);
+    assert.equal(tab.box.value, 'I hesitate.');
+    assert.equal(tab.box.writes.length, written);
+    for (const field of [notes, title, ...tab.inputs]) {
+        assert.equal(field.writes.length, 1, field.name);
+    }
+    assert.deepEqual(tab.presses, ['Suggested replies', 'Insert asterisk']);
+    assert.equal(tab.elsewhere.length, 5);
+    assert.equal(posted(walk), posts);
+    assert.deepEqual(
+        reportsFrom(walk, tab)
+            .slice(reports)
+            .filter((message) => message.kind === 'sent'),
+        [],
+    );
+    assert.equal(stored(walk, 'live').ready, ready);
+    assert.deepEqual(tab.logs, []);
+    assert.deepEqual(tab.frame.logs, []);
+});
+
+test('F4. the secrets stay on top over the whole walk', async () => {
+    const { walk } = await wholeWalk();
+    const secrets = [KEY, WholeSite.Token, BARE_TOKEN];
+    const framed = walk.tabs.filter((each) => each.frame !== null);
+    assert.equal(framed.length, 4);
+    const crossing = walk.posts.filter((post) => post.to === FRAME_ORIGIN || post.from === FRAME_ORIGIN);
+    assert.equal(crossing.length > 0, true);
+    assert.equal(crossing.some((post) => carries(post.data, secrets)), false);
+    assert.equal(
+        walk.posts.filter((post) => post.to === FRAME_ORIGIN).every((post) => post.target === FRAME_ORIGIN),
+        true,
+    );
+    const token = walk.storage.get(BRIDGE, null);
+    assert.equal(typeof token === 'string' && token.length >= 16, true);
+    const carrying = walk.posts.filter((post) => post.data.includes(token));
+    assert.equal(carrying.length > 0, true);
+    assert.equal(
+        carrying.every((post) => post.toLabel.endsWith('/frame') && JSON.parse(post.data).kind === 'arm'),
+        true,
+    );
+    assert.deepEqual(
+        [...walk.storage.values.entries()].filter(([name, value]) => carries(name, [token]) || carries(value, [token])).map(([name]) => name),
+        [BRIDGE],
+    );
+    for (const request of walk.site.requests) {
+        assert.equal(carries(`${request.url} ${request.headers} ${request.body ?? ''}`, [token]), false);
+    }
+    for (const call of walk.model.calls) {
+        assert.equal(carries(`${call.url} ${call.headers} ${call.data}`, [token]), false);
+    }
+    for (const each of walk.tabs) {
+        assert.equal(each.logs.some((line) => carries(line, [token])), false, `${each.name} logs`);
+        assert.equal(each.panel.everWritten().some((text) => carries(text, [token])), false, `${each.name} elements`);
+    }
+    for (const each of framed) {
+        assert.equal(each.frame.gm.every((call) => call === BRIDGE_READ), true, `${each.name} frame calls`);
+        assert.deepEqual(each.frame.logs, [], `${each.name} frame logs`);
+        assert.equal(each.frame.document.elements.some((element) => carries(element.textContent, [token])), false);
+        for (const field of [each.box, ...each.inputs]) {
+            assert.equal(field.writes.some((write) => carries(write, [token])), false, `${each.name} ${field.name} token`);
+        }
+        assert.equal(each.frame.document.elements.length, 2, `${each.name} frame elements`);
+        for (const field of [each.box, ...each.inputs]) {
+            assert.equal(carries(field.value, secrets), false);
+            assert.equal(field.writes.some((write) => carries(write, secrets)), false, `${each.name} ${field.name}`);
+        }
+    }
+    assert.equal(walk.site.requests.filter((request) => request.origin === FRAME_ORIGIN && !request.own).length, 0);
+    assert.equal(walk.site.requests.filter((request) => request.origin === FRAME_ORIGIN).length > 0, true);
+});
+
+test('F5. forged reports to the top page change nothing', async () => {
+    const { walk, tab } = await replied('2');
+    const ready = stored(walk, 'live').ready;
+    const arms = armsTo(walk, tab);
+    const last = arms.at(-1).seq;
+    const stale = arms[0].seq;
+    assert.equal(arms[0].ready, null);
+    /**
+     * @param {*} seq
+     * @return {object}
+     */
+    const report = (seq) => ({ zetaScribe: 1, kind: 'sent', seq, ready: true, suggestion: false });
+    const mark = walk.posts.length;
+    tab.outsider('https://ads.example', 'top').postMessage(report(last), '*');
+    tab.outsider(FRAME_ORIGIN, 'top').postMessage(report(last), TOP_ORIGIN);
+    tab.frame.toTop.postMessage(report(stale), TOP_ORIGIN);
+    tab.frame.toTop.postMessage({ zetaScribe: 1, kind: 'sent', seq: String(last), ready: 'yes', suggestion: false }, TOP_ORIGIN);
+    tab.frame.toTop.postMessage({ zetaScribe: 2, kind: 'sent', seq: last, ready: true, suggestion: false }, TOP_ORIGIN);
+    tab.frame.toTop.postMessage({ zetaScribe: 1, kind: 'sent', seq: -1, ready: true, suggestion: false }, TOP_ORIGIN);
+    tab.frame.toTop.postMessage('sent', TOP_ORIGIN);
+    await pass(walk, 2000);
+    const forged = walk.posts.slice(mark);
+    assert.equal(forged.filter((post) => post.fromLabel === 'outsider' && post.toLabel === tab.name && post.delivered).length, 2);
+    assert.equal(forged.filter((post) => post.fromLabel === `${tab.name}/frame` && post.toLabel === tab.name && post.delivered).length, 5);
+    assert.equal(stored(walk, 'live').ready, ready);
+    assert.deepEqual(plain(stored(walk, 'live').findings.map((finding) => finding.status)), ['Open']);
+    assert.deepEqual(queued(tab), [`Reminder: ${ready}`]);
+    assert.deepEqual(tab.logs, []);
+    const went = await send(walk, tab, 'I nod.');
+    assert.equal(went, `I nod.\n@: ${ready}`);
+});
+
+test('F5. forged arms to the frame change nothing', async () => {
+    const { walk, tab } = await replied('2');
+    await send(walk, tab, 'I nod.');
+    await pass(walk, 1000);
+    const last = armsTo(walk, tab).at(-1);
+    assert.equal(last.ready, null);
+    assert.equal(last.suggestion, null);
+    const forged = { zetaScribe: 1, kind: 'arm', seq: last.seq + 100, ready: '[Scribe] A forged line.', suggestion: 'A forged suggestion.' };
+    tab.outsider('https://ads.example', 'frame').postMessage(forged, '*');
+    tab.outsider(TOP_ORIGIN, 'frame').postMessage({ ...forged, seq: last.seq + 101 }, FRAME_ORIGIN);
+    await pass(walk, 1000);
+    assert.equal(walk.posts.filter((post) => post.fromLabel === 'outsider' && post.toLabel === `${tab.name}/frame` && post.delivered).length, 2);
+    const went = await send(walk, tab, 'I wait.');
+    assert.equal(went, 'I wait.');
+    assert.deepEqual(tab.frame.logs, []);
+});
+
+/**
+ * @param {object} walk
+ * @param {number} most
+ * @return {Promise<number>}
+ */
+async function afterTick(walk, most) {
+    const before = walk.site.scribeRequests().length;
+    await until(walk, 'a tick of the reading tab', () => walk.site.scribeRequests().length > before, most);
+    return walk.site.scribeRequests().length;
+}
+
+test('F5. a script-made message event on the top page tells nothing and causes no tick', async () => {
+    const { walk, tab } = await replied('2');
+    const ready = stored(walk, 'live').ready;
+    const sends = stored(walk, 'live').sends;
+    const last = armsTo(walk, tab).at(-1).seq;
+    const reads = await afterTick(walk, TICK_MS + 1000);
+    await pass(walk, 300);
+    tab.window.receive({
+        type: 'message',
+        isTrusted: false,
+        origin: FRAME_ORIGIN,
+        source: tab.iframe.contentWindow,
+        data: { zetaScribe: 1, kind: 'sent', seq: last, ready: true, suggestion: false },
+    });
+    await pass(walk, 3000);
+    assert.equal(walk.site.scribeRequests().length, reads);
+    assert.equal(stored(walk, 'live').ready, ready);
+    assert.equal(stored(walk, 'live').sends, sends);
+    assert.deepEqual(plain(stored(walk, 'live').findings.map((finding) => finding.status)), ['Open']);
+    assert.deepEqual(tab.logs, []);
+    tab.frame.toTop.postMessage({ zetaScribe: 1, kind: 'sent', seq: last, ready: false, suggestion: false }, TOP_ORIGIN);
+    await pass(walk, 1000);
+    assert.equal(walk.site.scribeRequests().length > reads, true);
+    assert.equal(stored(walk, 'live').ready, ready);
+});
+
+test('F5. arms posted to the frame by a script in the top page change nothing and lock nothing out', async () => {
+    const { walk, tab } = await replied('2');
+    const ready = stored(walk, 'live').ready;
+    const real = armsTo(walk, tab).at(-1);
+    assert.equal(real.ready, ready);
+    const page = tab.iframe.contentWindow;
+    const mark = walk.posts.length;
+    page.postMessage({ zetaScribe: 1, kind: 'arm', seq: real.seq + 1, ready: '[Scribe] Forged without a token.', suggestion: null }, FRAME_ORIGIN);
+    page.postMessage(
+        { zetaScribe: 1, kind: 'arm', seq: real.seq + 2, token: 'a-wrong-token-of-length', ready: '[Scribe] Forged with a wrong token.', suggestion: 'A forged suggestion.' },
+        FRAME_ORIGIN,
+    );
+    page.postMessage(
+        { zetaScribe: 1, kind: 'arm', seq: Number.MAX_SAFE_INTEGER, token: 'another-wrong-token-0000', ready: '[Scribe] Forged at the highest seq.', suggestion: null },
+        FRAME_ORIGIN,
+    );
+    await pass(walk, 500);
+    assert.equal(walk.posts.slice(mark).filter((post) => post.fromLabel === tab.name && post.delivered).length, 3);
+    tab.panel.tab('Findings');
+    tab.panel.button(tab.panel.byId('scribe-offer-actions'), 'Suggest one').click();
+    await until(walk, 'step F5: an offer', () => tab.panel.text('scribe-offer-text') === RIDER, 5000);
+    tab.panel.button(tab.panel.byId('scribe-offer-actions'), 'Use').click();
+    await until(walk, 'step F5: a real arm with the suggestion', () => armsTo(walk, tab).at(-1).suggestion === RIDER, 5000);
+    assert.equal(armsTo(walk, tab).at(-1).seq < Number.MAX_SAFE_INTEGER, true);
+    const went = await send(walk, tab, 'I listen.');
+    assert.equal(went, `I listen.\n@: ${ready}\n@: ${RIDER}`);
+    assert.equal(went.includes('Forged'), false);
+    assert.equal(went.includes('forged'), false);
+    assert.equal(tab.frame.gm.every((call) => call === BRIDGE_READ), true);
+});
+
+/**
+ * @param {object} walk
+ * @param {WholeTab} tab
+ * @return {Promise<string>}
+ */
+async function moved(walk, tab) {
+    const old = stored(walk, 'live').ready;
+    walk.model.answers.Scene = () => OFFICE;
+    await arrive(walk, tab, 'I follow Mirelle inside.', [['Narrator', 'Mirelle leads Halvard into the ledger office.']]);
+    await until(
+        walk,
+        'step F9: the new reply to be checked',
+        () => stored(walk, 'live').seen?.id === walk.site.messages.at(-1).id && stored(walk, 'live').ready !== old,
+        TICK_MS * 2,
+    );
+    await quiet(walk, 'step F9: after the check');
+    return stored(walk, 'live').ready;
+}
+
+test('F9. a chat frame hidden while the reminder changes appends the present reminder, never the old one', async () => {
+    const { walk, tab } = await replied('2');
+    const old = stored(walk, 'live').ready;
+    tab.frameShown(false);
+    const present = await moved(walk, tab);
+    assert.equal(typeof present, 'string');
+    assert.equal(present.includes('"The ledger office"'), true, present);
+    assert.equal(present === old, false);
+    assert.equal(armsTo(walk, tab).at(-1).ready, present);
+    tab.frameShown(true);
+    const went = await send(walk, tab, 'I sit down.');
+    assert.equal(went, `I sit down.\n@: ${present}`);
+    assert.equal(went.includes(old), false);
+});
+
+test('F9. a reminder dropped while the chat frame is hidden is not appended when it is shown again', async () => {
+    const { walk, tab } = await replied('2');
+    tab.frameShown(false);
+    tab.panel.tab('Findings');
+    tab.panel.click('scribe-clear');
+    await pass(walk, 1000);
+    assert.equal(stored(walk, 'live').ready, null);
+    assert.equal(armsTo(walk, tab).at(-1).ready, null);
+    tab.frameShown(true);
+    const went = await send(walk, tab, 'I sit down.');
+    assert.equal(went, 'I sit down.');
+});
+
+test('F9. a send reported while the chat frame is hidden still clears the reminder', async () => {
+    const { walk, tab } = await replied('2');
+    const ready = stored(walk, 'live').ready;
+    tab.frameShown(false);
+    const went = await send(walk, tab, 'I nod.');
+    assert.equal(went, `I nod.\n@: ${ready}`);
+    assert.equal(stored(walk, 'live').ready, null);
+    assert.deepEqual(plain(stored(walk, 'live').findings.map((finding) => finding.status)), ['Reminded']);
+    tab.frameShown(true);
+    const next = await send(walk, tab, 'I wait.');
+    assert.equal(next, 'I wait.');
+});
+
+test("F10. leaving one chat for another: the second chat's messages never carry the first chat's reminder", async () => {
+    const walk = world();
+    walk.site.open(QUARRY, campaign(QUARRY_LENGTH));
+    walk.model.answers.Story = storyFrom(FACTS.map(([position, line]) => [position, line.replace(OLD_HAIR, NEW_HAIR)]));
+    const tab = install(walk, '/');
+    tab.ready();
+    await pass(walk, 1000);
+    tab.go(`/rooms/${QUARRY}`);
+    await tab.openPage();
+    await until(walk, 'step F10: the second chat to be pulled', () => tab.panel.headline() === 'No book for this chat yet: 61 messages.', 15000);
+    await saveKey(walk, tab);
+    await adopt(walk, tab, '3');
+    const quarryReady = stored(walk, 'live', QUARRY).ready;
+    assert.equal(typeof quarryReady, 'string');
+    await send(walk, tab, 'I look at the quarry wall.');
+    await send(walk, tab, 'I wait by the cart.');
+    await quiet(walk, 'step F10: the second chat at rest');
+    const before = plain(stored(walk, 'live', QUARRY));
+    assert.equal(before.ready, null);
+    assert.equal(before.sends, 1);
+    walk.model.answers.Story = storyFrom(FACTS);
+    tab.go(CHAT);
+    await tab.openPage();
+    await until(walk, 'step F10: the first chat to be pulled', () => tab.panel.headline() === 'No book for this chat yet: 91 messages.', TICK_MS * 2);
+    await adopt(walk, tab, '3');
+    const first = stored(walk, 'live').ready;
+    assert.equal(typeof first, 'string');
+    assert.equal(first.includes(OLD_HAIR), true, first);
+    const harbourArm = armsTo(walk, tab).at(-1);
+    assert.equal(harbourArm.ready, first);
+    const mark = walk.posts.length;
+    tab.go(`/rooms/${QUARRY}`);
+    await until(walk, 'step F10: the second chat to be open again', () => tab.panel.headline().startsWith('Up to date: 60 of'), TICK_MS * 2);
+    await quiet(walk, 'step F10: back in the second chat');
+    const reads = walk.site.scribeRequests().length;
+    const reported = walk.posts.length;
+    tab.frame.toTop.postMessage({ zetaScribe: 1, kind: 'sent', seq: harbourArm.seq, ready: true, suggestion: false }, TOP_ORIGIN);
+    await pass(walk, 2000);
+    const late = walk.posts.slice(reported).filter((post) => post.fromLabel === `${tab.name}/frame`);
+    assert.equal(late.length, 1);
+    assert.equal(late[0].delivered, true);
+    assert.equal(walk.site.scribeRequests().length > reads, true);
+    assert.deepEqual(tab.logs, []);
+    assert.deepEqual(tab.frame.logs, []);
+    const after = plain(stored(walk, 'live', QUARRY));
+    assert.equal(after.sends, before.sends);
+    assert.equal(after.ready, before.ready);
+    assert.equal(after.suggestion, before.suggestion);
+    assert.equal(stored(walk, 'live').ready, first);
+    const since = walk.posts
+        .slice(mark)
+        .filter((post) => post.toLabel === `${tab.name}/frame`)
+        .map((post) => JSON.parse(post.data));
+    assert.equal(since.length > 0, true);
+    assert.equal(since.every((arm) => arm.ready !== first), true);
+    const went = await send(walk, tab, 'I climb the quarry path.');
+    assert.equal(went.includes(first), false);
+    assert.equal(went.includes(OLD_HAIR), false);
+});
+
+test('F6. leaving the chat disarms the frame, and returning arms it again', async () => {
+    const { walk, tab } = await replied('2');
+    const ready = stored(walk, 'live').ready;
+    tab.go('/');
+    await pass(walk, 2000);
+    assert.equal(tab.panel.hosts(), 0);
+    const left = armsTo(walk, tab).at(-1);
+    assert.equal(left.ready, null);
+    assert.equal(left.suggestion, null);
+    const away = await send(walk, tab, 'I step outside.');
+    assert.equal(away, 'I step outside.');
+    tab.go(CHAT);
+    await until(walk, 'step F6: the frame to be armed again', () => armsTo(walk, tab).at(-1).ready === ready, TICK_MS * 2);
+    const back = await send(walk, tab, 'I come back in.');
+    assert.equal(back, `I come back in.\n@: ${ready}`);
+    assert.equal(stored(walk, 'live').ready, null);
+});
+
+test('F7. a second tab that only watches arms its frame with nothing', async () => {
+    const { walk, tab } = await replied('2');
+    const ready = stored(walk, 'live').ready;
+    const second = await secondTab(walk);
+    await pass(walk, 2000);
+    const arms = armsTo(walk, second);
+    assert.equal(arms.length >= 1, true);
+    assert.equal(arms.every((arm) => arm.ready === null && arm.suggestion === null), true);
+    const went = await send(walk, second, 'I watch quietly.');
+    assert.equal(went, 'I watch quietly.');
+    await pass(walk, 1000);
+    assert.equal(stored(walk, 'live').ready, ready);
+    assert.equal(armsTo(walk, tab).at(-1).ready, ready);
+});
+
+test('F8. the old layout, the chat box in the top document, still works', async () => {
+    const { walk, tab } = await replied('2', { layout: 'top' });
+    assert.equal(tab.frame, null);
+    assert.equal(tab.iframe, null);
+    assert.equal(walk.posts.length, 0);
+    const ready = stored(walk, 'live').ready;
+    const posts = posted(walk);
+    const went = await send(walk, tab, 'I nod.');
+    assert.equal(went, `I nod.\n@: ${ready}`);
+    const sent = walk.site.requests.filter((request) => request.method === 'POST').slice(posts);
+    assert.equal(sent.length, 1);
+    assert.equal(sent[0].origin, TOP_ORIGIN);
+    assert.equal(stored(walk, 'live').ready, null);
+    assert.deepEqual(plain(stored(walk, 'live').findings.map((finding) => finding.status)), ['Reminded']);
 });

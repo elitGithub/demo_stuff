@@ -23,8 +23,6 @@ const ScribeLive = Object.freeze({
         NoCount: 0,
         Last: -1,
         Nothing: '',
-        Newline: '\n',
-        NarratorLead: '@: ',
         StoppedPhase: 'Stopped',
         DoneStop: 'Done',
         ObjectType: 'object',
@@ -51,16 +49,8 @@ const ScribeLive = Object.freeze({
         }),
         NothingAppended: Object.freeze({
             ready: null,
-            led: Object.freeze([]),
             suggestion: null,
         }),
-
-        /**
-         * @return {RegExp}
-         */
-        get Blank() {
-            return /^[\p{Z}\p{Cc}\p{Cf}]*$/u;
-        },
     }),
 
     /**
@@ -1002,45 +992,70 @@ const ScribeLive = Object.freeze({
     outgoing(live, text) {
         const settings = ScribeLive.Settings;
         live.appended = settings.NothingAppended;
-        if (!ScribeLive.active(live) || settings.Blank.test(text)) {
-            return text;
+        ScribeLive.active(live);
+        const offer = ScribeLive.lines(live);
+        const made = ScribeSender.compose(text, offer, settings.MessageBytes);
+        live.appended = Object.freeze({
+            ready: made.ready ? offer.ready : null,
+            suggestion: made.suggestion ? offer.suggestion : null,
+        });
+        return made.text;
+    },
+
+    /**
+     * @param {object} live
+     * @return {Readonly<{ ready: string|null, suggestion: string|null }>}
+     */
+    lines(live) {
+        const nothing = ScribeLive.Settings.NothingAppended;
+        if (live.closed || !live.loaded || live.watching) {
+            return nothing;
         }
         const view = live.keeper.view();
-        if (view.trusted !== true) {
-            return text;
-        }
         const record = live.record;
-        const chosen = {
+        const renewed = record.edition !== null && view.edition > record.edition;
+        if (!view.reader || view.trusted !== true || renewed) {
+            return nothing;
+        }
+        return Object.freeze({
             ready: ScribeLive.fresh(live, view) ? record.ready : null,
             suggestion: record.suggestion,
-        };
-        /**
-         * @return {string}
-         */
-        const whole = () => {
-            let joined = text;
-            for (const line of [chosen.ready, chosen.suggestion]) {
-                if (line !== null) {
-                    joined += settings.Newline + settings.NarratorLead + line;
+        });
+    },
+
+    /**
+     * @param {object} live
+     * @param {{ ready: string|null, suggestion: string|null }} lines
+     * @return {void}
+     */
+    went(live, lines) {
+        const settings = ScribeLive.Settings;
+        if (!ScribeLive.active(live)) {
+            return;
+        }
+        const record = live.record;
+        const state = live.keeper.view().state;
+        if (lines.ready !== null && record.ready === lines.ready) {
+            const led = record.led;
+            record.ready = null;
+            record.led = [];
+            record.basis = null;
+            for (const finding of record.findings) {
+                const reminded =
+                    finding.kind === ScribePedant.Kind.Contradiction &&
+                    finding.status === ScribeLive.Status.Open &&
+                    led.includes(finding.fact) &&
+                    !ScribePedant.spent(state, finding);
+                if (reminded) {
+                    finding.status = ScribeLive.Status.Reminded;
                 }
             }
-            return joined;
-        };
-        while (ScribeText.bytes(whole()) > settings.MessageBytes) {
-            if (chosen.ready !== null) {
-                chosen.ready = null;
-            } else if (chosen.suggestion !== null) {
-                chosen.suggestion = null;
-            } else {
-                break;
-            }
         }
-        live.appended = Object.freeze({
-            ready: chosen.ready,
-            led: chosen.ready === null ? settings.NothingAppended.led : Object.freeze([...record.led]),
-            suggestion: chosen.suggestion,
-        });
-        return whole();
+        if (record.suggestion === lines.suggestion) {
+            record.suggestion = null;
+        }
+        record.sends = lines.ready === null ? record.sends + settings.OneSend : settings.NoSends;
+        ScribeLive.changed(live);
     },
 
     /**
@@ -1048,34 +1063,9 @@ const ScribeLive = Object.freeze({
      * @return {void}
      */
     sent(live) {
-        const settings = ScribeLive.Settings;
-        if (!ScribeLive.active(live)) {
-            return;
-        }
         const went = live.appended;
-        live.appended = settings.NothingAppended;
-        const record = live.record;
-        const state = live.keeper.view().state;
-        if (record.ready === went.ready) {
-            record.ready = null;
-            record.led = [];
-            record.basis = null;
-        }
-        if (record.suggestion === went.suggestion) {
-            record.suggestion = null;
-        }
-        for (const finding of record.findings) {
-            const reminded =
-                finding.kind === ScribePedant.Kind.Contradiction &&
-                finding.status === ScribeLive.Status.Open &&
-                went.led.includes(finding.fact) &&
-                !ScribePedant.spent(state, finding);
-            if (reminded) {
-                finding.status = ScribeLive.Status.Reminded;
-            }
-        }
-        record.sends = went.ready === null ? record.sends + settings.OneSend : settings.NoSends;
-        ScribeLive.changed(live);
+        live.appended = ScribeLive.Settings.NothingAppended;
+        ScribeLive.went(live, went);
     },
 
     /**
@@ -1547,6 +1537,19 @@ const ScribeLive = Object.freeze({
              */
             sent: () => {
                 ScribeLive.sent(live);
+            },
+
+            /**
+             * @return {Readonly<{ ready: string|null, suggestion: string|null }>}
+             */
+            lines: () => ScribeLive.lines(live),
+
+            /**
+             * @param {{ ready: string|null, suggestion: string|null }} lines
+             * @return {void}
+             */
+            went: (lines) => {
+                ScribeLive.went(live, lines);
             },
 
             /**

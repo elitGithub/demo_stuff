@@ -13,9 +13,11 @@ import FakeTextInput from './support/FakeTextInput.mjs';
  * @return {object}
  */
 function load() {
-    const context = vm.createContext({});
-    const url = new URL('../scribe/page/ScribeSender.js', import.meta.url);
-    vm.runInContext(readFileSync(url, 'utf8'), context, { filename: url.pathname });
+    const context = vm.createContext({ TextEncoder });
+    for (const path of ['../scribe/core/ScribeText.js', '../scribe/page/ScribeSender.js']) {
+        const url = new URL(path, import.meta.url);
+        vm.runInContext(readFileSync(url, 'utf8'), context, { filename: url.pathname });
+    }
     return vm.runInContext('ScribeSender', context);
 }
 
@@ -41,7 +43,7 @@ function makePage(options = {}) {
     const document = new FakeSendDocument(window);
     const panel = document.add(new FakeNode('div', { id: 'scribe-panel' }));
     const box = document.add(new FakeTextArea({ name: 'message', tracker: options.tracker }));
-    const button = document.add(new FakeNode('button', { type: 'button', bottom: 860 }));
+    const button = document.add(new FakeNode('button', { type: 'button', bottom: 860, label: 'Send' }));
     const icon = button.append(new FakeNode('svg'));
     const page = {
         window,
@@ -272,24 +274,6 @@ test('the value is set the way the page notices', () => {
     assert.equal(bare.state, expected);
     bare.window.advance(25);
     assert.deepEqual(bare.sentTexts, [expected]);
-
-    const window = new FakeSendWindow();
-    const document = new FakeSendDocument(window);
-    const field = document.add(new FakeTextInput({}));
-    let typed = 'Hello';
-    const inputs = [];
-    field.addEventListener('input', (event) => {
-        inputs.push(event.data);
-        typed = field.value;
-    });
-    ScribeSender.attach({ document, window, ignore: null, outgoing: appendLine, sent: () => {} });
-    document.focus(field);
-    Object.getOwnPropertyDescriptor(FakeTextInput.prototype, 'value').set.call(field, 'Hello');
-    field.forget();
-    window.dispatch(field, 'keydown', ENTER);
-    assert.deepEqual(field.trail, ['tracker:Hello', `native:${expected}`, 'event:input:true:insertText', 'event:change:true:']);
-    assert.deepEqual(inputs, [expected]);
-    assert.equal(typed, expected);
 });
 
 test('shift-enter and composition do nothing', () => {
@@ -327,17 +311,39 @@ test('shift-enter and composition do nothing', () => {
     assert.equal(page.box.value, '   \n ');
 });
 
-test('the send button is recognised as the old script recognises it', () => {
+test('only send is send', () => {
     const page = makePage();
     const { calls } = wire(page, appendLine);
+    const others = ['Suggested replies', 'Insert asterisk'].map((label) => {
+        const button = page.document.add(new FakeNode('button', { type: 'button', bottom: 870, label }));
+        const icon = button.append(new FakeNode('svg'));
+        return { button, icon };
+    });
     const submit = page.document.add(new FakeNode('button', { type: 'submit', bottom: 870 }));
-    submit.addEventListener('pointerdown', page.send);
-    type(page, 'By the submit button');
-    const pressed = page.window.dispatch(submit, 'pointerdown');
+    submit.append(new FakeNode('svg'));
+    const lowerCase = page.document.add(new FakeNode('button', { type: 'submit', bottom: 870, label: 'send' }));
+    const labelledDiv = page.document.add(new FakeNode('div', { bottom: 870, label: 'Send' }));
+    type(page, 'Not a send');
+    for (const other of others) {
+        page.window.dispatch(other.button, 'pointerdown');
+        page.window.dispatch(other.icon, 'pointerdown');
+    }
+    for (const node of [submit, lowerCase, labelledDiv, page.box]) {
+        page.window.dispatch(node, 'pointerdown');
+    }
+    page.window.advance(5000);
+    assert.deepEqual(calls.outgoing, []);
+    assert.equal(calls.sent, 0);
+    assert.equal(page.box.value, 'Not a send');
+    assert.deepEqual(page.box.trail, []);
+    assert.equal(page.window.timerCount, 0);
+
+    type(page, 'By the send button');
+    const pressed = page.window.dispatch(page.button, 'pointerdown');
     assert.equal(pressed.defaultPrevented, false);
     assert.equal(pressed.immediateStopped, false);
-    assert.deepEqual(calls.outgoing, ['By the submit button']);
-    assert.deepEqual(page.sentTexts, [appendLine('By the submit button')]);
+    assert.deepEqual(calls.outgoing, ['By the send button']);
+    assert.deepEqual(page.sentTexts, [appendLine('By the send button')]);
     assert.deepEqual(page.prevented, [false]);
     page.window.advance(100);
     assert.equal(calls.sent, 1);
@@ -346,34 +352,25 @@ test('the send button is recognised as the old script recognises it', () => {
     type(page, 'By the icon');
     const iconPress = page.window.dispatch(page.icon, 'pointerdown');
     assert.equal(iconPress.defaultPrevented || iconPress.immediateStopped, false);
-    assert.deepEqual(page.sentTexts, [appendLine('By the submit button'), appendLine('By the icon')]);
+    assert.deepEqual(page.sentTexts, [appendLine('By the send button'), appendLine('By the icon')]);
     page.window.advance(100);
     assert.equal(calls.sent, 2);
 
-    const high = page.document.add(new FakeNode('button', { type: 'submit', bottom: 720 }));
-    const plainButton = page.document.add(new FakeNode('button', { type: 'button', bottom: 870 }));
-    const outside = page.document.add(new FakeNode('div', { bottom: 870 }));
-    const inside = page.panel.append(new FakeNode('button', { type: 'submit', bottom: 870 }));
+    const inside = page.panel.append(new FakeNode('button', { type: 'button', bottom: 870, label: 'Send' }));
     inside.append(new FakeNode('svg'));
-    const ghost = page.document.add(new FakeNode('button', { type: 'submit', bottom: 870 }));
-    type(page, 'Not a send');
-    page.window.dispatch(high, 'pointerdown');
-    page.window.dispatch(plainButton, 'pointerdown');
-    page.window.dispatch(outside, 'pointerdown');
-    page.window.dispatch(page.box, 'pointerdown');
+    const ghost = page.document.add(new FakeNode('button', { type: 'button', bottom: 870, label: 'Send' }));
+    type(page, 'Not a send either');
     page.window.dispatch(inside, 'pointerdown');
     page.window.dispatch(inside, 'pointerdown', { path: [] });
     page.window.dispatch(ghost, 'pointerdown', { path: [ghost, page.panel, page.window] });
     page.window.advance(5000);
     assert.equal(calls.outgoing.length, 2);
-    assert.equal(calls.sent, 2);
-    assert.equal(page.box.value, 'Not a send');
-    assert.deepEqual(page.box.trail, []);
+    assert.equal(page.box.value, 'Not a send either');
 
-    const edge = page.document.add(new FakeNode('button', { type: 'submit', bottom: 721 }));
-    page.window.dispatch(edge, 'pointerdown');
-    assert.deepEqual(calls.outgoing.at(-1), 'Not a send');
-    assert.equal(page.box.value, appendLine('Not a send'));
+    const high = page.document.add(new FakeNode('button', { type: 'button', bottom: 10, label: 'Send' }));
+    page.window.dispatch(high, 'pointerdown');
+    assert.deepEqual(calls.outgoing.at(-1), 'Not a send either');
+    assert.equal(page.box.value, appendLine('Not a send either'));
 });
 
 test("the message box is the page's, never the panel's", () => {
@@ -405,54 +402,31 @@ test("the message box is the page's, never the panel's", () => {
         document.focus(field);
         return window.dispatch(field, 'keydown', ENTER);
     };
-    enter(plain, 'Hello');
-    assert.deepEqual(asked, ['Hello']);
-    assert.equal(plain.value, appendLine('Hello'));
-    for (const field of [panelBox, panelNotes]) {
+    for (const field of [plain, panelBox, panelNotes]) {
         const event = enter(field, 'Panel words');
         assert.equal(event.defaultPrevented || event.immediateStopped, false);
         assert.equal(field.value, 'Panel words');
         assert.deepEqual(field.trail, []);
     }
-    assert.deepEqual(asked, ['Hello']);
+    assert.deepEqual(asked, []);
 
     window.advance(5000);
     const named = document.add(new FakeTextArea({ name: 'message' }));
     enter(plain, 'Second');
     assert.equal(plain.value, 'Second');
-    assert.deepEqual(asked, ['Hello']);
+    enter(panelBox, 'Panel again');
+    assert.equal(panelBox.value, 'Panel again');
+    assert.deepEqual(asked, []);
     enter(named, 'Third');
-    assert.deepEqual(asked, ['Hello', 'Third']);
+    assert.deepEqual(asked, ['Third']);
     assert.equal(named.value, appendLine('Third'));
     window.advance(5000);
     NATIVE.set.call(named, 'Fourth');
     document.focus(panelBox);
     const elsewhere = window.dispatch(named, 'keydown', ENTER);
     assert.equal(elsewhere.defaultPrevented, false);
-    assert.deepEqual(asked, ['Hello', 'Third']);
+    assert.deepEqual(asked, ['Third']);
     assert.equal(named.value, 'Fourth');
-
-    const lone = new FakeSendWindow();
-    const loneDocument = new FakeSendDocument(lone);
-    const lonePanel = loneDocument.add(new FakeNode('div', { id: 'scribe-panel' }));
-    lonePanel.append(new FakeTextArea({}));
-    const field = loneDocument.add(new FakeTextInput({}));
-    const loneAsked = [];
-    ScribeSender.attach({
-        document: loneDocument,
-        window: lone,
-        ignore: lonePanel,
-        outgoing: (text) => {
-            loneAsked.push(text);
-            return appendLine(text);
-        },
-        sent: () => {},
-    });
-    Object.getOwnPropertyDescriptor(FakeTextInput.prototype, 'value').set.call(field, 'Hello');
-    loneDocument.focus(field);
-    lone.dispatch(field, 'keydown', ENTER);
-    assert.deepEqual(loneAsked, ['Hello']);
-    assert.equal(field.value, appendLine('Hello'));
 });
 
 test('a send that did not happen is undone', () => {
@@ -637,11 +611,11 @@ test('detach gives the box back', () => {
 
 test('typing is not sending', () => {
     const page = makePage();
-    const emoji = page.document.add(new FakeNode('button', { type: 'button', bottom: 870 }));
-    emoji.append(new FakeNode('svg'));
     const { calls } = wire(page, appendLine);
     type(page, 'Hello');
-    page.window.dispatch(emoji, 'pointerdown');
+    page.refusing = true;
+    page.window.dispatch(page.icon, 'pointerdown');
+    page.refusing = false;
     assert.equal(page.box.value, appendLine('Hello'));
     assert.deepEqual(page.sentTexts, []);
     page.window.advance(400);
@@ -947,11 +921,11 @@ test('typing on, then enter, sends the player\'s words first', () => {
     assert.equal(calls.sent, 1);
 
     const pressed = makePage();
-    const emoji = pressed.document.add(new FakeNode('button', { type: 'button', bottom: 870 }));
-    emoji.append(new FakeNode('svg'));
     const smiling = liveOf(pressed);
     type(pressed, 'Hello');
-    pressed.window.dispatch(emoji, 'pointerdown');
+    pressed.refusing = true;
+    pressed.window.dispatch(pressed.icon, 'pointerdown');
+    pressed.refusing = false;
     assert.equal(pressed.box.value, appendLine('Hello'));
     pressed.window.advance(700);
     keyOn(pressed, ':');
@@ -1135,11 +1109,11 @@ test('a late sign is still a sign', () => {
     assert.equal(slowly.calls.sent, 1);
 
     const pressed = makePage();
-    const emoji = pressed.document.add(new FakeNode('button', { type: 'button', bottom: 870 }));
-    emoji.append(new FakeNode('svg'));
     const smiling = liveOf(pressed);
     type(pressed, 'Hello');
-    pressed.window.dispatch(emoji, 'pointerdown');
+    pressed.refusing = true;
+    pressed.window.dispatch(pressed.icon, 'pointerdown');
+    pressed.refusing = false;
     pressed.window.advance(700);
     edit(pressed, `${pressed.box.value} :)`);
     assert.equal(pressed.box.value, 'Hello :)');
@@ -1245,4 +1219,100 @@ test("the page's own change is still a send", () => {
     other.window.advance(100);
     assert.equal(swapped.calls.sent, 1);
     assert.equal(swapped.part.ready, null);
+});
+
+test('only the chat box is the chat box', () => {
+    const window = new FakeSendWindow();
+    const document = new FakeSendDocument(window);
+    const notes = document.add(new FakeTextArea({ name: 'notes' }));
+    const field = document.add(new FakeTextInput({ name: 'message' }));
+    const buttons = ['Send', 'Suggested replies', 'Insert asterisk'].map((label) => {
+        const button = document.add(new FakeNode('button', { type: 'submit', bottom: 870, label }));
+        const icon = button.append(new FakeNode('svg'));
+        return { button, icon };
+    });
+    const calls = { outgoing: 0, sent: 0 };
+    ScribeSender.attach({
+        document,
+        window,
+        ignore: null,
+        outgoing: (text) => {
+            calls.outgoing++;
+            return appendLine(text);
+        },
+        sent: () => {
+            calls.sent++;
+        },
+    });
+    for (const box of [notes, field]) {
+        Object.getOwnPropertyDescriptor(Object.getPrototypeOf(box), 'value').set.call(box, 'My own words');
+        box.forget();
+        document.focus(box);
+        const event = window.dispatch(box, 'keydown', ENTER);
+        assert.equal(event.defaultPrevented || event.immediateStopped, false);
+        for (const pressed of buttons) {
+            window.dispatch(pressed.button, 'pointerdown');
+            window.dispatch(pressed.icon, 'pointerdown');
+        }
+    }
+    window.advance(5000);
+    assert.deepEqual(calls, { outgoing: 0, sent: 0 });
+    for (const box of [notes, field]) {
+        assert.equal(box.value, 'My own words');
+        assert.deepEqual(box.trail, []);
+    }
+    assert.equal(window.timerCount, 0);
+});
+
+test('compose adds, drops and reports', () => {
+    const lines = Object.freeze({ ready: '[Scribe] Day 1, the mill.', suggestion: 'Ask the miller.' });
+    const blanks = ['', '   ', String.fromCodePoint(0xa0, 0x200b), String.fromCodePoint(0x200b), ' \n\t'];
+    for (const blank of blanks) {
+        const made = ScribeSender.compose(blank, lines, 4500);
+        assert.equal(Object.isFrozen(made), true);
+        assert.deepEqual({ ...made }, { text: blank, ready: false, suggestion: false });
+    }
+    const both = ScribeSender.compose('Hello', lines, 4500);
+    const whole = 'Hello\n@: [Scribe] Day 1, the mill.\n@: Ask the miller.';
+    assert.equal(Object.isFrozen(both), true);
+    assert.deepEqual({ ...both }, { text: whole, ready: true, suggestion: true });
+    assert.deepEqual({ ...ScribeSender.compose('Hello', lines, Buffer.byteLength(whole)) }, { ...both });
+
+    const suggested = 'Hello\n@: Ask the miller.';
+    assert.deepEqual(
+        { ...ScribeSender.compose('Hello', lines, Buffer.byteLength(whole) - 1) },
+        { text: suggested, ready: false, suggestion: true },
+    );
+    assert.deepEqual(
+        { ...ScribeSender.compose('Hello', lines, Buffer.byteLength(suggested)) },
+        { text: suggested, ready: false, suggestion: true },
+    );
+    assert.deepEqual(
+        { ...ScribeSender.compose('Hello', lines, Buffer.byteLength(suggested) - 1) },
+        { text: 'Hello', ready: false, suggestion: false },
+    );
+    assert.deepEqual({ ...ScribeSender.compose('Hello', lines, 2) }, { text: 'Hello', ready: false, suggestion: false });
+
+    assert.deepEqual(
+        { ...ScribeSender.compose('Hello', { ready: lines.ready, suggestion: null }, 4500) },
+        { text: 'Hello\n@: [Scribe] Day 1, the mill.', ready: true, suggestion: false },
+    );
+    assert.deepEqual(
+        { ...ScribeSender.compose('Hello', { ready: null, suggestion: lines.suggestion }, 4500) },
+        { text: suggested, ready: false, suggestion: true },
+    );
+    assert.deepEqual(
+        { ...ScribeSender.compose('Hello', { ready: null, suggestion: null }, 4500) },
+        { text: 'Hello', ready: false, suggestion: false },
+    );
+
+    const spaced = `${String.fromCodePoint(0xa0)}Hello`;
+    assert.equal(ScribeSender.compose(spaced, lines, 4500).text, `${spaced}\n@: [Scribe] Day 1, the mill.\n@: Ask the miller.`);
+    const wide = Object.freeze({ ready: 'Ü'.repeat(10), suggestion: 'ß' });
+    const wideWhole = 'Hello\n@: ' + 'Ü'.repeat(10) + '\n@: ß';
+    assert.equal(Buffer.byteLength(wideWhole) > wideWhole.length, true);
+    assert.deepEqual(
+        { ...ScribeSender.compose('Hello', wide, wideWhole.length) },
+        { text: 'Hello\n@: ß', ready: false, suggestion: true },
+    );
 });

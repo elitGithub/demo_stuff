@@ -3,7 +3,7 @@ export default class FakeNode {
 
     /**
      * @param {string} tag
-     * @param {{ id?: string, type?: string, name?: string, bottom?: number }} attributes
+     * @param {{ id?: string, type?: string, name?: string, bottom?: number, label?: string }} attributes
      */
     constructor(tag, attributes = {}) {
         for (const [name, value] of [
@@ -20,6 +20,7 @@ export default class FakeNode {
         this.type = attributes.type ?? '';
         this.name = attributes.name ?? '';
         this.bottom = attributes.bottom ?? 0;
+        this.label = attributes.label ?? null;
     }
 
     /**
@@ -78,6 +79,10 @@ export default class FakeNode {
         }
         if (/^[a-z]+$/.test(selector)) {
             return this.tagName === selector.toUpperCase();
+        }
+        const labelled = /^([a-z]+)\[aria-label="([^"]*)"\]$/.exec(selector);
+        if (labelled !== null) {
+            return this.tagName === labelled[1].toUpperCase() && this.label === labelled[2];
         }
         throw new Error(`The fake node cannot match ${selector}`);
     }

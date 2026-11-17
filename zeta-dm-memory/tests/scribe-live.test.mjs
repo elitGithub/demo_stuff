@@ -34,6 +34,7 @@ const {
     ScribePedant,
     ScribeReminder,
     ScribeMuse,
+    ScribeSender,
     ScribeLive,
 } = load(
     [
@@ -46,7 +47,7 @@ const {
         'ScribeKnowledge',
         'ScribeAnalyzer',
     ],
-    ['ScribeStore', 'ScribeScene', 'ScribeReminder', 'ScribePedant', 'ScribeMuse', 'ScribeLive'],
+    ['ScribeStore', 'ScribeScene', 'ScribeReminder', 'ScribePedant', 'ScribeMuse', 'ScribeSender', 'ScribeLive'],
 );
 
 const ROOM = 'harbour';
@@ -2961,4 +2962,185 @@ test("a failed call's answer is not remembered", async () => {
     assert.equal(chooses(model), 2);
     await live.reply(at(41));
     assert.equal(chooses(model), 3);
+});
+
+/**
+ * @param {object} lines
+ * @return {{ ready: string|null, suggestion: string|null }}
+ */
+function linesOf(lines) {
+    assert.equal(Object.isFrozen(lines), true);
+    return { ready: lines.ready, suggestion: lines.suggestion };
+}
+
+const NO_LINES = Object.freeze({ ready: null, suggestion: null });
+
+test('lines offers what may go', async () => {
+    const { storage, keeper, notices, live } = rig();
+    await live.reply(at(41));
+    const ready = live.view().ready;
+    assert.ok(reminds(ready, 'The mill'));
+    assert.deepEqual(linesOf(live.lines()), { ready, suggestion: null });
+    live.use(GULL);
+    live.view();
+    const saves = storage.count('set');
+    const told = notices.count;
+    assert.deepEqual(linesOf(live.lines()), { ready, suggestion: GULL });
+
+    for (const fields of [{ trusted: false }, { trusted: false, mismatch: true }, { trusted: false, reader: false }, { reader: false }]) {
+        keeper.change(fields);
+        assert.deepEqual(linesOf(live.lines()), NO_LINES, JSON.stringify(fields));
+        keeper.change(READING);
+        assert.deepEqual(linesOf(live.lines()), { ready, suggestion: GULL }, JSON.stringify(fields));
+    }
+    for (const stopped of [PAUSED, BUDGET]) {
+        keeper.change(stopped);
+        assert.deepEqual(linesOf(live.lines()), { ready, suggestion: GULL });
+        keeper.change(READING);
+    }
+    keeper.change({ state: revised(state) });
+    assert.deepEqual(linesOf(live.lines()), { ready: null, suggestion: GULL });
+    keeper.change({ state });
+    assert.deepEqual(linesOf(live.lines()), { ready, suggestion: GULL });
+    keeper.change({ edition: 2 });
+    assert.deepEqual(linesOf(live.lines()), NO_LINES);
+    keeper.change({ edition: 1 });
+    assert.equal(storage.count('set'), saves);
+    assert.equal(notices.count, told);
+    assert.equal(live.view().ready, ready);
+    assert.equal(live.view().suggestion, GULL);
+    assert.equal(live.view().sends, 0);
+
+    live.close();
+    assert.deepEqual(linesOf(live.lines()), NO_LINES);
+
+    const away = rig({ reader: false });
+    const reads = away.storage.calls.length;
+    assert.deepEqual(linesOf(away.live.lines()), NO_LINES);
+    assert.equal(away.storage.calls.length, reads);
+    const unread = rig();
+    await unread.live.reply(at(41));
+    unread.keeper.change({ reader: false });
+    unread.live.view();
+    unread.keeper.change(READING);
+    assert.deepEqual(linesOf(unread.live.lines()), NO_LINES);
+    unread.live.view();
+    assert.deepEqual(linesOf(unread.live.lines()), { ready: unread.live.view().ready, suggestion: null });
+});
+
+test('went marks only what went', async () => {
+    const { storage, notices, live } = rig();
+    await live.reply(at(41));
+    const age = keyOf(live, 'Contradiction', 'MESSAGE-41');
+    const ready = live.view().ready;
+    assert.deepEqual(ledOf(storage), [AGE]);
+    live.use(GULL);
+    const told = notices.count;
+
+    live.went(NO_LINES);
+    live.went({ ready: null, suggestion: null });
+    assert.equal(live.view().sends, 2);
+    assert.equal(live.view().ready, ready);
+    assert.equal(live.view().suggestion, GULL);
+    assert.equal(statusOf(live, age), 'Open');
+    assert.deepEqual(ledOf(storage), [AGE]);
+    assert.equal(notices.count, told + 2);
+
+    live.went({ ready: `${ready} `, suggestion: 'A gull cries over the mill' });
+    assert.equal(live.view().ready, ready);
+    assert.equal(live.view().suggestion, GULL);
+    assert.equal(statusOf(live, age), 'Open');
+    assert.deepEqual(ledOf(storage), [AGE]);
+    assert.equal(live.view().sends, 0);
+
+    live.went({ ready: null, suggestion: GULL });
+    assert.equal(live.view().suggestion, null);
+    assert.equal(live.view().ready, ready);
+    assert.equal(statusOf(live, age), 'Open');
+    assert.equal(live.view().sends, 1);
+
+    live.went({ ready, suggestion: null });
+    assert.equal(live.view().ready, null);
+    assert.deepEqual(ledOf(storage), []);
+    assert.equal(statusOf(live, age), 'Reminded');
+    assert.equal(live.view().sends, 0);
+    assert.equal(notices.count, told + 5);
+
+    const away = rig();
+    await away.live.reply(at(41));
+    const awayReady = away.live.view().ready;
+    away.live.use(GULL);
+    away.keeper.change({ reader: false });
+    const awayTold = away.notices.count;
+    away.live.went({ ready: awayReady, suggestion: GULL });
+    away.keeper.change(READING);
+    assert.equal(away.live.view().ready, awayReady);
+    assert.equal(away.live.view().suggestion, GULL);
+    assert.equal(away.live.view().sends, 0);
+    assert.equal(away.notices.count, awayTold);
+    away.live.close();
+    away.live.went({ ready: awayReady, suggestion: GULL });
+    assert.equal(away.notices.count, awayTold);
+
+    const kept = new FakeStorage();
+    const basis = { revision: state.revision, first: [AGE] };
+    ScribeStore.write(kept, ROOM, ScribeStore.Kind.Live, {
+        now: null,
+        ready: null,
+        led: [],
+        basis,
+        sends: 0,
+        findings: [],
+        suggestion: null,
+        seen: null,
+        reminded: null,
+        edition: 1,
+    });
+    const odd = rig({}, kept);
+    odd.live.view();
+    odd.live.went(NO_LINES);
+    const stored = ScribeStore.read(kept, ROOM, ScribeStore.Kind.Live);
+    assert.equal(stored.sends, 1);
+    assert.deepEqual(plain(stored.basis), basis);
+});
+
+test('outgoing and sent are the same pieces', async () => {
+    const one = rig();
+    const two = rig();
+    for (const side of [one, two]) {
+        await side.live.reply(at(41));
+        side.live.use(GULL);
+    }
+    const age = [one, two].map((side) => keyOf(side.live, 'Contradiction', 'MESSAGE-41'));
+    const full = 'x'.repeat(LIMIT - bytes(lineOf(GULL)));
+    for (const text of [full, 'Onward.', 'Quiet.', '', '  ']) {
+        const offered = two.live.lines();
+        const made = ScribeSender.compose(text, offered, 4500);
+        assert.ok(one.live.outgoing(text) === made.text, `text of ${text.length}`);
+        one.live.sent();
+        two.live.went({
+            ready: made.ready ? offered.ready : null,
+            suggestion: made.suggestion ? offered.suggestion : null,
+        });
+        for (const field of ['ready', 'suggestion', 'sends']) {
+            assert.equal(one.live.view()[field], two.live.view()[field], `${field} after ${text.length}`);
+        }
+        assert.deepEqual(statuses(one.live), statuses(two.live));
+        assert.deepEqual(ledOf(one.storage), ledOf(two.storage));
+        assert.equal(statusOf(one.live, age[0]), statusOf(two.live, age[1]));
+    }
+    assert.equal(one.live.view().ready, null);
+    assert.equal(one.live.view().suggestion, null);
+    assert.equal(statusOf(one.live, age[0]), 'Reminded');
+    assert.equal(one.live.view().sends, 3);
+    one.live.sent();
+    assert.equal(one.live.view().sends, 4);
+
+    const twice = rig();
+    await twice.live.reply(at(41));
+    assert.notEqual(twice.live.outgoing('Onward.'), 'Onward.');
+    twice.live.sent();
+    assert.equal(twice.live.view().sends, 0);
+    twice.live.sent();
+    assert.equal(twice.live.view().sends, 1);
 });

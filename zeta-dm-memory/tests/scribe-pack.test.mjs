@@ -9,6 +9,7 @@ const ROOT = fileURLToPath(new URL('../', import.meta.url));
 const HEADER = '// ==UserScript==\n// @name         Invented\n// ==/UserScript==\n';
 const OPENING = '(() => {';
 const CLOSING = '})();';
+const BRIDGE_TOKEN = 'stored-bridge-token-of-length';
 const COMPILE_PREFIX = 'The packed script does not compile: ';
 const BAD_HEADER = 'The header is not a userscript header';
 const FIRST = ScribePack.Files[0];
@@ -213,39 +214,60 @@ function realRead(relativePath) {
 
 /**
  * @param {string} output
- * @param {{ path?: string, body?: object|null, navigator?: object, uuids?: string[], date?: Function, extras?: object, observe?: boolean }} choices
- * @return {{ page: object, original: Function, requests: object[], timers: Array<[string, number]>, logs: string[], added: string[], seen: object[], context: object, run: () => void }}
+ * @param {{ path?: string, origin?: string, framed?: boolean, ancestors?: string[], body?: object|null, navigator?: object, uuids?: string[], date?: Function, extras?: object }} choices
+ * @return {{ page: object, original: Function, requests: object[], timers: Array<[string, number]>, logs: string[], added: string[], seen: object[], calls: string[], posted: Array<[string, string]>, queries: string[], context: object, run: () => void }}
  */
 function stage(output, choices = {}) {
-    const store = new Map();
+    const store = new Map(Object.entries(choices.stored ?? {}));
     const seen = [];
+    const calls = [];
+    const reads = [];
+    const writes = [];
+    const listeners = [];
+    const posted = [];
+    const queries = [];
+    const outer = {
+        postMessage: (message, origin) => {
+            posted.push([JSON.stringify(message), origin]);
+        },
+    };
+    const box = { kind: 'chat box' };
     const marks = new Map();
     const documentAdded = [];
     const documentRemoved = [];
-    const uuids = [...(choices.uuids ?? ['tab-invented'])];
+    const uuids = [...(choices.uuids ?? ['tab-invented', 'bridge-token-of-adequate-length'])];
     const requests = [];
     const timers = [];
     const logs = [];
     const original = () => 'the page fetch';
     const added = [];
     const removed = [];
-    const page = {
-        location: { pathname: choices.path ?? '/' },
-        fetch: original,
-        AbortController,
-        addEventListener: (type) => {
-            added.push(type);
-        },
-        removeEventListener: (type) => {
-            removed.push(type);
-        },
-    };
     let next = 0;
     const record = (name) => (...values) => {
         timers.push([name, values.length]);
         next += 1;
         return next;
     };
+    const page = {
+        location: { pathname: choices.path ?? '/', origin: choices.origin ?? 'https://zeta-ai.io', ancestorOrigins: choices.ancestors },
+        fetch: original,
+        AbortController,
+        top: null,
+        parent: null,
+        setTimeout: record('setTimeout'),
+        clearTimeout: record('clearTimeout'),
+        setInterval: record('setInterval'),
+        clearInterval: record('clearInterval'),
+        addEventListener: (type, listener) => {
+            added.push(type);
+            listeners.push([type, listener]);
+        },
+        removeEventListener: (type) => {
+            removed.push(type);
+        },
+    };
+    page.top = choices.framed === true ? outer : page;
+    page.parent = choices.framed === true ? outer : page;
     const context = vm.createContext({
         unsafeWindow: page,
         document: {
@@ -266,19 +288,34 @@ function stage(output, choices = {}) {
             removeEventListener: (type) => {
                 documentRemoved.push(type);
             },
+            querySelectorAll: (selector) => {
+                queries.push(selector);
+                return selector === 'textarea[name="message"]' ? [box] : [];
+            },
         },
         observe: (environment) => {
             seen.push(environment);
         },
-        GM_getValue: (name, fallback) => (store.has(name) ? store.get(name) : fallback),
+        GM_getValue: (name, fallback) => {
+            calls.push('GM_getValue');
+            reads.push(name);
+            return store.has(name) ? store.get(name) : fallback;
+        },
         GM_setValue: (name, value) => {
+            calls.push('GM_setValue');
+            writes.push(name);
             store.set(name, value);
         },
         GM_deleteValue: (name) => {
+            calls.push('GM_deleteValue');
             store.delete(name);
         },
-        GM_listValues: () => [...store.keys()],
+        GM_listValues: () => {
+            calls.push('GM_listValues');
+            return [...store.keys()];
+        },
         GM_xmlhttpRequest: (details) => {
+            calls.push('GM_xmlhttpRequest');
             requests.push(details);
             return { abort: () => undefined };
         },
@@ -301,7 +338,7 @@ function stage(output, choices = {}) {
         Blob,
         ...(choices.extras ?? {}),
     });
-    return { page, original, requests, timers, logs, added, seen, marks, documentAdded, documentRemoved, context, run: () => vm.runInContext(output, context) };
+    return { page, original, requests, timers, logs, added, seen, calls, reads, writes, listeners, store, posted, queries, marks, documentAdded, documentRemoved, context, run: () => vm.runInContext(output, context) };
 }
 
 /**
@@ -339,6 +376,14 @@ test('the packed script boots once', () => {
     assert.equal(chat.marks.has('data-zeta-scribe'), true);
     assert.equal(chat.documentAdded.includes('visibilitychange'), true);
     assert.equal(chat.documentRemoved.length, 0);
+    assert.equal(chat.added.filter((type) => type === 'message').length, 1);
+    assert.equal(chat.queries.includes('iframe'), false);
+    assert.deepEqual(chat.posted, []);
+    assert.equal(chat.writes.filter((name) => name === 'scribe-bridge').length, 1);
+    const token = chat.store.get('scribe-bridge');
+    assert.equal(typeof token === 'string' && token.length >= 16 && token.length <= 200, true);
+    assert.equal(chat.logs.some((line) => line.includes(token)), false);
+    assert.deepEqual(chat.logs, []);
     assert.equal(chat.timers.filter(([name]) => name === 'setInterval').length >= 1, true);
     assert.equal(
         chat.logs.every((line) => line.startsWith('[Scribe] ')),
@@ -348,6 +393,77 @@ test('the packed script boots once', () => {
     assert.doesNotThrow(plain.run);
     assert.equal(plain.page.fetch === plain.original, false);
     assert.deepEqual(plain.logs, []);
+});
+
+test('inside the chat frame only the frame part starts', () => {
+    const output = ScribePack.build(realRead);
+    const frame = stage(observed(output), {
+        origin: 'https://frame.pingpong.ai',
+        framed: true,
+        ancestors: ['https://zeta-ai.io'],
+        body: { kind: 'body' },
+        stored: { 'scribe-bridge': BRIDGE_TOKEN },
+    });
+    assert.doesNotThrow(frame.run);
+    assert.deepEqual(frame.calls, []);
+    assert.equal(frame.requests.length, 0);
+    assert.equal(frame.seen.length, 0);
+    assert.equal(frame.marks.size, 0);
+    assert.deepEqual(frame.documentAdded, []);
+    assert.deepEqual(frame.queries, []);
+    assert.equal(frame.page.fetch === frame.original, true);
+    assert.deepEqual(frame.logs, []);
+    assert.deepEqual(frame.posted, [['{"zetaScribe":1,"kind":"ready"}', 'https://zeta-ai.io']]);
+    assert.equal(frame.added.includes('message'), true);
+    assert.equal(frame.timers.some(([name]) => name === 'setInterval'), true);
+    const listener = frame.listeners.find(([type]) => type === 'message')[1];
+    const arm = (overrides) => ({ zetaScribe: 1, kind: 'arm', seq: 1, token: BRIDGE_TOKEN, ready: null, suggestion: null, ...overrides });
+    const event = (overrides) => ({ isTrusted: true, origin: 'https://zeta-ai.io', source: frame.page.parent, data: arm({}), ...overrides });
+    listener(event({ isTrusted: false }));
+    listener(event({ origin: 'https://frame.pingpong.ai' }));
+    listener(event({ source: {} }));
+    listener(event({ data: arm({ kind: 'sent' }) }));
+    listener(event({ data: arm({ token: 'short' }) }));
+    assert.deepEqual(frame.calls, []);
+    listener(event({ data: arm({ token: 'another-token-of-adequate-length' }) }));
+    assert.deepEqual(frame.calls, ['GM_getValue']);
+    assert.equal(frame.timers.some(([name]) => name === 'clearInterval'), false);
+    listener(event({}));
+    assert.equal(frame.calls.length, 2);
+    assert.equal(frame.calls.every((name) => name === 'GM_getValue'), true);
+    assert.deepEqual(frame.reads, ['scribe-bridge', 'scribe-bridge']);
+    assert.deepEqual(frame.writes, []);
+    assert.equal(frame.requests.length, 0);
+    assert.equal(frame.timers.some(([name]) => name === 'clearInterval'), true);
+});
+
+test('anywhere else nothing starts', () => {
+    const output = ScribePack.build(realRead);
+    const places = [
+        { origin: 'https://zeta-ai.io', framed: true, ancestors: ['https://zeta-ai.io'] },
+        { origin: 'https://zeta-ai.io', framed: true },
+        { origin: 'https://frame.pingpong.ai' },
+        { origin: 'https://frame.pingpong.ai', ancestors: [] },
+        { origin: 'https://frame.pingpong.ai', framed: true, ancestors: ['https://other.example'] },
+        { origin: 'https://other.example' },
+        { origin: 'https://other.example', framed: true, ancestors: ['https://zeta-ai.io'] },
+    ];
+    for (const place of places) {
+        const label = `${place.origin} ${place.framed === true} ${place.ancestors}`;
+        const world = stage(observed(output), { ...place, body: { kind: 'body' }, path: '/rooms/harbour' });
+        assert.doesNotThrow(world.run, label);
+        assert.deepEqual(world.calls, [], label);
+        assert.deepEqual(world.posted, [], label);
+        assert.deepEqual(world.logs, [], label);
+        assert.equal(world.seen.length, 0, label);
+        assert.equal(world.requests.length, 0, label);
+        assert.deepEqual(world.timers, [], label);
+        assert.deepEqual(world.added, [], label);
+        assert.deepEqual(world.documentAdded, [], label);
+        assert.deepEqual(world.queries, [], label);
+        assert.equal(world.marks.size, 0, label);
+        assert.equal(world.page.fetch === world.original, true, label);
+    }
 });
 
 test('the list is the list', () => {
@@ -374,6 +490,7 @@ test('the list is the list', () => {
         'ScribeMuse',
         'ScribeLive',
         'ScribeSender',
+        'ScribeFrame',
         'PanelStyle',
         'PanelView',
         'ScribePanel',
@@ -382,8 +499,10 @@ test('the list is the list', () => {
     ]) {
         wanted.push(`scribe/page/${name}.js`);
     }
-    assert.equal(wanted.length, 25);
-    assert.equal(ScribePack.Files.length, 25);
+    assert.equal(wanted.length, 26);
+    assert.equal(ScribePack.Files.length, 26);
+    assert.equal(wanted.indexOf('scribe/page/ScribeFrame.js'), wanted.indexOf('scribe/page/ScribeSender.js') + 1);
+    assert.equal(wanted.at(-1), 'scribe/page/ScribeStart.js');
     assert.deepEqual([...ScribePack.Files], wanted);
 });
 
@@ -448,9 +567,9 @@ function headerProblems(header, body) {
     const host = new URL(/ModelOrigin: '([^']+)'/.exec(body)[1]).host;
     const wanted = [
         ['connect', lines.filter((line) => line.startsWith('// @connect ')).map((line) => line.slice('// @connect '.length).trim()), [host]],
-        ['match', lines.filter((line) => line.startsWith('// @match ')).map((line) => line.slice('// @match '.length).trim()), ['https://zeta-ai.io/*']],
+        ['match', lines.filter((line) => line.startsWith('// @match ')).map((line) => line.slice('// @match '.length).trim()), ['https://zeta-ai.io/*', 'https://frame.pingpong.ai/*']],
         ['run-at', lines.filter((line) => line.startsWith('// @run-at ')).map((line) => line.slice('// @run-at '.length).trim()), ['document-start']],
-        ['noframes', lines.filter((line) => line === '// @noframes'), ['// @noframes']],
+        ['noframes', lines.filter((line) => line.startsWith('// @noframes')), []],
     ];
     for (const [name, found, expected] of wanted) {
         if (found.length !== expected.length || found.some((entry, index) => entry !== expected[index])) {
@@ -461,12 +580,24 @@ function headerProblems(header, body) {
 }
 
 test('the header grants what the script uses', () => {
-    const header = realRead(ScribePack.Settings.Header);
+    const header = realRead(ScribePack.Settings.Header).replaceAll('\r', '');
     const output = ScribePack.build(realRead);
     const body = output.slice(output.indexOf(`${OPENING}\n`));
     assert.deepEqual(headerProblems(header, body), []);
     const lines = header.split('\n');
-    const prefixes = ['// @grant GM_getValue', '// @grant GM_setValue', '// @grant GM_deleteValue', '// @grant GM_listValues', '// @grant GM_xmlhttpRequest', '// @grant unsafeWindow', '// @connect', '// @match', '// @run-at', '// @noframes'];
+    assert.equal(lines.filter((line) => line.startsWith('// @match ')).length, 2);
+    const prefixes = [
+        '// @grant GM_getValue',
+        '// @grant GM_setValue',
+        '// @grant GM_deleteValue',
+        '// @grant GM_listValues',
+        '// @grant GM_xmlhttpRequest',
+        '// @grant unsafeWindow',
+        '// @connect',
+        '// @match https://zeta-ai.io',
+        '// @match https://frame.pingpong.ai',
+        '// @run-at',
+    ];
     for (const prefix of prefixes) {
         const kept = lines.filter((line) => !line.replace(/ +/g, ' ').startsWith(prefix));
         assert.equal(kept.length, lines.length - 1, prefix);
@@ -475,8 +606,9 @@ test('the header grants what the script uses', () => {
     const changes = [
         ['// @run-at       document-start', '// @run-at       document-idle'],
         ['// @match        https://zeta-ai.io/*', '// @match        https://example.org/*'],
+        ['// @match        https://frame.pingpong.ai/*', '// @match        https://frame.pingpong.ai/*\n// @match        https://example.org/*'],
         ['// @connect      openrouter.ai', '// @connect      openrouter.example'],
-        ['// @noframes', '// @noframes extra'],
+        ['// @run-at       document-start', '// @run-at       document-start\n// @noframes'],
         ['// @grant        unsafeWindow', '// @grant        unsafeWindow\n// @grant        GM_download'],
     ];
     for (const [from, to] of changes) {

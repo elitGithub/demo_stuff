@@ -4,3 +4,5 @@
 .dev.vars.*
 .wrangler/
 *.sqlite*
+spike/
+scribe/private/

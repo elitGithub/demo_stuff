@@ -1,6 +1,6 @@
 # Read first: workspace rules
 
-The primary instructions for every demo in this workspace are in `/var/www/demo_stuff/CLAUDE.md` (its `AGENTS.md` is an identical copy). Read it before anything below; its operator laws and workflow override this file wherever they differ. In particular, never add or change a dependency, and never run the Laravel Boost installation steps mentioned below, without the operator's explicit approval.
+The primary instructions for every demo in this workspace are in `/var/www/demo_stuff/CLAUDE.md` (its `AGENTS.md` is an identical copy). Read it before anything below; its operator laws and workflow override this file wherever they differ. In particular, never add or change a dependency without the operator's explicit approval.
 
 ---
 
@@ -85,7 +85,6 @@ Before relying on a package's API, confirm its installed version:
 - Pure copy, styling, and layout-only changes do not require new or updated tests.
 - When test coverage applies, run the affected tests and ensure they pass.
 - Test the changed behavior and its important failure modes, but do not add tests beyond them.
-- Read the `testing-best-practices` skill before writing tests.
 
 === laravel/core rules ===
 
@@ -126,7 +125,6 @@ Before relying on a package's API, confirm its installed version:
 
 - This project uses PHPUnit. Create tests with `php artisan make:test --phpunit {name}`.
 - Do not include the test suite directory in `{name}`. Use `SomeFeatureTest`, not `Feature/SomeFeatureTest`.
-- Read the `testing-best-practices` skill for guidance on coverage, naming, structure, dependency isolation, and review.
 
 ## Running Tests
 

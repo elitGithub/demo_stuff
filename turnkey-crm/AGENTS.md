@@ -39,9 +39,10 @@ Kilo Code, etc.).
 
 ## Skills
 
-Workspace skills live in `.github/skills/` (canonical source) and are symlinked
-into every agent runtime (`.ai`, `.claude`, `.codex`, `.cursor`, `.kilocode`).
-See [.github/skills/README.md](.github/skills/README.md) for the standard.
+Workspace skills live in `.github/skills/` (canonical source). In this checkout
+`.claude/skills` is a plain file holding the text `../.github/skills`, not a
+symlink, so Claude Code does not load them: open the relevant `SKILL.md` under
+`.github/skills/` directly. See [.github/skills/README.md](.github/skills/README.md) for the standard.
 
 | Skill | Use when |
 |-------|----------|
@@ -53,7 +54,7 @@ skill content here — keep details in the skills.
 
 ---
 
-## Critical Conventions (Never Deviate)
+## Conventions
 
 - **Never modify core Krayin files** unless explicitly required. Extend behavior
   through a package under `packages/Webkul/`.

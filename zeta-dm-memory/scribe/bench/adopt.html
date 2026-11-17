@@ -1,0 +1,260 @@
+<!doctype html>
+<html lang="en">
+<head>
+    <meta charset="utf-8">
+    <meta name="viewport" content="width=device-width, initial-scale=1">
+    <title>Scribe bench</title>
+    <link rel="stylesheet" href="bench.css">
+</head>
+<body>
+    <header class="masthead">
+        <h1>Scribe bench</h1>
+        <p>A development tool for judging the scribe engine against an exported campaign. Fields marked <span class="required">*</span> are required.</p>
+    </header>
+
+    <main>
+        <section class="setup" aria-label="Setup">
+            <div class="fields">
+                <div class="field">
+                    <label for="key">OpenRouter key <span class="required" aria-hidden="true">*</span></label>
+                    <input id="key" type="password" autocomplete="off" spellcheck="false" required aria-required="true" aria-describedby="key-problem">
+                    <p id="key-problem" class="problem" aria-live="polite"></p>
+                </div>
+                <div class="field">
+                    <label for="campaign">Campaign <span class="required" aria-hidden="true">*</span></label>
+                    <select id="campaign" required aria-required="true"></select>
+                </div>
+                <div class="field">
+                    <label for="model">Model <span class="required" aria-hidden="true">*</span></label>
+                    <input id="model" type="text" autocomplete="off" spellcheck="false" required aria-required="true" aria-describedby="model-problem">
+                    <p id="model-problem" class="problem" aria-live="polite"></p>
+                </div>
+                <div class="field">
+                    <label for="size">Messages per stretch <span class="required" aria-hidden="true">*</span></label>
+                    <input id="size" type="text" inputmode="numeric" autocomplete="off" spellcheck="false" required aria-required="true" aria-describedby="size-problem">
+                    <p id="size-problem" class="problem" aria-live="polite"></p>
+                </div>
+                <div class="field">
+                    <label for="stop">Stop after message</label>
+                    <input id="stop" type="text" inputmode="numeric" autocomplete="off" spellcheck="false" placeholder="blank for all" aria-describedby="stop-problem">
+                    <p id="stop-problem" class="problem" aria-live="polite"></p>
+                </div>
+                <div class="field">
+                    <label for="budget">Budget in dollars <span class="required" aria-hidden="true">*</span></label>
+                    <input id="budget" type="text" inputmode="decimal" autocomplete="off" spellcheck="false" required aria-required="true" aria-describedby="budget-problem">
+                    <p id="budget-problem" class="problem" aria-live="polite"></p>
+                </div>
+            </div>
+            <div class="actions">
+                <button id="pause" type="button">Pause</button>
+                <button id="continue" type="button">Continue the saved book</button>
+                <button id="start" type="button" class="primary">Start</button>
+            </div>
+            <p id="status" class="status" role="status" aria-live="polite"></p>
+        </section>
+
+        <nav class="tabs" role="tablist" aria-label="Views">
+            <button id="tab-progress" type="button" role="tab" aria-controls="panel-progress">Progress</button>
+            <button id="tab-book" type="button" role="tab" aria-controls="panel-book">Book</button>
+            <button id="tab-timeline" type="button" role="tab" aria-controls="panel-timeline">Timeline</button>
+            <button id="tab-rulings" type="button" role="tab" aria-controls="panel-rulings">Rulings</button>
+            <button id="tab-audit" type="button" role="tab" aria-controls="panel-audit">Audit</button>
+        </nav>
+
+        <section id="panel-progress" class="panel" role="tabpanel" aria-labelledby="tab-progress">
+            <h2 id="progress-title" class="panel-title" tabindex="-1">Progress</h2>
+            <p id="waiting" class="waiting" role="status" aria-live="polite" hidden></p>
+            <ul id="progress-list" class="rows"></ul>
+            <div class="pager">
+                <button id="progress-previous" type="button">Previous</button>
+                <p id="progress-place" class="place"></p>
+                <button id="progress-next" type="button">Next</button>
+            </div>
+        </section>
+
+        <section id="panel-book" class="panel" role="tabpanel" aria-labelledby="tab-book" hidden>
+            <h2 id="book-title" class="panel-title" tabindex="-1">Book</h2>
+            <div class="book">
+                <div class="subjects">
+                    <label for="search">Search names</label>
+                    <input id="search" type="search" autocomplete="off" spellcheck="false">
+                    <ul id="subjects-list" class="rows"></ul>
+                    <div class="pager">
+                        <button id="subjects-previous" type="button">Previous</button>
+                        <p id="subjects-place" class="place"></p>
+                        <button id="subjects-next" type="button">Next</button>
+                    </div>
+                </div>
+                <div id="detail" class="detail" hidden>
+                    <h2 id="heading"></h2>
+                    <p id="names" class="meta"></p>
+                    <ul id="facts-list" class="rows"></ul>
+                    <div class="pager">
+                        <button id="facts-previous" type="button">Previous</button>
+                        <p id="facts-place" class="place"></p>
+                        <button id="facts-next" type="button">Next</button>
+                    </div>
+
+                    <fieldset class="form">
+                        <legend>Add a fact</legend>
+                        <div class="field">
+                            <label for="add-category">Category <span class="required" aria-hidden="true">*</span></label>
+                            <select id="add-category" required aria-required="true"></select>
+                        </div>
+                        <div id="add-target-field" class="field" hidden>
+                            <label for="add-target">Target <span class="required" aria-hidden="true">*</span></label>
+                            <select id="add-target" aria-required="true"></select>
+                        </div>
+                        <div class="field">
+                            <label for="add-text">Statement <span class="required" aria-hidden="true">*</span></label>
+                            <input id="add-text" type="text" autocomplete="off" required aria-required="true">
+                        </div>
+                        <div class="tick">
+                            <input id="add-hidden" type="checkbox">
+                            <label for="add-hidden">Hidden</label>
+                        </div>
+                        <div class="actions">
+                            <button id="add-file" type="button" class="primary">Add the fact</button>
+                        </div>
+                        <p id="add-outcome" class="outcome" role="status" aria-live="polite"></p>
+                    </fieldset>
+
+                    <fieldset class="form">
+                        <legend>Split</legend>
+                        <p class="meta">Tick the facts above that belong to the second person.</p>
+                        <div class="field">
+                            <label for="split-label">Label of the second person <span class="required" aria-hidden="true">*</span></label>
+                            <input id="split-label" type="text" autocomplete="off" required aria-required="true">
+                        </div>
+                        <div class="field">
+                            <label for="split-kind">Kind <span class="required" aria-hidden="true">*</span></label>
+                            <select id="split-kind" required aria-required="true"></select>
+                        </div>
+                        <div class="actions">
+                            <button id="split-file" type="button" class="primary">Split</button>
+                        </div>
+                        <p id="split-outcome" class="outcome" role="status" aria-live="polite"></p>
+                    </fieldset>
+                </div>
+            </div>
+        </section>
+
+        <section id="panel-timeline" class="panel" role="tabpanel" aria-labelledby="tab-timeline" hidden>
+            <h2 id="timeline-title" class="panel-title" tabindex="-1">Timeline</h2>
+            <ul id="timeline-list" class="rows"></ul>
+            <div class="pager">
+                <button id="timeline-previous" type="button">Previous</button>
+                <p id="timeline-place" class="place"></p>
+                <button id="timeline-next" type="button">Next</button>
+            </div>
+        </section>
+
+        <section id="panel-rulings" class="panel" role="tabpanel" aria-labelledby="tab-rulings" hidden>
+            <h2 id="rulings-title" class="panel-title" tabindex="-1">Rulings</h2>
+            <section class="group" aria-label="Conflicts">
+                <h3>Conflicts</h3>
+                <div class="actions">
+                    <button id="keep-first" type="button" class="primary">Keep the first value for all that remain</button>
+                </div>
+                <p id="keep-outcome" class="outcome" role="status" aria-live="polite"></p>
+                <ul id="conflicts-list" class="rows"></ul>
+                <div class="pager">
+                    <button id="conflicts-previous" type="button">Previous</button>
+                    <p id="conflicts-place" class="place"></p>
+                    <button id="conflicts-next" type="button">Next</button>
+                </div>
+            </section>
+            <section class="group" aria-label="Look-alikes">
+                <h3>Look-alikes</h3>
+                <ul id="likes-list" class="rows"></ul>
+                <div class="pager">
+                    <button id="likes-previous" type="button">Previous</button>
+                    <p id="likes-place" class="place"></p>
+                    <button id="likes-next" type="button">Next</button>
+                </div>
+            </section>
+            <section class="group" aria-label="Public scenes">
+                <h3>Public scenes</h3>
+                <ul id="scenes-list" class="rows"></ul>
+                <div class="pager">
+                    <button id="scenes-previous" type="button">Previous</button>
+                    <p id="scenes-place" class="place"></p>
+                    <button id="scenes-next" type="button">Next</button>
+                </div>
+            </section>
+            <section class="group" aria-label="Questions">
+                <h3>Questions</h3>
+                <ul id="questions-list" class="rows"></ul>
+                <div class="pager">
+                    <button id="questions-previous" type="button">Previous</button>
+                    <p id="questions-place" class="place"></p>
+                    <button id="questions-next" type="button">Next</button>
+                </div>
+            </section>
+            <section class="group" aria-label="Names joined">
+                <h3>Names joined</h3>
+                <ul id="aliases-list" class="rows"></ul>
+                <div class="pager">
+                    <button id="aliases-previous" type="button">Previous</button>
+                    <p id="aliases-place" class="place"></p>
+                    <button id="aliases-next" type="button">Next</button>
+                </div>
+            </section>
+            <section class="group" aria-label="Fuller statements">
+                <h3>Fuller statements</h3>
+                <ul id="refinements-list" class="rows"></ul>
+                <div class="pager">
+                    <button id="refinements-previous" type="button">Previous</button>
+                    <p id="refinements-place" class="place"></p>
+                    <button id="refinements-next" type="button">Next</button>
+                </div>
+            </section>
+            <section class="group" aria-label="Rulings made">
+                <h3>Rulings made</h3>
+                <ul id="made-list" class="rows"></ul>
+                <div class="pager">
+                    <button id="made-previous" type="button">Previous</button>
+                    <p id="made-place" class="place"></p>
+                    <button id="made-next" type="button">Next</button>
+                </div>
+            </section>
+        </section>
+
+        <section id="panel-audit" class="panel" role="tabpanel" aria-labelledby="tab-audit" hidden>
+            <h2 id="audit-title" class="panel-title" tabindex="-1">Audit</h2>
+            <div class="audit-bar">
+                <div class="field">
+                    <label for="audit-seed">Seed <span class="required" aria-hidden="true">*</span></label>
+                    <input id="audit-seed" type="text" inputmode="numeric" autocomplete="off" spellcheck="false" required aria-required="true">
+                </div>
+                <div class="actions">
+                    <button id="audit-draw" type="button">Draw again</button>
+                    <button id="audit-save" type="button" class="primary">Save audit</button>
+                </div>
+            </div>
+            <p id="audit-tally" class="tally" role="status" aria-live="polite"></p>
+            <p id="audit-outcome" class="outcome" role="status" aria-live="polite"></p>
+            <ul id="audit-list" class="rows"></ul>
+            <div class="pager">
+                <button id="audit-previous" type="button">Previous</button>
+                <p id="audit-place" class="place"></p>
+                <button id="audit-next" type="button">Next</button>
+            </div>
+        </section>
+    </main>
+
+    <script src="../core/ScribeText.js"></script>
+    <script src="../core/ScribeCategory.js"></script>
+    <script src="../core/ScribeIntake.js"></script>
+    <script src="../core/ScribeAnswer.js"></script>
+    <script src="../core/ScribeLog.js"></script>
+    <script src="../core/ScribeReplay.js"></script>
+    <script src="../core/ScribeKnowledge.js"></script>
+    <script src="../core/ScribeAnalyzer.js"></script>
+    <script src="../core/ScribeGateway.js"></script>
+    <script src="../core/ScribeAdoption.js"></script>
+    <script src="BenchView.js"></script>
+    <script src="BenchPage.js"></script>
+    <script src="BenchStart.js"></script>
+</body>
+</html>

@@ -1,0 +1,16 @@
+// ==UserScript==
+// @name         Zeta Scribe
+// @namespace    zeta-scribe
+// @version      0.1.0
+// @description  Keeps the book of a Zeta campaign, tells the scene what it knows, and checks replies against the book.
+// @match        https://zeta-ai.io/*
+// @run-at       document-start
+// @noframes
+// @grant        GM_getValue
+// @grant        GM_setValue
+// @grant        GM_deleteValue
+// @grant        GM_listValues
+// @grant        GM_xmlhttpRequest
+// @grant        unsafeWindow
+// @connect      openrouter.ai
+// ==/UserScript==

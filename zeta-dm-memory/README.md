@@ -183,6 +183,78 @@ Run these database-free userscript checks from this directory in PowerShell.
 
 The userscript tests run the installed source in a Node VM with controlled browser events, time, and Tampermonkey responses. See the [userscript verification record](docs/verification/userscript-verification.md) for automated results and the pending browser checks.
 
+## Scribe engine bench
+
+The bench is a development page for judging the scribe engine against a real exported campaign. It is not the scribe that will sit beside the chat. It builds the book from the export, shows it, lets you rule on what the engine could not decide, and lets you audit a sample of facts against the messages they cite.
+
+1. Copy an exported campaign into `scribe/private/` under a name beginning `campaign-` and ending `.json`, for example `scribe/private/campaign-harbour.json`.
+2. Start the server from this directory with `node scribe/bench/serve.mjs`.
+3. Open `http://localhost:8766/`.
+4. Type your OpenRouter key, choose the campaign, check the model, the messages per stretch, the stop point and the budget, and press **Start**. **Continue the saved book** resumes a book saved earlier. **Pause** stops after the stretch in flight.
+
+The tabs:
+
+- **Progress** shows the model call in flight with its seconds, then one line per finished step with what was stored, refused and spent. A step that refused lines opens to list them.
+- **Book** lists the subjects, searchable by name and other names, and shows one subject's facts with their source, status and who knows them. Facts are added, removed, made public and split off to a second person here.
+- **Timeline** lists the scenes with their day, messages, place, reach and who was present.
+- **Rulings** lists what the engine could not decide, the fuller statements, and the rulings already made, each of which can be revoked.
+- **Audit** draws thirty facts beside the messages they cite, to be marked right or wrong and saved.
+
+The OpenRouter key is typed into the page each session. The page sends it only in the request to OpenRouter and saves it nowhere. The browser may offer to save the key field as a password: decline it.
+
+`scribe/private/` is ignored by Git. It holds the export, the saved book (`log-<room>.json`), one file per model call (`calls-<room>-<n>.json`, or `calls-<room>-unreadable-<time>.json` for an answer the engine could not read, where the time is in milliseconds) and the saved audits (`audit-<room>.json`).
+
+Run the engine's tests with `node --test tests/scribe-*.test.mjs`. The [scribe engine verification record](docs/verification/scribe-engine-verification.md) lists what has and has not been checked.
+
+## The scribe on the Zeta page
+
+The scribe is a second userscript, separate from the notes widget above. It keeps a book of a campaign (people, facts, who knows what, scenes, open threads), reminds the scene what it knows with each message you send, checks each reply against the book, and offers developments. It stores everything in Tampermonkey's storage in this browser and talks to one outside service, OpenRouter, with your own key.
+
+### Build and install
+
+1. From this directory run `node scribe/pack.mjs`. It writes `scribe/scribe.user.js` from the sources under `scribe/core/` and `scribe/page/`. Run it again after any change to those files.
+2. In the Tampermonkey dashboard create a new script, paste the contents of `scribe/scribe.user.js` and save. Its name is **Zeta Scribe**.
+3. **Disable the old Zeta DM Memory script** while the scribe is enabled. Both hold Enter back and write into the message box; together they append twice.
+4. When Tampermonkey asks for a connection, allow only `openrouter.ai`.
+5. Open a Zeta room. The panel appears at the right edge; under 1,100 px of window width it starts collapsed behind a **Scribe** button.
+
+### First evening
+
+1. **Progress** tab, *Key and settings*: paste your OpenRouter key and press **Save key**. The key is kept in Tampermonkey's storage and sent only in the request to OpenRouter. Decline the browser's offer to save it as a password.
+2. Check the three models, the messages per stretch (40), the sends between reminders (6) and the day's budget in dollars (3), then press **Adopt this chat**. The scribe pulls the whole chat with the page's own login, then reads it stretch by stretch. A long chat takes a while and costs most of what the scribe will ever cost for it. **Pause** stops after the stretch in flight; **Resume** goes on.
+3. **Rulings** tab: rule what the engine could not decide (conflicts, look-alikes, questions). Your rulings outrank the story and survive every later reading.
+4. Play. From then on the scribe works at the newest message.
+
+### What it does while you play
+
+- **With your next message.** When you press Enter, one line beginning `@: [Scribe]` is added under your text: the day, the place, who is present, and what those present know. Texts from the book stand in quotation marks; people the book does not know are counted, not named. The **Findings** tab shows the line before it goes. If you touch the message box again, or the site refuses the send, the line is taken out again.
+- **Findings.** Each new reply is checked for a misspelt name, a contradiction with the book, or a character using a secret they were never told. The scribe only reports. A contradicted fact goes first in the next reminder when everyone present may hear it. **Rule it...** puts the reply's value into the Tell box if the reply is right and the book wrong; **They were told** records that the speaker now knows; **Dismiss** drops the finding. The scribe never writes a correction into the chat.
+- **A development.** **Suggest one** asks for a narrator line that brings an open thread back. Nothing is sent unless you press **Use**; it then goes with your next message.
+- **Tell the scribe.** Write what the book should know. **Work it out** shows what would change in the book; **File it** files exactly that. Nothing typed here is sent to the chat.
+- **Regenerated and edited replies.** Findings about a reply that was regenerated, edited or deleted go away, and the new text is checked. An edit to an old message is noticed at the next whole pull (**Pull the chat again**), and only its stretch is read again.
+
+The other tabs: **Summary** (what needs you, the cast, where the story stands), **Book** (every subject with its facts; add, remove, make public, split), **Timeline** (scenes by day), **Progress** (readings, the last model calls, how the last pull ended, **Export**, **Start the book over**).
+
+### Money
+
+Every answer OpenRouter bills is counted against the day's budget, including answers that came back empty or cut off. When the budget is reached, reading stops and replies are no longer checked until the next day. The header shows the day's spending.
+
+### One tab reads
+
+The tab you are looking at reads and checks. A second tab on the same chat shows the book and changes nothing. A hidden tab does nothing until it is shown again.
+
+### Limits
+
+- Nothing here has run in a real browser or against the real site or a real model yet. The [scribe page verification record](docs/verification/scribe-page-verification.md) lists what the tests cover and, in order, what to check on the real page first.
+- The book runs up to one stretch behind the newest message. Until a stretch is read, reminders carry lasting facts and who knows what, not locations or passing conditions.
+- A reminder is left out of a message when the book, the scene or the findings changed after it was prepared; the next message carries a fresh one.
+- Deleting the opening messages of a chat on the site is not noticed. Use **Start the book over**.
+- Names in scripts without capital letters, and names with unusual characters, are counted among "others" in the reminder.
+- If the userscript runs in the page's own JavaScript world, a hostile script on the site could observe the key. The scribe assumes Zeta's own scripts are not hostile.
+- `scribe/private/` and `spike/` hold exports and are ignored by Git, but a web server that serves this directory would serve them.
+
+Run the tests one file at a time, for example `node --test tests/scribe-whole.test.mjs`. On a machine with little memory use `NODE_OPTIONS=--max-old-space-size=600 prlimit --as=3000000000 timeout -s KILL 120 node --test --test-timeout=20000 <file>`.
+
 ## Limits and provenance
 
 This is a single-owner API for the Free plan. Accepted requests write the rate counter before the room operation. Platform quota exhaustion can interrupt service, including with Cloudflare-generated responses outside the API error format. Each room stores its current notes only. Provider-managed backups are separate from application history. No plan upgrades are automated.

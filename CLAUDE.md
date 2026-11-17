@@ -28,7 +28,7 @@ The index of demos is in `README.md`. Each demo has its own README or DEMO.md wi
 3. **Plan** at `<demo>/docs/superpowers/plans/YYYY-MM-DD-<topic>.md`: exact files, signatures, values and the tests that try to break each task. Approved by the operator.
 4. **Execution loop, one task at a time:**
    - an implementer subagent builds the task (Haiku for mechanical edits, Sonnet or Opus for anything needing reasoning; never a Fable-class subagent);
-   - an adversarial Opus reviewer attacks it with the directive "THIS CODE IS WRONG! PROVE OTHERWISE!";
+   - an adversarial Opus reviewer attacks it with the directive "Assume this code has defects and try to prove it. A finding counts only with an input that reproduces it; if you cannot break something, say so.";
    - the orchestrating assistant checks the reviewer's claims against the code, one focused check per claim, and never writes implementation code itself;
    - the hand-off to the operator opens with "Commit-ready." or "NOT commit-ready: <what is missing>";
    - review findings of every severity are fixed before hand-off; fix rounds are proposed to the operator, who rules on them; fixes get a scoped re-review;

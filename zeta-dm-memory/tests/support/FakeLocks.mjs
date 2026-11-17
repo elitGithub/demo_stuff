@@ -22,6 +22,20 @@ export default class FakeLocks {
     }
 
     /**
+     * @return {Promise<{ held: Array<{ name: string, mode: string, clientId: string }>, pending: Array<{ name: string, mode: string, clientId: string }> }>}
+     */
+    query() {
+        const held = [...this.holders.values()].map((entry) => ({ name: entry.name, mode: 'exclusive', clientId: 'a client' }));
+        const pending = [];
+        for (const queue of this.queues.values()) {
+            for (const entry of queue) {
+                pending.push({ name: entry.name, mode: 'exclusive', clientId: 'a client' });
+            }
+        }
+        return Promise.resolve({ held, pending });
+    }
+
+    /**
      * @param {string} name
      * @param {...*} rest
      * @return {Promise<*>}

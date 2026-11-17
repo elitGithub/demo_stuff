@@ -13,13 +13,17 @@ const ScribeBoot = Object.freeze({
         RetryMs: 10000,
         Attempts: 3,
         PauseMs: 2000,
-        TimeoutMs: 180000,
-        TransportTimeoutMs: 175000,
+        TimeoutMs: Object.freeze({
+            Analyzer: 600000,
+            Scribe: 180000,
+            Pedant: 180000,
+        }),
+        TransportMarginMs: 5000,
         LockWaitMs: 2000,
         LockRetryMs: 10000,
         ModelOrigin: 'https://openrouter.ai',
         MaxTokens: Object.freeze({
-            Analyzer: 8000,
+            Analyzer: 40000,
             Scribe: 700,
             Pedant: 1500,
         }),
@@ -357,6 +361,8 @@ const ScribeBoot = Object.freeze({
             throw new Error(messages.NoKey);
         }
         const model = ScribeBoot.setting(session, settings.Models[role]);
+        const timeoutMs = settings.TimeoutMs[role];
+        const transportMs = timeoutMs - settings.TransportMarginMs;
 
         /**
          * @param {number} milliseconds
@@ -389,7 +395,7 @@ const ScribeBoot = Object.freeze({
                     let done = false;
                     ScribeBoot.later(
                         session,
-                        settings.TransportTimeoutMs,
+                        transportMs,
                         /**
                          * @return {void}
                          */
@@ -401,7 +407,13 @@ const ScribeBoot = Object.freeze({
                         null,
                     );
                     return session.boot
-                        .request(url, { method: options.method, headers: options.headers, body: options.body, signal: stopper.signal })
+                        .request(url, {
+                            method: options.method,
+                            headers: options.headers,
+                            body: options.body,
+                            timeout: transportMs,
+                            signal: stopper.signal,
+                        })
                         .finally(
                             /**
                              * @return {void}
@@ -450,7 +462,7 @@ const ScribeBoot = Object.freeze({
                     user,
                     maxTokens: settings.MaxTokens[role],
                     sleep: pause,
-                    timeoutMs: settings.TimeoutMs,
+                    timeoutMs,
                 }),
             { attempts: settings.Attempts, pauseMs: settings.PauseMs, sleep: pause },
         );
@@ -507,7 +519,7 @@ const ScribeBoot = Object.freeze({
 
     /**
      * @param {Function} xmlHttpRequest
-     * @return {(url: string, options: { method: string, headers: object, body: string, signal?: object }) => Promise<{ status: number, text: () => Promise<string> }>}
+     * @return {(url: string, options: { method: string, headers: object, body: string, timeout?: number, signal?: object }) => Promise<{ status: number, text: () => Promise<string> }>}
      */
     request(xmlHttpRequest) {
         const settings = ScribeBoot.Settings;
@@ -515,7 +527,7 @@ const ScribeBoot = Object.freeze({
 
         /**
          * @param {*} url
-         * @param {{ method: string, headers: object, body: string, signal?: object }} options
+         * @param {{ method: string, headers: object, body: string, timeout?: number, signal?: object }} options
          * @return {Promise<{ status: number, text: () => Promise<string> }>}
          */
         return (url, options) =>
@@ -542,7 +554,7 @@ const ScribeBoot = Object.freeze({
                     details.data = options.body;
                     details.responseType = settings.ResponseType;
                     details.anonymous = true;
-                    details.timeout = settings.TransportTimeoutMs;
+                    details.timeout = options.timeout;
                     details.redirect = settings.Redirect;
 
                     /**
@@ -701,6 +713,7 @@ const ScribeBoot = Object.freeze({
             },
             null,
         );
+        ScribeBoot.contest(session);
         ScribeBoot.attempt(
             session.boot,
             ScribeBoot.Settings.Messages.NotChecked,
@@ -818,7 +831,7 @@ const ScribeBoot = Object.freeze({
         const settings = ScribeBoot.Settings;
         const boot = session.boot;
         const environment = boot.environment;
-        if (session.closed || session.reader || session.resting || session.asking !== null || ScribeBoot.hidden(boot)) {
+        if (session.closed || session.reader || session.resting || session.asking !== null) {
             return;
         }
         let asking = null;
@@ -836,7 +849,7 @@ const ScribeBoot = Object.freeze({
                     if (session.asking === asking) {
                         session.asking = null;
                     }
-                    if (session.closed || !session.locking || ScribeBoot.hidden(boot)) {
+                    if (session.closed || !session.locking) {
                         return null;
                     }
                     const held = ScribeBoot.hold(session);
@@ -929,7 +942,7 @@ const ScribeBoot = Object.freeze({
                             }
                             session.locking = true;
                             answer(null);
-                            if (lock === null || ScribeBoot.hidden(boot)) {
+                            if (lock === null) {
                                 ScribeBoot.wait(session);
                                 return null;
                             }
@@ -956,52 +969,81 @@ const ScribeBoot = Object.freeze({
 
     /**
      * @param {object} session
-     * @return {Promise<void>}
+     * @return {void}
      */
-    shown(session) {
-        return new Promise(
-            /**
-             * @param {Function} resolve
-             * @return {void}
-             */
-            (resolve) => {
-                if (ScribeBoot.hidden(session.boot)) {
-                    session.shown = resolve;
-                } else {
-                    resolve();
-                }
-            },
-        );
+    look(session) {
+        if (!session.closed && session.locking) {
+            ScribeBoot.wait(session);
+        }
+    },
+
+    /**
+     * @param {object} session
+     * @param {*} state
+     * @return {void}
+     */
+    yieldTo(session, state) {
+        const settings = ScribeBoot.Settings;
+        const name = `${settings.LockPrefix}${session.roomId}`;
+        const pending = state?.pending;
+        session.wanted =
+            Array.isArray(pending) &&
+            pending.some(
+                /**
+                 * @param {*} request
+                 * @return {boolean}
+                 */
+                (request) => request?.name === name,
+            );
+        if (!session.wanted || session.closed || session.release === null || !ScribeBoot.hidden(session.boot) || ScribeBoot.reading(session)) {
+            return;
+        }
+        session.wanted = false;
+        ScribeBoot.giveBack(session);
+        ScribeBoot.wait(session);
     },
 
     /**
      * @param {object} session
      * @return {void}
      */
-    look(session) {
+    contest(session) {
+        const settings = ScribeBoot.Settings;
         const boot = session.boot;
-        try {
-            if (session.closed) {
-                return;
-            }
-            if (ScribeBoot.hidden(boot)) {
-                ScribeBoot.withdraw(session);
-                if (session.release !== null && !ScribeBoot.reading(session)) {
-                    ScribeBoot.giveBack(session);
-                }
-                return;
-            }
-            if (session.shown !== null) {
-                const shown = session.shown;
-                session.shown = null;
-                shown();
-            }
-            if (session.locking) {
-                ScribeBoot.wait(session);
-            }
-        } catch (error) {
-            ScribeBoot.say(boot, `${ScribeBoot.Settings.Messages.NotLocked}${ScribeBoot.words(error)}`);
+        const locks = boot.environment.locks;
+        if (session.closed || !session.locking || session.release === null || !ScribeBoot.hidden(boot) || typeof locks.query !== settings.FunctionType) {
+            return;
         }
+        let asked = null;
+        try {
+            asked = locks.query();
+        } catch {
+            return;
+        }
+        Promise.resolve(asked)
+            .then(
+                /**
+                 * @param {*} state
+                 * @return {void}
+                 */
+                (state) => {
+                    ScribeBoot.yieldTo(session, state);
+                },
+                /**
+                 * @return {null}
+                 */
+                () => null,
+            )
+            .then(
+                null,
+                /**
+                 * @param {*} error
+                 * @return {void}
+                 */
+                (error) => {
+                    ScribeBoot.say(boot, `${settings.Messages.NotLocked}${ScribeBoot.words(error)}`);
+                },
+            );
     },
 
     /**
@@ -1041,11 +1083,6 @@ const ScribeBoot = Object.freeze({
         ScribeBoot.withdraw(session);
         ScribeBoot.giveBack(session);
         ScribeBoot.repay(session);
-        if (session.shown !== null) {
-            const shown = session.shown;
-            session.shown = null;
-            shown();
-        }
         for (const ended of endings) {
             if (ended !== null) {
                 ended();
@@ -1064,10 +1101,6 @@ const ScribeBoot = Object.freeze({
         const environment = boot.environment;
         try {
             if (environment.locks !== null) {
-                await ScribeBoot.shown(session);
-                if (session.closed) {
-                    return;
-                }
                 await ScribeBoot.lock(session);
             }
             if (session.closed) {
@@ -1138,7 +1171,9 @@ const ScribeBoot = Object.freeze({
                         }
                     }
                     ScribeBoot.redraw(session);
-                    ScribeBoot.look(session);
+                    if (session.wanted) {
+                        ScribeBoot.contest(session);
+                    }
                 },
             };
             if (session.locking) {
@@ -1225,9 +1260,7 @@ const ScribeBoot = Object.freeze({
                  * @return {void}
                  */
                 () => {
-                    if (!ScribeBoot.hidden(boot)) {
-                        ScribeBoot.askTick(session);
-                    }
+                    ScribeBoot.askTick(session);
                 },
                 settings.TickMs,
             );
@@ -1301,7 +1334,7 @@ const ScribeBoot = Object.freeze({
                     asking: null,
                     resting: false,
                     warned: false,
-                    shown: null,
+                    wanted: false,
                     keeper: null,
                     live: null,
                     panel: null,
@@ -1394,7 +1427,7 @@ const ScribeBoot = Object.freeze({
          */
         const visibility = () => {
             if (boot.session !== null) {
-                ScribeBoot.look(boot.session);
+                ScribeBoot.contest(boot.session);
             }
         };
         environment.document.addEventListener(settings.VisibilityEvent, visibility);

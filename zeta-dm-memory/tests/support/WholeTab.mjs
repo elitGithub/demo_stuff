@@ -13,7 +13,7 @@ export default class WholeTab {
     static PageSize = 31;
 
     /**
-     * @param {{ name: string, tabId: string, packed: string, clock: import('./FakeTimers.mjs').default, storage: import('./FakeStorage.mjs').default, site: WholeSite, model: import('./WholeModel.mjs').default, locks: import('./FakeLocks.mjs').default|null, path: string, width?: number }} options
+     * @param {{ name: string, tabId: string, packed: string, clock: import('./FakeTimers.mjs').default, storage: import('./FakeStorage.mjs').default, site: WholeSite, model: import('./WholeModel.mjs').default, locks: import('./FakeLocks.mjs').default|null, path: string, width?: number, query?: boolean }} options
      */
     constructor(options) {
         this.name = options.name;
@@ -24,6 +24,8 @@ export default class WholeTab {
         this.site = options.site;
         this.model = options.model;
         this.locks = options.locks;
+        this.queried = options.query !== false;
+        this.callbacks = new Set();
         this.dead = false;
         this.release = null;
         this.death = new Promise((resolve) => {
@@ -85,7 +87,12 @@ export default class WholeTab {
     lock(name, ...rest) {
         const callback = rest.at(-1);
         const options = rest.length > 1 ? rest[0] : {};
-        return this.locks.request(name, options, (granted) => {
+        /**
+         * @param {object|null} granted
+         * @return {*}
+         */
+        const wrapped = (granted) => {
+            this.callbacks.delete(wrapped);
             if (this.dead) {
                 return null;
             }
@@ -94,7 +101,55 @@ export default class WholeTab {
                 return held;
             }
             return Promise.race([held, this.death]);
-        });
+        };
+        this.callbacks.add(wrapped);
+        return this.locks.request(name, options, wrapped);
+    }
+
+    /**
+     * @return {object}
+     */
+    lockManager() {
+        const manager = {
+            /**
+             * @param {string} name
+             * @param {...*} rest
+             * @return {Promise<*>}
+             */
+            request: (name, ...rest) => this.lock(name, ...rest),
+        };
+        if (this.queried) {
+            /**
+             * @return {Promise<object>}
+             */
+            manager.query = () => this.locks.query();
+        }
+        return manager;
+    }
+
+    /**
+     * @return {void}
+     */
+    forsake() {
+        if (this.locks === null) {
+            return;
+        }
+        for (const queue of this.locks.queues.values()) {
+            for (let index = queue.length - 1; index >= 0; index--) {
+                if (this.callbacks.has(queue[index].callback)) {
+                    queue.splice(index, 1);
+                }
+            }
+        }
+        this.callbacks.clear();
+    }
+
+    /**
+     * @return {string}
+     */
+    room() {
+        const found = /^\/rooms\/([^/]+)/.exec(this.window.location.pathname);
+        return found === null ? WholeSite.Room : decodeURIComponent(found[1]);
     }
 
     /**
@@ -130,7 +185,7 @@ export default class WholeTab {
             clearInterval: (id) => {
                 timers.clearInterval(id);
             },
-            navigator: this.locks === null ? {} : { locks: { request: (name, ...rest) => this.lock(name, ...rest) } },
+            navigator: this.locks === null ? {} : { locks: this.lockManager() },
             crypto: { randomUUID: () => this.tabId },
             console: { log: record, info: record, warn: record, error: record, debug: record },
             window: {
@@ -199,7 +254,7 @@ export default class WholeTab {
      * @return {Promise<object>}
      */
     pageGet() {
-        return this.window.fetch(`${WholeSite.Messages}?limit=${WholeTab.PageSize}`, {
+        return this.window.fetch(`${WholeSite.messagesOf(this.room())}?limit=${WholeTab.PageSize}`, {
             headers: { Authorization: WholeSite.Token },
             own: true,
         });
@@ -210,7 +265,7 @@ export default class WholeTab {
      * @return {Promise<object>}
      */
     pagePost(text) {
-        return this.window.fetch(WholeSite.Messages, {
+        return this.window.fetch(WholeSite.messagesOf(this.room()), {
             method: 'POST',
             headers: { Authorization: WholeSite.Token, 'Content-Type': 'application/json' },
             body: JSON.stringify({ text }),
@@ -223,7 +278,7 @@ export default class WholeTab {
      * @return {Promise<object>}
      */
     pageRegenerate(id) {
-        return this.window.fetch(`${WholeSite.Messages}/${id}/regenerate`, {
+        return this.window.fetch(`${WholeSite.messagesOf(this.room())}/${id}/regenerate`, {
             method: 'POST',
             headers: { Authorization: WholeSite.Token, 'Content-Type': 'application/json' },
             body: '{}',
@@ -305,6 +360,7 @@ export default class WholeTab {
         this.dead = true;
         this.scriptTimers.stop();
         this.pageTimers.stop();
+        this.forsake();
         this.release();
     }
 }

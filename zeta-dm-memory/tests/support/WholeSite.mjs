@@ -13,24 +13,59 @@ export default class WholeSite {
      * @param {import('./CampaignBuilder.mjs').default} builder
      */
     constructor(builder) {
-        this.builder = builder;
-        this.zeta = new FakeZeta(builder.messages, WholeSite.Room, WholeSite.Token);
-        this.zeta.most = WholeSite.MostRequests;
+        this.rooms = new Map();
         this.requests = [];
+        this.open(WholeSite.Room, builder);
+    }
+
+    /**
+     * @param {string} room
+     * @return {string}
+     */
+    static messagesOf(room) {
+        return `${WholeSite.Api}/v1/rooms/${room}/messages`;
     }
 
     /**
      * @return {string}
      */
     static get Messages() {
-        return `${WholeSite.Api}/v1/rooms/${WholeSite.Room}/messages`;
+        return WholeSite.messagesOf(WholeSite.Room);
+    }
+
+    /**
+     * @param {string} room
+     * @param {import('./CampaignBuilder.mjs').default} builder
+     * @return {void}
+     */
+    open(room, builder) {
+        const zeta = new FakeZeta(builder.messages, room, WholeSite.Token);
+        zeta.most = WholeSite.MostRequests;
+        this.rooms.set(room, { builder, zeta });
+    }
+
+    /**
+     * @param {string} room
+     * @return {object[]}
+     */
+    messagesIn(room) {
+        return this.rooms.get(room).builder.messages;
     }
 
     /**
      * @return {object[]}
      */
     get messages() {
-        return this.builder.messages;
+        return this.messagesIn(WholeSite.Room);
+    }
+
+    /**
+     * @param {*} url
+     * @return {string|null}
+     */
+    static roomOf(url) {
+        const found = /^\/v1\/rooms\/([^/]+)\/messages/.exec(new URL(String(url)).pathname);
+        return found === null ? null : decodeURIComponent(found[1]);
     }
 
     /**
@@ -50,22 +85,28 @@ export default class WholeSite {
             headers: JSON.stringify(headers),
             body: typeof options?.body === 'string' ? options.body : null,
         });
+        const room = WholeSite.roomOf(url);
+        const kept = room === null ? undefined : this.rooms.get(room);
+        if (kept === undefined) {
+            return FakeZeta.reply(404, 'No such room.');
+        }
         if (method !== 'GET') {
-            if (String(url) === WholeSite.Messages) {
-                this.builder.player(JSON.parse(options.body).text);
+            if (String(url) === WholeSite.messagesOf(room)) {
+                kept.builder.player(JSON.parse(options.body).text);
             }
             return FakeZeta.reply(200, '{}');
         }
-        return this.zeta.respond(receiver, url, options);
+        return kept.zeta.respond(receiver, url, options);
     }
 
     /**
      * @param {Array<[string, string]>} blocks
+     * @param {string} room
      * @return {object}
      */
-    reply(blocks) {
-        this.builder.reply(blocks);
-        return this.messages.at(-1);
+    reply(blocks, room = WholeSite.Room) {
+        this.rooms.get(room).builder.reply(blocks);
+        return this.messagesIn(room).at(-1);
     }
 
     /**

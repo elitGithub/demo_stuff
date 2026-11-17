@@ -1022,7 +1022,7 @@ test('the model is asked by role', async () => {
     const plain = ask(ScribeBoot.Role.Analyzer, SYSTEM, USER);
     await settle();
     assert.equal(run.sent.calls.length, 1);
-    assert.deepEqual(asked(run.sent.calls[0]), [DEFAULTS.analyzer, 8000]);
+    assert.deepEqual(asked(run.sent.calls[0]), [DEFAULTS.analyzer, 40000]);
     answer(run.sent.calls[0], 200, completion('The plain answer.', 0.25));
     const result = await plain;
     assert.deepEqual(Object.keys(result), ['text', 'cost']);
@@ -1030,7 +1030,7 @@ test('the model is asked by role', async () => {
     assert.equal(result.cost, 0.25);
     ScribeStore.write(run.storage, 'harbour', ScribeStore.Kind.Settings, { analyzer: 'invented/analyzer-model', scribe: 'invented/scribe-model', budget: 3 });
     const roles = [
-        ['Analyzer', 'invented/analyzer-model', 8000],
+        ['Analyzer', 'invented/analyzer-model', 40000],
         ['Scribe', 'invented/scribe-model', 700],
         ['Pedant', DEFAULTS.pedant, 1500],
     ];
@@ -1107,13 +1107,16 @@ test('ticks come on time and not too often', async () => {
     const keeper = run.world.keepers[0];
     await pass(run, 40000);
     assert.deepEqual(keeper.ticks, [20000, 40000]);
-    run.document.visibilityState = 'hidden';
+    await show(run, 'hidden');
     await pass(run, 40000);
-    assert.deepEqual(keeper.ticks, [20000, 40000]);
+    assert.deepEqual(keeper.ticks, [20000, 40000, 60000, 80000]);
+    await show(run, 'visible');
+    await pass(run, 3000);
     await traffic(run);
     await pass(run, 15000);
-    assert.deepEqual(keeper.ticks, [20000, 40000, 80000, 85000, 95000]);
-    await pass(run, 15000);
+    assert.deepEqual(keeper.ticks.slice(4), [83000, 88000, 98000]);
+    await pass(run, 6000);
+    assert.deepEqual(keeper.ticks.slice(7), [101000]);
     const base = run.timers.now() - START;
     for (let count = 0; count < 3; count++) {
         await traffic(run);
@@ -1121,18 +1124,17 @@ test('ticks come on time and not too often', async () => {
     }
     await pass(run, 20800);
     assert.deepEqual(
-        keeper.ticks.slice(5).map((time) => time - base),
+        keeper.ticks.slice(8).map((time) => time - base),
         [0, 3000, 6000, 15000, 18000],
     );
-    run.document.visibilityState = 'visible';
     run.world.tickFailure = 'The newest page could not be read';
-    await pass(run, 8000);
+    await pass(run, 15000);
     assert.equal(keeper.ticks.at(-1), 140000);
     assert.deepEqual(run.lines, ['The check failed: The newest page could not be read']);
     run.world.tickFailure = null;
     await pass(run, 20000);
     assert.equal(keeper.ticks.at(-1), 160000);
-    assert.equal(keeper.ticks.length, 12);
+    assert.equal(keeper.ticks.length, 15);
     assert.equal(run.lines.length, 1);
     run.boot.stop();
 });
@@ -1494,7 +1496,7 @@ test('a request that is given up is ended', async () => {
     const scene = run.world.lives[0].options.ask(ScribeBoot.Role.Scribe, SYSTEM, USER);
     await settle();
     assert.equal(run.sent.calls.length, 1);
-    assert.equal(run.sent.calls[0].details.timeout, ScribeBoot.Settings.TimeoutMs - 5000);
+    assert.equal(run.sent.calls[0].details.timeout, ScribeBoot.Settings.TimeoutMs.Scribe - 5000);
     await pass(run, 174999);
     assert.equal(run.sent.calls[0].ended, false);
     await pass(run, 1);
@@ -1532,7 +1534,7 @@ test('a request that is given up is ended', async () => {
 test('nothing is looked up outside the details', async () => {
     const made = requests();
     const fetch = ScribeBoot.request(made.xmlHttpRequest);
-    const going = fetch(ENDPOINT, { method: 'POST', headers: { Authorization: `Bearer ${KEY}` }, body: '{}' });
+    const going = fetch(ENDPOINT, { method: 'POST', headers: { Authorization: `Bearer ${KEY}` }, body: '{}', timeout: 175000 });
     const details = made.calls[0].details;
     assert.equal(Object.getPrototypeOf(details), null);
     assert.equal(Object.getPrototypeOf(details.headers), null);
@@ -1597,7 +1599,61 @@ test('say does not read the key', async () => {
     run.boot.stop();
 });
 
-test('the reader is a tab that is looked at', async () => {
+test('a hidden tab keeps its chat', async () => {
+    const locks = new FakeLocks();
+    const run = harness({ locks });
+    start(run);
+    await settle();
+    const keeper = run.world.keepers[0];
+    assert.equal(keeper.options.claim(), true);
+    keeper.phase = 'Reading';
+    await show(run, 'hidden');
+    for (let minute = 0; minute < 10; minute++) {
+        await traffic(run);
+        await pass(run, 60000);
+        if (minute === 0) {
+            keeper.phase = 'Idle';
+            keeper.options.notify({ kind: 'Changed' });
+            await settle();
+            assert.equal(keeper.options.claim(), true);
+        }
+        assert.equal(locks.held(LOCK), true, `minute ${minute}`);
+    }
+    assert.equal(keeper.options.claim(), true);
+    assert.equal(keeper.ticks.length > 40, true, `${keeper.ticks.length} ticks`);
+    assert.equal(locks.waiting(LOCK), 0);
+    assert.deepEqual(locks.made, [`${LOCK} if available`]);
+    run.boot.stop();
+});
+
+test('two chats in two tabs both work', async () => {
+    const locks = new FakeLocks();
+    const one = harness({ locks });
+    const two = harness({ locks, path: '/rooms/quay', tabId: 'tab-two', timers: one.timers, storage: one.storage, world: one.world });
+    start(one);
+    await settle();
+    await show(one, 'hidden');
+    start(two);
+    await settle();
+    const [first, second] = one.world.keepers;
+    assert.equal(first.roomId, 'harbour');
+    assert.equal(second.roomId, 'quay');
+    assert.equal(first.options.claim(), true);
+    assert.equal(second.options.claim(), true);
+    locks.request('scribe:reader:quay', () => null);
+    await settle();
+    assert.equal(locks.waiting('scribe:reader:quay'), 1);
+    await pass(one, 60000);
+    assert.equal(first.options.claim(), true);
+    assert.equal(second.options.claim(), true);
+    assert.equal(locks.held(LOCK), true);
+    assert.deepEqual(first.ticks, [20000, 40000, 60000]);
+    assert.deepEqual(second.ticks, [20000, 40000, 60000]);
+    one.boot.stop();
+    two.boot.stop();
+});
+
+test('a hidden reader yields to a waiting tab', async () => {
     const locks = new FakeLocks();
     const one = harness({ locks });
     const two = harness({ locks, tabId: 'tab-two', timers: one.timers, storage: one.storage, world: one.world });
@@ -1606,42 +1662,86 @@ test('the reader is a tab that is looked at', async () => {
     start(two);
     await settle();
     const [first, second] = one.world.keepers;
-    assert.equal(first.options.tabId, 'tab-one');
-    assert.equal(second.options.tabId, 'tab-two');
     assert.equal(first.options.claim(), true);
     assert.equal(second.options.claim(), false);
     assert.equal(locks.waiting(LOCK), 1);
     await show(one, 'hidden');
+    await settle();
     assert.equal(first.options.claim(), false);
     assert.equal(second.options.claim(), true);
     assert.equal(second.ticks.length, 1);
-    assert.equal(locks.waiting(LOCK), 0);
-    for (let minute = 0; minute < 3; minute++) {
-        await traffic(two);
-        await pass(one, 60000);
-    }
-    assert.equal(first.ticks.length, 0);
-    assert.equal(second.ticks.length > 3, true);
-    assert.equal(first.options.claim(), false);
-    assert.equal(second.options.claim(), true);
-    await show(one, 'visible');
-    assert.equal(first.options.claim(), false);
     assert.equal(locks.waiting(LOCK), 1);
-    second.phase = 'Reading';
-    await show(two, 'hidden');
-    await pass(one, 3000);
-    assert.equal(second.options.claim(), true);
-    assert.equal(first.options.claim(), false);
-    const before = first.ticks.length;
-    second.phase = 'Idle';
-    second.options.notify({ kind: 'Changed' });
-    await settle();
-    assert.equal(second.options.claim(), false);
+    go(two, '/');
+    await pass(one, 1000);
     assert.equal(first.options.claim(), true);
-    assert.equal(first.ticks.length, before + 1);
     assert.equal(locks.waiting(LOCK), 0);
+    go(two, '/rooms/harbour');
+    await pass(one, 1000);
+    const third = one.world.keepers[2];
+    assert.equal(third.options.tabId, 'tab-two');
+    assert.equal(third.options.claim(), false);
+    assert.equal(locks.waiting(LOCK), 1);
+    first.phase = 'Reading';
+    await pass(one, 20000);
+    assert.equal(first.options.claim(), true);
+    assert.equal(third.options.claim(), false);
+    first.phase = 'Idle';
+    first.options.notify({ kind: 'Changed' });
+    await settle();
+    assert.equal(first.options.claim(), false);
+    assert.equal(third.options.claim(), true);
+    assert.equal(locks.waiting(LOCK), 1);
     one.boot.stop();
     two.boot.stop();
+});
+
+test('a visible reader never yields', async () => {
+    const locks = new FakeLocks();
+    const one = harness({ locks });
+    const two = harness({ locks, tabId: 'tab-two', timers: one.timers, storage: one.storage, world: one.world });
+    start(one);
+    await settle();
+    start(two);
+    await settle();
+    const [first, second] = one.world.keepers;
+    await traffic(two);
+    await pass(one, 60000);
+    assert.equal(first.options.claim(), true);
+    assert.equal(second.options.claim(), false);
+    assert.equal(locks.waiting(LOCK), 1);
+    assert.deepEqual(first.ticks, [20000, 40000, 60000]);
+    one.boot.stop();
+    two.boot.stop();
+});
+
+test('no guess when the manager cannot say', async () => {
+    const managers = [
+        ['without query', (locks) => ({ request: (...values) => locks.request(...values) })],
+        ['query rejects', (locks) => ({ request: (...values) => locks.request(...values), query: () => Promise.reject(new Error('No answer')) })],
+        ['query throws', (locks) => ({ request: (...values) => locks.request(...values), query: () => {
+            throw new Error('No answer at all');
+        } })],
+    ];
+    for (const [label, wrap] of managers) {
+        const locks = new FakeLocks();
+        const manager = wrap(locks);
+        const one = harness({ locks: manager });
+        const two = harness({ locks: manager, tabId: 'tab-two', timers: one.timers, storage: one.storage, world: one.world });
+        start(one);
+        await settle();
+        start(two);
+        await settle();
+        const [first, second] = one.world.keepers;
+        assert.equal(first.options.claim(), true, label);
+        assert.equal(locks.waiting(LOCK), 1, label);
+        await show(one, 'hidden');
+        await pass(one, 40000);
+        assert.equal(first.options.claim(), true, label);
+        assert.equal(second.options.claim(), false, label);
+        assert.equal(locks.held(LOCK), true, label);
+        one.boot.stop();
+        two.boot.stop();
+    }
 });
 
 test('a failing lock manager falls back', async () => {
@@ -1706,22 +1806,16 @@ test('only this chat\'s traffic asks for ticks', async () => {
         await pass(run, 2000);
     }
     assert.deepEqual(keeper.ticks, [20000, 40000, 60000]);
-    run.document.visibilityState = 'hidden';
-    await pass(run, 5000);
-    const base = run.timers.now() - START;
+    await pass(run, 4000);
     await traffic(run);
-    await pass(run, 15000);
-    assert.deepEqual(
-        keeper.ticks.slice(3).map((time) => time - base),
-        [0, 5000, 15000],
-    );
-    await pass(run, 5000);
+    await pass(run, 20000);
+    assert.deepEqual(keeper.ticks.slice(3), [64000, 69000, 79000, 82000]);
     await traffic(run, `${API}/v1/rooms/quay/messages`);
     await pass(run, 20000);
-    assert.equal(keeper.ticks.length, 6);
+    assert.deepEqual(keeper.ticks.slice(7), [100000]);
     await traffic(run, `${API}/v1/rooms/harbourside/messages`);
     await pass(run, 20000);
-    assert.equal(keeper.ticks.length, 6);
+    assert.deepEqual(keeper.ticks.slice(7), [100000, 120000]);
     run.boot.stop();
 });
 
@@ -1789,8 +1883,10 @@ test('each part is closed on its own', async () => {
 });
 
 test('the model timeout is the setting', async () => {
-    assert.equal(ScribeBoot.Settings.TimeoutMs, 180000);
-    assert.equal(ScribeBoot.Settings.TransportTimeoutMs, 175000);
+    assert.equal(ScribeBoot.Settings.TimeoutMs.Analyzer, 600000);
+    assert.equal(ScribeBoot.Settings.TimeoutMs.Scribe, 180000);
+    assert.equal(ScribeBoot.Settings.TimeoutMs.Pedant, 180000);
+    assert.equal(ScribeBoot.Settings.TransportMarginMs, 5000);
     const run = harness();
     start(run);
     await settle();
@@ -1798,8 +1894,8 @@ test('the model timeout is the setting', async () => {
     const pending = failureOf(run.world.keepers[0].options.ask(ScribeBoot.Role.Analyzer, SYSTEM, USER));
     await settle();
     assert.equal(run.sent.calls.length, 1);
-    assert.equal(run.sent.calls[0].details.timeout, 175000);
-    assert.equal(run.timers.delays.includes(180000), true);
+    assert.equal(run.sent.calls[0].details.timeout, 595000);
+    assert.equal(run.timers.delays.includes(600000), true);
     run.boot.stop();
     assert.equal(await stateOf(pending), 'settled');
     assert.equal((await pending).message, 'The chat has been left');
@@ -1993,12 +2089,11 @@ test('a failing waiting request backs off', async () => {
             return locks.request(name, ...rest);
         },
     };
+    locks.request(LOCK, () => new Promise(() => {}));
+    await settle();
     start(run);
     await settle();
-    assert.equal(run.world.keepers[0].options.claim(), true);
-    await show(run, 'hidden');
-    assert.equal(locks.held(LOCK), false);
-    await show(run, 'visible');
+    assert.equal(run.world.keepers[0].options.claim(), false);
     await pass(run, 60000);
     assert.equal(signalled.length >= 6 && signalled.length <= 7, true, `${signalled.length} requests`);
     for (let index = 1; index < signalled.length; index++) {
@@ -2027,20 +2122,86 @@ test('an answer billed after the ask settled is still counted', async () => {
     run.boot.stop();
 });
 
-test('a tab opened hidden waits to be shown', async () => {
+test('a tab opened hidden starts at once', async () => {
     const locks = new FakeLocks();
     const run = harness({ locks });
     run.document.visibilityState = 'hidden';
     start(run);
-    await pass(run, 5000);
-    assert.deepEqual(run.world.order, []);
-    assert.deepEqual(locks.made, []);
-    await show(run, 'visible');
     await settle();
     assert.deepEqual(run.world.order, BUILT);
     assert.deepEqual(locks.made, [`${LOCK} if available`]);
+    assert.equal(run.world.keepers[0].claimed, true);
     assert.equal(run.world.keepers[0].options.claim(), true);
+    await pass(run, 20000);
+    assert.equal(run.world.keepers[0].ticks.length, 1);
     run.boot.stop();
+});
+
+test('the reading role may answer at length', async () => {
+    const run = harness();
+    start(run);
+    await settle();
+    ScribeStore.setKey(run.storage, KEY);
+    const keeper = run.world.keepers[0].options.ask;
+    const live = run.world.lives[0].options.ask;
+    const expected = [
+        [keeper, ScribeBoot.Role.Analyzer, 40000],
+        [live, ScribeBoot.Role.Scribe, 700],
+        [live, ScribeBoot.Role.Pedant, 1500],
+    ];
+    for (const [ask, role, tokens] of expected) {
+        const asking = ask(role, SYSTEM, USER);
+        await settle();
+        const call = run.sent.calls.at(-1);
+        assert.equal(JSON.parse(call.details.data).max_tokens, tokens, role);
+        answer(call, 200, completion(`The ${role} answer.`, 0.01));
+        assert.equal((await asking).text, `The ${role} answer.`);
+    }
+    assert.equal(run.sent.calls.length, 3);
+    run.boot.stop();
+});
+
+test('each role has its own timeout', async () => {
+    const run = harness();
+    start(run);
+    await settle();
+    ScribeStore.setKey(run.storage, KEY);
+    const keeper = run.world.keepers[0].options.ask;
+    const live = run.world.lives[0].options.ask;
+    const reading = keeper(ScribeBoot.Role.Analyzer, SYSTEM, USER);
+    await settle();
+    assert.equal(run.sent.calls.length, 1);
+    assert.equal(run.sent.calls[0].details.timeout, 595000);
+    assert.equal(run.timers.delays.includes(600000), true);
+    assert.equal(run.timers.delays.includes(595000), true);
+    await pass(run, 300000);
+    assert.equal(await stateOf(reading), 'pending');
+    assert.equal(run.sent.calls[0].handle.aborts, 0);
+    answer(run.sent.calls[0], 200, completion('A long reading.', 0.2));
+    assert.equal(await stateOf(reading), 'settled');
+    assert.equal((await reading).text, 'A long reading.');
+    assert.equal(run.sent.calls.length, 1);
+    const unanswered = failureOf(keeper(ScribeBoot.Role.Analyzer, SYSTEM, USER));
+    await settle();
+    assert.equal(run.sent.calls.length, 2);
+    await pass(run, 594999);
+    assert.equal(run.sent.calls[1].handle.aborts, 0);
+    await pass(run, 1);
+    assert.equal(run.sent.calls[1].handle.aborts, 1);
+    assert.equal(run.sent.calls[1].ended, true);
+    for (const role of [ScribeBoot.Role.Scribe, ScribeBoot.Role.Pedant]) {
+        const asking = live(role, SYSTEM, USER);
+        await settle();
+        const call = run.sent.calls.at(-1);
+        assert.equal(call.details.timeout, 175000, role);
+        assert.equal(run.timers.delays.includes(180000), true, role);
+        assert.equal(run.timers.delays.includes(175000), true, role);
+        answer(call, 200, completion(`The ${role} answer.`, 0.01));
+        assert.equal((await asking).text, `The ${role} answer.`);
+    }
+    run.boot.stop();
+    assert.equal(await stateOf(unanswered), 'settled');
+    assert.equal((await unanswered).message, 'The chat has been left');
 });
 
 test('the day is the local date', () => {

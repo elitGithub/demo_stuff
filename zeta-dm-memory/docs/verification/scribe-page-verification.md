@@ -22,9 +22,9 @@ Result on 2026-11-16, each file run alone under that limit:
 | `scribe-live` | work at the newest message | 53 of 53 |
 | `scribe-sender` | the send hook on the message box | 24 of 24 |
 | `scribe-panel` | the panel | 68 of 68 |
-| `scribe-boot` | wiring on the page, model requests, the reader's role | 39 of 39 |
+| `scribe-boot` | wiring on the page, model requests, the reader's role | 45 of 45 |
 | `scribe-pack` | the packed userscript's text | 17 of 17 |
-| `scribe-whole` | the packed script walked over a fake page, 19 steps | 34 of 34 |
+| `scribe-whole` | the packed script walked over a fake page, 20 steps | 36 of 36 |
 
 The engine's files on the same day: text 58, intake 51, answer 59, facts 69, scenes 43, operator 48, knowledge 27, analyzer 29, gateway 30, adoption 32, serve 22, bench 49, all passing.
 
@@ -33,6 +33,10 @@ Each part was attacked by a separate reviewer told to prove it wrong, its findin
 The whole walk packs the real sources in memory with `ScribePack.build` and runs that text in a Node VM over a fake page, a scripted site and a scripted model. No part of the scribe is replaced by a stand-in. Its steps: install on a page that is no chat; a chat opens; the key; adopt; a reload; a new reply; sending; a refused send followed by typing; a regenerated reply; an edited old message; a ruling; telling the scribe; a suggestion; a billed answer that fails; a second tab; pausing; starting the book over; leaving the chat; a search of every log line, every element's text, every request and every stored value for the key and the site's token; and a phone-width window with the panel never opened, and a hidden panel, where replies are still checked and the reminder still goes out.
 
 The first run of the walk passed 24 of 30 tests and showed five places where finished parts did not fit together (a reply checked against a book not yet read; the header's spending lagging; a paid question asked twice; a spent budget never said; a reply that arrived while paused never checked after a reload). All five were fixed in the sources, and the walk's own expectations were corrected where a later ruling made them wrong.
+
+## The owner's first run, 2026-11-17
+
+On the real site, with the first build: the panel appeared; the chat was pulled with the page's own login (`Last pull: 864 messages, ended NoCursor`); the key saved; Adopt started; the cost of a failed call was counted. Two faults showed and were fixed the same day: the reading model's answer was cut off at an 8,000-token cap (now 40,000, with ten minutes a call), and a tab that was not in front stopped working (now a hidden tab keeps working and yields only to another tab on the same chat). The boot and whole-walk counts above are from after those fixes; the rest of the first run is still to be done.
 
 ## Not verified by any agent
 
@@ -59,6 +63,7 @@ Stop at the first line that fails and note what the Progress tab and the browser
 - [ ] After the next reading of the book, the scribe's own lines are not in the book as story (Book tab: no fact quotes a `[Scribe]` line).
 - [ ] Regenerate a reply. Findings about the old text go; the new text is checked.
 - [ ] Type in the panel's fields. Nothing you type there triggers a site shortcut or lands in the chat.
+- [ ] Open a second chat in a second tab of the same window. Both chats are read; the hidden one keeps going.
 - [ ] Open the same room in a second tab. It says another tab is reading. Hide the first tab: the second takes over.
 - [ ] Press **Export**. A file `scribe-<room>.json` is saved.
 - [ ] Then adopt the long campaign. Messages: ____ Time: ____ Cost: $____ Conflicts: ____ Look-alikes: ____ Questions: ____

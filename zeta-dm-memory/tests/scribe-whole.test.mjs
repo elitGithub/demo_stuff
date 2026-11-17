@@ -27,6 +27,8 @@ const TICK_MS = 20000;
 const MOST_QUIET = 10;
 const WIDE = 1280;
 const NARROW = 390;
+const QUARRY = 'quarry';
+const QUARRY_LENGTH = 61;
 const OPENING = '[Scribe] Day 1, "The harbour market", public. Present: Halvard, Mirelle, and 1 other.';
 const HAIR = 'Mirelle, hair: "black, worn in a braid".';
 const OLD_HAIR = 'black, worn in a braid';
@@ -150,11 +152,12 @@ const COSTS = Object.freeze({
 });
 
 /**
+ * @param {number} length
  * @return {CampaignBuilder}
  */
-function campaign() {
+function campaign(length = CHAT_LENGTH) {
     const builder = new CampaignBuilder(PLAYER);
-    for (let number = 1; number <= CHAT_LENGTH; number++) {
+    for (let number = 1; number <= length; number++) {
         if (number % 2 === 0) {
             builder.player(SPOKEN[number] ?? `Halvard keeps watch by the quay, turn ${number}.`);
         } else {
@@ -260,8 +263,8 @@ const ANSWERS = Object.freeze({
 });
 
 /**
- * @param {{ locks?: boolean }} options
- * @return {{ clock: FakeTimers, site: WholeSite, model: WholeModel, storage: FakeStorage, locks: FakeLocks|null, tabs: WholeTab[], made: number }}
+ * @param {{ locks?: boolean, query?: boolean }} options
+ * @return {{ clock: FakeTimers, site: WholeSite, model: WholeModel, storage: FakeStorage, locks: FakeLocks|null, query: boolean, tabs: WholeTab[], made: number }}
  */
 function world(options = {}) {
     return {
@@ -270,6 +273,7 @@ function world(options = {}) {
         model: new WholeModel(PROMPTS, ANSWERS, COSTS),
         storage: new FakeStorage(),
         locks: options.locks === false ? null : new FakeLocks(),
+        query: options.query !== false,
         tabs: [],
         made: 0,
     };
@@ -294,6 +298,7 @@ function install(walk, path, width = WIDE) {
         locks: walk.locks,
         path,
         width,
+        query: walk.query,
     });
     walk.tabs.push(tab);
     tab.run();
@@ -361,10 +366,11 @@ async function until(walk, label, condition, most) {
 /**
  * @param {object} walk
  * @param {string} kind
+ * @param {string} room
  * @return {object|null}
  */
-function stored(walk, kind) {
-    return REFERENCE.ScribeStore.read(walk.storage, ROOM, kind);
+function stored(walk, kind, room = ROOM) {
+    return REFERENCE.ScribeStore.read(walk.storage, room, kind);
 }
 
 /**
@@ -511,7 +517,7 @@ async function adopt(walk, tab, budget) {
     await until(
         walk,
         'the newest reply to be checked after the first reading',
-        () => stored(walk, 'live')?.seen?.id === walk.site.messages.at(-1).id,
+        () => stored(walk, 'live', tab.room())?.seen?.id === walk.site.messagesIn(tab.room()).at(-1).id,
         TICK_MS * 2,
     );
     await quiet(walk, 'the first check after adopting');
@@ -576,7 +582,10 @@ async function reload(walk, tab, width = WIDE) {
  */
 async function arrive(walk, tab, said, blocks) {
     await tab.pagePost(said);
-    walk.site.reply(blocks.map((block) => [...block]));
+    walk.site.reply(
+        blocks.map((block) => [...block]),
+        tab.room(),
+    );
 }
 
 /**
@@ -1145,19 +1154,42 @@ test('14. a second tab watches', async () => {
     assert.equal(second.panel.headline(), 'Another tab is reading this chat.');
 });
 
-test('14. when the first tab is hidden, the second becomes the reader', async () => {
+test('14. when the first tab is hidden while the second waits, the second becomes the reader', async () => {
     const { walk, tab } = await adopted('2');
     const second = await secondTab(walk);
+    assert.equal(walk.locks.waiting('scribe:reader:harbour'), 1);
+    const hidden = walk.model.calls.length;
     tab.show('hidden');
     await until(walk, 'step 14: the second tab to become the reader', () => second.panel.headline().startsWith('Up to date'), TICK_MS * 2);
+    await until(walk, 'step 14: the hidden tab to say another tab reads', () => tab.panel.headline() === 'Another tab is reading this chat.', TICK_MS * 2);
     const from = walk.model.calls.length;
     await arrive(walk, second, ASKED, REPLY);
     await until(walk, 'step 14: the reply to be checked', () => asked(walk, 'Pedant', from) >= 1, TICK_MS * 2);
     await pass(walk, TICK_MS * 2);
+    assert.equal(walk.model.calls.slice(hidden).filter((call) => call.tab === tab.name).length, 0);
     const since = walk.model.calls.slice(from);
-    assert.equal(since.filter((call) => call.tab === tab.name).length, 0);
     assert.equal(since.filter((call) => call.tab === second.name && call.role === 'Scene').length, 1);
     assert.equal(since.filter((call) => call.tab === second.name && call.role === 'Pedant').length, 1);
+    assert.equal(second.panel.headline(), 'Up to date: 90 of 93 read.');
+});
+
+test('14. with a lock manager that has no query, the hidden first tab keeps the chat', async () => {
+    const { walk, tab } = await adopted('2', { query: false });
+    const second = await secondTab(walk);
+    tab.show('hidden');
+    await pass(walk, TICK_MS * 3);
+    assert.equal(second.panel.headline(), 'Another tab is reading this chat.');
+    assert.equal(tab.panel.headline(), 'Up to date: 90 of 91 read.');
+    const from = walk.model.calls.length;
+    await arrive(walk, second, ASKED, REPLY);
+    await until(walk, 'step 14: the hidden reader to check the reply', () => asked(walk, 'Pedant', from) >= 1, TICK_MS * 3);
+    await pass(walk, TICK_MS * 2);
+    const since = walk.model.calls.slice(from);
+    assert.equal(since.filter((call) => call.tab === second.name).length, 0);
+    assert.equal(since.filter((call) => call.tab === tab.name && call.role === 'Scene').length, 1);
+    assert.equal(since.filter((call) => call.tab === tab.name && call.role === 'Pedant').length, 1);
+    assert.equal(stored(walk, 'live').seen.id, walk.site.messages.at(-1).id);
+    assert.equal(second.panel.headline(), 'Another tab is reading this chat.');
 });
 
 test('14. without browser locks, the second tab is still a watcher', async () => {
@@ -1424,6 +1456,65 @@ test('19. hidden by its Hide button: shown again, the panel shows the same findi
     assert.equal(walk.storage.get('scribe:panel', null), 'open');
 });
 
+test('20. two chats in two tabs of one window, the first hidden: each reads its own chat', async () => {
+    const { walk, tab } = await adopted('2');
+    walk.site.open(QUARRY, campaign(QUARRY_LENGTH));
+    const other = install(walk, '/');
+    other.ready();
+    await pass(walk, 1000);
+    other.go(`/rooms/${QUARRY}`);
+    await other.openPage();
+    await until(walk, 'step 20: the second chat to be pulled', () => other.panel.headline() === 'No book for this chat yet: 61 messages.', 15000);
+    await adopt(walk, other, '2');
+    assert.equal(other.panel.headline(), 'Up to date: 60 of 61 read.');
+    assert.equal(tab.panel.headline(), 'Up to date: 90 of 91 read.');
+    await tab.pagePost(ASKED);
+    tab.show('hidden');
+    walk.site.reply(REPLY.map((block) => [...block]));
+    const from = walk.model.calls.length;
+    await arrive(walk, other, 'I ask Mirelle about the quarry.', REPLY);
+    await until(
+        walk,
+        'step 20: both new replies to be checked',
+        () =>
+            stored(walk, 'live').seen?.id === walk.site.messages.at(-1).id &&
+            stored(walk, 'live', QUARRY).seen?.id === walk.site.messagesIn(QUARRY).at(-1).id,
+        TICK_MS * 3,
+    );
+    await quiet(walk, 'step 20: both tabs at rest');
+    assert.equal(walk.locks.held('scribe:reader:harbour'), true);
+    assert.equal(walk.locks.held('scribe:reader:quarry'), true);
+    assert.equal(walk.locks.waiting('scribe:reader:harbour'), 0);
+    assert.equal(walk.locks.waiting('scribe:reader:quarry'), 0);
+    const since = walk.model.calls.slice(from);
+    /**
+     * @param {WholeTab} each
+     * @param {string} role
+     * @return {string[]}
+     */
+    const replies = (each, role) => since.filter((call) => call.tab === each.name && call.role === role).map((call) => /REPLY \(#(\d+)\)/.exec(call.user)?.[1] ?? 'scene');
+    assert.deepEqual(replies(tab, 'Scene'), ['scene']);
+    assert.deepEqual(replies(tab, 'Pedant'), ['93']);
+    assert.deepEqual(replies(other, 'Scene'), ['scene']);
+    assert.deepEqual(replies(other, 'Pedant'), ['63']);
+    assert.equal(since.filter((call) => call.role === 'Story').length, 0);
+    assert.equal(tab.document.visibilityState, 'hidden');
+    assert.equal(tab.panel.headline(), 'Up to date: 90 of 93 read.');
+    assert.equal(other.panel.headline(), 'Up to date: 60 of 63 read.');
+    const hiddenReady = stored(walk, 'live').ready;
+    const visibleReady = stored(walk, 'live', QUARRY).ready;
+    assert.equal(hiddenReady.startsWith(`${OPENING} ${HAIR}`), true, hiddenReady);
+    assert.equal(visibleReady.startsWith(`${OPENING} ${HAIR}`), true, visibleReady);
+    assert.deepEqual(plain(stored(walk, 'live').findings.map((finding) => [finding.message, finding.status])), [['MESSAGE-93', 'Open']]);
+    assert.deepEqual(plain(stored(walk, 'live', QUARRY).findings.map((finding) => [finding.message, finding.status])), [['MESSAGE-63', 'Open']]);
+    const went = await send(walk, other, 'I nod.');
+    assert.equal(went, `I nod.\n@: ${visibleReady}`);
+    assert.equal(stored(walk, 'live', QUARRY).ready, null);
+    assert.equal(stored(walk, 'live').ready, hiddenReady);
+    assert.equal(tab.panel.hosts(), 1);
+    assert.equal(other.panel.hosts(), 1);
+});
+
 /**
  * @param {string} text
  * @param {readonly string[]} secrets
@@ -1526,8 +1617,10 @@ test('18. secrets over the whole walk', async () => {
         button.click();
     }
     await pass(walk, 1000);
+    const handed = walk.model.calls.length;
     third.show('hidden');
     await pass(walk, TICK_MS * 2);
+    const handover = fourth.panel.headline();
     await arrive(walk, fourth, ASKED, REPLY);
     await pass(walk, TICK_MS * 2);
     fourth.panel.tab('Progress');
@@ -1545,6 +1638,8 @@ test('18. secrets over the whole walk', async () => {
         3,
     );
     assert.equal(afterSpent, spent);
+    assert.equal(handover.startsWith('Up to date'), true, handover);
+    assert.equal(walk.model.calls.slice(handed).filter((call) => call.tab === third.name).length, 0);
     assert.deepEqual(fourth.questions, ['Start a new book? It replaces the saved book for this chat.']);
     assert.equal(walk.model.by(fourth.name).filter((call) => call.role === 'Story').length >= 4, true);
     assert.equal(walk.model.by(fourth.name).filter((call) => call.role === 'Pedant').length >= 1, true);

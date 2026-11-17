@@ -240,9 +240,9 @@ The other tabs: **Summary** (what needs you, the cast, where the story stands), 
 
 Every answer OpenRouter bills is counted against the day's budget, including answers that came back empty or cut off. When the budget is reached, reading stops and replies are no longer checked until the next day. The header shows the day's spending.
 
-### One tab reads
+### One tab per chat reads
 
-The tab you are looking at reads and checks. A second tab on the same chat shows the book and changes nothing. A hidden tab does nothing until it is shown again.
+Each chat has its own book, and for each chat one tab reads and checks. Several chats can be open in several tabs at once; a tab keeps working while it is hidden. A second tab on the same chat shows the book and changes nothing; when the first tab is hidden, it hands that chat to the second.
 
 ### Limits
 

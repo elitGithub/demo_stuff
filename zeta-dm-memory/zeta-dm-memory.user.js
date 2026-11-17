@@ -1,9 +1,10 @@
 // ==UserScript==
 // @name         Zeta AI - Per-Room DM Memory Injector
 // @namespace    http://tampermonkey.net/
-// @version      1.3
+// @version      1.4
 // @description  Per-chat campaign memory notes & automatic periodic narrator injection for Zeta AI
 // @match        https://zeta-ai.io/*
+// @match        https://frame.pingpong.ai/*
 // @run-at       document-idle
 // @grant        GM_getValue
 // @grant        GM_setValue
@@ -18,6 +19,74 @@
 
     let lastPath = '';
     let bypassNextEnter = false;
+
+    const Bridge = Object.freeze({
+        TopOrigin: 'https://zeta-ai.io',
+        FrameOrigin: 'https://frame.pingpong.ai',
+        FramePrefix: 'https://frame.pingpong.ai/',
+        Tag: 1,
+        Kind: Object.freeze({ Ready: 'ready', Arm: 'arm', Sent: 'sent', Paste: 'paste', Pasted: 'pasted' }),
+        Mode: Object.freeze({ Off: 'off', Count: 'count', Inject: 'inject' }),
+        ResendMs: 25,
+        ReadyRepeatMs: 1000,
+        RoomCheckMs: 100,
+    });
+
+    const ancestors = window.location.ancestorOrigins;
+    if (window.location.origin === Bridge.FrameOrigin
+        && (ancestors ? ancestors[0] === Bridge.TopOrigin : window.parent !== window)) {
+        let arm = null;
+        /**
+         * @param {string} kind
+         * @param {object} fields
+         * @return {void}
+         */
+        const report = (kind, fields) => {
+            window.parent.postMessage({ ...fields, zetaDm: Bridge.Tag, kind }, Bridge.TopOrigin);
+        };
+        const readyRepeat = setInterval(() => {
+            report(Bridge.Kind.Ready, {});
+        }, Bridge.ReadyRepeatMs);
+        window.addEventListener('message', (event) => {
+            if (!tagged(event, Bridge.TopOrigin) || event.source !== window.parent) {
+                return;
+            }
+            const data = event.data;
+            const hasText = typeof data.text === 'string' && data.text !== '';
+            if (data.kind === Bridge.Kind.Arm && data.mode === Bridge.Mode.Inject && hasText) {
+                arm = { mode: data.mode, text: data.text };
+                clearInterval(readyRepeat);
+            } else if (data.kind === Bridge.Kind.Arm && data.text === undefined
+                && (data.mode === Bridge.Mode.Off || data.mode === Bridge.Mode.Count)) {
+                arm = { mode: data.mode };
+                clearInterval(readyRepeat);
+            } else if (data.kind === Bridge.Kind.Paste && hasText) {
+                const box = findChatInput();
+                if (box && appendNotes(box, data.text)) {
+                    report(Bridge.Kind.Pasted, {});
+                }
+            }
+        });
+        hookSends((box) => {
+            if (arm === null || arm.mode === Bridge.Mode.Off) {
+                return false;
+            }
+            const injected = arm.mode === Bridge.Mode.Inject;
+            const written = injected && appendNotes(box, arm.text);
+            arm = { mode: Bridge.Mode.Count };
+            report(Bridge.Kind.Sent, { injected });
+            return written;
+        });
+        report(Bridge.Kind.Ready, {});
+        return;
+    }
+    if (window.location.origin !== Bridge.TopOrigin) {
+        return;
+    }
+
+    const spokenFrames = new WeakSet();
+    let armedFrame = null;
+    let armedValue = '';
 
     /**
      * @param {string} [roomId]
@@ -1108,12 +1177,115 @@
         el.dispatchEvent(new Event('change', { bubbles: true }));
     }
 
+    /**
+     * @return {?HTMLTextAreaElement}
+     */
     function findChatInput() {
-        return (
-            document.querySelector('textarea[name="message"]') ||
-            document.querySelector('textarea:not(#zeta-dm-notes)') ||
-            document.querySelector('input[type="text"]:not(#zeta-dm-interval)')
-        );
+        return document.querySelector('textarea[name="message"]');
+    }
+
+    /**
+     * @param {HTMLTextAreaElement} box
+     * @param {string} text
+     * @return {boolean}
+     */
+    function appendNotes(box, text) {
+        if (box.value.includes(text)) {
+            return false;
+        }
+        const current = box.value.trimEnd();
+        setReactInputValue(box, current ? current + '\n\n' + text : text);
+        return true;
+    }
+
+    /**
+     * @param {function(HTMLTextAreaElement): boolean} deliver
+     * @return {void}
+     */
+    function hookSends(deliver) {
+        window.addEventListener('keydown', (event) => {
+            if (bypassNextEnter || event.key !== 'Enter' || event.shiftKey || event.isComposing) {
+                return;
+            }
+            const box = findChatInput();
+            if (!box || document.activeElement !== box || !box.value.trim() || !deliver(box)) {
+                return;
+            }
+            event.preventDefault();
+            event.stopImmediatePropagation();
+            setTimeout(() => {
+                bypassNextEnter = true;
+                box.dispatchEvent(new KeyboardEvent('keydown', {
+                    key: 'Enter',
+                    code: 'Enter',
+                    keyCode: 13,
+                    which: 13,
+                    bubbles: true,
+                    cancelable: true,
+                }));
+                bypassNextEnter = false;
+            }, Bridge.ResendMs);
+        }, true);
+        window.addEventListener('pointerdown', (event) => {
+            const button = event.target.closest('button[aria-label="Send"]');
+            const box = findChatInput();
+            if (!button || button.closest('#zeta-dm-widget') || !box || !box.value.trim()) {
+                return;
+            }
+            deliver(box);
+        }, true);
+    }
+
+    /**
+     * @param {MessageEvent} event
+     * @param {string} origin
+     * @return {boolean}
+     */
+    function tagged(event, origin) {
+        return event.origin === origin && Boolean(event.data) && typeof event.data === 'object'
+            && event.data.zetaDm === Bridge.Tag;
+    }
+
+    /**
+     * @return {?Window}
+     */
+    function chatFrame() {
+        for (const frame of document.querySelectorAll('iframe')) {
+            if (!frame.src.startsWith(Bridge.FramePrefix)) {
+                continue;
+            }
+            const rect = frame.getBoundingClientRect();
+            if (rect.width > 0 && rect.height > 0) {
+                return frame.contentWindow;
+            }
+        }
+        return null;
+    }
+
+    /**
+     * @param {boolean} force
+     * @return {void}
+     */
+    function pushArm(force) {
+        const frame = chatFrame();
+        if (!frame || !spokenFrames.has(frame)) {
+            return;
+        }
+        const state = cloudSync.localState(window.location.pathname);
+        const text = formatNotesAsNarrator(state.notes);
+        let arm = { zetaDm: Bridge.Tag, kind: Bridge.Kind.Arm, mode: Bridge.Mode.Count };
+        if (!text) {
+            arm = { ...arm, mode: Bridge.Mode.Off };
+        } else if (state.forceNext || state.turnCount + 1 >= state.interval) {
+            arm = { ...arm, mode: Bridge.Mode.Inject, text };
+        }
+        const value = JSON.stringify(arm);
+        if (!force && frame === armedFrame && value === armedValue) {
+            return;
+        }
+        armedFrame = frame;
+        armedValue = value;
+        frame.postMessage(arm, Bridge.FrameOrigin);
     }
 
     function buildWidget() {
@@ -1140,7 +1312,7 @@
 
         widget.innerHTML = `
             <div style="display:flex;justify-content:space-between;align-items:center;margin-bottom:6px;cursor:pointer;" id="zeta-dm-header">
-                <strong style="font-size:13px;color:#a78bfa;">🎲 DM Memory v1.3</strong>
+                <strong style="font-size:13px;color:#a78bfa;">DM Memory v1.4</strong>
                 <button id="zeta-dm-toggle" type="button" style="background:none;border:none;color:#aaa;cursor:pointer;font-size:14px;padding:0 4px;">—</button>
             </div>
             <div id="zeta-dm-body">
@@ -1180,6 +1352,7 @@
                 cloudSync.shownValue = notesEl.value;
                 cloudSync.shownNotes = notesEl.value;
                 cloudSync.editNotes(roomId, notesEl.value);
+                pushArm(false);
             }
         });
 
@@ -1227,6 +1400,10 @@
             const input = findChatInput();
             const state = loadRoomState();
             const formatted = formatNotesAsNarrator(state.notes);
+            const frame = input ? null : chatFrame();
+            if (frame && spokenFrames.has(frame) && formatted) {
+                frame.postMessage({ zetaDm: Bridge.Tag, kind: Bridge.Kind.Paste, text: formatted }, Bridge.FrameOrigin);
+            }
             if (!input || !formatted) return;
 
             if (!input.value.includes(formatted)) {
@@ -1272,6 +1449,7 @@
         bodyEl.style.display = state.minimized ? 'none' : 'block';
         toggleBtn.textContent = state.minimized ? '▢' : '—';
         cloudSync.render(window.location.pathname);
+        pushArm(false);
     }
 
     // Returns true if text was modified so the caller knows whether to delay submission by 1 frame
@@ -1301,56 +1479,58 @@
         return didModify;
     }
 
-    // Intercept Enter keypress: pause native submit for 25ms when injecting so React state commits the newline
-    window.addEventListener('keydown', (e) => {
-        if (bypassNextEnter) return;
+    hookSends(checkAndInject);
 
-        if (e.key === 'Enter' && !e.shiftKey && !e.isComposing) {
-            const active = document.activeElement;
-            if (active && (active.tagName === 'TEXTAREA' || active.tagName === 'INPUT') && active.id !== 'zeta-dm-notes' && active.id !== 'zeta-dm-interval') {
-                const modified = checkAndInject(active);
-                if (modified) {
-                    e.preventDefault();
-                    e.stopImmediatePropagation();
-                    setTimeout(() => {
-                        bypassNextEnter = true;
-                        active.dispatchEvent(new KeyboardEvent('keydown', {
-                            key: 'Enter',
-                            code: 'Enter',
-                            keyCode: 13,
-                            which: 13,
-                            bubbles: true,
-                            cancelable: true
-                        }));
-                        bypassNextEnter = false;
-                    }, 25);
-                }
-            }
+    window.addEventListener('message', (event) => {
+        if (!tagged(event, Bridge.FrameOrigin)) {
+            return;
         }
-    }, true);
-
-    // Intercept clicking the Send button with the mouse (pointerdown fires before click, giving React time to update)
-    window.addEventListener('pointerdown', (e) => {
-        const btn = e.target.closest('button');
-        const input = findChatInput();
-        if (!btn || !input || !input.value.trim()) return;
-        if (btn.closest('#zeta-dm-widget')) return;
-
-        if (btn.type === 'submit' || btn.querySelector('svg')) {
-            const rect = btn.getBoundingClientRect();
-            if (rect.bottom > window.innerHeight - 180) {
-                checkAndInject(input);
-            }
+        const data = event.data;
+        const valid = data.kind === Bridge.Kind.Ready || data.kind === Bridge.Kind.Pasted
+            || (data.kind === Bridge.Kind.Sent && typeof data.injected === 'boolean');
+        const frame = chatFrame();
+        if (!valid || !frame || event.source !== frame) {
+            return;
         }
-    }, true);
+        spokenFrames.add(frame);
+        if (data.kind === Bridge.Kind.Ready) {
+            pushArm(true);
+        } else if (data.kind === Bridge.Kind.Sent) {
+            if (!formatNotesAsNarrator(cloudSync.localState(window.location.pathname).notes)) {
+                return;
+            }
+            const state = loadRoomState();
+            if (data.injected) {
+                state.turnCount = 0;
+                state.forceNext = false;
+            } else {
+                state.turnCount += 1;
+            }
+            saveRoomState(state);
+            pushArm(true);
+            syncUI();
+        } else {
+            const state = loadRoomState();
+            state.turnCount = 0;
+            state.forceNext = false;
+            saveRoomState(state);
+            syncUI();
+        }
+    });
 
     cloudSync.start();
 
     setInterval(() => {
         buildWidget();
-        if (window.location.pathname !== lastPath) {
+        pushArm(false);
+    }, 800);
+
+    setInterval(() => {
+        if (window.location.pathname !== lastPath
+            && (lastPath !== '' || document.getElementById('zeta-dm-widget'))) {
             lastPath = window.location.pathname;
             cloudSync.activateRoom(lastPath);
+            pushArm(false);
         }
-    }, 800);
+    }, Bridge.RoomCheckMs);
 })();

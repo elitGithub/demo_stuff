@@ -3,9 +3,13 @@ import { runInNewContext } from 'node:vm';
 
 export class UserscriptHarness {
     /**
-     * @param {{source: string, pathname: string, localStorage?: Map, gmStorage?: Map}} options
+     * @param {{source: string, pathname: string, localStorage?: Map, gmStorage?: Map, origin?: string, frame?: boolean, blankFrame?: boolean, ancestors?: boolean|string[], dropFirstReady?: boolean}} options
      */
-    constructor({ source, pathname, localStorage = new Map(), gmStorage = new Map() }) {
+    constructor({
+        source, pathname, localStorage = new Map(), gmStorage = new Map(), origin = 'https://zeta-ai.io',
+        frame = false, blankFrame = false, ancestors = true, dropFirstReady = false,
+    }) {
+        this.source = source;
         this.localStorage = localStorage;
         this.gmStorage = gmStorage;
         this.localWrites = [];
@@ -17,6 +21,14 @@ export class UserscriptHarness {
         this.confirmResult = true;
         this.requests = [];
         this.chatEvents = [];
+        this.messages = [];
+        this.frameCalls = [];
+        this.realms = [];
+        this.framed = frame;
+        this.ancestors = ancestors;
+        this.frameLoads = 0;
+        this.dropNextReady = dropFirstReady;
+        this.running = null;
         this.failLocalWrites = false;
         this.hasAbortHandle = true;
         this.menus = new Map();
@@ -24,7 +36,6 @@ export class UserscriptHarness {
         this.time = Date.parse('2026-11-10T10:00:00.000Z');
         this.timers = new Map();
         this.nextTimer = 0;
-        const harness = this;
 
         class BrowserEvent {
             constructor(type, data = {}) {
@@ -33,6 +44,89 @@ export class UserscriptHarness {
             preventDefault() { this.defaultPrevented = true; }
             stopImmediatePropagation() { this.stopped = true; }
         }
+        this.BrowserEvent = BrowserEvent;
+
+        const top = this.createRealm('top', { origin, pathname });
+        top.window.parent = top.window;
+        Object.assign(top.window, {
+            prompt: (...args) => {
+                this.prompts.push(args);
+                return this.promptResult;
+            },
+            alert: (message) => this.alerts.push(message),
+            confirm: (message) => {
+                this.confirmations.push(message);
+                return typeof this.confirmResult === 'function' ? this.confirmResult() : this.confirmResult;
+            },
+        });
+        this.top = top;
+        this.document = top.document;
+        this.window = top.window;
+        if (frame) {
+            this.iframe = top.document.body.appendChild(new top.Element('iframe'));
+            this.iframe.setAttribute('src', 'https://frame.pingpong.ai/v1/index.html#run=r&host=h');
+            this.setFrameRect(480, 927);
+        } else {
+            this.addChat(top);
+            const send = top.document.body.appendChild(new top.Element('button'));
+            send.setAttribute('id', 'send');
+            send.setAttribute('type', 'submit');
+            send.setAttribute('aria-label', 'Send');
+        }
+        const context = {
+            ...this.globals(top),
+            localStorage: {
+                getItem: (key) => localStorage.get(key) ?? null,
+                setItem: (key, value) => {
+                    this.localWrites.push({ key, value });
+                    if (this.failLocalWrites) {
+                        throw new Error('Quota exceeded');
+                    }
+                    localStorage.set(key, value);
+                },
+            },
+        };
+        if (!source.includes('// @grant        none')) {
+            Object.assign(context, {
+                GM_getValue: (key, fallback) => gmStorage.get(key) ?? fallback,
+                GM_setValue: (key, value) => {
+                    const previous = gmStorage.get(key);
+                    gmStorage.set(key, value);
+                    this.gmWrites.push({ key, value });
+                    this.keyListeners.get(key)?.(key, previous, value, false);
+                },
+                GM_registerMenuCommand: (label, callback) => this.menus.set(label, callback),
+                GM_addValueChangeListener: (key, callback) => this.keyListeners.set(key, callback),
+                GM_xmlhttpRequest: (options) => {
+                    const request = { ...options, aborted: false };
+                    this.requests.push(request);
+                    if (this.hasAbortHandle) {
+                        return { abort: () => {
+                            request.aborted = true;
+                            request.onabort();
+                        } };
+                    }
+                    return undefined;
+                },
+            });
+        }
+        this.within(top, () => runInNewContext(source, context, { filename: 'zeta-dm-memory.user.js' }));
+        if (frame) {
+            this.openFrame();
+        }
+        if (frame && !blankFrame) {
+            this.reloadSameWindow();
+        }
+    }
+
+    /**
+     * @param {string} name
+     * @param {{origin: string, pathname: string, hash?: string}} location
+     * @return {object}
+     */
+    createRealm(name, location) {
+        const harness = this;
+        const realm = { name, origin: location.origin };
 
         class Element {
             constructor(tagName) {
@@ -67,7 +161,7 @@ export class UserscriptHarness {
             get options() { return this.children; }
             setAttribute(name, value) {
                 this.attributes.set(name, value);
-                if (['id', 'name', 'type'].includes(name)) {
+                if (['id', 'name', 'type', 'src'].includes(name)) {
                     this[name] = value;
                 }
                 if (name === 'hidden') {
@@ -78,6 +172,24 @@ export class UserscriptHarness {
                 child.parent = this;
                 this.children.push(child);
                 return child;
+            }
+            /**
+             * @param {Element} child
+             * @return {Element}
+             */
+            prepend(child) {
+                child.parent = this;
+                this.children.unshift(child);
+                return child;
+            }
+            /**
+             * @return {void}
+             */
+            remove() {
+                if (this.parent) {
+                    this.parent.children = this.parent.children.filter((child) => child !== this);
+                    this.parent = null;
+                }
             }
             replaceChildren(...children) {
                 this.children = [];
@@ -113,10 +225,18 @@ export class UserscriptHarness {
                     case 'textarea:not(#zeta-dm-notes)': return this.tagName === 'TEXTAREA' && this.id !== 'zeta-dm-notes';
                     case 'input[type="text"]:not(#zeta-dm-interval)':
                         return this.tagName === 'INPUT' && this.type === 'text' && this.id !== 'zeta-dm-interval';
+                    case 'button[aria-label="Send"]':
+                        return this.tagName === 'BUTTON' && this.attributes.get('aria-label') === 'Send';
+                    case 'iframe': return this.tagName === 'IFRAME';
                     default: return selector.startsWith('#') ? this.id === selector.slice(1) : this.tagName === selector.toUpperCase();
                 }
             }
             querySelector(selector) { return this.descendants().find((element) => element.matches(selector)) ?? null; }
+            /**
+             * @param {string} selector
+             * @return {Element[]}
+             */
+            querySelectorAll(selector) { return this.descendants().filter((element) => element.matches(selector)); }
             closest(selector) {
                 for (let element = this; element; element = element.parent) {
                     if (element.matches(selector)) {
@@ -125,7 +245,7 @@ export class UserscriptHarness {
                 }
                 return null;
             }
-            getBoundingClientRect() { return { bottom: 790 }; }
+            getBoundingClientRect() { return this.rect ?? { bottom: 790 }; }
             focus() { document.activeElement = this; }
             addEventListener(type, listener) {
                 if (!this.listeners.has(type)) {
@@ -134,12 +254,14 @@ export class UserscriptHarness {
                 this.listeners.get(type).push(listener);
             }
             dispatchEvent(event) {
-                event.target = this;
-                if (this !== window && (event.type === 'keydown' || event.type === 'pointerdown')) {
-                    window.emit(event);
-                }
-                this.emit(event);
-                return !event.defaultPrevented;
+                return harness.within(realm, () => {
+                    event.target = this;
+                    if (this !== window && (event.type === 'keydown' || event.type === 'pointerdown')) {
+                        window.emit(event);
+                    }
+                    this.emit(event);
+                    return !event.defaultPrevented;
+                });
             }
             emit(event) {
                 for (const listener of this.listeners.get(event.type) ?? []) {
@@ -157,99 +279,241 @@ export class UserscriptHarness {
             createElement: (tag) => new Element(tag),
             getElementById: (id) => document.body.querySelector('#' + id),
             querySelector: (selector) => document.body.querySelector(selector),
+            querySelectorAll: (selector) => document.body.querySelectorAll(selector),
         };
         const window = new Element('window');
         Object.assign(window, {
-            location: { pathname },
+            location: { ...location },
             innerHeight: 800,
             HTMLTextAreaElement: Element,
             HTMLInputElement: Element,
-            prompt: (...args) => {
-                this.prompts.push(args);
-                return this.promptResult;
-            },
-            alert: (message) => this.alerts.push(message),
-            confirm: (message) => {
-                this.confirmations.push(message);
-                return typeof this.confirmResult === 'function' ? this.confirmResult() : this.confirmResult;
-            },
+            postMessage: (data, targetOrigin) => harness.post(harness.running, realm, data, targetOrigin),
         });
-        const chat = document.body.appendChild(new Element('textarea'));
+        Object.assign(realm, { Element, document, window });
+        this.realms.push(realm);
+        return realm;
+    }
+
+    /**
+     * @param {object} realm
+     * @return {object}
+     */
+    globals(realm) {
+        const harness = this;
+        return {
+            document: realm.document, window: realm.window, TextEncoder, URL, URLSearchParams, crypto: { randomUUID },
+            Event: this.BrowserEvent, InputEvent: this.BrowserEvent, KeyboardEvent: this.BrowserEvent,
+            Date: class extends Date { static now() { return harness.time; } },
+            setTimeout: (callback, delay) => this.setTimer(callback, delay, false, realm),
+            setInterval: (callback, delay) => this.setTimer(callback, delay, true, realm),
+            clearTimeout: (id) => this.timers.delete(id),
+            clearInterval: (id) => this.timers.delete(id),
+            console: Object.fromEntries(['log', 'warn', 'error'].map((level) => [level, (...args) => this.logs.push(args)])),
+        };
+    }
+
+    /**
+     * @param {object} realm
+     * @return {void}
+     */
+    addChat(realm) {
+        const chat = realm.document.body.appendChild(new realm.Element('textarea'));
         chat.setAttribute('id', 'chat');
         chat.setAttribute('name', 'message');
         chat._valueTracker = { setValue: (value) => this.chatEvents.push({ type: 'tracker', value }) };
         for (const type of ['input', 'change', 'keydown']) {
             chat.addEventListener(type, (event) => this.chatEvents.push({ type, data: event.data, key: event.key }));
         }
-        const send = document.body.appendChild(new Element('button'));
-        send.setAttribute('id', 'send');
-        send.setAttribute('type', 'submit');
-        this.document = document;
-        this.window = window;
-        this.BrowserEvent = BrowserEvent;
-        const context = {
-            document, window, TextEncoder, URL, URLSearchParams, crypto: { randomUUID },
-            Event: BrowserEvent, InputEvent: BrowserEvent, KeyboardEvent: BrowserEvent,
-            Date: class extends Date { static now() { return harness.time; } },
-            setTimeout: (callback, delay) => this.setTimer(callback, delay, false),
-            setInterval: (callback, delay) => this.setTimer(callback, delay, true),
-            clearTimeout: (id) => this.timers.delete(id),
-            localStorage: {
-                getItem: (key) => localStorage.get(key) ?? null,
-                setItem: (key, value) => {
-                    this.localWrites.push({ key, value });
-                    if (this.failLocalWrites) {
-                        throw new Error('Quota exceeded');
-                    }
-                    localStorage.set(key, value);
-                },
-            },
-            console: Object.fromEntries(['log', 'warn', 'error'].map((level) => [level, (...args) => this.logs.push(args)])),
-        };
-        if (!source.includes('// @grant        none')) {
-            Object.assign(context, {
-                GM_getValue: (key, fallback) => gmStorage.get(key) ?? fallback,
-                GM_setValue: (key, value) => {
-                    const previous = gmStorage.get(key);
-                    gmStorage.set(key, value);
-                    this.gmWrites.push({ key, value });
-                    this.keyListeners.get(key)?.(key, previous, value, false);
-                },
-                GM_registerMenuCommand: (label, callback) => this.menus.set(label, callback),
-                GM_addValueChangeListener: (key, callback) => this.keyListeners.set(key, callback),
-                GM_xmlhttpRequest: (options) => {
-                    const request = { ...options, aborted: false };
-                    this.requests.push(request);
-                    if (this.hasAbortHandle) {
-                        return { abort: () => {
-                            request.aborted = true;
-                            request.onabort();
-                        } };
-                    }
-                    return undefined;
-                },
-            });
+    }
+
+    /**
+     * @return {?object}
+     */
+    openFrame() {
+        this.frameLoads += 1;
+        const previous = this.frame ?? null;
+        this.frame = this.createRealm(this.frameLoads === 1 ? 'frame' : 'frame' + this.frameLoads, {
+            origin: this.window.location.origin, pathname: 'blank',
+        });
+        this.frame.window.parent = this.window;
+        this.iframe.contentWindow = this.frame.window;
+        return previous;
+    }
+
+    /**
+     * @return {?object}
+     */
+    reloadFrame() {
+        const previous = this.openFrame();
+        this.reloadSameWindow();
+        return previous;
+    }
+
+    /**
+     * @return {void}
+     */
+    reloadSameWindow() {
+        const frame = this.frame;
+        for (const [id, timer] of this.timers) {
+            if (timer.realm === frame) {
+                this.timers.delete(id);
+            }
         }
-        runInNewContext(source, context, { filename: 'zeta-dm-memory.user.js' });
+        frame.window.listeners = new Map();
+        frame.document.body.replaceChildren();
+        frame.document.activeElement = null;
+        const ancestorOrigins = this.ancestors === true ? [this.window.location.origin] : this.ancestors;
+        frame.origin = 'https://frame.pingpong.ai';
+        frame.window.location = {
+            origin: frame.origin, pathname: '/v1/index.html', hash: '#run=r&host=h',
+            ...(ancestorOrigins ? { ancestorOrigins } : {}),
+        };
+        this.addChat(frame);
+        const body = frame.document.body;
+        for (const [id, label] of [['suggest', 'Suggested replies'], ['asterisk', 'Insert asterisk'], ['send', 'Send']]) {
+            const button = body.appendChild(new frame.Element('button'));
+            button.setAttribute('id', id);
+            button.setAttribute('aria-label', label);
+            button.appendChild(new frame.Element('svg'));
+        }
+        for (const id of ['extra1', 'extra2', 'extra3']) {
+            const input = body.appendChild(new frame.Element('input'));
+            input.setAttribute('id', id);
+            input.setAttribute('type', 'text');
+        }
+        /**
+         * @param {string} name
+         * @return {Function}
+         */
+        const logged = (name) => (...args) => {
+            this.frameCalls.push({ name, args });
+        };
+        const context = {
+            ...this.globals(frame),
+            localStorage: Object.fromEntries(['getItem', 'setItem', 'removeItem', 'clear', 'key']
+                .map((method) => [method, logged('localStorage.' + method)])),
+        };
+        if (!this.source.includes('// @grant        none')) {
+            Object.assign(context, Object.fromEntries(['GM_getValue', 'GM_setValue', 'GM_registerMenuCommand',
+                'GM_addValueChangeListener', 'GM_xmlhttpRequest'].map((name) => [name, logged(name)])));
+        }
+        this.within(frame, () => runInNewContext(this.source, context, { filename: 'zeta-dm-memory.user.js' }));
+    }
+
+    /**
+     * @param {number} width
+     * @param {number} height
+     * @return {void}
+     */
+    setFrameRect(width, height) {
+        this.iframe.rect = { width, height, bottom: height };
+    }
+
+    /**
+     * @param {object} realm
+     * @param {Function} callback
+     * @return {unknown}
+     */
+    within(realm, callback) {
+        const previous = this.running;
+        this.running = realm;
+        try {
+            return callback();
+        } finally {
+            this.running = previous;
+        }
+    }
+
+    /**
+     * @param {?object} sender
+     * @param {object} receiver
+     * @param {unknown} data
+     * @param {string} targetOrigin
+     * @return {void}
+     */
+    post(sender, receiver, data, targetOrigin) {
+        if (!sender) {
+            throw new Error('postMessage called outside a realm');
+        }
+        const clone = structuredClone(data);
+        let delivered = targetOrigin === receiver.origin;
+        if (delivered && this.dropNextReady && clone?.kind === 'ready') {
+            delivered = false;
+            this.dropNextReady = false;
+        }
+        this.messages.push({ from: sender.name, to: receiver.name, targetOrigin, data: clone, delivered });
+        if (delivered) {
+            this.deliver(receiver, clone, sender.origin, sender.window);
+        }
+    }
+
+    /**
+     * @param {{origin: string, source: unknown}} sender
+     * @param {object} target
+     * @param {unknown} data
+     * @return {void}
+     */
+    postAs({ origin, source }, target, data) {
+        const receiver = this.realms.find((realm) => realm.window === target);
+        const clone = structuredClone(data);
+        this.messages.push({ from: 'forged', to: receiver.name, targetOrigin: receiver.origin, data: clone, delivered: true });
+        this.deliver(receiver, clone, origin, source);
+    }
+
+    /**
+     * @param {object} receiver
+     * @param {unknown} data
+     * @param {string} origin
+     * @param {unknown} source
+     * @return {void}
+     */
+    deliver(receiver, data, origin, source) {
+        this.setTimer(() => receiver.window.emit(new this.BrowserEvent('message', {
+            data: structuredClone(data), origin, source,
+        })), 0, false, receiver);
+    }
+
+    /**
+     * @param {object} document
+     * @return {object}
+     */
+    byId(document) {
+        return Object.fromEntries(document.body.descendants().filter((element) => element.id)
+            .map((element) => [element.id, element]));
     }
 
     /**
      * @return {object}
      */
     get elements() {
-        return Object.fromEntries(this.document.body.descendants().filter((element) => element.id)
-            .map((element) => [element.id, element]));
+        const elements = this.byId(this.document);
+        return this.framed ? { ...elements, chat: this.frameElements.chat } : elements;
+    }
+
+    /**
+     * @return {object}
+     */
+    get frameElements() {
+        return this.byId(this.frame.document);
+    }
+
+    /**
+     * @return {object}
+     */
+    get chatElements() {
+        return this.framed ? this.frameElements : this.elements;
     }
 
     /**
      * @param {Function} callback
      * @param {number} delay
      * @param {boolean} repeating
+     * @param {object} realm
      * @return {number}
      */
-    setTimer(callback, delay, repeating) {
+    setTimer(callback, delay, repeating, realm) {
         const id = ++this.nextTimer;
-        this.timers.set(id, { callback, at: this.time + delay, interval: repeating ? delay : 0 });
+        this.timers.set(id, { callback, at: this.time + delay, interval: repeating ? delay : 0, realm });
         return id;
     }
 
@@ -282,7 +546,7 @@ export class UserscriptHarness {
             } else {
                 this.timers.delete(id);
             }
-            timer.callback();
+            this.within(timer.realm, timer.callback);
             await this.flush();
         }
         this.time = target;
@@ -428,9 +692,28 @@ export class UserscriptHarness {
     }
 
     /**
-     * @return {void}
+     * @param {string} elementId
+     * @param {object} [fields]
+     * @return {boolean}
+     */
+    enterOn(elementId, fields = {}) {
+        const element = this.chatElements[elementId];
+        element.focus();
+        return element.dispatchEvent(new this.BrowserEvent('keydown', { key: 'Enter', bubbles: true, ...fields }));
+    }
+
+    /**
+     * @param {string} elementId
+     * @return {boolean}
+     */
+    pointerOn(elementId) {
+        return this.chatElements[elementId].dispatchEvent(new this.BrowserEvent('pointerdown'));
+    }
+
+    /**
+     * @return {boolean}
      */
     pointerSend() {
-        this.elements.send.dispatchEvent(new this.BrowserEvent('pointerdown'));
+        return this.pointerOn('send');
     }
 }

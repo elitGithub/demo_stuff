@@ -5,9 +5,10 @@ Private per-room notes storage for the Zeta AI Tampermonkey script. This package
 ## Install or update the userscript
 
 1. Open [zeta-dm-memory.user.js](zeta-dm-memory.user.js). In the Tampermonkey dashboard, replace the contents of the existing script with this version and save. The name and namespace match v1.2. Keep one enabled copy.
-2. When Tampermonkey prompts for a connection, allow only the Worker host listed in the script, `zeta-dm-memory.elit1989.workers.dev`.
-3. On Zeta AI, select **Set DM API key** from the Tampermonkey menu and enter your Worker key. Repeat in each browser. The native prompt shows the key as you type. Keep it out of screenshots.
-4. Reload a Zeta room. The widget reads cloud notes for its exact pathname. Without a key, the widget keeps working with browser-local notes.
+2. Version 1.4 also matches `https://frame.pingpong.ai/*`. Zeta now serves its chat box from that frame inside the room page, so Tampermonkey runs the script there as well. The room page keeps the notes, counter, and widget. The copy in the frame only watches the chat box and its **Send** button and writes notes when the room page asks. Mouse sends count only while that button is labeled **Send**, so in another site language only Enter sends count.
+3. When Tampermonkey prompts for a connection, allow only the Worker host listed in the script, `zeta-dm-memory.elit1989.workers.dev`.
+4. On Zeta AI, select **Set DM API key** from the Tampermonkey menu and enter your Worker key. Repeat in each browser. The native prompt shows the key as you type. Keep it out of screenshots.
+5. Reload a Zeta room. The widget reads cloud notes for its exact pathname. Without a key, the widget keeps working with browser-local notes.
 
 Edits save locally as you type. Cloud saving waits for 500 ms without a notes change and for input composition to finish. Clearing the field saves an empty note. The status next to **Import** shows whether notes are loading, saving, saved, or need attention.
 
@@ -178,7 +179,7 @@ Run these database-free userscript checks from this directory in PowerShell.
 
 ```powershell
 & 'C:/Program Files/nodejs/node.exe' --check zeta-dm-memory.user.js
-& 'C:/Program Files/nodejs/node.exe' --test tests/userscript.test.mjs
+& 'C:/Program Files/nodejs/node.exe' --test tests/userscript.test.mjs tests/userscript-frame.test.mjs
 ```
 
 The userscript tests run the installed source in a Node VM with controlled browser events, time, and Tampermonkey responses. See the [userscript verification record](docs/verification/userscript-verification.md) for automated results and the pending browser checks.

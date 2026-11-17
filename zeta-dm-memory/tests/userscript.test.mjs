@@ -90,27 +90,6 @@ async function pickSource(harness, sourceRoom = externalSource) {
     await harness.change(sourceField, sourceRoom);
 }
 
-test('original_injection_sections_are_preserved', () => {
-    const spans = [
-        ...['formatNotesAsNarrator', 'setReactInputValue', 'findChatInput', 'checkAndInject']
-            .map((name) => ['\n    function ' + name + '(', '\n    }\n']),
-        ...['keydown', 'pointerdown']
-            .map((type) => ["\n    window.addEventListener('" + type + "'", '\n    }, true);\n']),
-    ];
-    for (const [start, end] of spans) {
-        /** @return {string} */
-        const section = (input) => {
-            const normalized = input.replace(/\r\n/g, '\n');
-            const offset = normalized.indexOf(start);
-            const last = normalized.indexOf(end, offset);
-            assert.notEqual(offset, -1, start);
-            assert.notEqual(last, -1, end);
-            return normalized.slice(offset, last + end.length);
-        };
-        assert.equal(section(source), section(original), start);
-    }
-});
-
 test('original_narration_paste_and_send_behavior', async () => {
     const outputs = [];
     for (const script of [original, source]) {

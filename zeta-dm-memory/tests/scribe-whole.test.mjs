@@ -478,7 +478,9 @@ function storedNames(walk) {
  */
 function queued(tab) {
     tab.panel.tab('Findings');
-    return tab.panel.rowTexts('queued');
+    const reminder = tab.panel.byId('scribe-reminder').value;
+    const rows = tab.panel.rowTexts('queued');
+    return reminder === '' ? rows : [`Reminder: ${reminder}`, ...rows];
 }
 
 /**
@@ -554,6 +556,23 @@ async function quiet(walk, label) {
 }
 
 /**
+ * @param {object} walk
+ * @param {WholeTab} tab
+ * @return {Promise<void>}
+ */
+async function forceReminder(walk, tab) {
+    tab.panel.tab('Findings');
+    tab.panel.click('scribe-force');
+    await until(
+        walk,
+        'the forced reminder to be ready',
+        () => typeof stored(walk, 'live', tab.room())?.ready === 'string',
+        TICK_MS * 2,
+    );
+    await quiet(walk, 'after the forced reminder');
+}
+
+/**
  * @param {string} budget
  * @param {{ locks?: boolean }} options
  * @return {Promise<{ walk: object, tab: WholeTab }>}
@@ -563,6 +582,7 @@ async function adopted(budget = '2', options = {}) {
     const tab = await opened(walk);
     await saveKey(walk, tab);
     await adopt(walk, tab, budget);
+    await forceReminder(walk, tab);
     return { walk, tab };
 }
 
@@ -782,10 +802,17 @@ test('4. while the book is first read, only the Analyzer is asked; then the newe
         [],
     );
     assert.equal(seen[last + 1].ready, null);
+    assert.equal(stored(walk, 'live').ready, null);
+    assert.deepEqual(queued(tab), []);
+    assert.equal(tab.panel.byId('scribe-reminder').value, '');
+    assert.equal(tab.panel.byId('scribe-force').disabled, false);
+    await forceReminder(walk, tab);
     const ready = stored(walk, 'live').ready;
     assert.equal(ready.startsWith(`${OPENING} `), true, ready);
     assert.equal(ready.includes('Present: 3 people'), false);
     assert.deepEqual(queued(tab), [`Reminder: ${ready}`]);
+    assert.equal(tab.panel.byId('scribe-reminder').value, ready);
+    assert.deepEqual(tab.panel.rowTexts('queued'), []);
 });
 
 test('4. the first message after adopting carries a reminder built from the book just read', async () => {
@@ -795,6 +822,37 @@ test('4. the first message after adopting carries a reminder built from the book
     assert.equal(went, `I look around.\n@: ${ready}`);
     assert.equal(went.startsWith(`I look around.\n@: ${OPENING} `), true, went);
     assert.equal(went.includes('Present: 3 people'), false);
+});
+
+test('4. without the press nothing goes before the count, and at the count the next reply makes one', async () => {
+    const walk = world();
+    const tab = await opened(walk);
+    await saveKey(walk, tab);
+    tab.panel.tab('Settings');
+    tab.panel.type('scribe-setting-refresh', '2');
+    await adopt(walk, tab, '2');
+    assert.equal(stored(walk, 'live').ready, null);
+    assert.equal(stored(walk, 'live').sends, 0);
+    assert.equal(await send(walk, tab, 'I look around.'), 'I look around.');
+    assert.equal(await send(walk, tab, 'I wait.'), 'I wait.');
+    assert.equal(stored(walk, 'live').sends, 2);
+    await arrive(walk, tab, ASKED, REPLY);
+    await until(
+        walk,
+        'the reply after the count to be checked',
+        () =>
+            stored(walk, 'live')?.seen?.id === walk.site.messages.at(-1).id &&
+            typeof stored(walk, 'live')?.ready === 'string',
+        TICK_MS * 2,
+    );
+    await quiet(walk, 'after the reply at the count');
+    const ready = stored(walk, 'live').ready;
+    assert.equal(ready.startsWith('[Scribe] '), true, ready);
+    assert.deepEqual(queued(tab), [`Reminder: ${ready}`]);
+    assert.equal(await send(walk, tab, 'I nod.'), `I nod.\n@: ${ready}`);
+    assert.equal(stored(walk, 'live').ready, null);
+    assert.equal(stored(walk, 'live').sends, 0);
+    assert.equal(await send(walk, tab, 'I wait again.'), 'I wait again.');
 });
 
 test('5. a reload keeps everything', async () => {
@@ -1533,6 +1591,7 @@ test('20. two chats in two tabs of one window, the first hidden: each reads its 
     await other.openPage();
     await until(walk, 'step 20: the second chat to be pulled', () => other.panel.headline() === 'No book for this chat yet: 61 messages.', 15000);
     await adopt(walk, other, '2');
+    await forceReminder(walk, other);
     assert.equal(other.panel.headline(), 'Up to date: 60 of 61 read.');
     assert.equal(tab.panel.headline(), 'Up to date: 90 of 91 read.');
     await tab.pagePost(ASKED);
@@ -1893,6 +1952,33 @@ test('F2. a reminder goes out through the frame by a press on Send', async () =>
     await throughFrame(true);
 });
 
+test('F2. a reminder typed with a doubled lead goes out through the frame with one lead', async () => {
+    const { walk, tab } = await replied('2');
+    tab.panel.tab('Findings');
+    const box = tab.panel.byId('scribe-reminder');
+    assert.equal(box.readOnly, true);
+    tab.panel.click('scribe-edit');
+    await pass(walk, 200);
+    assert.equal(box.readOnly, false);
+    box.value = '@: @: [Scribe] Mirelle wears a green coat.';
+    box.dispatchEvent({ type: 'input' });
+    await pass(walk, 500);
+    assert.equal(stored(walk, 'live').edited, null);
+    tab.panel.click('scribe-edit-save');
+    await pass(walk, 200);
+    assert.equal(box.readOnly, true);
+    assert.equal(box.value, '[Scribe] Mirelle wears a green coat.');
+    assert.equal(stored(walk, 'live').edited, '[Scribe] Mirelle wears a green coat.');
+    const posts = posted(walk);
+    const text = await send(walk, tab, 'I nod.');
+    assert.equal(posted(walk), posts + 1);
+    const body = JSON.parse(walk.site.requests.filter((request) => request.method === 'POST').at(-1).body).text;
+    assert.equal(body.endsWith('\n@: [Scribe] Mirelle wears a green coat.'), true, body);
+    assert.equal(body.includes('@: @:'), false, body);
+    assert.equal(text.includes('I nod.'), true);
+    assert.equal(stored(walk, 'live').edited, null);
+});
+
 test('F3. nothing lands in any other field of the top page or the frame', async () => {
     const { walk, tab } = await replied('2');
     const ready = stored(walk, 'live').ready;
@@ -2174,6 +2260,7 @@ test("F10. leaving one chat for another: the second chat's messages never carry 
     await until(walk, 'step F10: the second chat to be pulled', () => tab.panel.headline() === 'No book for this chat yet: 61 messages.', 15000);
     await saveKey(walk, tab);
     await adopt(walk, tab, '3');
+    await forceReminder(walk, tab);
     const quarryReady = stored(walk, 'live', QUARRY).ready;
     assert.equal(typeof quarryReady, 'string');
     await send(walk, tab, 'I look at the quarry wall.');
@@ -2187,6 +2274,7 @@ test("F10. leaving one chat for another: the second chat's messages never carry 
     await tab.openPage();
     await until(walk, 'step F10: the first chat to be pulled', () => tab.panel.headline() === 'No book for this chat yet: 91 messages.', TICK_MS * 2);
     await adopt(walk, tab, '3');
+    await forceReminder(walk, tab);
     const first = stored(walk, 'live').ready;
     assert.equal(typeof first, 'string');
     assert.equal(first.includes(OLD_HAIR), true, first);

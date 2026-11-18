@@ -6,6 +6,7 @@ export default class PanelLive {
         this.current = view;
         this.calls = [];
         this.failure = null;
+        this.refusal = null;
         this.held = null;
     }
 
@@ -88,6 +89,26 @@ export default class PanelLive {
      */
     clear() {
         this.note('clear', []);
+    }
+
+    /**
+     * @param {string} text
+     * @param {boolean|null} shown
+     * @return {void}
+     * @throws {Error}
+     */
+    edit(text, shown = null) {
+        this.note('edit', [text, shown]);
+        if (this.refusal !== null) {
+            throw this.refusal;
+        }
+    }
+
+    /**
+     * @return {Promise<void>}
+     */
+    force() {
+        return this.answer('force', []);
     }
 
     /**

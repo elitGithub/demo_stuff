@@ -96,6 +96,14 @@ const ScribePanel = Object.freeze({
             KeepOutcome: 'scribe-keep-outcome',
             Clear: 'scribe-clear',
             ClearOutcome: 'scribe-clear-outcome',
+            Reminder: 'scribe-reminder',
+            Edit: 'scribe-edit',
+            EditCancel: 'scribe-edit-cancel',
+            EditSave: 'scribe-edit-save',
+            Force: 'scribe-force',
+            ForceReason: 'scribe-force-reason',
+            ForceOutcome: 'scribe-force-outcome',
+            ReminderOutcome: 'scribe-reminder-outcome',
             OfferText: 'scribe-offer-text',
             OfferActions: 'scribe-offer-actions',
             OfferOutcome: 'scribe-offer-outcome',
@@ -138,6 +146,8 @@ const ScribePanel = Object.freeze({
             Split: 'split',
             Keep: 'keep',
             Clear: 'clear',
+            Force: 'force',
+            Reminder: 'reminder',
             Key: 'key',
             Settings: 'settings',
             Controls: 'controls',
@@ -289,6 +299,7 @@ const ScribePanel = Object.freeze({
             Autocomplete: 'autocomplete',
             InputMode: 'inputmode',
             MaxLength: 'maxlength',
+            Placeholder: 'placeholder',
             Fact: 'data-fact',
         }),
         Aria: Object.freeze({
@@ -414,7 +425,16 @@ const ScribePanel = Object.freeze({
             RevokeOpen: 'Revoke ruling ',
             Present: 'present: ',
             NextHeading: 'With your next message',
-            Reminder: 'Reminder: ',
+            ReminderLabel: 'Reminder',
+            NothingWaiting: 'No reminder is waiting.',
+            PreparedLater: 'A reminder is prepared after the next reply.',
+            EditHeld: 'Your edit goes once the book is ready.',
+            HeldReady: 'Your reminder goes once the book is ready.',
+            Edit: 'Edit',
+            EditCancel: 'Cancel',
+            EditSave: 'Save',
+            Force: 'Send a reminder with my next message',
+            Forced: 'It goes with your next message.',
             Suggestion: 'Suggestion: ',
             Clear: 'Clear',
             FindingsHeading: 'Findings',
@@ -618,6 +638,9 @@ const ScribePanel = Object.freeze({
             troubled: null,
             fixing: null,
             composing: false,
+            editing: false,
+            editShown: false,
+            editFrom: settings.Nothing,
             heldDraw: false,
             workedOut: null,
         };
@@ -1760,6 +1783,66 @@ const ScribePanel = Object.freeze({
             const settings = ScribePanel.Settings;
             const words = settings.Words;
             const next = ScribePanel.group(panel, section, words.NextHeading);
+            const reminder = ScribePanel.field(
+                panel,
+                settings.InputTypes.Area,
+                words.ReminderLabel,
+                settings.Ids.Reminder,
+                false,
+                false,
+            );
+            ScribePanel.own(panel, 'Reminder', reminder.input);
+            const editing = ScribePanel.make(panel, settings.Tags.Block, settings.Nothing, settings.Classes.Actions);
+            editing.append(
+                ScribePanel.own(
+                    panel,
+                    'Edit',
+                    ScribePanel.button(
+                        panel,
+                        words.Edit,
+                        /**
+                         * @return {Promise<void>}
+                         */
+                        async () => ScribePanel.openEdit(panel),
+                        settings.Guard.Free,
+                        settings.Ids.Edit,
+                    ),
+                ),
+                ScribePanel.own(
+                    panel,
+                    'EditCancel',
+                    ScribePanel.button(
+                        panel,
+                        words.EditCancel,
+                        /**
+                         * @return {Promise<void>}
+                         */
+                        async () => ScribePanel.closeEdit(panel, false),
+                        settings.Guard.Free,
+                        settings.Ids.EditCancel,
+                    ),
+                ),
+                ScribePanel.own(
+                    panel,
+                    'EditSave',
+                    ScribePanel.button(
+                        panel,
+                        words.EditSave,
+                        /**
+                         * @return {Promise<void>}
+                         */
+                        async () => ScribePanel.closeEdit(panel, true),
+                        settings.Guard.Free,
+                        settings.Ids.EditSave,
+                        settings.Classes.Primary,
+                    ),
+                ),
+            );
+            next.append(
+                reminder.label,
+                ScribePanel.outlet(panel, 'ReminderOutcome', settings.Outlets.Reminder),
+                editing,
+            );
             ScribePanel.pager(panel, settings.Lists.Queued, next);
             const clearing = ScribePanel.make(panel, settings.Tags.Block, settings.Nothing, settings.Classes.Actions);
             clearing.append(
@@ -1778,7 +1861,11 @@ const ScribePanel = Object.freeze({
                                 /**
                                  * @return {void}
                                  */
-                                call: () => panel.live.clear(),
+                                call: () => {
+                                    panel.editing = false;
+                                    ScribePanel.say(panel, settings.Outlets.Reminder, settings.Nothing);
+                                    panel.live.clear();
+                                },
                                 question: null,
                                 done: settings.Nothing,
                                 pending: words.Saving,
@@ -1788,8 +1875,36 @@ const ScribePanel = Object.freeze({
                         settings.Ids.Clear,
                     ),
                 ),
+                ScribePanel.own(
+                    panel,
+                    'Force',
+                    ScribePanel.button(
+                        panel,
+                        words.Force,
+                        /**
+                         * @return {Promise<void>}
+                         */
+                        () => ScribePanel.force(panel),
+                        settings.Guard.Free,
+                        settings.Ids.Force,
+                        settings.Classes.Primary,
+                    ),
+                ),
             );
-            next.append(clearing, ScribePanel.outlet(panel, 'ClearOutcome', settings.Outlets.Clear));
+            next.append(
+                clearing,
+                ScribePanel.outlet(panel, 'ClearOutcome', settings.Outlets.Clear),
+                ScribePanel.outlet(panel, 'ForceOutcome', settings.Outlets.Force),
+                ScribePanel.stale(
+                    panel,
+                    ScribePanel.own(
+                        panel,
+                        'ForceReason',
+                        ScribePanel.make(panel, settings.Tags.Paragraph, settings.Nothing, settings.Classes.Meta),
+                    ),
+                    true,
+                ),
+            );
             const offer = ScribePanel.group(panel, section, words.OfferHeading);
             offer.append(
                 ScribePanel.stale(
@@ -2050,6 +2165,11 @@ const ScribePanel = Object.freeze({
                 }
             }
         }
+        panel.parts.Reminder.disabled = true;
+        panel.parts.Edit.disabled = true;
+        panel.parts.EditCancel.disabled = true;
+        panel.parts.EditSave.disabled = true;
+        panel.parts.Force.disabled = true;
     },
 
     /**
@@ -2103,6 +2223,11 @@ const ScribePanel = Object.freeze({
                 findings: heard.findings ?? [],
                 problem: heard.problem ?? null,
                 ready: heard.ready ?? null,
+                edited: heard.edited ?? false,
+                prepared: heard.prepared ?? false,
+                due: heard.due ?? false,
+                forced: heard.forced ?? false,
+                forceBlock: heard.forceBlock ?? null,
                 suggestion: heard.suggestion ?? null,
             };
         } catch (error) {
@@ -2435,7 +2560,11 @@ const ScribePanel = Object.freeze({
         if (focused === null) {
             return;
         }
-        const target = panel.keyed.get(focused) ?? panel.fixed.get(focused);
+        let target = panel.keyed.get(focused) ?? panel.fixed.get(focused);
+        const row = [panel.parts.Edit, panel.parts.EditCancel, panel.parts.EditSave];
+        if (target !== undefined && target.hidden && row.includes(target)) {
+            target = row.find((control) => !control.hidden && !control.disabled) ?? panel.parts.Reminder;
+        }
         if (target !== undefined && !target.disabled) {
             target.focus();
             const selection = panel.selection;
@@ -2560,6 +2689,70 @@ const ScribePanel = Object.freeze({
         if (filed && (panel.live.view().offer ?? null) === null) {
             ScribePanel.say(panel, outlet, words.NothingFits);
             panel.fleeting.add(outlet);
+            ScribePanel.redraw(panel);
+        }
+    },
+
+    /**
+     * @param {object} panel
+     * @return {void}
+     */
+    openEdit(panel) {
+        const settings = ScribePanel.Settings;
+        const shown = panel.live.view().ready ?? settings.Nothing;
+        panel.editing = true;
+        panel.editShown = shown !== settings.Nothing;
+        panel.editFrom = shown;
+        panel.parts.Reminder.value = shown;
+        ScribePanel.say(panel, settings.Outlets.Reminder, settings.Nothing);
+        ScribePanel.redraw(panel);
+        panel.parts.Reminder.focus();
+    },
+
+    /**
+     * @param {object} panel
+     * @param {boolean} save
+     * @return {void}
+     */
+    closeEdit(panel, save) {
+        const settings = ScribePanel.Settings;
+        const outlet = settings.Outlets.Reminder;
+        if (save && ScribeLive.line(panel.parts.Reminder.value) !== ScribeLive.line(panel.editFrom)) {
+            try {
+                panel.live.edit(panel.parts.Reminder.value, panel.editShown);
+            } catch (error) {
+                ScribePanel.fail(panel, outlet, ScribePanel.refusal(error));
+                ScribePanel.redraw(panel);
+                return;
+            }
+        }
+        panel.editing = false;
+        ScribePanel.say(panel, outlet, settings.Nothing);
+        ScribePanel.redraw(panel);
+        panel.parts.Edit.focus();
+    },
+
+    /**
+     * @param {object} panel
+     * @return {Promise<void>}
+     */
+    async force(panel) {
+        const settings = ScribePanel.Settings;
+        const words = settings.Words;
+        const outlet = settings.Outlets.Force;
+        const filed = await ScribePanel.perform(panel, {
+            outlet,
+            /**
+             * @return {Promise<void>}
+             */
+            call: () => panel.live.force(),
+            question: null,
+            done: words.Forced,
+            pending: words.Working,
+            book: false,
+        });
+        if (filed && (panel.live.view().ready ?? null) === null) {
+            ScribePanel.say(panel, outlet, words.PreparedLater);
             ScribePanel.redraw(panel);
         }
     },
@@ -3371,8 +3564,43 @@ const ScribePanel = Object.freeze({
             const settings = ScribePanel.Settings;
             const words = settings.Words;
             const queued = [];
-            if (live.ready !== null) {
-                queued.push(words.Reminder + PanelView.said(live.ready));
+            const parts = panel.parts;
+            const blocked = live.forceBlock !== null;
+            const editing = panel.editing;
+            if (!editing) {
+                parts.Reminder.value = live.ready ?? settings.Nothing;
+            }
+            parts.Reminder.readOnly = !editing;
+            let placeholder = words.NothingWaiting;
+            if (live.ready === null && live.edited) {
+                placeholder = words.EditHeld;
+            } else if (live.ready === null && blocked && (live.forced || (live.due && live.prepared))) {
+                placeholder = words.HeldReady;
+            } else if (live.ready === null && live.forced) {
+                placeholder = words.PreparedLater;
+            }
+            parts.Reminder.setAttribute(settings.Attributes.Placeholder, placeholder);
+            parts.Reminder.disabled = blocked;
+            parts.Edit.hidden = editing;
+            parts.Edit.disabled = blocked;
+            parts.EditCancel.hidden = !editing;
+            parts.EditCancel.disabled = false;
+            parts.EditSave.hidden = !editing;
+            parts.EditSave.disabled = blocked;
+            parts.Force.disabled = blocked;
+            ScribePanel.wait(panel, settings.Outlets.Force, parts.Force);
+            parts.ForceReason.hidden = !blocked;
+            ScribePanel.write(parts.ForceReason, blocked ? live.forceBlock : settings.Nothing);
+            const forceOutcome = panel.outcomes.get(settings.Outlets.Force);
+            if ([words.Forced, words.PreparedLater].includes(forceOutcome)) {
+                const going = live.ready !== null || live.edited || (blocked && live.prepared);
+                let outcome = settings.Nothing;
+                if (live.forced) {
+                    outcome = going ? words.Forced : words.PreparedLater;
+                }
+                if (outcome !== forceOutcome) {
+                    ScribePanel.say(panel, settings.Outlets.Force, outcome);
+                }
             }
             if (live.suggestion !== null) {
                 queued.push(words.Suggestion + PanelView.said(live.suggestion));
@@ -3388,7 +3616,6 @@ const ScribePanel = Object.freeze({
                 (text) => ScribePanel.Rows.text(panel, text),
                 null,
             );
-            const parts = panel.parts;
             const acts = settings.Acts;
             const outlet = settings.Outlets.Offer;
             const offer = live.offer;

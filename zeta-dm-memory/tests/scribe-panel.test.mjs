@@ -147,6 +147,9 @@ function liveView(findings = [], changes = {}) {
         now: null,
         ready: null,
         due: false,
+        edited: false,
+        forced: false,
+        forceBlock: null,
         sends: 0,
         findings,
         suggestion: null,
@@ -990,10 +993,8 @@ test('findings act through the live part', async () => {
     });
     assert.equal(panel.text('scribe-badge'), '3 findings');
     await panel.tab('Findings');
-    assert.deepEqual(panel.rowTexts('queued'), [
-        'Reminder: [Scribe] Mirelle has grey eyes.',
-        'Suggestion: [Scribe] The bell rings at the gate.',
-    ]);
+    assert.deepEqual(panel.rowTexts('queued'), ['Suggestion: [Scribe] The bell rings at the gate.']);
+    assert.equal(panel.byId('scribe-reminder').value, '[Scribe] Mirelle has grey eyes.');
     assert.equal(panel.rows('findings').length, 3);
     panel.button(panel.rowSaying('findings', 'Aldrich'), 'Dismiss').click();
     await panel.flush();
@@ -1030,10 +1031,469 @@ test('findings act through the live part', async () => {
     assert.deepEqual(panel.keeper.calls, []);
     panel.live.current = liveView([{ ...leak(), status: Status.Told }]);
     panel.redraw();
-    assert.deepEqual(panel.actionsWhere('Findings', false), ['Clear', 'Suggest one']);
+    assert.deepEqual(panel.actionsWhere('Findings', false), [
+        'Edit',
+        'Cancel',
+        'Save',
+        'Clear',
+        'Send a reminder with my next message',
+        'Suggest one',
+    ]);
+    assert.equal(panel.byId('scribe-reminder').value, '');
     assert.equal(panel.rowTexts('findings')[0].includes('Marked as told'), true);
     assert.equal(panel.text('scribe-list-queued'), 'None.');
     assert.equal(panel.byId('scribe-badge').hidden, true);
+});
+
+test('the box is read-only and shows what will go; Edit opens it, Cancel changes nothing, Save passes the text once', async () => {
+    const ready = '[Scribe] Mirelle has grey eyes.';
+    const panel = mounted(findingsBook(), { live: liveView([], { ready }) });
+    await panel.tab('Findings');
+    const box = panel.byId('scribe-reminder');
+    const edit = panel.byId('scribe-edit');
+    const cancel = panel.byId('scribe-edit-cancel');
+    const save = panel.byId('scribe-edit-save');
+    assert.equal(box.tagName, 'TEXTAREA');
+    assert.equal(box.value, ready);
+    assert.equal(box.readOnly, true);
+    assert.equal(box.getAttribute('maxlength'), null);
+    assert.equal(box.getAttribute('placeholder'), 'No reminder is waiting.');
+    assert.equal(box.parent.textContent.includes('Reminder'), true);
+    assert.deepEqual([edit.hidden, cancel.hidden, save.hidden], [false, true, true]);
+    assert.equal(cancel.parent === save.parent, true);
+    assert.deepEqual(
+        cancel.parent.children.map((child) => child.textContent),
+        ['Edit', 'Cancel', 'Save'],
+    );
+    assert.equal(save.classes.has('primary'), true);
+    assert.equal(cancel.classes.has('primary'), false);
+
+    edit.click();
+    await panel.flush();
+    assert.equal(box.readOnly, false);
+    assert.equal(box.value, ready);
+    assert.equal(panel.focused(), `TEXTAREA|scribe-reminder|${ready}`);
+    assert.deepEqual([edit.hidden, cancel.hidden, save.hidden], [true, false, false]);
+    box.value = 'typed and abandoned';
+    box.dispatchEvent({ type: 'input' });
+    await panel.flush();
+    assert.deepEqual(panel.live.called('edit'), []);
+    cancel.click();
+    await panel.flush();
+    assert.deepEqual(panel.live.called('edit'), []);
+    assert.equal(box.readOnly, true);
+    assert.equal(box.value, ready);
+    assert.deepEqual([edit.hidden, cancel.hidden, save.hidden], [false, true, true]);
+
+    edit.click();
+    await panel.flush();
+    box.value = '[Scribe] Mirelle has grey eyes!';
+    box.dispatchEvent({ type: 'input' });
+    panel.redraw();
+    assert.equal(box.value, '[Scribe] Mirelle has grey eyes!');
+    save.click();
+    await panel.flush();
+    assert.deepEqual(plain(panel.live.called('edit')), [['[Scribe] Mirelle has grey eyes!', true]]);
+    assert.equal(box.readOnly, true);
+    assert.deepEqual([edit.hidden, cancel.hidden, save.hidden], [false, true, true]);
+    panel.live.current = liveView([], { ready: '[Scribe] Mirelle has grey eyes!', edited: true });
+    panel.redraw();
+    assert.equal(box.value, '[Scribe] Mirelle has grey eyes!');
+    assert.deepEqual(panel.live.called('clear'), []);
+    assert.equal(panel.live.called('edit').length, 1);
+});
+
+test('a refused save is said under the box, the box stays open and the typed text stays', async () => {
+    const panel = mounted(findingsBook(), { live: liveView([], { ready: '[Scribe] Hold.' }) });
+    await panel.tab('Findings');
+    const box = panel.byId('scribe-reminder');
+    const words = 'A reminder may be at most 2,000 bytes; nothing was saved.';
+    panel.click('scribe-edit');
+    await panel.flush();
+    panel.live.refusal = new Error(words);
+    box.value = 'x'.repeat(3000);
+    panel.click('scribe-edit-save');
+    await panel.flush();
+    assert.equal(panel.text('scribe-reminder-outcome'), words);
+    assert.equal(box.value, 'x'.repeat(3000));
+    assert.equal(box.readOnly, false);
+    assert.equal(panel.byId('scribe-edit-save').hidden, false);
+    panel.redraw();
+    assert.equal(box.value, 'x'.repeat(3000));
+    panel.live.refusal = null;
+    box.value = 'short';
+    panel.click('scribe-edit-save');
+    await panel.flush();
+    assert.equal(panel.text('scribe-reminder-outcome'), '');
+    assert.equal(box.readOnly, true);
+    assert.equal(panel.live.called('edit').length, 2);
+});
+
+test('Save tells the edit whether a line was shown when Edit was pressed', async () => {
+    const empty = mounted(findingsBook(), { live: liveView() });
+    await empty.tab('Findings');
+    const box = empty.byId('scribe-reminder');
+    empty.click('scribe-edit');
+    await empty.flush();
+    assert.equal(box.value, '');
+    box.value = 'a';
+    box.value = '';
+    empty.click('scribe-edit-save');
+    await empty.flush();
+    assert.deepEqual(plain(empty.live.called('edit')), []);
+    assert.equal(box.readOnly, true);
+
+    const composing = mounted(findingsBook(), { live: liveView() });
+    await composing.tab('Findings');
+    const field = composing.byId('scribe-reminder');
+    composing.click('scribe-edit');
+    await composing.flush();
+    field.dispatchEvent({ type: 'compositionstart', bubbles: true });
+    field.value = 'a';
+    field.dispatchEvent({ type: 'compositionend', bubbles: true });
+    field.value = '';
+    composing.click('scribe-edit-save');
+    await composing.flush();
+    assert.deepEqual(plain(composing.live.called('edit')), []);
+
+    const shown = mounted(findingsBook(), { live: liveView([], { ready: '[Scribe] Hold.' }) });
+    await shown.tab('Findings');
+    shown.click('scribe-edit');
+    await shown.flush();
+    assert.equal(shown.byId('scribe-reminder').value, '[Scribe] Hold.');
+    shown.byId('scribe-reminder').value = '';
+    shown.click('scribe-edit-save');
+    await shown.flush();
+    assert.deepEqual(plain(shown.live.called('edit')), [['', true]]);
+
+    const arriving = mounted(findingsBook(), { live: liveView() });
+    await arriving.tab('Findings');
+    arriving.click('scribe-edit');
+    await arriving.flush();
+    arriving.live.current = liveView([], { ready: '[Scribe] Late.' });
+    arriving.redraw();
+    assert.equal(arriving.byId('scribe-reminder').value, '');
+    arriving.click('scribe-edit-save');
+    await arriving.flush();
+    assert.deepEqual(plain(arriving.live.called('edit')), []);
+});
+
+test('Save with the prefilled text unchanged is a Cancel, and focus returns to Edit', async () => {
+    const ready = '[Scribe] Mirelle has grey eyes.';
+    const panel = mounted(findingsBook(), { live: liveView([], { ready }) });
+    await panel.tab('Findings');
+    const box = panel.byId('scribe-reminder');
+    panel.byId('scribe-edit').focus();
+    panel.click('scribe-edit');
+    await panel.flush();
+    panel.click('scribe-edit-save');
+    await panel.flush();
+    assert.deepEqual(plain(panel.live.called('edit')), []);
+    assert.equal(box.readOnly, true);
+    assert.equal(panel.byId('scribe-edit').hidden, false);
+    assert.equal(panel.root.activeElement, panel.byId('scribe-edit'));
+
+    panel.click('scribe-edit');
+    await panel.flush();
+    box.value = `  ${ready}  `;
+    panel.byId('scribe-edit-save').focus();
+    panel.click('scribe-edit-save');
+    await panel.flush();
+    assert.deepEqual(plain(panel.live.called('edit')), []);
+
+    panel.click('scribe-edit');
+    await panel.flush();
+    box.value = '[Scribe] Changed.';
+    panel.byId('scribe-edit-save').focus();
+    panel.click('scribe-edit-save');
+    await panel.flush();
+    assert.deepEqual(plain(panel.live.called('edit')), [['[Scribe] Changed.', true]]);
+    assert.equal(panel.root.activeElement, panel.byId('scribe-edit'));
+
+    panel.click('scribe-edit');
+    await panel.flush();
+    panel.byId('scribe-edit-cancel').focus();
+    panel.click('scribe-edit-cancel');
+    await panel.flush();
+    assert.equal(panel.root.activeElement, panel.byId('scribe-edit'));
+});
+
+test('Clear takes the refusal line away with the box', async () => {
+    const panel = mounted(findingsBook(), { live: liveView([], { ready: '[Scribe] Hold.' }) });
+    await panel.tab('Findings');
+    const words = 'A reminder may be at most 2,000 bytes; nothing was saved.';
+    panel.click('scribe-edit');
+    await panel.flush();
+    panel.live.refusal = new Error(words);
+    panel.byId('scribe-reminder').value = 'x'.repeat(3000);
+    panel.click('scribe-edit-save');
+    await panel.flush();
+    assert.equal(panel.text('scribe-reminder-outcome'), words);
+    panel.click('scribe-clear');
+    await panel.flush();
+    assert.equal(panel.text('scribe-reminder-outcome'), '');
+});
+
+test('while the box is open a reply and a rebuild leave the typed text alone, and Cancel shows the new line', async () => {
+    const panel = mounted(findingsBook(), { live: liveView([], { ready: '[Scribe] First.' }) });
+    await panel.tab('Findings');
+    const box = panel.byId('scribe-reminder');
+    panel.click('scribe-edit');
+    await panel.flush();
+    box.value = 'my own words';
+    panel.live.current = liveView([], { ready: '[Scribe] Reply line.', due: true, prepared: true });
+    panel.redraw();
+    assert.equal(box.value, 'my own words');
+    panel.live.current = liveView([], { ready: null, due: true, prepared: true });
+    panel.redraw();
+    assert.equal(box.value, 'my own words');
+    panel.live.current = liveView([], { ready: '[Scribe] Rebuilt line.', due: true, prepared: true });
+    panel.redraw();
+    assert.equal(box.value, 'my own words');
+    assert.equal(box.readOnly, false);
+    panel.click('scribe-edit-cancel');
+    await panel.flush();
+    assert.equal(box.value, '[Scribe] Rebuilt line.');
+    assert.equal(box.readOnly, true);
+    assert.deepEqual(panel.live.called('edit'), []);
+});
+
+test('while the box is open Clear closes it and the force button still works', async () => {
+    const panel = mounted(findingsBook(), { live: liveView([], { ready: '[Scribe] Hold.' }) });
+    await panel.tab('Findings');
+    const box = panel.byId('scribe-reminder');
+    panel.click('scribe-edit');
+    await panel.flush();
+    box.value = 'half typed';
+    panel.click('scribe-force');
+    await panel.flush();
+    assert.deepEqual(plain(panel.live.called('force')), [[]]);
+    assert.equal(box.value, 'half typed');
+    assert.equal(box.readOnly, false);
+    panel.live.current = liveView([], { ready: null });
+    panel.click('scribe-clear');
+    await panel.flush();
+    assert.deepEqual(panel.live.called('clear'), [[]]);
+    assert.equal(box.readOnly, true);
+    assert.equal(box.value, '');
+    assert.deepEqual(
+        [panel.byId('scribe-edit').hidden, panel.byId('scribe-edit-cancel').hidden, panel.byId('scribe-edit-save').hidden],
+        [false, true, true],
+    );
+    assert.deepEqual(panel.live.called('edit'), []);
+});
+
+test('the placeholder says a stored edit waits for the book, and the force outcome follows the line', async () => {
+    const held = mounted(findingsBook(), { live: liveView([], { edited: true }) });
+    await held.tab('Findings');
+    assert.equal(held.byId('scribe-reminder').getAttribute('placeholder'), 'Your edit goes once the book is ready.');
+
+    const ready = '[Scribe] Halvard is brave.';
+    const panel = mounted(findingsBook(), { live: liveView([], { forced: true, due: true, ready }) });
+    await panel.tab('Findings');
+    panel.click('scribe-force');
+    await panel.flush();
+    assert.equal(panel.text('scribe-force-outcome'), 'It goes with your next message.');
+    panel.live.current = liveView([], { forced: true, due: true, ready: null });
+    panel.redraw();
+    assert.equal(panel.text('scribe-force-outcome'), 'A reminder is prepared after the next reply.');
+    assert.equal(
+        panel.byId('scribe-reminder').getAttribute('placeholder'),
+        'A reminder is prepared after the next reply.',
+    );
+    panel.live.current = liveView([], { forced: false, ready: null });
+    panel.redraw();
+    assert.equal(panel.text('scribe-force-outcome'), '');
+});
+
+test('Clear sits left of the force button in one row, and the force button answers at once', async () => {
+    const panel = mounted(findingsBook(), { live: liveView([], { ready: '[Scribe] Hold.' }) });
+    await panel.tab('Findings');
+    const clear = panel.byId('scribe-clear');
+    const force = panel.byId('scribe-force');
+    assert.equal(clear.parent === force.parent, true);
+    assert.deepEqual(
+        clear.parent.children.map((child) => child.textContent),
+        ['Clear', 'Send a reminder with my next message'],
+    );
+    assert.equal(force.classes.has('primary'), true);
+    assert.equal(clear.classes.has('primary'), false);
+    const queued = panel.section('Findings').descendants().filter((element) => element.tagName === 'BUTTON');
+    assert.equal(queued.indexOf(clear) < queued.indexOf(force), true);
+    const hold = panel.live.hold();
+    panel.live.current = liveView([], { ready: '[Scribe] Hold.', forced: true });
+    force.click();
+    assert.equal(panel.text('scribe-force-outcome'), 'Working...');
+    assert.equal(force.disabled, true);
+    panel.redraw();
+    assert.equal(force.disabled, true);
+    hold.open();
+    await panel.flush();
+    assert.deepEqual(plain(panel.live.called('force')), [[]]);
+    assert.equal(panel.text('scribe-force-outcome'), 'It goes with your next message.');
+    assert.equal(force.disabled, false);
+
+    panel.live.failure = new Error('The book has not finished its first reading.');
+    force.click();
+    await panel.flush();
+    assert.equal(panel.text('scribe-force-outcome'), 'The book has not finished its first reading.');
+    assert.equal(force.disabled, false);
+
+    const later = mounted(findingsBook(), { live: liveView([], { forced: true }) });
+    await later.tab('Findings');
+    assert.equal(
+        later.byId('scribe-reminder').getAttribute('placeholder'),
+        'A reminder is prepared after the next reply.',
+    );
+    later.click('scribe-force');
+    await later.flush();
+    assert.equal(later.text('scribe-force-outcome'), 'A reminder is prepared after the next reply.');
+    later.live.current = liveView([], { forced: false });
+    later.redraw();
+    assert.equal(later.text('scribe-force-outcome'), '');
+    assert.equal(later.byId('scribe-reminder').getAttribute('placeholder'), 'No reminder is waiting.');
+
+    const ready = '[Scribe] Halvard is brave.';
+    const waiting = mounted(findingsBook(), { live: liveView([], { forced: true }) });
+    await waiting.tab('Findings');
+    waiting.click('scribe-force');
+    await waiting.flush();
+    assert.equal(waiting.text('scribe-force-outcome'), 'A reminder is prepared after the next reply.');
+    waiting.live.current = liveView([], { forced: true, due: true, ready });
+    waiting.redraw();
+    assert.equal(waiting.text('scribe-force-outcome'), 'It goes with your next message.');
+    assert.equal(waiting.byId('scribe-reminder').value, ready);
+});
+
+test('in a held book the placeholder and the force outcome say what will happen', async () => {
+    const held = 'The book holds only part of the chat';
+    const hold = { forceBlock: held, due: true };
+    const reason = 'Your reminder goes once the book is ready.';
+
+    const prepared = mounted(findingsBook(), { live: liveView([], { due: true, prepared: true, ready: '[Scribe] Hold.' }) });
+    await prepared.tab('Findings');
+    prepared.live.current = liveView([], { ...hold, prepared: true });
+    prepared.redraw();
+    assert.equal(prepared.byId('scribe-reminder').getAttribute('placeholder'), reason);
+    assert.equal(prepared.text('scribe-force-outcome'), '');
+    prepared.live.current = liveView([], { due: true, prepared: true, ready: '[Scribe] Hold.' });
+    prepared.redraw();
+    assert.equal(prepared.byId('scribe-reminder').getAttribute('placeholder'), 'No reminder is waiting.');
+
+    const quiet = mounted(findingsBook(), { live: liveView([], { forceBlock: held, due: false, prepared: true }) });
+    await quiet.tab('Findings');
+    assert.equal(quiet.byId('scribe-reminder').getAttribute('placeholder'), 'No reminder is waiting.');
+
+    const forced = mounted(findingsBook(), { live: liveView([], { due: true, prepared: true, forced: true, ready: '[Scribe] Hold.' }) });
+    await forced.tab('Findings');
+    forced.click('scribe-force');
+    await forced.flush();
+    assert.equal(forced.text('scribe-force-outcome'), 'It goes with your next message.');
+    forced.live.current = liveView([], { ...hold, prepared: true, forced: true });
+    forced.redraw();
+    assert.equal(forced.byId('scribe-reminder').getAttribute('placeholder'), reason);
+    assert.equal(forced.text('scribe-force-outcome'), 'It goes with your next message.');
+    forced.live.current = liveView([], { due: true, prepared: true, forced: true, ready: '[Scribe] Hold.' });
+    forced.redraw();
+    assert.equal(forced.text('scribe-force-outcome'), 'It goes with your next message.');
+
+    const unprepared = mounted(findingsBook(), { live: liveView([], { due: true, forced: true }) });
+    await unprepared.tab('Findings');
+    unprepared.click('scribe-force');
+    await unprepared.flush();
+    assert.equal(unprepared.text('scribe-force-outcome'), 'A reminder is prepared after the next reply.');
+    unprepared.live.current = liveView([], { ...hold, forced: true });
+    unprepared.redraw();
+    assert.equal(unprepared.byId('scribe-reminder').getAttribute('placeholder'), reason);
+
+    const edited = mounted(findingsBook(), { live: liveView([], { due: true, forced: true, edited: true, ready: '[Scribe] Mine.' }) });
+    await edited.tab('Findings');
+    edited.click('scribe-force');
+    await edited.flush();
+    assert.equal(edited.text('scribe-force-outcome'), 'It goes with your next message.');
+    edited.live.current = liveView([], { ...hold, forced: true, edited: true });
+    edited.redraw();
+    assert.equal(edited.byId('scribe-reminder').getAttribute('placeholder'), 'Your edit goes once the book is ready.');
+    assert.equal(edited.text('scribe-force-outcome'), 'It goes with your next message.');
+    edited.live.current = liveView([], { due: true, forced: true, edited: true, ready: '[Scribe] Mine.' });
+    edited.redraw();
+    assert.equal(edited.text('scribe-force-outcome'), 'It goes with your next message.');
+});
+
+test('a forced reminder that becomes ready after the force reads as going with the next message', async () => {
+    const panel = mounted(findingsBook(), { live: liveView([], { forced: true, due: true }) });
+    await panel.tab('Findings');
+    panel.click('scribe-force');
+    await panel.flush();
+    assert.equal(panel.text('scribe-force-outcome'), 'A reminder is prepared after the next reply.');
+    panel.live.current = liveView([], { forced: true, due: true, prepared: true, ready: '[Scribe] Prepared.' });
+    panel.redraw();
+    assert.equal(panel.text('scribe-force-outcome'), 'It goes with your next message.');
+    assert.equal(panel.byId('scribe-reminder').value, '[Scribe] Prepared.');
+    panel.live.current = liveView([], { forced: false, due: false });
+    panel.redraw();
+    assert.equal(panel.text('scribe-force-outcome'), '');
+});
+
+test('the box and the force button follow the force block, with its reason', async () => {
+    const reason = 'No book yet: adopt this chat first.';
+    const panel = mounted(findingsBook(), { live: liveView([], { forceBlock: reason }) });
+    await panel.tab('Findings');
+    const box = panel.byId('scribe-reminder');
+    const force = panel.byId('scribe-force');
+    const why = panel.byId('scribe-force-reason');
+    const edit = panel.byId('scribe-edit');
+    assert.equal(box.disabled, true);
+    assert.equal(edit.disabled, true);
+    assert.equal(force.disabled, true);
+    assert.equal(why.hidden, false);
+    assert.equal(why.textContent, reason);
+    force.click();
+    edit.click();
+    await panel.flush();
+    assert.deepEqual(panel.live.called('force'), []);
+    assert.equal(panel.byId('scribe-edit').hidden, false);
+    assert.equal(box.readOnly, true);
+    panel.live.current = liveView([], { forceBlock: null });
+    panel.redraw();
+    assert.equal(box.disabled, false);
+    assert.equal(edit.disabled, false);
+    assert.equal(force.disabled, false);
+    assert.equal(why.hidden, true);
+    assert.equal(why.textContent, '');
+    edit.click();
+    await panel.flush();
+    const save = panel.byId('scribe-edit-save');
+    assert.equal(save.disabled, false);
+    panel.live.current = liveView([], { forceBlock: reason });
+    panel.redraw();
+    assert.equal(save.disabled, true);
+    assert.equal(panel.byId('scribe-edit-cancel').disabled, false);
+    assert.equal(box.readOnly, false);
+    panel.click('scribe-edit-cancel');
+    await panel.flush();
+    assert.equal(box.readOnly, true);
+    panel.live.current = liveView([], { forceBlock: null });
+    panel.redraw();
+    panel.live.current = liveView([], { forceBlock: 'The book has not finished its first reading.' });
+    panel.redraw();
+    assert.equal(box.disabled, true);
+    assert.equal(why.textContent, 'The book has not finished its first reading.');
+});
+
+test('the Findings tab fits a phone: the box and both buttons wrap and nothing scrolls sideways', async () => {
+    const long = liveView([], { ready: `[Scribe] ${'long '.repeat(300)}` });
+    const panel = mounted(findingsBook(), { width: 390, live: long });
+    panel.click('scribe-toggle');
+    await panel.flush();
+    await panel.tab('Findings');
+    assert.equal(panel.byId('scribe-reminder').tagName, 'TEXTAREA');
+    assert.equal(panel.byId('scribe-force').textContent, 'Send a reminder with my next message');
+    assert.match(PanelStyle.Text, /\*,\s*\*::before,\s*\*::after \{[^}]*box-sizing: border-box;/);
+    assert.match(PanelStyle.Text, /textarea \{[^}]*width: 100%;/);
+    assert.match(PanelStyle.Text, /\.actions \{[^}]*flex-wrap: wrap;/);
+    assert.doesNotMatch(PanelStyle.Text, /\.actions \{[^}]*(white-space: nowrap|overflow-x: (scroll|auto))/);
+    assert.doesNotMatch(PanelStyle.Text, /textarea \{[^}]*(white-space: nowrap|overflow-x: (scroll|auto))/);
 });
 
 test('everything is locked while the keeper is busy', async () => {
@@ -1066,7 +1526,17 @@ test('everything is locked while the keeper is busy', async () => {
     const free = {
         Rulings: ['Work it out'],
         Book: ['Aldric', 'Aldrich', 'Halvard', 'Mirelle', 'Oswin', 'Oswin (the miller)'],
-        Findings: ['Dismiss', 'Rule it...', 'Dismiss', 'Clear', 'Suggest one'],
+        Findings: [
+            'Dismiss',
+            'Rule it...',
+            'Dismiss',
+            'Edit',
+            'Cancel',
+            'Save',
+            'Clear',
+            'Send a reminder with my next message',
+            'Suggest one',
+        ],
         Progress: ['Export', 'Pause'],
         Settings: ['Save key'],
     };
@@ -1128,7 +1598,10 @@ test('a watching tab changes nothing', async () => {
     const log = rulingsBook();
     const panel = mounted(log, {
         keeper: { phase: Phase.Watching, reader: false },
-        live: liveView([contradiction(), leak(), spelling('Spelling|MESSAGE-99|Aldrich|S6')], { ready: '[Scribe] Hold.' }),
+        live: liveView([contradiction(), leak(), spelling('Spelling|MESSAGE-99|Aldrich|S6')], {
+            ready: '[Scribe] Hold.',
+            forceBlock: 'Another tab is reading this chat',
+        }),
     });
     assert.equal(panel.text('scribe-headline'), 'Another tab is reading this chat.');
     await panel.tab('Rulings');
@@ -1144,15 +1617,20 @@ test('a watching tab changes nothing', async () => {
     assert.equal(panel.actionsWhere('Book', true).length, 10);
     await panel.tab('Findings');
     assert.equal(panel.rows('findings').length, 3);
-    assert.deepEqual(panel.actionsWhere('Findings', false), ['Rule it...']);
+    assert.deepEqual(panel.actionsWhere('Findings', false), ['Cancel', 'Rule it...']);
     assert.deepEqual(panel.actionsWhere('Findings', true).sort(), [
         'Clear',
         'Dismiss',
         'Dismiss',
         'Dismiss',
+        'Edit',
+        'Save',
+        'Send a reminder with my next message',
         'Suggest one',
         'They were told',
     ]);
+    assert.equal(panel.byId('scribe-reminder').disabled, true);
+    assert.equal(panel.text('scribe-force-reason'), 'Another tab is reading this chat');
     await panel.tab('Progress');
     assert.deepEqual(panel.actionsWhere('Progress', false), ['Export']);
     assert.deepEqual(panel.actionsWhere('Progress', true).sort(), [
@@ -1269,7 +1747,7 @@ test('hostile text is text', async () => {
     assert.equal(panel.byId('scribe-list-questions').textContent.includes(hostile(6)), true);
     await panel.tab('Findings');
     assert.equal(panel.byId('scribe-list-findings').textContent.includes(hostile(4)), true);
-    assert.equal(panel.byId('scribe-list-queued').textContent.includes(hostile(9)), true);
+    assert.equal(panel.byId('scribe-reminder').value, hostile(9));
     await panel.tab('Progress');
     assert.equal(panel.byId('scribe-list-calls').textContent.includes(hostile(5)), true);
     assert.equal(panel.byId('scribe-list-calls').textContent.includes('Unreadable answer: Story'), true);
@@ -3049,7 +3527,8 @@ test('there is no correct', async () => {
         texts.push(...buttonsIn(panel.root).map((button) => button.textContent));
     }
     assert.equal(texts.includes('Correct'), false);
-    assert.deepEqual(panel.rowTexts('queued'), ['Reminder: [Scribe] Hold.']);
+    assert.deepEqual(panel.rowTexts('queued'), []);
+    assert.equal(panel.byId('scribe-reminder').value, '[Scribe] Hold.');
     assert.equal(panel.text('scribe-section-findings').includes('Correction'), false);
     panel.live.correct = (key) => {
         panel.live.note('correct', [key]);

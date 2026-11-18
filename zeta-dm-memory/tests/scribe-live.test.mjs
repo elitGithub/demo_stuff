@@ -265,6 +265,7 @@ const PEDANT = answer({
         `${EYES} | Halvard | eyes | green`,
     ],
     LEAKS: [`${BUILD} | Mirelle | Your scars ache`],
+    MISSPELLINGS: ['N1'],
 });
 
 const MANY = Object.freeze([
@@ -684,6 +685,37 @@ test('the refresh count makes a reminder due', async () => {
     assert.equal(live.view().now.changed, false);
 });
 
+test('a failed check raises no spelling finding', async () => {
+    const { model, live } = rig();
+    model.failing.add('Pedant');
+    await live.reply(at(43));
+    assert.equal(model.calls.at(-1).role, 'Pedant');
+    assert.equal(model.calls.at(-1).user.includes('NAME CANDIDATES:'), true);
+    assert.deepEqual(statuses(live), []);
+    assert.equal(typeof live.view().problem, 'string');
+
+    const working = rig();
+    await working.live.reply(at(43));
+    assert.equal(
+        working.live.view().findings.some((finding) => finding.kind === 'Spelling'),
+        true,
+    );
+
+    const later = rig();
+    await later.live.reply(at(45));
+    later.model.failing.add('Pedant');
+    await later.live.reply(at(47));
+    assert.deepEqual(statuses(later.live), []);
+    assert.equal(typeof later.live.view().problem, 'string');
+    later.model.failing.clear();
+    await later.live.reply(variant(47, [['Narrator', 'Rain falls on the tent.']], 'OTHER-47'));
+    await later.live.reply(at(47));
+    assert.equal(
+        later.live.view().findings.some((finding) => finding.kind === 'Spelling' && finding.message === 'MESSAGE-47'),
+        true,
+    );
+});
+
 test("a regenerated reply takes back the old one's findings", async () => {
     const { model, live } = rig();
     await live.reply(at(45));
@@ -692,8 +724,8 @@ test("a regenerated reply takes back the old one's findings", async () => {
     await live.reply(at(47));
     assert.equal(live.view().now.place, 'The tent');
     assert.deepEqual(statuses(live), [
-        ['Spelling', 'MESSAGE-47', 'Open'],
         ['Contradiction', 'MESSAGE-47', 'Open'],
+        ['Spelling', 'MESSAGE-47', 'Open'],
     ]);
     live.dismiss(keyOf(live, 'Spelling', 'MESSAGE-47'));
     model.scene = YARD;
@@ -779,9 +811,9 @@ test('a failing model changes nothing it should not', async () => {
     assert.equal(replyOf(model.calls.at(-1).user), '43');
     assert.equal(model.calls.at(-1).role, 'Pedant');
     assert.deepEqual(statuses(live), [
-        ['Spelling', 'MESSAGE-43', 'Open'],
         ['Contradiction', 'MESSAGE-43', 'Open'],
         ['Leak', 'MESSAGE-43', 'Open'],
+        ['Spelling', 'MESSAGE-43', 'Open'],
         ['Contradiction', 'MESSAGE-41', 'Reminded'],
     ]);
     const kept = statuses(live);
@@ -920,9 +952,9 @@ test('findings can be dismissed and told', async () => {
     const { keeper, live } = rig();
     await live.reply(at(43));
     assert.deepEqual(statuses(live), [
-        ['Spelling', 'MESSAGE-43', 'Open'],
         ['Contradiction', 'MESSAGE-43', 'Open'],
         ['Leak', 'MESSAGE-43', 'Open'],
+        ['Spelling', 'MESSAGE-43', 'Open'],
     ]);
     const spelling = keyOf(live, 'Spelling', 'MESSAGE-43');
     const contradiction = keyOf(live, 'Contradiction', 'MESSAGE-43');
@@ -1128,7 +1160,7 @@ test('what is kept survives a reload', async () => {
     assert.notEqual(before.ready, null);
     assert.deepEqual(
         before.findings.map(([, status]) => status),
-        ['Dismissed', 'Reminded', 'Open', 'Reminded'],
+        ['Reminded', 'Open', 'Dismissed', 'Reminded'],
     );
     live.close();
     const again = following(
@@ -1897,9 +1929,9 @@ test('a finding belongs to its reply', async () => {
     live.outgoing('Onward.');
     live.sent();
     assert.deepEqual(statuses(live), [
-        ['Spelling', 'MESSAGE-43', 'Open'],
         ['Contradiction', 'MESSAGE-43', 'Reminded'],
         ['Leak', 'MESSAGE-43', 'Open'],
+        ['Spelling', 'MESSAGE-43', 'Open'],
         ['Contradiction', 'MESSAGE-41', 'Reminded'],
     ]);
     await live.reply(at(41));
@@ -1916,8 +1948,8 @@ test('a finding belongs to its reply', async () => {
     assert.equal(edits.model.calls.length, calls + 2);
     assert.ok(edits.model.calls.at(-1).user.includes('whistles again'));
     assert.deepEqual(statuses(edits.live), [
-        ['Spelling', 'MESSAGE-43', 'Open'],
         ['Contradiction', 'MESSAGE-43', 'Open'],
+        ['Spelling', 'MESSAGE-43', 'Open'],
     ]);
     assert.deepEqual(
         plain(edits.live.view().findings.map((finding) => finding.fingerprint === edited.fingerprint)),
@@ -2346,9 +2378,9 @@ test('a failed read is not an empty record', async () => {
         );
     const before = stored();
     assert.deepEqual(before, [
-        ['Spelling', 'Dismissed'],
         ['Contradiction', 'Reminded'],
         ['Leak', 'Open'],
+        ['Spelling', 'Dismissed'],
     ]);
     storage.refuseGetsMatching(/live/);
     const { model, live } = rig({}, storage);
@@ -2384,7 +2416,8 @@ test('a failed read is not an empty record', async () => {
         sends: 0,
         findings: saved.findings.map((finding, index) => {
             const { fingerprint, ...rest } = finding;
-            return { ...rest, correction: '[Scribe] Correction: x', status: index === 1 ? 'Corrected' : finding.status };
+            const status = index === 0 ? 'Corrected' : finding.status;
+            return { ...rest, correction: '[Scribe] Correction: x', status };
         }),
         corrections: ['[Scribe] Correction: x'],
         suggestion: null,
@@ -2394,9 +2427,9 @@ test('a failed read is not an empty record', async () => {
     const reopened = rig({}, ancient);
     assert.equal(reopened.live.view().problem, null);
     assert.deepEqual(statuses(reopened.live), [
-        ['Spelling', 'MESSAGE-43', 'Dismissed'],
         ['Contradiction', 'MESSAGE-43', 'Corrected'],
         ['Leak', 'MESSAGE-43', 'Open'],
+        ['Spelling', 'MESSAGE-43', 'Dismissed'],
         ['Contradiction', 'MESSAGE-41', 'Open'],
     ]);
     assert.equal(reopened.live.view().now.place, 'The mill');
@@ -2482,7 +2515,7 @@ test('only a higher edition is a new book', async () => {
 test('an older reply edited loses its findings at once', async () => {
     const { keeper, storage, model, live } = rig();
     await live.reply(at(41));
-    model.pedant = answer({ CONTRADICTIONS: [] });
+    model.pedant = answer({ CONTRADICTIONS: [], MISSPELLINGS: ['N1'] });
     await live.reply(at(43));
     assert.deepEqual(statuses(live), [
         ['Spelling', 'MESSAGE-43', 'Open'],

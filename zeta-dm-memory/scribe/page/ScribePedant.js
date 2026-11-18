@@ -8,6 +8,7 @@ const ScribePedant = Object.freeze({
     Block: Object.freeze({
         Contradictions: 'CONTRADICTIONS',
         Leaks: 'LEAKS',
+        Misspellings: 'MISSPELLINGS',
     }),
 
     Settings: Object.freeze({
@@ -20,6 +21,7 @@ const ScribePedant = Object.freeze({
         Apostrophe: "'",
         Unquoted: '$1',
         Unwrapped: '$2',
+        Unbracketed: '$1',
         Hidden: ' (hidden)',
         RelationTo: 'relation to ',
         DoesNotKnow: ' does not know ',
@@ -31,7 +33,13 @@ const ScribePedant = Object.freeze({
             Ledger: 'LEDGER:',
             Unknown: 'DOES NOT KNOW:',
             Since: 'SINCE THE BOOK WAS LAST READ:',
+            Candidates: 'NAME CANDIDATES:',
         }),
+        BlockAliases: Object.freeze({
+            MISSPELLING: 'MISSPELLINGS',
+        }),
+        CandidatePrefix: 'N',
+        MostCandidates: 20,
         MostWords: 120,
         UnreadCharacters: 60000,
         FindingsPerFact: 1,
@@ -41,6 +49,7 @@ const ScribePedant = Object.freeze({
         NormalForm: 'NFC',
         NotFound: -1,
         ShortestNameWord: 4,
+        UncheckedCategories: Object.freeze(['location']),
         ContradictionFields: 4,
         LeakFields: 3,
         FactField: 0,
@@ -131,6 +140,48 @@ const ScribePedant = Object.freeze({
         /**
          * @return {RegExp}
          */
+        get CandidateNumber() {
+            return /^N\s*0*([1-9]\d*)$/iu;
+        },
+
+        /**
+         * @return {RegExp}
+         */
+        get NumberDress() {
+            return /[`*_#]/gu;
+        },
+
+        /**
+         * @return {RegExp}
+         */
+        get MarkdownHeading() {
+            return /^#+\s/u;
+        },
+
+        /**
+         * @return {RegExp}
+         */
+        get Bracketed() {
+            return /^\[\s*([^\[\]]*?)\s*\]$/u;
+        },
+
+        /**
+         * @return {RegExp}
+         */
+        get TrailingMarks() {
+            return /[.,;:]+$/u;
+        },
+
+        /**
+         * @return {RegExp}
+         */
+        get NumberSeparator() {
+            return /\s*(?:[,;]\s*\band\b|[,;]|\band\b)\s*|\s+(?=\[?N)/iu;
+        },
+
+        /**
+         * @return {RegExp}
+         */
         get Forbidden() {
             return /[|\[\]@\p{Zl}\p{Zp}\p{Cc}]/u;
         },
@@ -207,22 +258,26 @@ const ScribePedant = Object.freeze({
 
         PromptLines: Object.freeze([
             'You are the Pedant: a proofreader for an ongoing adult fiction roleplay between consenting adult characters. You never write story.',
-            'You receive PLAYER CHARACTER, a LEDGER of established facts (each with an id like F12, its subject, its category and its text), a list of what certain speakers DO NOT KNOW, the messages SINCE THE BOOK WAS LAST READ, and one REPLY from the storyteller.',
-            'Find where the REPLY disagrees with the LEDGER, and where a speaker uses something they do not know.',
+            'You receive PLAYER CHARACTER, a LEDGER of established facts (each with an id like F12, its subject, its category and its text), a list of what certain speakers DO NOT KNOW, the messages SINCE THE BOOK WAS LAST READ, one REPLY from the storyteller, and NAME CANDIDATES: words in the REPLY that look like known names, each line giving the name, the word of that name it looks like, and the word in the REPLY.',
+            'Find where the REPLY disagrees with the LEDGER, where a speaker uses something they do not know, and which NAME CANDIDATES are misspellings.',
             '',
-            'Answer with these two blocks, each starting with its === line. Leave a block out if it has nothing. Write nothing else.',
+            'Answer with these three blocks, each starting with its === line. Leave a block out if it has nothing. Write nothing else.',
             '',
             '=== CONTRADICTIONS',
             'F12 | Label | category | the words of the reply that say otherwise',
             '=== LEAKS',
             'F7 | Label of the speaker | the words of theirs that show they know it',
+            '=== MISSPELLINGS',
+            'N21',
+            'N22',
             '',
             'Rules.',
             "1. A contradiction is a statement in the REPLY, about the LEDGER fact's own subject, that cannot be true together with that fact: another age, number, colour, name, place or description of the same thing. Give the fact's id, its subject's label and its category exactly as the LEDGER shows them, and copy the reply's own words for the other value. Never report a fact marked (hidden) as contradicted.",
             '2. More detail about the same thing is not a contradiction. Less detail is not a contradiction. The same thing in other words is not a contradiction. Something the story has plainly changed (a move, a promotion, a wound), in the REPLY or in the messages since the book was last read, is not a contradiction.',
-            "3. A leak is a line spoken by a speaker that states, uses or reacts to a fact listed for that speaker under DOES NOT KNOW. Copy the few words of that speaker's own line that show it, exactly as the REPLY has them. What the narrator says, or what another character says or thinks, is not that speaker's leak.",
+            "3. A leak is a line spoken by a speaker that states or uses a fact listed for that speaker under DOES NOT KNOW. Copy the few words of that speaker's own line that show it, exactly as the REPLY has them. What the narrator says, or what another character says or thinks, is not that speaker's leak.",
             '4. It is not a leak if the speaker was told or shown the fact earlier in the REPLY, or anywhere in the messages since the book was last read.',
             '5. Report only what the REPLY itself shows. Never guess. When in doubt, leave it out.',
+            '6. A misspelling is a word in the REPLY that is meant as the listed known name but is written another way. An ordinary word, a word at the start of a sentence that is not meant as the name, and a different or new name are not misspellings. Report only numbers from NAME CANDIDATES. In the MISSPELLINGS block write only the numbers of the misspellings, one per line, nothing else on the line.',
         ]),
     }),
 
@@ -524,7 +579,11 @@ const ScribePedant = Object.freeze({
              */
             (fact) => {
                 const kind = ScribeReplay.kindOf(fact.category);
-                return (kind === kinds.Fixed || kind === kinds.Moving) && !ScribePedant.veiled(fact);
+                return (
+                    (kind === kinds.Fixed || kind === kinds.Moving) &&
+                    !ScribePedant.veiled(fact) &&
+                    !settings.UncheckedCategories.includes(fact.category)
+                );
             },
         );
         const earlier = unread
@@ -709,6 +768,7 @@ const ScribePedant = Object.freeze({
                             subject: subject.id,
                             label: subject.label,
                             written,
+                            looksLike: word,
                         }),
                     );
                 }
@@ -722,9 +782,10 @@ const ScribePedant = Object.freeze({
      * @param {string} player
      * @param {object} message
      * @param {readonly object[]} unread
+     * @param {readonly object[]} candidates
      * @return {string}
      */
-    input(state, player, message, unread) {
+    input(state, player, message, unread, candidates) {
         const settings = ScribePedant.Settings;
         const headings = settings.Headings;
         const labels = ScribeAnalyzer.labels(state);
@@ -759,18 +820,37 @@ const ScribePedant = Object.freeze({
             since = [survey.since];
         }
         const reply = settings.ReplyOpen + message.position + settings.ReplyClose;
-        return [
+        const named = candidates.map(
+            /**
+             * @param {{ label: string, looksLike: string, written: string }} candidate
+             * @param {number} index
+             * @return {string}
+             */
+            (candidate, index) =>
+                [settings.CandidatePrefix + (index + 1), candidate.label, candidate.looksLike, candidate.written].join(
+                    settings.Joiner,
+                ),
+        );
+        const sections = [
             ScribeAnalyzer.section(headings.Player, [player]),
             ScribeAnalyzer.section(headings.Ledger, ledger),
             ScribeAnalyzer.section(headings.Unknown, unknown),
             ScribeAnalyzer.section(headings.Since, since),
             ScribeAnalyzer.section(reply, [ScribeIntake.transcript([message])]),
-        ].join(settings.BlankLine);
+        ];
+        if (named.length > 0) {
+            sections.push(ScribeAnalyzer.section(headings.Candidates, named));
+        }
+        return sections.join(settings.BlankLine);
     },
 
     /**
      * @param {string} text
-     * @return {Readonly<{ contradictions: readonly object[], leaks: readonly object[] }>}
+     * @return {Readonly<{
+     *     contradictions: readonly object[],
+     *     leaks: readonly object[],
+     *     misspellings: readonly number[]
+     * }>}
      */
     parse(text) {
         const settings = ScribePedant.Settings;
@@ -778,6 +858,7 @@ const ScribePedant = Object.freeze({
         const blocks = ScribePedant.Block;
         const contradictions = [];
         const leaks = [];
+        const misspellings = [];
         let block = null;
         for (const raw of typeof text === 'string' ? text.split(answer.LineBreak) : []) {
             const line = raw
@@ -788,20 +869,56 @@ const ScribePedant = Object.freeze({
                 .replace(answer.ListMarkers, settings.Nothing)
                 .trim();
             const letters = line.replace(settings.NonLetters, settings.Nothing).toUpperCase();
-            if (Object.values(blocks).includes(letters)) {
-                block = letters;
+            const heading = settings.BlockAliases[letters] ?? letters;
+            if (Object.values(blocks).includes(heading)) {
+                block = heading;
                 continue;
             }
-            if (
-                block === null ||
-                line === settings.Nothing ||
-                answer.Fence.test(line) ||
-                settings.NoneLine.test(line)
-            ) {
+            if (block === null || line === settings.Nothing || answer.Fence.test(line)) {
                 continue;
             }
-            const fields = line
-                .replace(settings.TableEdges, settings.Nothing)
+            const unedged = line.replace(settings.TableEdges, settings.Nothing);
+            if (block === blocks.Misspellings) {
+                if (settings.MarkdownHeading.test(raw.replace(answer.FormatCharacter, settings.Nothing).trimStart())) {
+                    block = null;
+                    continue;
+                }
+                const tokens = unedged
+                    .replace(settings.NumberDress, settings.Nothing)
+                    .replace(settings.TrailingMarks, settings.Nothing)
+                    .trim()
+                    .split(settings.NumberSeparator)
+                    .map(
+                        /**
+                         * @param {string} token
+                         * @return {RegExpMatchArray|null}
+                         */
+                        (token) =>
+                            token
+                                .trim()
+                                .replace(settings.Bracketed, settings.Unbracketed)
+                                .match(settings.CandidateNumber),
+                    );
+                const numbers = tokens.filter(
+                    /**
+                     * @param {RegExpMatchArray|null} candidate
+                     * @return {boolean}
+                     */
+                    (candidate) => candidate !== null,
+                );
+                if (numbers.length === tokens.length) {
+                    for (const candidate of numbers) {
+                        misspellings.push(Number(candidate[settings.NumberGroup]));
+                    }
+                } else {
+                    block = null;
+                }
+                continue;
+            }
+            if (settings.NoneLine.test(line)) {
+                continue;
+            }
+            const fields = unedged
                 .split(settings.Pipe)
                 .map(
                     /**
@@ -810,10 +927,8 @@ const ScribePedant = Object.freeze({
                      */
                     (field) => field.trim(),
                 );
-            const number = fields[settings.FactField]
-                .replace(settings.IdDress, settings.Nothing)
-                .trim()
-                .match(settings.FactNumber);
+            const id = fields[settings.FactField].replace(settings.IdDress, settings.Nothing).trim();
+            const number = id.match(settings.FactNumber);
             if (number === null) {
                 continue;
             }
@@ -837,14 +952,46 @@ const ScribePedant = Object.freeze({
                 );
             }
         }
-        return Object.freeze({ contradictions: Object.freeze(contradictions), leaks: Object.freeze(leaks) });
+        return Object.freeze({
+            contradictions: Object.freeze(contradictions),
+            leaks: Object.freeze(leaks),
+            misspellings: Object.freeze(misspellings),
+        });
+    },
+
+    /**
+     * @param {readonly object[]} candidates
+     * @param {readonly number[]} numbers
+     * @return {readonly object[]}
+     */
+    misspelt(candidates, numbers) {
+        const chosen = new Set(numbers);
+        return Object.freeze(
+            candidates.filter(
+                /**
+                 * @param {object} candidate
+                 * @param {number} index
+                 * @return {boolean}
+                 */
+                (candidate, index) => chosen.has(index + 1),
+            ).map(
+                /**
+                 * @param {object} candidate
+                 * @return {Readonly<object>}
+                 */
+                (candidate) => {
+                    const { looksLike, ...finding } = candidate;
+                    return Object.freeze(finding);
+                },
+            ),
+        );
     },
 
     /**
      * @param {object} state
      * @param {string} player
      * @param {object} message
-     * @param {{ contradictions: readonly object[], leaks: readonly object[] }} parsed
+     * @param {{ contradictions: readonly object[], leaks: readonly object[], misspellings: readonly number[] }} parsed
      * @param {readonly object[]} unread
      * @return {readonly object[]}
      */
@@ -966,24 +1113,21 @@ const ScribePedant = Object.freeze({
     /**
      * @param {{ state: object, player: string, message: object, unread: readonly object[], ask: function(string, string): Promise<{ text: string }> }} request
      * @return {Promise<readonly object[]>}
+     * @throws {Error}
      */
     async review({ state, player, message, unread, ask }) {
         if (message.fromPlayer) {
             return Object.freeze([]);
         }
-        const spellings = ScribePedant.spellings(state, message);
-        if (ScribePedant.survey(state, player, message, unread).ledger.length === 0) {
-            return spellings;
+        const candidates = ScribePedant.spellings(state, message).slice(0, ScribePedant.Settings.MostCandidates);
+        if (ScribePedant.survey(state, player, message, unread).ledger.length === 0 && candidates.length === 0) {
+            return Object.freeze([]);
         }
-        const input = ScribePedant.input(state, player, message, unread);
-        let text = null;
-        try {
-            text = (await ask(ScribePedant.Prompt, input)).text;
-        } catch {
-            return spellings;
-        }
-        const confirmed = ScribePedant.confirm(state, player, message, ScribePedant.parse(text), unread);
-        return Object.freeze([...spellings, ...confirmed]);
+        const input = ScribePedant.input(state, player, message, unread, candidates);
+        const { text } = await ask(ScribePedant.Prompt, input);
+        const parsed = ScribePedant.parse(text);
+        const confirmed = ScribePedant.confirm(state, player, message, parsed, unread);
+        return Object.freeze([...confirmed, ...ScribePedant.misspelt(candidates, parsed.misspellings)]);
     },
 
     /**

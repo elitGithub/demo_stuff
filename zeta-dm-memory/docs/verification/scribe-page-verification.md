@@ -55,6 +55,10 @@ Owner checks for the frame, on the real page:
 
 What only the real page can show for the frame: that Tampermonkey runs the script inside the sandboxed frame; that the frame's copy reads a value the top page's copy saved after the frame started; that message events read as browser-delivered, with the right sender, through Tampermonkey's wrappers; how many Pingpong frames the room page holds.
 
+## The checker's false alarms, 2026-11-18
+
+Three false alarms from the owner's room were fixed (design `docs/superpowers/specs/2026-11-18-scribe-checker-fixes-design.md`): the word check now only finds candidates and the checker model confirms which are misspellings of a known name (a reply with candidates and no facts to check now makes one call where it made none; otherwise the candidates ride in the call the checker already makes; an ordinary word or a new name is dropped, and a failed check raises nothing and shows the problem; findings of unchanged replies are kept, and an edited or regenerated reply's old findings go, as they always have; the new text is checked when the model is back and the reply is shown again, not on a timer and not after a reload, and a check refused because the budget ran out during it is checked again when the budget frees); location facts are no longer checked for contradictions; and a leak must state or use the secret. After the change `scribe-pedant` passes 55 of 55 tests, `scribe-live` 57 of 57, `scribe-whole` 52 of 52, `scribe-pack` 19 of 19 and `scribe-panel` 82 of 82; `scribe/scribe.user.js` was rebuilt (`Packed 26 files, 868490 bytes`).
+
 ## Not verified by any agent
 
 - **Nothing has run in a browser.** No agent opened the real site, installed the script in Tampermonkey, or made a request to Zeta.

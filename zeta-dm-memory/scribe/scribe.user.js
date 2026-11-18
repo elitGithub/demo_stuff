@@ -8906,6 +8906,7 @@ const ScribeKeeper = Object.freeze({
             settings: keeper.settings,
             spentToday: keeper.spentToday,
             flight: keeper.flight,
+            began: keeper.flight === null ? null : keeper.began,
             stop: keeper.stop,
             pulled: keeper.lastPull,
             mismatch: keeper.mismatch !== null,
@@ -9641,6 +9642,7 @@ const ScribeKeeper = Object.freeze({
         const epoch = keeper.epoch;
         keeper.pulledAt = keeper.clock.now();
         keeper.flight = flight.PullOpen + settings.NoCount + flight.PullClose;
+        keeper.began = keeper.pulledAt;
         ScribeKeeper.tell(keeper, { kind: ScribeKeeper.Event.Changed });
         let result = null;
         try {
@@ -9706,6 +9708,7 @@ const ScribeKeeper = Object.freeze({
         const epoch = keeper.epoch;
         const before = keeper.problem;
         keeper.flight = ScribeKeeper.Settings.Flight.Looking;
+        keeper.began = keeper.clock.now();
         let page = null;
         try {
             page = await keeper.zeta.newest();
@@ -9932,6 +9935,7 @@ const ScribeKeeper = Object.freeze({
         keeper.busy = ScribeKeeper.Busy.Reading;
         keeper.phase = ScribeKeeper.Phase.Reading;
         keeper.flight = ScribeKeeper.reading(keeper, chosen);
+        keeper.began = keeper.clock.now();
         ScribeKeeper.tell(keeper, { kind: ScribeKeeper.Event.Changed });
         let result = null;
         try {
@@ -10043,6 +10047,7 @@ const ScribeKeeper = Object.freeze({
                     keeper.lines.unshift(report);
                     keeper.lines.splice(settings.LastLines);
                     keeper.flight = ScribeKeeper.reading(keeper, chosen);
+                    keeper.began = keeper.clock.now();
                     ScribeKeeper.tell(keeper, { kind: ScribeKeeper.Event.Progress });
                 },
                 /**
@@ -10460,6 +10465,7 @@ const ScribeKeeper = Object.freeze({
             throw new Error(messages.Watching);
         }
         keeper.flight = flight;
+        keeper.began = keeper.clock.now();
         try {
             ScribeStore.write(keeper.storage, keeper.roomId, ScribeStore.Kind.Book, book);
         } catch (error) {
@@ -10809,6 +10815,7 @@ const ScribeKeeper = Object.freeze({
             made: Object.freeze([]),
             busy: null,
             flight: null,
+            began: null,
             problem: null,
             calls: [],
             lines: [],
@@ -12343,6 +12350,7 @@ const ScribePedant = Object.freeze({
     Block: Object.freeze({
         Contradictions: 'CONTRADICTIONS',
         Leaks: 'LEAKS',
+        Misspellings: 'MISSPELLINGS',
     }),
 
     Settings: Object.freeze({
@@ -12355,6 +12363,7 @@ const ScribePedant = Object.freeze({
         Apostrophe: "'",
         Unquoted: '$1',
         Unwrapped: '$2',
+        Unbracketed: '$1',
         Hidden: ' (hidden)',
         RelationTo: 'relation to ',
         DoesNotKnow: ' does not know ',
@@ -12366,7 +12375,13 @@ const ScribePedant = Object.freeze({
             Ledger: 'LEDGER:',
             Unknown: 'DOES NOT KNOW:',
             Since: 'SINCE THE BOOK WAS LAST READ:',
+            Candidates: 'NAME CANDIDATES:',
         }),
+        BlockAliases: Object.freeze({
+            MISSPELLING: 'MISSPELLINGS',
+        }),
+        CandidatePrefix: 'N',
+        MostCandidates: 20,
         MostWords: 120,
         UnreadCharacters: 60000,
         FindingsPerFact: 1,
@@ -12376,6 +12391,7 @@ const ScribePedant = Object.freeze({
         NormalForm: 'NFC',
         NotFound: -1,
         ShortestNameWord: 4,
+        UncheckedCategories: Object.freeze(['location']),
         ContradictionFields: 4,
         LeakFields: 3,
         FactField: 0,
@@ -12466,6 +12482,48 @@ const ScribePedant = Object.freeze({
         /**
          * @return {RegExp}
          */
+        get CandidateNumber() {
+            return /^N\s*0*([1-9]\d*)$/iu;
+        },
+
+        /**
+         * @return {RegExp}
+         */
+        get NumberDress() {
+            return /[`*_#]/gu;
+        },
+
+        /**
+         * @return {RegExp}
+         */
+        get MarkdownHeading() {
+            return /^#+\s/u;
+        },
+
+        /**
+         * @return {RegExp}
+         */
+        get Bracketed() {
+            return /^\[\s*([^\[\]]*?)\s*\]$/u;
+        },
+
+        /**
+         * @return {RegExp}
+         */
+        get TrailingMarks() {
+            return /[.,;:]+$/u;
+        },
+
+        /**
+         * @return {RegExp}
+         */
+        get NumberSeparator() {
+            return /\s*(?:[,;]\s*\band\b|[,;]|\band\b)\s*|\s+(?=\[?N)/iu;
+        },
+
+        /**
+         * @return {RegExp}
+         */
         get Forbidden() {
             return /[|\[\]@\p{Zl}\p{Zp}\p{Cc}]/u;
         },
@@ -12542,22 +12600,26 @@ const ScribePedant = Object.freeze({
 
         PromptLines: Object.freeze([
             'You are the Pedant: a proofreader for an ongoing adult fiction roleplay between consenting adult characters. You never write story.',
-            'You receive PLAYER CHARACTER, a LEDGER of established facts (each with an id like F12, its subject, its category and its text), a list of what certain speakers DO NOT KNOW, the messages SINCE THE BOOK WAS LAST READ, and one REPLY from the storyteller.',
-            'Find where the REPLY disagrees with the LEDGER, and where a speaker uses something they do not know.',
+            'You receive PLAYER CHARACTER, a LEDGER of established facts (each with an id like F12, its subject, its category and its text), a list of what certain speakers DO NOT KNOW, the messages SINCE THE BOOK WAS LAST READ, one REPLY from the storyteller, and NAME CANDIDATES: words in the REPLY that look like known names, each line giving the name, the word of that name it looks like, and the word in the REPLY.',
+            'Find where the REPLY disagrees with the LEDGER, where a speaker uses something they do not know, and which NAME CANDIDATES are misspellings.',
             '',
-            'Answer with these two blocks, each starting with its === line. Leave a block out if it has nothing. Write nothing else.',
+            'Answer with these three blocks, each starting with its === line. Leave a block out if it has nothing. Write nothing else.',
             '',
             '=== CONTRADICTIONS',
             'F12 | Label | category | the words of the reply that say otherwise',
             '=== LEAKS',
             'F7 | Label of the speaker | the words of theirs that show they know it',
+            '=== MISSPELLINGS',
+            'N21',
+            'N22',
             '',
             'Rules.',
             "1. A contradiction is a statement in the REPLY, about the LEDGER fact's own subject, that cannot be true together with that fact: another age, number, colour, name, place or description of the same thing. Give the fact's id, its subject's label and its category exactly as the LEDGER shows them, and copy the reply's own words for the other value. Never report a fact marked (hidden) as contradicted.",
             '2. More detail about the same thing is not a contradiction. Less detail is not a contradiction. The same thing in other words is not a contradiction. Something the story has plainly changed (a move, a promotion, a wound), in the REPLY or in the messages since the book was last read, is not a contradiction.',
-            "3. A leak is a line spoken by a speaker that states, uses or reacts to a fact listed for that speaker under DOES NOT KNOW. Copy the few words of that speaker's own line that show it, exactly as the REPLY has them. What the narrator says, or what another character says or thinks, is not that speaker's leak.",
+            "3. A leak is a line spoken by a speaker that states or uses a fact listed for that speaker under DOES NOT KNOW. Copy the few words of that speaker's own line that show it, exactly as the REPLY has them. What the narrator says, or what another character says or thinks, is not that speaker's leak.",
             '4. It is not a leak if the speaker was told or shown the fact earlier in the REPLY, or anywhere in the messages since the book was last read.',
             '5. Report only what the REPLY itself shows. Never guess. When in doubt, leave it out.',
+            '6. A misspelling is a word in the REPLY that is meant as the listed known name but is written another way. An ordinary word, a word at the start of a sentence that is not meant as the name, and a different or new name are not misspellings. Report only numbers from NAME CANDIDATES. In the MISSPELLINGS block write only the numbers of the misspellings, one per line, nothing else on the line.',
         ]),
     }),
 
@@ -12859,7 +12921,11 @@ const ScribePedant = Object.freeze({
              */
             (fact) => {
                 const kind = ScribeReplay.kindOf(fact.category);
-                return (kind === kinds.Fixed || kind === kinds.Moving) && !ScribePedant.veiled(fact);
+                return (
+                    (kind === kinds.Fixed || kind === kinds.Moving) &&
+                    !ScribePedant.veiled(fact) &&
+                    !settings.UncheckedCategories.includes(fact.category)
+                );
             },
         );
         const earlier = unread
@@ -13044,6 +13110,7 @@ const ScribePedant = Object.freeze({
                             subject: subject.id,
                             label: subject.label,
                             written,
+                            looksLike: word,
                         }),
                     );
                 }
@@ -13057,9 +13124,10 @@ const ScribePedant = Object.freeze({
      * @param {string} player
      * @param {object} message
      * @param {readonly object[]} unread
+     * @param {readonly object[]} candidates
      * @return {string}
      */
-    input(state, player, message, unread) {
+    input(state, player, message, unread, candidates) {
         const settings = ScribePedant.Settings;
         const headings = settings.Headings;
         const labels = ScribeAnalyzer.labels(state);
@@ -13094,18 +13162,37 @@ const ScribePedant = Object.freeze({
             since = [survey.since];
         }
         const reply = settings.ReplyOpen + message.position + settings.ReplyClose;
-        return [
+        const named = candidates.map(
+            /**
+             * @param {{ label: string, looksLike: string, written: string }} candidate
+             * @param {number} index
+             * @return {string}
+             */
+            (candidate, index) =>
+                [settings.CandidatePrefix + (index + 1), candidate.label, candidate.looksLike, candidate.written].join(
+                    settings.Joiner,
+                ),
+        );
+        const sections = [
             ScribeAnalyzer.section(headings.Player, [player]),
             ScribeAnalyzer.section(headings.Ledger, ledger),
             ScribeAnalyzer.section(headings.Unknown, unknown),
             ScribeAnalyzer.section(headings.Since, since),
             ScribeAnalyzer.section(reply, [ScribeIntake.transcript([message])]),
-        ].join(settings.BlankLine);
+        ];
+        if (named.length > 0) {
+            sections.push(ScribeAnalyzer.section(headings.Candidates, named));
+        }
+        return sections.join(settings.BlankLine);
     },
 
     /**
      * @param {string} text
-     * @return {Readonly<{ contradictions: readonly object[], leaks: readonly object[] }>}
+     * @return {Readonly<{
+     *     contradictions: readonly object[],
+     *     leaks: readonly object[],
+     *     misspellings: readonly number[]
+     * }>}
      */
     parse(text) {
         const settings = ScribePedant.Settings;
@@ -13113,6 +13200,7 @@ const ScribePedant = Object.freeze({
         const blocks = ScribePedant.Block;
         const contradictions = [];
         const leaks = [];
+        const misspellings = [];
         let block = null;
         for (const raw of typeof text === 'string' ? text.split(answer.LineBreak) : []) {
             const line = raw
@@ -13123,20 +13211,56 @@ const ScribePedant = Object.freeze({
                 .replace(answer.ListMarkers, settings.Nothing)
                 .trim();
             const letters = line.replace(settings.NonLetters, settings.Nothing).toUpperCase();
-            if (Object.values(blocks).includes(letters)) {
-                block = letters;
+            const heading = settings.BlockAliases[letters] ?? letters;
+            if (Object.values(blocks).includes(heading)) {
+                block = heading;
                 continue;
             }
-            if (
-                block === null ||
-                line === settings.Nothing ||
-                answer.Fence.test(line) ||
-                settings.NoneLine.test(line)
-            ) {
+            if (block === null || line === settings.Nothing || answer.Fence.test(line)) {
                 continue;
             }
-            const fields = line
-                .replace(settings.TableEdges, settings.Nothing)
+            const unedged = line.replace(settings.TableEdges, settings.Nothing);
+            if (block === blocks.Misspellings) {
+                if (settings.MarkdownHeading.test(raw.replace(answer.FormatCharacter, settings.Nothing).trimStart())) {
+                    block = null;
+                    continue;
+                }
+                const tokens = unedged
+                    .replace(settings.NumberDress, settings.Nothing)
+                    .replace(settings.TrailingMarks, settings.Nothing)
+                    .trim()
+                    .split(settings.NumberSeparator)
+                    .map(
+                        /**
+                         * @param {string} token
+                         * @return {RegExpMatchArray|null}
+                         */
+                        (token) =>
+                            token
+                                .trim()
+                                .replace(settings.Bracketed, settings.Unbracketed)
+                                .match(settings.CandidateNumber),
+                    );
+                const numbers = tokens.filter(
+                    /**
+                     * @param {RegExpMatchArray|null} candidate
+                     * @return {boolean}
+                     */
+                    (candidate) => candidate !== null,
+                );
+                if (numbers.length === tokens.length) {
+                    for (const candidate of numbers) {
+                        misspellings.push(Number(candidate[settings.NumberGroup]));
+                    }
+                } else {
+                    block = null;
+                }
+                continue;
+            }
+            if (settings.NoneLine.test(line)) {
+                continue;
+            }
+            const fields = unedged
                 .split(settings.Pipe)
                 .map(
                     /**
@@ -13145,10 +13269,8 @@ const ScribePedant = Object.freeze({
                      */
                     (field) => field.trim(),
                 );
-            const number = fields[settings.FactField]
-                .replace(settings.IdDress, settings.Nothing)
-                .trim()
-                .match(settings.FactNumber);
+            const id = fields[settings.FactField].replace(settings.IdDress, settings.Nothing).trim();
+            const number = id.match(settings.FactNumber);
             if (number === null) {
                 continue;
             }
@@ -13172,14 +13294,46 @@ const ScribePedant = Object.freeze({
                 );
             }
         }
-        return Object.freeze({ contradictions: Object.freeze(contradictions), leaks: Object.freeze(leaks) });
+        return Object.freeze({
+            contradictions: Object.freeze(contradictions),
+            leaks: Object.freeze(leaks),
+            misspellings: Object.freeze(misspellings),
+        });
+    },
+
+    /**
+     * @param {readonly object[]} candidates
+     * @param {readonly number[]} numbers
+     * @return {readonly object[]}
+     */
+    misspelt(candidates, numbers) {
+        const chosen = new Set(numbers);
+        return Object.freeze(
+            candidates.filter(
+                /**
+                 * @param {object} candidate
+                 * @param {number} index
+                 * @return {boolean}
+                 */
+                (candidate, index) => chosen.has(index + 1),
+            ).map(
+                /**
+                 * @param {object} candidate
+                 * @return {Readonly<object>}
+                 */
+                (candidate) => {
+                    const { looksLike, ...finding } = candidate;
+                    return Object.freeze(finding);
+                },
+            ),
+        );
     },
 
     /**
      * @param {object} state
      * @param {string} player
      * @param {object} message
-     * @param {{ contradictions: readonly object[], leaks: readonly object[] }} parsed
+     * @param {{ contradictions: readonly object[], leaks: readonly object[], misspellings: readonly number[] }} parsed
      * @param {readonly object[]} unread
      * @return {readonly object[]}
      */
@@ -13301,24 +13455,21 @@ const ScribePedant = Object.freeze({
     /**
      * @param {{ state: object, player: string, message: object, unread: readonly object[], ask: function(string, string): Promise<{ text: string }> }} request
      * @return {Promise<readonly object[]>}
+     * @throws {Error}
      */
     async review({ state, player, message, unread, ask }) {
         if (message.fromPlayer) {
             return Object.freeze([]);
         }
-        const spellings = ScribePedant.spellings(state, message);
-        if (ScribePedant.survey(state, player, message, unread).ledger.length === 0) {
-            return spellings;
+        const candidates = ScribePedant.spellings(state, message).slice(0, ScribePedant.Settings.MostCandidates);
+        if (ScribePedant.survey(state, player, message, unread).ledger.length === 0 && candidates.length === 0) {
+            return Object.freeze([]);
         }
-        const input = ScribePedant.input(state, player, message, unread);
-        let text = null;
-        try {
-            text = (await ask(ScribePedant.Prompt, input)).text;
-        } catch {
-            return spellings;
-        }
-        const confirmed = ScribePedant.confirm(state, player, message, ScribePedant.parse(text), unread);
-        return Object.freeze([...spellings, ...confirmed]);
+        const input = ScribePedant.input(state, player, message, unread, candidates);
+        const { text } = await ask(ScribePedant.Prompt, input);
+        const parsed = ScribePedant.parse(text);
+        const confirmed = ScribePedant.confirm(state, player, message, parsed, unread);
+        return Object.freeze([...confirmed, ...ScribePedant.misspelt(candidates, parsed.misspellings)]);
     },
 
     /**
@@ -16722,6 +16873,32 @@ h4 {
     writing-mode: vertical-rl;
 }
 
+.activity {
+    flex: 1 1 100%;
+    display: flex;
+    flex-direction: column;
+    gap: var(--scribe-gap-small);
+}
+
+.activity p {
+    margin: 0;
+    color: var(--scribe-muted);
+}
+
+.meter {
+    width: 100%;
+    accent-color: var(--scribe-accent);
+}
+
+.hollow {
+    margin: 0 0 var(--scribe-gap);
+    color: var(--scribe-muted);
+}
+
+.panel.collapsed .activity p {
+    display: none;
+}
+
 .headline {
     flex: 1 1 100%;
     margin: 0;
@@ -17023,7 +17200,17 @@ const PanelView = Object.freeze({
             Budget: "the day's budget is spent.",
             NoReason: 'the reason was not recorded.',
             Watching: 'Another tab is reading this chat.',
+            MessagesRead: ' messages read.',
+            AboutOpen: ' About ',
+            ReadingOne: ' reading to go.',
+            ReadingMany: ' readings to go.',
+            Minutes: ':',
+            NoBookYet:
+                'No book yet. Press Adopt this chat above to start the first reading. Nothing is read, and nothing is spent, before that.',
+            FirstUnderWay: 'The first reading is under way. This fills as each stretch lands.',
+            NothingReadYet: 'Nothing has been read yet. Press Resume above.',
             ProblemOpen: ' Problem: ',
+            LoginWait: " Waiting for the site's login: it is taken from the page's next request to Zeta.",
             ScribeOpen: ' Scribe: ',
             Hidden: ' (hidden)',
             Toward: ' toward ',
@@ -17059,7 +17246,107 @@ const PanelView = Object.freeze({
         StringType: 'string',
         NumberType: 'number',
         ObjectType: 'object',
+        SecondsPerMinute: 60,
+        MillisecondsPerSecond: 1000,
+        SecondDigits: 2,
+        NoCount: 0,
     }),
+
+    /**
+     * @param {number} milliseconds
+     * @return {string}
+     */
+    elapsed(milliseconds) {
+        const settings = PanelView.Settings;
+        const valid = Number.isFinite(milliseconds) && milliseconds > settings.NoCount;
+        const seconds = valid ? Math.floor(milliseconds / settings.MillisecondsPerSecond) : settings.NoCount;
+        const minutes = Math.floor(seconds / settings.SecondsPerMinute);
+        const rest = String(seconds % settings.SecondsPerMinute).padStart(settings.SecondDigits, '0');
+        return String(minutes) + settings.Words.Minutes + rest;
+    },
+
+    /**
+     * @param {{ read: number, total: number, unread: readonly *[], settings: { size: number } }} keeperView
+     * @return {string}
+     */
+    progress(keeperView) {
+        const settings = PanelView.Settings;
+        const words = settings.Words;
+        let line = PanelView.number(keeperView.read) + words.Of + PanelView.number(keeperView.total) + words.MessagesRead;
+        const left = PanelView.listed(keeperView.unread).length;
+        if (left > settings.NoCount) {
+            const readings = Math.ceil(left / keeperView.settings.size);
+            line +=
+                words.AboutOpen +
+                PanelView.number(readings) +
+                (readings === settings.Single ? words.ReadingOne : words.ReadingMany);
+        }
+        return line;
+    },
+
+    /**
+     * @param {{ phase: string, read: number, flight: string|null }} keeperView
+     * @return {string|null}
+     */
+    empty(keeperView) {
+        const settings = PanelView.Settings;
+        const words = settings.Words;
+        const phases = ScribeKeeper.Phase;
+        if (keeperView.phase === phases.NoBook) {
+            return words.NoBookYet;
+        }
+        const booked = [phases.Reading, phases.Idle, phases.Stopped].includes(keeperView.phase);
+        if (!booked || keeperView.read !== settings.NoCount) {
+            return null;
+        }
+        if ((keeperView.flight ?? null) !== null) {
+            return words.FirstUnderWay;
+        }
+        return keeperView.phase === phases.Stopped ? words.NothingReadYet : null;
+    },
+
+    /**
+     * @param {{ pass: string, first: number|null, last: number|null, read: number, refusedLines?: *, refusedOperations?: * }} report
+     * @return {string}
+     */
+    finished(report) {
+        return BenchView.progress({
+            ...report,
+            refusedLines: PanelView.listed(report.refusedLines),
+            refusedOperations: PanelView.listed(report.refusedOperations),
+        });
+    },
+
+    Step: Object.freeze({
+        Adopt: 'Adopt',
+        Resume: 'Resume',
+    }),
+
+    /**
+     * @param {{ phase: string, flight: string|null, stop: { reason: string }|null }} keeperView
+     * @return {string|null}
+     */
+    next(keeperView) {
+        const phases = ScribeKeeper.Phase;
+        const stops = ScribeAdoption.Stop;
+        const flight = keeperView.flight ?? null;
+        const stop = keeperView.stop ?? null;
+        if (flight !== null) {
+            return null;
+        }
+        if (keeperView.phase === phases.NoBook) {
+            return PanelView.Step.Adopt;
+        }
+        if (
+            keeperView.phase === phases.Stopped &&
+            stop !== null &&
+            stop.reason !== stops.Budget &&
+            stop.reason !== stops.Done
+        ) {
+            return PanelView.Step.Resume;
+        }
+        return null;
+    },
 
     /**
      * @param {{ phase: string, total: number, read: number, flight: string|null, stop: { reason: string, problem: string|null }|null, problem: string|null }} keeperView
@@ -17103,7 +17390,9 @@ const PanelView = Object.freeze({
             const recorded = typeof reason === settings.StringType && reason.trim() !== words.Nothing;
             line = words.StoppedOpen + (recorded ? reason : words.NoReason);
         }
-        if (problem !== null) {
+        if (problem === ZetaSource.Settings.Messages.NoLogin) {
+            line += words.LoginWait;
+        } else if (problem !== null) {
             line += words.ProblemOpen + PanelView.said(problem);
         }
         const scribe = liveView.problem ?? null;
@@ -17852,6 +18141,8 @@ const ScribePanel = Object.freeze({
         NarrowWindow: 1100,
         TellLimit: 2000,
         RepeatMs: 1000,
+        ClockMs: 1000,
+        Hollow: Object.freeze(['Summary', 'Book', 'Timeline', 'Rulings']),
         RoomLength: 60,
         Replacement: '_',
         ShadowMode: 'closed',
@@ -17904,6 +18195,13 @@ const ScribePanel = Object.freeze({
             Host: 'scribe-host',
             Panel: 'scribe-panel',
             Headline: 'scribe-headline',
+            Next: 'scribe-next',
+            NextOutcome: 'scribe-next-outcome',
+            Activity: 'scribe-activity',
+            Meter: 'scribe-meter',
+            Counts: 'scribe-counts',
+            Clock: 'scribe-clock',
+            Finished: 'scribe-finished',
             Badge: 'scribe-badge',
             Spend: 'scribe-spend',
             Trouble: 'scribe-trouble',
@@ -17957,6 +18255,7 @@ const ScribePanel = Object.freeze({
             Section: 'scribe-section-',
             Title: 'scribe-title-',
             Failure: 'scribe-failure-',
+            Empty: 'scribe-empty-',
             List: 'scribe-list-',
             Setting: 'scribe-setting-',
         }),
@@ -17975,6 +18274,7 @@ const ScribePanel = Object.freeze({
             Key: 'key',
             Settings: 'settings',
             Controls: 'controls',
+            Next: 'next',
             Offer: 'offer',
             Tell: 'tell',
         }),
@@ -18062,6 +18362,7 @@ const ScribePanel = Object.freeze({
             Summary: 'summary',
             Preformatted: 'pre',
             Style: 'style',
+            Progress: 'progress',
         }),
         Classes: Object.freeze({
             Panel: 'panel',
@@ -18100,8 +18401,13 @@ const ScribePanel = Object.freeze({
             Field: 'field',
             Tick: 'tick',
             Required: 'required',
+            Activity: 'activity',
+            Meter: 'meter',
+            Hollow: 'hollow',
         }),
         Attributes: Object.freeze({
+            Max: 'max',
+            Value: 'value',
             Type: 'type',
             Role: 'role',
             Label: 'aria-label',
@@ -18314,6 +18620,10 @@ const ScribePanel = Object.freeze({
             AnswerText: 'The answer',
             Saving: 'Saving...',
             Working: 'Working...',
+            AdoptFixNext: 'A setup field on the Progress tab needs attention.',
+            MeterLabel: 'Messages read',
+            StepOpen: 'This step: ',
+            LastFinished: 'Last finished: ',
             Empty: 'None.',
             PageOpen: 'Page ',
             PageOf: ' of ',
@@ -18433,6 +18743,10 @@ const ScribePanel = Object.freeze({
             marked: new Set(),
             last: new Map(),
             busy: 0,
+            step: null,
+            timer: null,
+            began: null,
+            hollows: {},
             filled: null,
             trouble,
             composing: false,
@@ -18488,6 +18802,7 @@ const ScribePanel = Object.freeze({
             return;
         }
         panel.mounted = false;
+        ScribePanel.stopClock(panel);
         panel.host.remove();
     },
 
@@ -19110,12 +19425,51 @@ const ScribePanel = Object.freeze({
         toggle.setAttribute(attributes.Controls, settings.Ids.Body);
         const trouble = ScribePanel.make(panel, tags.Paragraph, settings.Nothing, classes.Trouble);
         trouble.setAttribute(attributes.Role, aria.Alert);
+        const next = ScribePanel.button(
+            panel,
+            settings.Nothing,
+            /**
+             * @return {Promise<void>}
+             */
+            async () => {
+                if (panel.step === PanelView.Step.Adopt) {
+                    await ScribePanel.adopt(panel, settings.Outlets.Next);
+                } else if (panel.step === PanelView.Step.Resume) {
+                    await ScribePanel.resume(panel, settings.Outlets.Next);
+                }
+            },
+            settings.Guard.Free,
+            settings.Ids.Next,
+            classes.Primary,
+        );
+        next.hidden = true;
+        const activity = ScribePanel.own(
+            panel,
+            'Activity',
+            ScribePanel.make(panel, tags.Block, settings.Nothing, classes.Activity),
+        );
+        const meter = ScribePanel.own(
+            panel,
+            'Meter',
+            ScribePanel.make(panel, tags.Progress, settings.Nothing, classes.Meter),
+        );
+        meter.setAttribute(attributes.Label, words.MeterLabel);
+        activity.hidden = true;
+        activity.append(
+            meter,
+            ScribePanel.own(panel, 'Counts', ScribePanel.make(panel, tags.Paragraph, settings.Nothing)),
+            ScribePanel.own(panel, 'Clock', ScribePanel.make(panel, tags.Paragraph, settings.Nothing)),
+            ScribePanel.own(panel, 'Finished', ScribePanel.make(panel, tags.Paragraph, settings.Nothing)),
+        );
         header.append(
             ScribePanel.own(
                 panel,
                 'Headline',
                 ScribePanel.make(panel, tags.Paragraph, settings.Nothing, classes.Headline),
             ),
+            ScribePanel.own(panel, 'Next', next),
+            ScribePanel.outlet(panel, 'NextOutcome', settings.Outlets.Next),
+            activity,
             ScribePanel.own(panel, 'Badge', ScribePanel.make(panel, tags.Span, settings.Nothing, classes.Badge)),
             ScribePanel.own(panel, 'Spend', ScribePanel.make(panel, tags.Span, settings.Nothing, classes.Spend)),
             toggle,
@@ -19164,6 +19518,13 @@ const ScribePanel = Object.freeze({
             failure.setAttribute(attributes.Role, aria.Alert);
             failure.hidden = true;
             section.append(title, failure);
+            if (settings.Hollow.includes(name)) {
+                const hollow = ScribePanel.make(panel, tags.Paragraph, settings.Nothing, classes.Hollow);
+                hollow.id = settings.Prefixes.Empty + lower;
+                hollow.hidden = true;
+                panel.hollows[name] = hollow;
+                section.append(hollow);
+            }
             panel.making = name;
             panel.stale[name] = [];
             ScribePanel.Builders[name](panel, section);
@@ -19634,7 +19995,7 @@ const ScribePanel = Object.freeze({
                         /**
                          * @return {Promise<void>}
                          */
-                        () => ScribePanel.adopt(panel),
+                        () => ScribePanel.adopt(panel, outlets.Controls),
                         guards.Book,
                         ids.Adopt,
                     ),
@@ -19693,13 +20054,7 @@ const ScribePanel = Object.freeze({
                     ScribePanel.button(
                         panel,
                         words.Resume,
-                        command(
-                            /**
-                             * @return {Promise<void>}
-                             */
-                            () => keeper.resume(),
-                            true,
-                        ),
+                        () => ScribePanel.resume(panel, outlets.Controls),
                         guards.Book,
                         ids.Resume,
                     ),
@@ -19798,6 +20153,9 @@ const ScribePanel = Object.freeze({
                 ScribePanel.write(panel.parts[name], settings.Nothing);
             }
             panel.parts.Badge.hidden = true;
+            panel.parts.Next.hidden = true;
+            panel.parts.Activity.hidden = true;
+            ScribePanel.stopClock(panel);
             ScribePanel.fold(panel);
             ScribePanel.alarm(panel, words.Trouble + ScribePanel.reason(error));
         }
@@ -19824,6 +20182,58 @@ const ScribePanel = Object.freeze({
         const parts = panel.parts;
         ScribePanel.fold(panel);
         ScribePanel.write(parts.Headline, PanelView.headline(view, live));
+        const step = PanelView.next(view);
+        ScribePanel.fill(panel, view);
+        panel.step = step;
+        if (step === null && panel.root.activeElement === parts.Next) {
+            parts.Toggle.focus();
+        }
+        parts.Next.hidden = step === null;
+        parts.Next.disabled = ScribePanel.ruled(panel, view);
+        ScribePanel.write(parts.Next, step === PanelView.Step.Adopt ? words.Adopt : words.Resume);
+        const said = panel.outcomes.get(settings.Outlets.Next) ?? settings.Nothing;
+        ScribePanel.write(parts.NextOutcome, said);
+        parts.NextOutcome.hidden = said === settings.Nothing;
+        panel.shown.add(settings.Outlets.Next);
+        const flying = view.flight !== null;
+        parts.Activity.hidden = !flying;
+        if (flying) {
+            const reading =
+                view.flight.startsWith(ScribeKeeper.Settings.Flight.ReadOpen) ||
+                [ScribeKeeper.Settings.Flight.Answers, ScribeKeeper.Settings.Flight.Finishing].includes(view.flight);
+            if (reading && view.total > settings.NoCount) {
+                parts.Meter.setAttribute(settings.Attributes.Max, String(view.total));
+                parts.Meter.setAttribute(settings.Attributes.Value, String(view.read));
+            } else {
+                parts.Meter.removeAttribute(settings.Attributes.Max);
+                parts.Meter.removeAttribute(settings.Attributes.Value);
+            }
+            ScribePanel.write(parts.Counts, PanelView.progress(view));
+            const newest = PanelView.listed(view.lines)[0];
+            parts.Finished.hidden = !PanelView.entry(newest);
+            ScribePanel.write(
+                parts.Finished,
+                PanelView.entry(newest) ? words.LastFinished + PanelView.finished(newest) : settings.Nothing,
+            );
+            panel.began = view.began ?? null;
+            ScribePanel.tick(panel);
+            if (panel.timer === null) {
+                panel.timer = panel.document.defaultView.setInterval(
+                    /**
+                     * @return {void}
+                     */
+                    () => ScribePanel.tick(panel),
+                    settings.ClockMs,
+                );
+            }
+        } else {
+            ScribePanel.stopClock(panel);
+        }
+        for (const name of settings.Hollow) {
+            const sentence = PanelView.empty(view);
+            ScribePanel.write(panel.hollows[name], sentence ?? settings.Nothing);
+            panel.hollows[name].hidden = sentence === null;
+        }
         const needs = PanelView.needs(view.state);
         const ruling = needs.conflicts + needs.lookAlikes + needs.questions;
         const open = PanelView.tally(
@@ -19920,13 +20330,63 @@ const ScribePanel = Object.freeze({
 
     /**
      * @param {object} panel
+     * @return {void}
+     */
+    tick(panel) {
+        const settings = ScribePanel.Settings;
+        const span = panel.began === null ? settings.NoCount : panel.clock.now() - panel.began;
+        ScribePanel.write(panel.parts.Clock, settings.Words.StepOpen + PanelView.elapsed(span));
+    },
+
+    /**
+     * @param {object} panel
+     * @return {void}
+     */
+    stopClock(panel) {
+        if (panel.timer === null) {
+            return;
+        }
+        panel.document.defaultView.clearInterval(panel.timer);
+        panel.timer = null;
+    },
+
+    /**
+     * @param {object} panel
+     * @param {object} view
+     * @return {void}
+     */
+    fill(panel, view) {
+        const settings = ScribePanel.Settings;
+        const filled = JSON.stringify(view.settings);
+        if (filled === panel.filled) {
+            return;
+        }
+        for (const item of settings.Setup) {
+            const value = view.settings[item.name];
+            const shown = typeof value === settings.StringType || typeof value === settings.NumberType;
+            panel.setup[item.name].input.value = shown ? String(value) : settings.Nothing;
+        }
+        panel.filled = filled;
+    },
+
+    /**
+     * @param {object} panel
+     * @param {object} view
+     * @return {boolean}
+     */
+    ruled(panel, view) {
+        return !view.reader || view.flight !== null || panel.busy > 0;
+    },
+
+    /**
+     * @param {object} panel
      * @param {object} view
      * @return {void}
      */
     lock(panel, view) {
         const phases = ScribeKeeper.Phase;
         const parts = panel.parts;
-        const ruled = !view.reader || view.flight !== null || panel.busy > 0;
+        const ruled = ScribePanel.ruled(panel, view);
         for (const control of [...panel.held.Book, ...panel.guarded.Book]) {
             control.disabled = ruled;
         }
@@ -20352,17 +20812,37 @@ const ScribePanel = Object.freeze({
 
     /**
      * @param {object} panel
+     * @param {string} outlet
+     * @return {Promise<boolean>}
+     */
+    resume(panel, outlet) {
+        const settings = ScribePanel.Settings;
+        return ScribePanel.perform(panel, {
+            outlet,
+            /**
+             * @return {Promise<void>}
+             */
+            call: () => panel.keeper.resume(),
+            question: null,
+            done: settings.Nothing,
+            pending: settings.Words.Working,
+            book: true,
+        });
+    },
+
+    /**
+     * @param {object} panel
+     * @param {string} outlet
      * @return {Promise<void>}
      */
-    async adopt(panel) {
+    async adopt(panel, outlet) {
         const settings = ScribePanel.Settings;
         const words = settings.Words;
-        const outlet = settings.Outlets.Controls;
         const view = panel.keeper.view();
         const form = ScribePanel.form(panel);
         if (form.problems.size > settings.NoCount) {
             panel.parts.Setup.open = true;
-            ScribePanel.say(panel, outlet, words.AdoptFix);
+            ScribePanel.say(panel, outlet, outlet === settings.Outlets.Next ? words.AdoptFixNext : words.AdoptFix);
             ScribePanel.redraw(panel);
             return;
         }
@@ -21052,15 +21532,7 @@ const ScribePanel = Object.freeze({
                 keyState = words.KeyUnreadable;
             }
             ScribePanel.write(parts.KeyState, keyState);
-            const filled = JSON.stringify(view.settings);
-            if (filled !== panel.filled) {
-                for (const item of settings.Setup) {
-                    const value = view.settings[item.name];
-                    const shown = typeof value === settings.StringType || typeof value === settings.NumberType;
-                    panel.setup[item.name].input.value = shown ? String(value) : settings.Nothing;
-                }
-                panel.filled = filled;
-            }
+            ScribePanel.fill(panel, view);
             if (noBook) {
                 parts.Setup.open = true;
                 parts.Adopt.classList.add(settings.Classes.Primary);
@@ -21975,11 +22447,7 @@ const ScribePanel = Object.freeze({
             const refusedLines = PanelView.listed(report.refusedLines);
             const refusedOperations = PanelView.listed(report.refusedOperations);
             item.append(
-                ScribePanel.make(
-                    panel,
-                    tags.Paragraph,
-                    BenchView.progress({ ...report, refusedLines, refusedOperations }),
-                ),
+                ScribePanel.make(panel, tags.Paragraph, PanelView.finished(report)),
             );
             const refused = [
                 ...PanelView.each(

@@ -185,7 +185,7 @@ const facts = [
     'Tamsin | age | 29 | #28',
     'Tamsin | status | poisoned her first husband | hidden | #29',
     'Mirelle | build | short and broad | hidden | #30',
-    'Mirelle | location | the inn | #31',
+    'Mirelle | role | the innkeeper | #31',
     'Isolde | eyes | green | #32',
     'Brandt | hair | black | #33',
     'Brandt | hair | silver | #34',
@@ -199,22 +199,26 @@ const scenes = [
 
 const promptLines = [
     'You are the Pedant: a proofreader for an ongoing adult fiction roleplay between consenting adult characters. You never write story.',
-    'You receive PLAYER CHARACTER, a LEDGER of established facts (each with an id like F12, its subject, its category and its text), a list of what certain speakers DO NOT KNOW, the messages SINCE THE BOOK WAS LAST READ, and one REPLY from the storyteller.',
-    'Find where the REPLY disagrees with the LEDGER, and where a speaker uses something they do not know.',
+    'You receive PLAYER CHARACTER, a LEDGER of established facts (each with an id like F12, its subject, its category and its text), a list of what certain speakers DO NOT KNOW, the messages SINCE THE BOOK WAS LAST READ, one REPLY from the storyteller, and NAME CANDIDATES: words in the REPLY that look like known names, each line giving the name, the word of that name it looks like, and the word in the REPLY.',
+    'Find where the REPLY disagrees with the LEDGER, where a speaker uses something they do not know, and which NAME CANDIDATES are misspellings.',
     '',
-    'Answer with these two blocks, each starting with its === line. Leave a block out if it has nothing. Write nothing else.',
+    'Answer with these three blocks, each starting with its === line. Leave a block out if it has nothing. Write nothing else.',
     '',
     '=== CONTRADICTIONS',
     'F12 | Label | category | the words of the reply that say otherwise',
     '=== LEAKS',
     'F7 | Label of the speaker | the words of theirs that show they know it',
+    '=== MISSPELLINGS',
+    'N21',
+    'N22',
     '',
     'Rules.',
     "1. A contradiction is a statement in the REPLY, about the LEDGER fact's own subject, that cannot be true together with that fact: another age, number, colour, name, place or description of the same thing. Give the fact's id, its subject's label and its category exactly as the LEDGER shows them, and copy the reply's own words for the other value. Never report a fact marked (hidden) as contradicted.",
     '2. More detail about the same thing is not a contradiction. Less detail is not a contradiction. The same thing in other words is not a contradiction. Something the story has plainly changed (a move, a promotion, a wound), in the REPLY or in the messages since the book was last read, is not a contradiction.',
-    "3. A leak is a line spoken by a speaker that states, uses or reacts to a fact listed for that speaker under DOES NOT KNOW. Copy the few words of that speaker's own line that show it, exactly as the REPLY has them. What the narrator says, or what another character says or thinks, is not that speaker's leak.",
+    "3. A leak is a line spoken by a speaker that states or uses a fact listed for that speaker under DOES NOT KNOW. Copy the few words of that speaker's own line that show it, exactly as the REPLY has them. What the narrator says, or what another character says or thinks, is not that speaker's leak.",
     '4. It is not a leak if the speaker was told or shown the fact earlier in the REPLY, or anywhere in the messages since the book was last read.',
     '5. Report only what the REPLY itself shows. Never guess. When in doubt, leave it out.',
+    '6. A misspelling is a word in the REPLY that is meant as the listed known name but is written another way. An ordinary word, a word at the start of a sentence that is not meant as the name, and a different or new name are not misspellings. Report only numbers from NAME CANDIDATES. In the MISSPELLINGS block write only the numbers of the misspellings, one per line, nothing else on the line.',
 ];
 
 /**
@@ -328,7 +332,7 @@ function known(state) {
         tamsinAge: id('29'),
         poison: id('poisoned her first husband'),
         broad: id('short and broad'),
-        inn: id('the inn'),
+        inn: id('the innkeeper'),
         black: id('black'),
         isoldeEyes: id('the colour of moss after rain'),
     };
@@ -491,7 +495,7 @@ function scriptedAsk(reply) {
  */
 function sectionOf(state, section, message, unread) {
     const order = ['PLAYER CHARACTER:', 'LEDGER:', 'DOES NOT KNOW:', 'SINCE THE BOOK WAS LAST READ:', 'REPLY (#'];
-    const text = ScribePedant.input(state, 'Orla', message, unread);
+    const text = ScribePedant.input(state, 'Orla', message, unread, []);
     const start = text.indexOf(`${section}\n`);
     const end = text.indexOf(`\n\n${order[order.indexOf(section) + 1]}`, start);
     assert.notEqual(start, -1, section);
@@ -506,7 +510,8 @@ test('a near-miss name is flagged', () => {
     assert.deepEqual(plain(flagged.map(fields)), [
         ['Spelling', 'MESSAGE-1', 1, aldric, 'Aldric', null, null, null, null, null, null, 'Aldrich'],
     ]);
-    assert.deepEqual(plain(Object.keys(flagged[0])), shape);
+    assert.deepEqual(plain(Object.keys(flagged[0])), [...shape, 'looksLike']);
+    assert.equal(flagged[0].looksLike, 'Aldric');
     assert.equal(ScribePedant.spellings(state, narration('Aldric bows.')).length, 0);
     assert.equal(ScribePedant.spellings(state, narration('Then aldrich bows.')).length, 0);
     const possessive = ScribePedant.spellings(state, narration('Aldrich’s cloak sways.'));
@@ -553,6 +558,28 @@ test('a near-miss name is flagged', () => {
     assert.deepEqual(plain(spoken.map((finding) => [finding.label, finding.written])), [['Brandt', 'Wolfrick']]);
 });
 
+test('a location is never a checkable contradiction', () => {
+    const state = smallBook({
+        SUBJECTS: cast,
+        FACTS: [
+            'Halvard | role | a guard | #7',
+            'Halvard | location | the mill | #8',
+            'Brandt | location | the cellar | hidden | #9',
+        ],
+    });
+    const reply = at(50);
+    const survey = ScribePedant.survey(state, 'Orla', reply, [reply]);
+    const categories = (facts) => plain(facts.map((fact) => fact.category));
+    assert.deepEqual(categories(survey.candidates), ['role']);
+    assert.deepEqual(categories(survey.ledger), ['role', 'location']);
+    assert.equal(survey.ledger.some((fact) => fact.text === 'the cellar'), true);
+    assert.equal(survey.ledger.some((fact) => fact.text === 'the mill'), false);
+    const mill = factSaying(state, 'the mill');
+    assert.equal(check(state, reply, [contradiction(mill.id, 'Halvard', 'location', 'the tower')]).length, 0);
+    const guard = factSaying(state, 'a guard');
+    assert.equal(check(state, reply, [contradiction(guard.id, 'Halvard', 'role', 'a baker')]).length, 1);
+});
+
 test('the input shows the ledger and who does not know', () => {
     const { log, state } = book();
     const ids = known(state);
@@ -564,7 +591,6 @@ test('the input shows the ledger and who does not know', () => {
         'LEDGER:',
         `${ids.age} | Halvard | age | 34`,
         `${ids.eyes} | Halvard | eyes | grey`,
-        `${ids.location} | Halvard | location | the mill`,
         `${ids.friends} | Halvard | relation to Isolde | sworn friends`,
         `${ids.miller} | Halvard | relation to the miller | owes him money`,
         `${ids.guard} | Halvard | role | a guard`,
@@ -573,7 +599,7 @@ test('the input shows the ledger and who does not know', () => {
         `${ids.background} | Halvard | background | deserted at the siege (hidden)`,
         `${ids.hair} | Halvard | hair | red with grey at the temples`,
         `${ids.ability} | Halvard | ability | picks locks with a bent pin (hidden)`,
-        `${ids.inn} | Mirelle | location | the inn`,
+        `${ids.inn} | Mirelle | role | the innkeeper`,
         `${ids.ferry} | Brandt | role | a ferryman`,
         `${ids.wolfric} | Brandt | aka | Wolfric (hidden)`,
         '',
@@ -591,14 +617,14 @@ test('the input shows the ledger and who does not know', () => {
         `Mirelle: ${speech50}`,
         'Orla: We should go.',
     ].join('\n');
-    assert.equal(ScribePedant.input(state, 'Orla', reply, [reply]), expected);
+    assert.equal(ScribePedant.input(state, 'Orla', reply, [reply], []), expected);
 
     const twice = sectionOf(state, 'DOES NOT KNOW:', at(62), [at(62)]).split('\n').slice(1);
     assert.equal(twice.length > 0, true);
     assert.equal(new Set(twice).size, twice.length);
 
     const widened = ruled(log, { type: 'Widen', fact: ids.status, to: 'Everyone' });
-    const lines = ScribePedant.input(widened, 'Orla', reply, [reply]).split('\n');
+    const lines = ScribePedant.input(widened, 'Orla', reply, [reply], []).split('\n');
     assert.equal(lines.includes(`${ids.status} | Halvard | status | wanted by the crown for desertion`), true);
     assert.deepEqual(
         lines.filter((line) => line.includes(' does not know ')),
@@ -606,7 +632,7 @@ test('the input shows the ledger and who does not know', () => {
     );
 
     const empty = subjectsOnly(['Halvard', 'Mirelle', 'Orla']).state;
-    const bare = ScribePedant.input(empty, 'Orla', reply, [reply]).split('\n\n');
+    const bare = ScribePedant.input(empty, 'Orla', reply, [reply], []).split('\n\n');
     assert.deepEqual(bare.slice(0, 4), [
         'PLAYER CHARACTER:\nOrla',
         'LEDGER:\n(none)',
@@ -643,6 +669,7 @@ test('the answer is read', () => {
             { fact: 'F3', label: 'Halvard', category: 'age', said: 'forty' },
         ],
         leaks: [{ fact: 'F13', speaker: 'Mirelle', words: 'you ran from the siege' }],
+        misspellings: [],
     });
     const dressed = ['**=== contradictions ===**', 'F7 | Mirelle | build | tall', '#LEAKS:', 'F8 | Orla | it'].join(
         '\r\n',
@@ -650,10 +677,154 @@ test('the answer is read', () => {
     assert.deepEqual(plain(ScribePedant.parse(dressed)), {
         contradictions: [{ fact: 'F7', label: 'Mirelle', category: 'build', said: 'tall' }],
         leaks: [{ fact: 'F8', speaker: 'Orla', words: 'it' }],
+        misspellings: [],
     });
     for (const unreadable of ['', 'All of it agrees with the book.', null, 42]) {
-        assert.deepEqual(plain(ScribePedant.parse(unreadable)), { contradictions: [], leaks: [] });
+        assert.deepEqual(plain(ScribePedant.parse(unreadable)), { contradictions: [], leaks: [], misspellings: [] });
     }
+});
+
+test('the misspelling numbers are read', () => {
+    const numbers = (text) => plain(ScribePedant.parse(text).misspellings);
+    const lines = ['N1', 'n 2', '**N3**', '- N4', 'N007'];
+    assert.deepEqual(numbers(['=== MISSPELLINGS', ...lines].join('\n')), [1, 2, 3, 4, 7]);
+    for (const unreadable of ['N0', 'N-1', 'X5', 'N1 | Thessaly | Thessely', 'N', 'N1.5']) {
+        assert.deepEqual(numbers(`=== MISSPELLINGS\n${unreadable}`), [], unreadable);
+    }
+    for (const dressed of ['`N3`', '[N3]', 'N3:', '*N3*', '**N3**', '#N3', 'N3.', 'N3,']) {
+        assert.deepEqual(numbers(`=== MISSPELLINGS\n${dressed}`), [3], dressed);
+    }
+    for (const listed of ['N1, N3', 'N1 N3', 'N1; N3', 'N1 and N3', 'N1 AND N3', 'N1,N3']) {
+        assert.deepEqual(numbers(`=== MISSPELLINGS\n${listed}`), [1, 3], listed);
+    }
+    const voided = [
+        'N1 | no',
+        'N2 | yes',
+        'N1 | Nine Quarter | Fine',
+        'N3 - note',
+        'N3 (Thessely)',
+        'N3: Thessely for Thessaly',
+        'N1, N3 and Thessely',
+        'N1, , N3',
+        'Nine Quarter',
+    ];
+    for (const line of voided) {
+        assert.deepEqual(numbers(`=== MISSPELLINGS\n${line}`), [], line);
+    }
+    const echoed = '=== MISSPELLINGS\nN2\nNAME CANDIDATES:\nN1 | Nine Quarter | Nine | Fine\nN2 | Thessaly | Thessaly | Thessely';
+    assert.deepEqual(numbers(echoed), [2]);
+    assert.deepEqual(numbers('=== MISSPELLING\nN4'), [4]);
+    assert.deepEqual(numbers('MISSPELLING:\nN4'), [4]);
+    assert.deepEqual(numbers('=== MISSPELLINGS\n(none)'), []);
+    assert.deepEqual(numbers('=== MISSPELLINGS\nnone'), []);
+    assert.deepEqual(numbers('N1\nN2'), []);
+    assert.deepEqual(numbers('=== MISSPELLINGS\nF1 | Halvard | age | forty'), []);
+    assert.deepEqual(numbers('=== MISSPELLINGS\n[N1], [N3]'), [1, 3]);
+    assert.deepEqual(numbers('=== MISSPELLINGS\n[N1] [N3]'), [1, 3]);
+    assert.deepEqual(numbers('=== MISSPELLINGS\nN3:'), [3]);
+
+    const ids = known(book().state);
+    const first = ScribePedant.parse(`=== MISSPELLINGS\nN2\n=== CONTRADICTIONS\n${ids.age} | Halvard | age | forty`);
+    assert.deepEqual(plain(first.misspellings), [2]);
+    assert.deepEqual(plain(first.contradictions.map((claim) => claim.fact)), [ids.age]);
+    const last = ScribePedant.parse(
+        [
+            `=== LEAKS\n${ids.status} | Mirelle | You deserted`,
+            `=== CONTRADICTIONS\n${ids.age} | Halvard | age | forty`,
+            '=== MISSPELLINGS\nN5',
+        ].join('\n'),
+    );
+    assert.deepEqual(plain(last.misspellings), [5]);
+    assert.deepEqual(plain(last.leaks.map((claim) => claim.fact)), [ids.status]);
+    assert.deepEqual(plain(last.contradictions.map((claim) => claim.fact)), [ids.age]);
+});
+
+test('a line that is not numbers ends the misspellings block', () => {
+    const numbers = (text) => plain(ScribePedant.parse(text).misspellings);
+    assert.deepEqual(numbers('=== MISSPELLINGS\nNone. These are ordinary words or new names:\nN1\nN3'), []);
+    assert.deepEqual(numbers('=== MISSPELLINGS\nN2\nNone of the following are misspellings:\nN1\nN3\nN4\nN5'), [2]);
+    for (const label of [
+        '*Not misspellings:*',
+        '_Not misspellings:_',
+        '__Not misspellings:__',
+        '`Not misspellings:`',
+        '***Not misspellings:***',
+    ]) {
+        assert.deepEqual(numbers(`=== MISSPELLINGS\nN2\n${label}\n- N1\n- N3\n- N4\n- N5`), [2], label);
+    }
+    for (const label of ['**Not misspellings**', 'Not misspellings', 'Not misspellings\n---']) {
+        assert.deepEqual(numbers(`=== MISSPELLINGS\nN2\n\n${label}\n- N1\n- N3`), [2], label);
+    }
+    assert.deepEqual(numbers('=== MISSPELLINGS\n(none)\nN1'), []);
+    assert.deepEqual(numbers('=== MISSPELLINGS\n\nN2\n\nN3'), [2, 3]);
+    assert.deepEqual(numbers('=== MISSPELLINGS\nN1\n=== NOT MISSPELLINGS\nN2\nN3\nN4\nN5'), [1]);
+    assert.deepEqual(numbers('=== MISSPELLINGS\nN2\n\nNot misspellings:\n- N1\n- N3'), [2]);
+    assert.deepEqual(numbers('=== MISSPELLINGS\nN2\n=== ORDINARY WORDS\nN1\nN3'), [2]);
+    assert.deepEqual(numbers('=== MISSPELLINGS\nN2\nN1 | no\nN3'), [2]);
+    assert.deepEqual(numbers('=== MISSPELLINGS\nN2\nsome prose here\nN3'), [2]);
+    assert.deepEqual(numbers('=== MISSPELLINGS\nN2\n**Correct (not misspellings):**\n- N1'), [2]);
+    assert.deepEqual(numbers('=== MISSPELLINGS\nN2\n## Ordinary words\nN1'), [2]);
+    assert.deepEqual(numbers('=== MISSPELLINGS\nN2\n=== NOT MISSPELLINGS\nN1\n=== MISSPELLINGS\nN3'), [2, 3]);
+    assert.deepEqual(numbers('=== MISSPELLINGS\nN3:'), [3]);
+    assert.deepEqual(numbers('=== MISSPELLINGS\n#N3'), [3]);
+    const ids = known(book().state);
+    const after = ScribePedant.parse(
+        `=== MISSPELLINGS\nN2\nNot misspellings:\nN1\n=== LEAKS\n${ids.status} | Mirelle | You deserted`,
+    );
+    assert.deepEqual(plain(after.misspellings), [2]);
+    assert.deepEqual(plain(after.leaks.map((claim) => claim.fact)), [ids.status]);
+});
+
+test('a markdown heading ends the misspellings block', async () => {
+    const numbers = (text) => plain(ScribePedant.parse(text).misspellings);
+    const heading = '=== MISSPELLINGS\n## N1\nNot a misspelling: Fine is a new name.\n## N3\nMisspelling of Thessaly.';
+    assert.deepEqual(numbers(heading), []);
+    assert.deepEqual(numbers('=== MISSPELLINGS\n# N3'), []);
+    assert.deepEqual(numbers('=== MISSPELLINGS\n###\tN3'), []);
+    assert.deepEqual(numbers('=== MISSPELLINGS\nN2\n## N1\nN3'), [2]);
+    assert.deepEqual(numbers('=== MISSPELLINGS\n#N3'), [3]);
+    assert.deepEqual(numbers('### Misspellings\nN2'), [2]);
+    const quarter = smallBook({ SUBJECTS: ['Nine Quarter | place', 'Thessaly | character', 'Orla | character'] });
+    const reply = narration('Fine, said Thessely.');
+    assert.equal((await reviewed(quarter, reply, heading)).length, 0);
+});
+
+test('an Oxford comma is one separator', () => {
+    const numbers = (text) => plain(ScribePedant.parse(text).misspellings);
+    assert.deepEqual(numbers('=== MISSPELLINGS\nN1, N3, and N5'), [1, 3, 5]);
+    assert.deepEqual(numbers('=== MISSPELLINGS\nN1, N3, and N5\nN2'), [1, 3, 5, 2]);
+    assert.deepEqual(numbers('=== MISSPELLINGS\nN1; N3; and N5'), [1, 3, 5]);
+    assert.deepEqual(numbers('=== MISSPELLINGS\nN1, N3,\nand N5'), [1, 3]);
+    assert.deepEqual(numbers('=== MISSPELLINGS\nN1, , N3'), []);
+    assert.deepEqual(numbers('=== MISSPELLINGS\nN1, , N3\nN2'), []);
+});
+
+test('a checkbox line ends the misspellings block', () => {
+    const numbers = (text) => plain(ScribePedant.parse(text).misspellings);
+    assert.deepEqual(numbers('=== MISSPELLINGS\n- [x] N1\n- [ ] N2\n- [ ] N3\n- [ ] N4\n- [ ] N5'), []);
+    assert.deepEqual(numbers('=== MISSPELLINGS\n- [X] N1\n[ ] N2\n[x] N3'), []);
+    assert.deepEqual(numbers('=== MISSPELLINGS\nN1 [ ]\nN2 [x]\nN3 [X]'), []);
+    assert.deepEqual(numbers('=== MISSPELLINGS\n[N3]'), [3]);
+    assert.deepEqual(numbers('=== MISSPELLINGS\n- [N3]\n[ ] N1\nN2'), [3]);
+    assert.deepEqual(numbers('=== MISSPELLINGS\n[N1] [N3]'), [1, 3]);
+});
+
+test('the prompt example confirms nothing', async () => {
+    const most = ScribePedant.Settings.MostCandidates;
+    const names = Array.from({ length: most }, (_, index) => `Name${String.fromCharCode(97 + index)}x`);
+    const full = smallBook({ SUBJECTS: [...names.map((name) => `${name} | character`), 'Orla | character'] });
+    const reply = narration(names.map((name) => `${name}y`).join(' and ') + ' wait.');
+    assert.equal(ScribePedant.spellings(full, reply).length >= most, true);
+    const template = promptLines
+        .slice(promptLines.indexOf('=== CONTRADICTIONS'), promptLines.indexOf('N22') + 1)
+        .join('\n');
+    const example = ScribePedant.parse(template).misspellings;
+    assert.equal(example.length > 0, true);
+    assert.equal(
+        example.every((number) => number > most),
+        true,
+    );
+    assert.equal((await reviewed(full, reply, template)).length, 0);
 });
 
 test('dressed ids are read', () => {
@@ -717,9 +888,9 @@ test('only single-valued facts can be contradicted', () => {
     assert.equal(check(state, reply, [contradiction(ids.lip, 'Halvard', 'condition', 'a black eye')]).length, 0);
     const kept = check(state, reply, [
         contradiction(ids.age, 'Halvard', 'age', 'forty'),
-        contradiction(ids.location, 'Halvard', 'location', 'the tower'),
+        contradiction(ids.inn, 'Mirelle', 'role', 'the tower'),
     ]);
-    assert.deepEqual(plain(kept.map((finding) => finding.fact)), [ids.age, ids.location]);
+    assert.deepEqual(plain(kept.map((finding) => finding.fact)), [ids.age, ids.inn]);
 });
 
 test('a thinner wording is not a contradiction', () => {
@@ -883,12 +1054,12 @@ test('a contradiction must check out', () => {
     const variants = check(state, reply, [
         contradiction(ids.age, 'halvard', 'Age', 'FORTY'),
         contradiction(ids.friends, 'Halvard', 'relation to Isolde', 'bitter rivals'),
-        contradiction(ids.inn, 'Mi', 'location', 'the tower'),
+        contradiction(ids.inn, 'Mi', 'role', 'the tower'),
     ]);
     assert.deepEqual(plain(variants.map((finding) => [finding.fact, finding.category, finding.said])), [
         [ids.age, 'age', 'FORTY'],
         [ids.friends, 'relation', 'bitter rivals'],
-        [ids.inn, 'location', 'the tower'],
+        [ids.inn, 'role', 'the tower'],
     ]);
 
     const dropped = {
@@ -914,7 +1085,7 @@ test("the reply's words are the reply's", () => {
     const said = (message, words) => check(state, message, [contradiction(ids.age, 'Halvard', 'age', words)]);
     assert.equal(said(reply, '50').length, 0);
     assert.equal(said(reply, '#50').length, 0);
-    assert.equal(check(state, reply, [contradiction(ids.location, 'Halvard', 'location', 'Orla')]).length, 0);
+    assert.equal(check(state, reply, [contradiction(ids.guard, 'Halvard', 'role', 'Orla')]).length, 0);
     assert.equal(said(reply, 'He deserted the army once. You look tired').length, 0);
     assert.equal(said(at(49), 'ten').length, 0);
     assert.deepEqual(plain(said(reply, 'ten').map((finding) => finding.said)), ['ten']);
@@ -1128,7 +1299,7 @@ test('the claimed words must be in the reply', () => {
     const { state } = book();
     const ids = known(state);
     const north = at(56);
-    const said = (words) => check(state, north, [contradiction(ids.location, 'Halvard', 'location', words)]);
+    const said = (words) => check(state, north, [contradiction(ids.guard, 'Halvard', 'role', words)]);
     assert.equal(said('the harbour').length, 0);
     assert.deepEqual(plain(said('THE   NORTH GATE').map((finding) => finding.said)), ['THE NORTH GATE']);
     for (const words of ['at [Scribe] dawn', 'dawn @: twice', 'twice | maybe', `north${separator}gate`]) {
@@ -1160,7 +1331,7 @@ test('family names and dismissed names', () => {
     assert.deepEqual(plain(spelled.map((finding) => [finding.written, finding.label])), [['Brandtt', 'Brandt']]);
 });
 
-test('review joins both and survives a bad model', async () => {
+test('review joins both and passes a failed model call on', async () => {
     const { state } = book();
     const ids = known(state);
     const reply = at(53);
@@ -1168,30 +1339,32 @@ test('review joins both and survives a bad model', async () => {
     const text = answer({
         CONTRADICTIONS: [`${ids.age} | Halvard | age | forty`],
         LEAKS: [`${ids.status} | Mirelle | You deserted`],
+        MISSPELLINGS: ['N1'],
     });
     const good = scriptedAsk({ text });
     const found = await ScribePedant.review({ state, player: 'Orla', message: reply, unread, ask: good.ask });
     assert.deepEqual(plain(found.map((finding) => [finding.kind, finding.written ?? finding.fact])), [
-        ['Spelling', 'Halvart'],
         ['Contradiction', ids.age],
         ['Leak', ids.status],
+        ['Spelling', 'Halvart'],
     ]);
     assert.equal(good.calls.length, 1);
     assert.equal(good.calls[0][0], ScribePedant.Prompt);
-    assert.equal(good.calls[0][1], ScribePedant.input(state, 'Orla', reply, unread));
+    const candidates = ScribePedant.spellings(state, reply);
+    assert.equal(good.calls[0][1], ScribePedant.input(state, 'Orla', reply, unread, candidates));
 
     const failing = async () => {
         throw new Error('the model is down');
     };
-    const answers = [{ text: 'All of it agrees with the book.' }, { text: '' }, { text: null }, null];
-    const bad = [failing, ...answers.map((given) => scriptedAsk(given).ask)];
-    for (const [index, ask] of bad.entries()) {
+    await assert.rejects(
+        ScribePedant.review({ state, player: 'Orla', message: reply, unread, ask: failing }),
+        /the model is down/u,
+    );
+    const answers = [{ text: 'All of it agrees with the book.' }, { text: '' }, { text: null }];
+    for (const [index, given] of answers.entries()) {
+        const ask = scriptedAsk(given).ask;
         const kept = await ScribePedant.review({ state, player: 'Orla', message: reply, unread, ask });
-        assert.deepEqual(
-            plain(kept.map((finding) => [finding.kind, finding.written])),
-            [['Spelling', 'Halvart']],
-            `${index}`,
-        );
+        assert.deepEqual(plain(kept), [], `${index}`);
     }
 
     const played = scriptedAsk({ text });
@@ -1202,10 +1375,179 @@ test('review joins both and survives a bad model', async () => {
     assert.equal(played.calls.length, 0);
 
     const empty = subjectsOnly(['Halvard', 'Mirelle', 'Orla']).state;
-    const idle = scriptedAsk({ text });
+    const idle = scriptedAsk({ text: answer({ MISSPELLINGS: ['N1'] }) });
     const alone = await ScribePedant.review({ state: empty, player: 'Orla', message: reply, unread, ask: idle.ask });
     assert.deepEqual(plain(alone.map((finding) => finding.kind)), ['Spelling']);
-    assert.equal(idle.calls.length, 0);
+    assert.equal(idle.calls.length, 1);
+    assert.equal(idle.calls[0][1].includes('NAME CANDIDATES:\nN1 | Halvard | Halvard | Halvart'), true);
+
+    const quiet = narration('Rain falls on the roofs.');
+    const silent = scriptedAsk({ text });
+    const nothing = await ScribePedant.review({
+        state: empty,
+        player: 'Orla',
+        message: quiet,
+        unread: [quiet],
+        ask: silent.ask,
+    });
+    assert.equal(nothing.length, 0);
+    assert.equal(silent.calls.length, 0);
+});
+
+/**
+ * @param {object} candidate
+ * @return {object}
+ */
+function withoutLook(candidate) {
+    const { looksLike, ...finding } = candidate;
+    return finding;
+}
+
+/**
+ * @param {object} state
+ * @param {object} message
+ * @param {string} text
+ * @return {Promise<readonly object[]>}
+ */
+function reviewed(state, message, text) {
+    return ScribePedant.review({
+        state,
+        player: 'Orla',
+        message,
+        unread: [message],
+        ask: scriptedAsk({ text }).ask,
+    });
+}
+
+test('the model judges which candidates are misspellings', async () => {
+    const quarter = smallBook({ SUBJECTS: ['Nine Quarter | place', 'Thessaly | character', 'Orla | character'] });
+    const reply = narration('Fine, said Thessely.');
+    const candidates = ScribePedant.spellings(quarter, reply);
+    assert.deepEqual(plain(candidates.map((finding) => [finding.label, finding.written])), [
+        ['Nine Quarter', 'Fine'],
+        ['Thessaly', 'Thessely'],
+    ]);
+
+    const second = await reviewed(quarter, reply, 'MISSPELLINGS\nN2');
+    assert.deepEqual(plain(second.map((finding) => [finding.kind, finding.label, finding.written])), [
+        ['Spelling', 'Thessaly', 'Thessely'],
+    ]);
+    assert.deepEqual(plain(second[0]), plain(withoutLook(candidates[1])));
+
+    assert.equal((await reviewed(quarter, reply, 'All of it is spelt right.')).length, 0);
+    assert.equal((await reviewed(quarter, reply, '=== MISSPELLINGS\n(none)')).length, 0);
+
+    const odd = await reviewed(quarter, reply, '=== MISSPELLINGS\nN9\nN2\nN2\nN0');
+    assert.deepEqual(plain(odd.map((finding) => finding.written)), ['Thessely']);
+
+    const both = await reviewed(quarter, reply, '=== MISSPELLINGS\nN2\nN1');
+    assert.deepEqual(plain(both.map((finding) => finding.written)), ['Fine', 'Thessely']);
+});
+
+test('the model answers contradictions and no misspellings', async () => {
+    const { state } = book();
+    const ids = known(state);
+    const reply = at(53);
+    const text = answer({ CONTRADICTIONS: [`${ids.age} | Halvard | age | forty`] });
+    const found = await reviewed(state, reply, text);
+    assert.deepEqual(plain(found.map((finding) => [finding.kind, finding.fact])), [['Contradiction', ids.age]]);
+});
+
+test('every confirmed candidate is a finding, with no cap between them', async () => {
+    const twins = smallBook({ SUBJECTS: ['Aldric | character', 'Aldrich | character', 'Orla | character'] });
+    const reply = narration('Aldrick bows.');
+    assert.equal(ScribePedant.spellings(twins, reply).length, 2);
+    const found = await reviewed(twins, reply, '=== MISSPELLINGS\nN1\nN2');
+    assert.deepEqual(plain(found.map((finding) => [finding.label, finding.written])), [
+        ['Aldric', 'Aldrick'],
+        ['Aldrich', 'Aldrick'],
+    ]);
+    const first = await reviewed(twins, reply, '=== MISSPELLINGS\nN1');
+    assert.deepEqual(plain(first.map((finding) => finding.label)), ['Aldric']);
+});
+
+test('at most twenty candidates are sent', async () => {
+    const names = Array.from({ length: 25 }, (_, index) => `Name${String.fromCharCode(97 + index)}x`);
+    const book25 = smallBook({ SUBJECTS: [...names.map((name) => `${name} | character`), 'Orla | character'] });
+    const typos = names.map((name) => `${name}y`);
+    const reply = narration(typos.join(' and ') + ' wait.');
+    assert.equal(ScribePedant.spellings(book25, reply).length >= 25, true);
+    const asked = scriptedAsk({ text: '=== MISSPELLINGS\nN20\nN21\nN25' });
+    const found = await ScribePedant.review({
+        state: book25,
+        player: 'Orla',
+        message: reply,
+        unread: [reply],
+        ask: asked.ask,
+    });
+    const section = asked.calls[0][1].split('NAME CANDIDATES:\n')[1].split('\n');
+    assert.equal(section.length, 20);
+    assert.equal(section[0].startsWith('N1 | '), true);
+    assert.equal(section[19].startsWith('N20 | '), true);
+    assert.equal(asked.calls[0][1].includes('N21 | '), false);
+    assert.equal(found.length, 1);
+    assert.deepEqual(plain(found[0]), plain(withoutLook(ScribePedant.spellings(book25, reply)[19])));
+});
+
+test('the candidates are numbered in the input and left out when there are none', () => {
+    const { state } = book();
+    const reply = at(53);
+    const candidates = ScribePedant.spellings(state, reply);
+    const text = ScribePedant.input(state, 'Orla', reply, [reply], candidates);
+    assert.equal(text.endsWith('\n\nNAME CANDIDATES:\nN1 | Halvard | Halvard | Halvart'), true);
+    const plainText = ScribePedant.input(state, 'Orla', reply, [reply], []);
+    assert.equal(plainText.includes('NAME CANDIDATES'), false);
+    assert.equal(plainText.endsWith('You deserted, I know it.'), true);
+
+    const twins = smallBook({ SUBJECTS: ['Aldric | character', 'Aldrich | character', 'Orla | character'] });
+    const twice = narration('Aldrick bows.');
+    const both = ScribePedant.input(twins, 'Orla', twice, [twice], ScribePedant.spellings(twins, twice));
+    assert.equal(
+        both.endsWith('NAME CANDIDATES:\nN1 | Aldric | Aldric | Aldrick\nN2 | Aldrich | Aldrich | Aldrick'),
+        true,
+    );
+});
+
+test('a candidate line gives the name word it looks like, alias and merged names included', async () => {
+    const aliased = smallBook({
+        SUBJECTS: ['Brandt | character', 'Orla | character'],
+        NAMES: ['Wolfric | Brandt | #3'],
+    });
+    const spoken = narration('Wolfrick waits by the boat.');
+    const asked = scriptedAsk({ text: '=== MISSPELLINGS\nN1' });
+    const found = await ScribePedant.review({
+        state: aliased,
+        player: 'Orla',
+        message: spoken,
+        unread: [spoken],
+        ask: asked.ask,
+    });
+    assert.equal(asked.calls[0][1].includes('NAME CANDIDATES:\nN1 | Brandt | Wolfric | Wolfrick'), true);
+    assert.deepEqual(plain(found.map((finding) => [finding.label, finding.written])), [['Brandt', 'Wolfrick']]);
+    assert.deepEqual(plain(Object.keys(found[0])), shape);
+
+    const merging = subjectsOnly(['Aldric', 'Brandt']);
+    const merged = ruled(merging.log, {
+        type: 'Merge',
+        from: idOf(merging.state, 'Aldric'),
+        into: idOf(merging.state, 'Brandt'),
+    });
+    const bowing = narration('Aldrich bows.');
+    const inputText = ScribePedant.input(merged, 'Orla', bowing, [bowing], ScribePedant.spellings(merged, bowing));
+    assert.equal(inputText.endsWith('NAME CANDIDATES:\nN1 | Brandt | Aldric | Aldrich'), true);
+});
+
+test('a confirmed spelling keeps its key and is spent as before', async () => {
+    const { log, state } = subjectsOnly(['Aldric', 'Brandt']);
+    const reply = narration('Aldrich bows.');
+    const found = await reviewed(state, reply, '=== MISSPELLINGS\nN1');
+    const [spelling] = ScribePedant.spellings(state, reply);
+    assert.deepEqual(plain(found), plain([withoutLook(spelling)]));
+    assert.deepEqual(plain(Object.keys(found[0])), shape);
+    assert.equal(ScribePedant.key(found[0]), ScribePedant.key(spelling));
+    assert.equal(ScribePedant.spent(state, found[0]), false);
+    const joined = ruled(log, { type: 'Merge', from: found[0].subject, into: idOf(state, 'Brandt') });
+    assert.equal(ScribePedant.spent(joined, found[0]), true);
 });
 
 test('the same finding is one finding', () => {
@@ -1357,7 +1699,7 @@ test('a spent finding does nothing', () => {
     function findingsOf(state) {
         const ids = known(state);
         const [aged] = check(state, reply, [contradiction(ids.age, 'Halvard', 'age', 'forty')]);
-        const [placed] = check(state, reply, [contradiction(ids.location, 'Halvard', 'location', 'the tower')]);
+        const [placed] = check(state, reply, [contradiction(ids.inn, 'Mirelle', 'role', 'the tower')]);
         const [guarded] = check(state, reply, [contradiction(ids.guard, 'Halvard', 'role', 'a baker')]);
         const [leaked] = check(state, reply, [], [leak(ids.status, 'Mirelle', 'You deserted')]);
         const [spelling] = ScribePedant.spellings(state, at(53));
@@ -1401,10 +1743,10 @@ test('a spent finding does nothing', () => {
         (log, state) =>
             ruled(log, {
                 type: 'AddFact',
-                subject: idOf(state, 'Halvard'),
-                category: 'location',
+                subject: idOf(state, 'Mirelle'),
+                category: 'role',
                 target: null,
-                text: 'the inn',
+                text: 'the cook',
                 hidden: false,
                 cite: 'MESSAGE-44',
                 position: 44,
@@ -1635,6 +1977,8 @@ test('the prompt is exact', () => {
     for (const [index, line] of promptLines.entries()) {
         assert.equal(lines[index], line, `line ${index + 1}`);
     }
+    assert.equal(prompt.includes('states or uses'), true);
+    assert.equal(prompt.includes('reacts to'), false);
     assert.equal(prompt.includes('\t'), false);
     assert.equal(lines.some((line) => line.endsWith(' ')), false);
 });
@@ -1648,6 +1992,7 @@ test('nothing is changed', async () => {
     const text = answer({
         CONTRADICTIONS: [`${ids.age} | Halvard | age | forty`],
         LEAKS: [`${ids.status} | Mirelle | You deserted`],
+        MISSPELLINGS: ['N1'],
     });
     const found = await ScribePedant.review({
         state,
@@ -1656,7 +2001,7 @@ test('nothing is changed', async () => {
         unread: [reply],
         ask: scriptedAsk({ text }).ask,
     });
-    assert.deepEqual(plain(found.map((finding) => finding.kind)), ['Spelling', 'Contradiction', 'Leak']);
+    assert.deepEqual(plain(found.map((finding) => finding.kind)), ['Contradiction', 'Leak', 'Spelling']);
     assertFrozenDeep(found, 'review');
     assertFrozenDeep(ScribePedant.spellings(state, reply), 'spellings');
     const parsed = ScribePedant.parse(text);
@@ -1664,13 +2009,14 @@ test('nothing is changed', async () => {
     assertFrozenDeep(ScribePedant.confirm(state, 'Orla', reply, parsed, [reply]), 'confirm');
     const played = await ScribePedant.review({ state, player: 'Orla', message: at(47), unread: [], ask: null });
     assertFrozenDeep(played, 'played');
-    ScribePedant.input(state, 'Orla', reply, [reply]);
+    assertFrozenDeep(ScribePedant.misspelt(ScribePedant.spellings(state, reply), parsed.misspellings), 'misspelt');
+    ScribePedant.input(state, 'Orla', reply, [reply], ScribePedant.spellings(state, reply));
     for (const finding of found) {
         ScribePedant.key(finding);
         ScribePedant.spent(state, finding);
         assertFrozenDeep(ScribePedant.told(state, finding), `told ${finding.kind}`);
     }
-    assert.equal(ScribePedant.told(state, found[2]) !== null, true);
+    assert.equal(ScribePedant.told(state, found[1]) !== null, true);
     for (const member of [ScribePedant, ScribePedant.Kind, ScribePedant.Block, ScribePedant.Settings]) {
         assert.equal(Object.isFrozen(member), true);
     }

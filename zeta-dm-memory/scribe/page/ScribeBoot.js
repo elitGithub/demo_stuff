@@ -24,8 +24,8 @@ const ScribeBoot = Object.freeze({
         ModelOrigin: 'https://openrouter.ai',
         MaxTokens: Object.freeze({
             Analyzer: 40000,
-            Scribe: 700,
-            Pedant: 1500,
+            Scribe: 4000,
+            Pedant: 4000,
         }),
         LockPrefix: 'scribe:reader:',
         Models: Object.freeze({

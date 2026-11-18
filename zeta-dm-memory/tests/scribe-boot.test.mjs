@@ -1212,8 +1212,8 @@ test('the model is asked by role', async () => {
     ScribeStore.write(run.storage, 'harbour', ScribeStore.Kind.Settings, { analyzer: 'invented/analyzer-model', scribe: 'invented/scribe-model', budget: 3 });
     const roles = [
         ['Analyzer', 'invented/analyzer-model', 40000],
-        ['Scribe', 'invented/scribe-model', 700],
-        ['Pedant', DEFAULTS.pedant, 1500],
+        ['Scribe', 'invented/scribe-model', 4000],
+        ['Pedant', DEFAULTS.pedant, 4000],
     ];
     for (const [role, model, tokens] of roles) {
         const asking = ask(ScribeBoot.Role[role], SYSTEM, USER);
@@ -1235,7 +1235,7 @@ test('the model is asked by role', async () => {
     assert.equal(run.sent.calls.length, 5);
     await pass(run, 1);
     assert.equal(run.sent.calls.length, 6);
-    assert.deepEqual(asked(run.sent.calls.at(-1)), ['invented/scribe-model', 700]);
+    assert.deepEqual(asked(run.sent.calls.at(-1)), ['invented/scribe-model', 4000]);
     answer(run.sent.calls.at(-1), 200, completion('The second try.', 0.1));
     assert.equal((await retried).text, 'The second try.');
     run.boot.stop();
@@ -2328,8 +2328,8 @@ test('the reading role may answer at length', async () => {
     const live = run.world.lives[0].options.ask;
     const expected = [
         [keeper, ScribeBoot.Role.Analyzer, 40000],
-        [live, ScribeBoot.Role.Scribe, 700],
-        [live, ScribeBoot.Role.Pedant, 1500],
+        [live, ScribeBoot.Role.Scribe, 4000],
+        [live, ScribeBoot.Role.Pedant, 4000],
     ];
     for (const [ask, role, tokens] of expected) {
         const asking = ask(role, SYSTEM, USER);

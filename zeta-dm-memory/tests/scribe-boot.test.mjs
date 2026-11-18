@@ -80,7 +80,7 @@ const BUILT = Object.freeze(['keeper harbour', 'live harbour', 'panel harbour', 
 const DEFAULTS = Object.freeze({
     analyzer: 'mistralai/mistral-large-4-0',
     scribe: 'mistralai/mistral-small-3.2-24b-instruct',
-    pedant: 'mistralai/mistral-small-3.2-24b-instruct',
+    pedant: 'mistralai/mistral-large-4-0',
     size: 40,
     budget: 3,
     refresh: 6,

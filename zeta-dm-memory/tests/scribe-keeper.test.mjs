@@ -1056,7 +1056,13 @@ test('settings are kept per chat', async () => {
     const storage = new FakeStorage();
     const first = await opened(chat, analyst(), { storage });
     assert.equal(first.keeper.view().settings.size, 40);
-    await first.keeper.configure({ size: 25, budget: 1.5, analyzer: 'mistralai/mistral-medium-3' });
+    assert.equal(first.keeper.view().settings.pedant, 'mistralai/mistral-large-4-0');
+    await first.keeper.configure({
+        size: 25,
+        budget: 1.5,
+        analyzer: 'mistralai/mistral-medium-3',
+        pedant: 'mistralai/mistral-small-3.2-24b-instruct',
+    });
     assert.equal(first.keeper.view().settings.size, 25);
     assert.equal(ScribeStore.read(storage, ROOM, ScribeStore.Kind.Settings).size, 25);
     first.keeper.close();
@@ -1070,7 +1076,7 @@ test('settings are kept per chat', async () => {
     const defaults = other.keeper.view().settings;
     assert.deepEqual(
         [defaults.analyzer, defaults.scribe, defaults.pedant, defaults.size, defaults.budget, defaults.refresh],
-        ['mistralai/mistral-large-4-0', 'mistralai/mistral-small-3.2-24b-instruct', 'mistralai/mistral-small-3.2-24b-instruct', 40, 3, 6],
+        ['mistralai/mistral-large-4-0', 'mistralai/mistral-small-3.2-24b-instruct', 'mistralai/mistral-large-4-0', 40, 3, 6],
     );
     await assert.rejects(again.keeper.configure({ size: 0 }), { message: 'The settings are not valid: size' });
     await assert.rejects(again.keeper.configure({ budget: -1 }), { message: 'The settings are not valid: budget' });

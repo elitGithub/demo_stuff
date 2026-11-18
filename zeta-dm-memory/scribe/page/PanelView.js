@@ -61,11 +61,16 @@ const PanelView = Object.freeze({
             GoesFirst: "The book's value goes first in the next reminder, if this room may hear it.",
             Spent: 'The book has since changed.',
             Regenerate: 'If the reply should not stand, regenerate it. The next reminder will say who does not know.',
+            RegenerateSituation: 'If the reply should not stand, regenerate it.',
+            SituationSays: 'The reply says "',
+            SituationEarlier: '"; earlier: "',
+            SituationClose: '".',
         }),
         Titles: Object.freeze({
             Spelling: 'Name spelt another way',
             Contradiction: 'The reply contradicts the book',
             Leak: 'Someone knows what they were not told',
+            Situation: "The reply doesn't fit what's happening",
             Unknown: 'A finding of a kind this panel does not know',
         }),
         Actions: Object.freeze({
@@ -880,7 +885,7 @@ const PanelView = Object.freeze({
             (finding) => {
                 const open = finding.status === ScribeLive.Status.Open;
                 const can = open ? (finding.can ?? null) : null;
-                const known = [kinds.Spelling, kinds.Contradiction, kinds.Leak].includes(finding.kind);
+                const known = [kinds.Spelling, kinds.Contradiction, kinds.Leak, kinds.Situation].includes(finding.kind);
                 let title = titles.Unknown;
                 let detail = words.Nothing;
                 if (finding.kind === kinds.Spelling) {
@@ -913,6 +918,14 @@ const PanelView = Object.freeze({
                         words.Space +
                         speaker +
                         words.NeverTold;
+                } else if (finding.kind === kinds.Situation) {
+                    title = titles.Situation;
+                    detail =
+                        words.SituationSays +
+                        PanelView.named(finding.said) +
+                        words.SituationEarlier +
+                        PanelView.named(finding.book) +
+                        words.SituationClose;
                 }
                 const listed = open || finding.status === ScribeLive.Status.Reminded;
                 const possible = listed ? [actions.Dismiss] : [];
@@ -942,6 +955,9 @@ const PanelView = Object.freeze({
                     }
                     if (leak && open) {
                         notes.push(words.Regenerate);
+                    }
+                    if (finding.kind === kinds.Situation && open) {
+                        notes.push(words.RegenerateSituation);
                     }
                 }
                 return [

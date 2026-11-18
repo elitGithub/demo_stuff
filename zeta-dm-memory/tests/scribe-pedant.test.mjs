@@ -199,10 +199,10 @@ const scenes = [
 
 const promptLines = [
     'You are the Pedant: a proofreader for an ongoing adult fiction roleplay between consenting adult characters. You never write story.',
-    'You receive PLAYER CHARACTER, a LEDGER of established facts (each with an id like F12, its subject, its category and its text), a list of what certain speakers DO NOT KNOW, the messages SINCE THE BOOK WAS LAST READ, one REPLY from the storyteller, and NAME CANDIDATES: words in the REPLY that look like known names, each line giving the name, the word of that name it looks like, and the word in the REPLY.',
-    'Find where the REPLY disagrees with the LEDGER, where a speaker uses something they do not know, and which NAME CANDIDATES are misspellings.',
+    'You receive PLAYER CHARACTER, a LEDGER of established facts (each with an id like F12, its subject, its category and its text), a list of what certain speakers DO NOT KNOW, the RECENT MESSAGES before them, the messages SINCE THE BOOK WAS LAST READ, one REPLY from the storyteller, and NAME CANDIDATES: words in the REPLY that look like known names, each line giving the name, the word of that name it looks like, and the word in the REPLY.',
+    'Find where the REPLY disagrees with the LEDGER, where a speaker uses something they do not know, which NAME CANDIDATES are misspellings, and where the REPLY does not fit what the messages above establish.',
     '',
-    'Answer with these three blocks, each starting with its === line. Leave a block out if it has nothing. Write nothing else.',
+    'Answer with these four blocks, each starting with its === line. Leave a block out if it has nothing. Write nothing else.',
     '',
     '=== CONTRADICTIONS',
     'F12 | Label | category | the words of the reply that say otherwise',
@@ -211,6 +211,8 @@ const promptLines = [
     '=== MISSPELLINGS',
     'N21',
     'N22',
+    '=== SITUATION',
+    "the reply's own words | the earlier words they clash with",
     '',
     'Rules.',
     "1. A contradiction is a statement in the REPLY, about the LEDGER fact's own subject, that cannot be true together with that fact: another age, number, colour, name, place or description of the same thing. Give the fact's id, its subject's label and its category exactly as the LEDGER shows them, and copy the reply's own words for the other value. Never report a fact marked (hidden) as contradicted.",
@@ -219,6 +221,7 @@ const promptLines = [
     '4. It is not a leak if the speaker was told or shown the fact earlier in the REPLY, or anywhere in the messages since the book was last read.',
     '5. Report only what the REPLY itself shows. Never guess. When in doubt, leave it out.',
     '6. A misspelling is a word in the REPLY that is meant as the listed known name but is written another way. An ordinary word, a word at the start of a sentence that is not meant as the name, and a different or new name are not misspellings. Report only numbers from NAME CANDIDATES. In the MISSPELLINGS block write only the numbers of the misspellings, one per line, nothing else on the line.',
+    "7. A situation clash is a statement in the REPLY that cannot be true given what the messages above establish: where the characters are, who is present, what they are doing or holding, the time, or what was just agreed or planned. Copy the reply's own words exactly, then the earlier words that establish the situation, exactly as a message above has them; each quote at most 40 words, from one sentence. Something the REPLY or a message above plainly changes (they walk to the table, the plan changes) is not a clash. Not style, not taste, not something you would have written differently. When in doubt, leave it out.",
 ];
 
 /**
@@ -670,6 +673,7 @@ test('the answer is read', () => {
         ],
         leaks: [{ fact: 'F13', speaker: 'Mirelle', words: 'you ran from the siege' }],
         misspellings: [],
+        situations: [],
     });
     const dressed = ['**=== contradictions ===**', 'F7 | Mirelle | build | tall', '#LEAKS:', 'F8 | Orla | it'].join(
         '\r\n',
@@ -678,9 +682,15 @@ test('the answer is read', () => {
         contradictions: [{ fact: 'F7', label: 'Mirelle', category: 'build', said: 'tall' }],
         leaks: [{ fact: 'F8', speaker: 'Orla', words: 'it' }],
         misspellings: [],
+        situations: [],
     });
     for (const unreadable of ['', 'All of it agrees with the book.', null, 42]) {
-        assert.deepEqual(plain(ScribePedant.parse(unreadable)), { contradictions: [], leaks: [], misspellings: [] });
+        assert.deepEqual(plain(ScribePedant.parse(unreadable)), {
+            contradictions: [],
+            leaks: [],
+            misspellings: [],
+            situations: [],
+        });
     }
 });
 
@@ -1391,7 +1401,8 @@ test('review joins both and passes a failed model call on', async () => {
         ask: silent.ask,
     });
     assert.equal(nothing.length, 0);
-    assert.equal(silent.calls.length, 0);
+    assert.equal(silent.calls.length, 1);
+    assert.equal(silent.calls[0][1].includes('NAME CANDIDATES:'), false);
 });
 
 /**
@@ -2022,4 +2033,444 @@ test('nothing is changed', async () => {
     }
     assert.equal(JSON.stringify(state) === stateBefore, true);
     assert.equal(JSON.stringify(reply) === replyBefore, true);
+});
+
+/**
+ * @param {string[]} texts
+ * @return {object[]}
+ */
+function chatOf(texts) {
+    const builder = new CampaignBuilder('Orla');
+    for (const text of texts) {
+        builder.narrator(text);
+    }
+    return ScribeIntake.read(builder.messages).messages;
+}
+
+/**
+ * @param {number} count
+ * @return {string[]}
+ */
+function fillers(count) {
+    return Array.from({ length: count }, (unused, index) => `Filler line ${index + 1} of the road.`);
+}
+
+/**
+ * @param {object[]} messages
+ * @param {string[]} lines
+ * @param {object[]|null} unread
+ * @return {Promise<{ found: readonly object[], calls: Array<Array<string>> }>}
+ */
+async function judged(messages, lines, unread = null) {
+    const reply = messages[messages.length - 1];
+    const asked = scriptedAsk({ text: answer({ SITUATION: lines }) });
+    const found = await ScribePedant.review({
+        state: subjectsOnly(['Orla']).state,
+        player: 'Orla',
+        message: reply,
+        unread: unread ?? [reply],
+        messages,
+        ask: asked.ask,
+    });
+    return { found, calls: asked.calls };
+}
+
+/**
+ * @param {string} input
+ * @return {string|null}
+ */
+function recentOf(input) {
+    const heading = 'RECENT MESSAGES:\n';
+    const start = input.indexOf(heading);
+    if (start === -1) {
+        return null;
+    }
+    return input.slice(start + heading.length, input.indexOf('\n\nSINCE THE BOOK WAS LAST READ:', start));
+}
+
+test('the prompt carries the situation check', () => {
+    const prompt = ScribePedant.Prompt;
+    assert.equal(prompt.includes('the RECENT MESSAGES before them, the messages SINCE THE BOOK WAS LAST READ'), true);
+    assert.equal(
+        prompt.includes(
+            'which NAME CANDIDATES are misspellings, and where the REPLY does not fit what the messages above establish.',
+        ),
+        true,
+    );
+    assert.equal(prompt.includes('Answer with these four blocks'), true);
+    assert.equal(prompt.includes("=== SITUATION\nthe reply's own words | the earlier words they clash with"), true);
+    assert.equal(prompt.split('\n').includes(promptLines[promptLines.length - 1]), true);
+    assert.equal(promptLines[promptLines.length - 1].startsWith('7. A situation clash'), true);
+});
+
+test('recent messages fill what the since section does not show', () => {
+    const { state } = subjectsOnly(['Orla']);
+    const messages = chatOf(fillers(15));
+    const reply = messages[14];
+    const input = (unread) => ScribePedant.input(state, 'Orla', reply, unread, [], messages);
+
+    const caught = input([reply]);
+    assert.equal(recentOf(caught), ScribeIntake.transcript(messages.slice(4, 14)));
+    assert.equal(caught.includes('SINCE THE BOOK WAS LAST READ:\n(none)'), true);
+    assert.equal(caught.indexOf('RECENT MESSAGES:') < caught.indexOf('SINCE THE BOOK WAS LAST READ:'), true);
+
+    const three = input([...messages.slice(11, 14), reply]);
+    assert.equal(recentOf(three), ScribeIntake.transcript(messages.slice(4, 11)));
+    assert.equal(three.includes(`SINCE THE BOOK WAS LAST READ:\n${ScribeIntake.transcript(messages.slice(11, 14))}`), true);
+
+    const long = chatOf(fillers(40));
+    const longReply = long[39];
+    const thirty = ScribePedant.input(state, 'Orla', longReply, [...long.slice(9, 39), longReply], [], long);
+    assert.equal(thirty.includes('RECENT MESSAGES:'), false);
+    assert.equal(thirty.includes(ScribeIntake.transcript(long.slice(9, 39))), true);
+
+    const heavyTexts = fillers(15);
+    heavyTexts[2] = 'y'.repeat(61000);
+    const heavy = chatOf(heavyTexts);
+    const heavyReply = heavy[14];
+    const tooLong = ScribePedant.input(state, 'Orla', heavyReply, [...heavy.slice(0, 14), heavyReply], [], heavy);
+    assert.equal(tooLong.includes('SINCE THE BOOK WAS LAST READ:\n(too long to show)'), true);
+    assert.equal(recentOf(tooLong), ScribeIntake.transcript(heavy.slice(4, 14)));
+
+    const bare = ScribePedant.input(state, 'Orla', reply, [reply], [], []);
+    assert.equal(bare.includes('RECENT MESSAGES:'), false);
+    for (const missing of [undefined, null, 'not a list', {}]) {
+        assert.equal(ScribePedant.input(state, 'Orla', reply, [reply], [], missing), bare, String(missing));
+    }
+});
+
+test('the recent section is capped by characters', () => {
+    const { state } = subjectsOnly(['Orla']);
+    const texts = fillers(15);
+    for (let index = 4; index < 14; index++) {
+        texts[index] = String.fromCharCode(97 + index).repeat(3000);
+    }
+    const messages = chatOf(texts);
+    const reply = messages[14];
+    const capped = recentOf(ScribePedant.input(state, 'Orla', reply, [reply], [], messages));
+    assert.equal(capped, ScribeIntake.transcript(messages.slice(8, 14)));
+    assert.equal(Array.from(capped).length <= 20000, true);
+    assert.equal(Array.from(ScribeIntake.transcript(messages.slice(7, 14))).length > 20000, true);
+
+    const long = fillers(15);
+    long[13] = `${'a'.repeat(5000)}${'b'.repeat(20000)}`;
+    const over = chatOf(long);
+    const overReply = over[14];
+    const tail = recentOf(ScribePedant.input(state, 'Orla', overReply, [overReply], [], over));
+    assert.equal(Array.from(tail).length, 20000);
+    assert.equal(tail.startsWith('[#14] '), true);
+    assert.equal(tail.endsWith('b'.repeat(19000)), true);
+    assert.equal(tail.includes('a'.repeat(100)), false);
+    assert.equal(tail.includes('Narrator:'), false);
+
+    const giant = fillers(15);
+    giant[13] = 'c'.repeat(25000);
+    const huge = chatOf(giant);
+    const hugeReply = huge[14];
+    const section = recentOf(ScribePedant.input(state, 'Orla', hugeReply, [hugeReply], [], huge));
+    assert.equal(Array.from(section).length <= 20000, true);
+    assert.equal(section.startsWith('[#14] '), true);
+    assert.equal(section.endsWith('c'.repeat(1000)), true);
+});
+
+test('the earlier words of an over-long recent message are only the kept end', async () => {
+    const texts = fillers(15);
+    const reply = 'The lantern hangs here, says nobody.';
+    texts[14] = reply;
+    const filler = 'c'.repeat(23000);
+    const cases = [
+        [`The red lantern hangs here. ${filler}`, 'The red lantern hangs here', 0],
+        [`${filler} The blue lantern hangs here.`, 'The blue lantern hangs here', 1],
+    ];
+    for (const [text, quote, expected] of cases) {
+        const long = [...texts];
+        long[13] = text;
+        const chat = chatOf(long);
+        const found = (await judged(chat, [`The lantern hangs here | ${quote}`])).found;
+        assert.equal(found.length, expected, quote);
+    }
+});
+
+test('every reply is checked once', async () => {
+    const messages = chatOf(['The wind drops.', 'Rain falls on the roofs.']);
+    const { found, calls } = await judged(messages, ['(none)']);
+    assert.equal(calls.length, 1);
+    assert.equal(found.length, 0);
+    assert.equal(calls[0][1].includes('NAME CANDIDATES:'), false);
+    assert.equal(calls[0][1].includes('RECENT MESSAGES:'), true);
+});
+
+test('the situation block is read', () => {
+    const situations = (text) => plain(ScribePedant.parse(text).situations);
+    assert.deepEqual(situations('=== SITUATION\nYou have a bed? | We camp for three nights'), [
+        { said: 'You have a bed?', earlier: 'We camp for three nights' },
+    ]);
+    assert.deepEqual(situations('=== SITUATION\nreply words | earlier one | and more'), [
+        { said: 'reply words', earlier: 'earlier one | and more' },
+    ]);
+    for (const skipped of ['just one field', '(none)', 'None.', 'none', 'NONE', '(None).', '', '| |']) {
+        assert.deepEqual(situations(`=== SITUATION\n${skipped}`), [], skipped);
+    }
+    assert.deepEqual(situations('=== SITUATION\nNonetheless he waits | They stood at the door'), [
+        { said: 'Nonetheless he waits', earlier: 'They stood at the door' },
+    ]);
+    assert.deepEqual(situations('=== SITUATION\nNone of them sleep | We camp'), [
+        { said: 'None of them sleep', earlier: 'We camp' },
+    ]);
+    assert.deepEqual(situations('=== SITUATION\n| a | b |\n- c | d\n**e | f**'), [
+        { said: 'a', earlier: 'b' },
+        { said: 'c', earlier: 'd' },
+        { said: 'e', earlier: 'f' },
+    ]);
+    assert.deepEqual(situations('=== SITUATION\nsolo\nnext | pair'), [{ said: 'next', earlier: 'pair' }]);
+
+    const before = ScribePedant.parse('=== SITUATION\nx | y\n=== CONTRADICTIONS\nF1 | Halvard | age | forty\n=== LEAKS\nF2 | Orla | it');
+    assert.equal(before.situations.length, 1);
+    assert.equal(before.contradictions.length, 1);
+    assert.equal(before.leaks.length, 1);
+    const after = ScribePedant.parse('=== CONTRADICTIONS\nF1 | Halvard | age | forty\n=== SITUATION\nx | y\nF3 | Orla | it');
+    assert.equal(after.situations.length, 2);
+    assert.equal(after.contradictions.length, 1);
+    const switched = ScribePedant.parse('=== MISSPELLINGS\nN2\n=== SITUATION\nx | y');
+    assert.deepEqual(plain(switched.misspellings), [2]);
+    assert.deepEqual(plain(switched.situations), [{ said: 'x', earlier: 'y' }]);
+    const reversed = ScribePedant.parse('=== SITUATION\nx | y\n=== MISSPELLINGS\nN4\nN1 | z');
+    assert.deepEqual(plain(reversed.misspellings), [4]);
+    assert.deepEqual(plain(reversed.situations), [{ said: 'x', earlier: 'y' }]);
+    assert.equal(ScribePedant.parse('=== SITUATIONS\nx | y').situations.length, 1);
+    assertFrozenDeep(before, 'parse');
+});
+
+test('the operator cases are caught', async () => {
+    const camping = chatOf([
+        'The party agrees the dungeon mission: We camp for three nights getting there.',
+        'Frost nods and checks the map.',
+        'Selene smiles. You have a bed? she asks. Four people, one apartment, one bed.',
+    ]);
+    const bed = await judged(camping, ['You have a bed? | We camp for three nights getting there']);
+    assert.equal(bed.calls.length, 1);
+    assert.deepEqual(plain(bed.found.map(fields)), [
+        [
+            'Situation',
+            'MESSAGE-3',
+            3,
+            null,
+            null,
+            null,
+            null,
+            'We camp for three nights getting there',
+            'You have a bed?',
+            null,
+            null,
+            null,
+        ],
+    ]);
+    assertFrozenDeep(bed.found, 'situation');
+
+    const door = chatOf([
+        'They stood at the door.',
+        'Frost listens.',
+        "Selene's free hand drifts, reaching past Frost's arm toward the bedroom. Toward the table.",
+    ]);
+    const reach = await judged(door, ["reaching past Frost's arm toward the bedroom | They stood at the door"]);
+    assert.deepEqual(plain(reach.found.map((finding) => [finding.kind, finding.said, finding.book])), [
+        ['Situation', "reaching past Frost's arm toward the bedroom", 'They stood at the door'],
+    ]);
+});
+
+test('a situation line that cannot be shown is dropped', async () => {
+    const texts = [...fillers(13), 'The reply holds the words about the door.'];
+    texts[0] = 'The old plan: we camp for three nights.';
+    texts[3] = 'Near enough: they stood at the door.';
+    const messages = chatOf(texts);
+    const reply = 'the reply holds the words about the door';
+    const caught = async (line, chat = messages, unread = null) => (await judged(chat, [line], unread)).found;
+
+    assert.equal((await caught(`${reply} | they stood at the door`)).length, 1);
+    assert.equal((await caught('words not in it at all | they stood at the door')).length, 0);
+    assert.equal((await caught(`${reply} | nobody said this anywhere`)).length, 0);
+    assert.equal((await caught(`${reply} | we camp for three nights`)).length, 0);
+    assert.equal((await caught(`${reply} | we camp for three nights`, messages, [messages[0], messages[13]])).length, 1);
+    assert.equal((await caught(`${reply} | they stood at the door | extra`)).length, 0);
+
+    const sized = (length) => {
+        const text = 'ab '.repeat(length).slice(0, length);
+        return text.endsWith(' ') ? `${text.slice(0, -1)}b` : text;
+    };
+    const wide = sized(200);
+    const over = sized(301);
+    const edge = sized(300);
+    const wideChat = (quote) => chatOf([`Before ${quote} after.`, `A reply with ${quote} inside.`]);
+    assert.equal((await caught(`${wide} | ${wide}`, wideChat(wide))).length, 1);
+    assert.equal((await caught(`${edge} | ${edge}`, wideChat(edge))).length, 1);
+    assert.equal((await caught(`${over} | ${over}`, wideChat(over))).length, 0);
+    assert.equal((await caught(`${wide} | ${over}`, wideChat(over))).length, 0);
+});
+
+test('at most three situations are kept, once each', async () => {
+    const words = ['first', 'second', 'third', 'fourth', 'fifth'];
+    const messages = chatOf([
+        ...words.map((word) => `The ${word} fact holds.`),
+        words.map((word) => `The ${word} holds.`).join(' '),
+    ]);
+    const clash = (word) => `The ${word} holds. | The ${word} fact holds.`;
+    const five = await judged(messages, words.map(clash));
+    assert.deepEqual(plain(five.found.map((finding) => finding.said)), [
+        'The first holds.',
+        'The second holds.',
+        'The third holds.',
+    ]);
+    const repeated = await judged(messages, [clash('first'), 'THE FIRST HOLDS. | The second fact holds.', clash('third')]);
+    assert.deepEqual(plain(repeated.found.map((finding) => finding.said)), ['The first holds.', 'The third holds.']);
+});
+
+test('review returns contradictions, leaks, spellings, then situations', async () => {
+    const { state } = book();
+    const ids = known(state);
+    const reply = at(53);
+    const text = answer({
+        SITUATION: ['Halvart is forty now. | Mirelle looks at Halvard: you deserted, they say.'],
+        MISSPELLINGS: ['N1'],
+        LEAKS: [`${ids.status} | Mirelle | You deserted`],
+        CONTRADICTIONS: [`${ids.age} | Halvard | age | forty`],
+    });
+    const asked = scriptedAsk({ text });
+    const found = await ScribePedant.review({
+        state,
+        player: 'Orla',
+        message: reply,
+        unread: [reply],
+        messages: story,
+        ask: asked.ask,
+    });
+    assert.deepEqual(plain(found.map((finding) => finding.kind)), ['Contradiction', 'Leak', 'Spelling', 'Situation']);
+    assert.equal(asked.calls[0][1].includes('RECENT MESSAGES:'), true);
+    assertFrozenDeep(found, 'review');
+});
+
+test('a situation finding has a stable key and is never spent', async () => {
+    const messages = chatOf(['They stood at the door.', 'Selene reaches toward the bedroom.']);
+    const first = (await judged(messages, ['reaches toward the bedroom | They stood at the door'])).found[0];
+    const second = (await judged(messages, ['Reaches  toward the BEDROOM | They stood at the door'])).found[0];
+    assert.equal(ScribePedant.key(first), JSON.stringify(['Situation', 'MESSAGE-2', 'reaches toward the bedroom']));
+    assert.equal(ScribePedant.key(second), ScribePedant.key(first));
+    const other = (await judged(messages, ['Selene reaches toward | They stood at the door'])).found[0];
+    assert.notEqual(ScribePedant.key(other), ScribePedant.key(first));
+    for (const state of [book().state, subjectsOnly(['Orla']).state]) {
+        assert.equal(ScribePedant.spent(state, first), false);
+        assert.equal(ScribePedant.told(state, first), null);
+    }
+});
+
+test('double quotation marks of every form fold to one', async () => {
+    const straightSource = new CampaignBuilder('Orla');
+    straightSource.player('"We camp for three nights getting there," Frost says.');
+    straightSource.reply([['Narrator', 'Selene tilts her head. “You have a bed?” she asks. Four people, one bed.']]);
+    const curlySource = new CampaignBuilder('Orla');
+    curlySource.player('“We camp for three nights getting there,” Frost says.');
+    curlySource.reply([['Narrator', 'Selene tilts her head. "You have a bed?" she asks. Four people, one bed.']]);
+    const straight = ScribeIntake.read(straightSource.messages).messages;
+    const curly = ScribeIntake.read(curlySource.messages).messages;
+    const cases = [
+        [straight, '"You have a bed?" she asks. | We camp for three nights getting there'],
+        [straight, '“You have a bed?” she asks. | "We camp for three nights getting there," Frost says.'],
+        [straight, '„You have a bed?” she asks. | «We camp for three nights getting there,» Frost says.'],
+        [curly, '“You have a bed?” she asks. | “We camp for three nights getting there,” Frost says.'],
+        [curly, '"You have a bed?" she asks. | "We camp for three nights getting there," Frost says.'],
+    ];
+    for (const [chat, line] of cases) {
+        assert.equal((await judged(chat, [line])).found.length, 1, line);
+    }
+    assert.equal(ScribePedant.folded('“a” „b‟ «c» ”d"'), '"a" "b" "c" "d"');
+});
+
+test('bold and italic dress on a situation field is removed', async () => {
+    const chat = chatOf(['We camp for three nights getting there.', 'Selene asks: You have a bed? Just one.']);
+    const lines = [
+        '**You have a bed?** | **We camp for three nights getting there**',
+        '- **You have a bed?** | **We camp for three nights getting there**',
+        '*You have a bed?* | _We camp for three nights getting there_',
+        '__You have a bed?__ | __We camp for three nights getting there__',
+        '**You have a bed? | We camp for three nights getting there**',
+    ];
+    for (const line of lines) {
+        assert.equal((await judged(chat, [line])).found.length, 1, line);
+    }
+    assert.deepEqual(plain(ScribePedant.parse('=== SITUATION\n*x* | *y*').situations), [{ said: 'x', earlier: 'y' }]);
+    assert.deepEqual(plain(ScribePedant.parse('=== SITUATION\n**a** | **b**').situations), [{ said: 'a', earlier: 'b' }]);
+});
+
+test('only unbalanced bold edges are stripped from a situation field', async () => {
+    const stop = '**Stop.** She raises a hand, palm out.';
+    const chat = chatOf(['We camp for three nights getting there.', stop]);
+    const parsed = plain(ScribePedant.parse(`=== SITUATION\n${stop} | We camp for three nights getting there`).situations);
+    assert.deepEqual(parsed, [{ said: stop, earlier: 'We camp for three nights getting there' }]);
+    const found = (await judged(chat, [`${stop} | We camp for three nights getting there`])).found;
+    assert.equal(found.length, 1);
+    assert.equal(found[0].said, stop);
+    assert.deepEqual(plain(ScribePedant.parse('=== SITUATION\n__Stop__ now | x__').situations), [
+        { said: '__Stop__ now', earlier: 'x' },
+    ]);
+});
+
+test('speaker labels never count as words of a message', async () => {
+    const builder = new CampaignBuilder('Orla');
+    builder.player('I wave at Selene from the doorway.');
+    builder.narrator('Selene waits by the road.');
+    builder.narrator('Selene waits by the road and looks around.');
+    const chat = ScribeIntake.read(builder.messages).messages;
+    assert.equal((await judged(chat, ['Selene waits by the road | Narrator'])).found.length, 0);
+    assert.equal((await judged(chat, ['Selene waits by the road | Orla (player)'])).found.length, 0);
+    assert.equal((await judged(chat, ['Selene waits by the road | Narrator: Selene waits by the road'])).found.length, 0);
+    assert.equal((await judged(chat, ['Selene waits by the road | I wave at Selene from the doorway'])).found.length, 1);
+    assert.equal((await judged(chat, ['Narrator: Selene waits by the road | I wave at Selene'])).found.length, 0);
+});
+
+test('a situation is keyed by the words of the reply, not its punctuation', async () => {
+    const chat = chatOf(['We camp for three nights getting there.', 'Selene asks: You have a bed? Just one.']);
+    const both = await judged(chat, [
+        'You have a bed | We camp for three nights',
+        'You have a bed? | We camp for three nights getting there',
+    ]);
+    assert.equal(both.found.length, 1);
+    const plainKey = ScribePedant.key((await judged(chat, ['You have a bed | We camp for three nights'])).found[0]);
+    const marked = ScribePedant.key((await judged(chat, ['**You have a BED?** | We camp for three nights'])).found[0]);
+    const dotted = ScribePedant.key(
+        ScribePedant.finding(chat[1], { kind: ScribePedant.Kind.Situation, said: 'You have a *bed*.', book: 'x' }),
+    );
+    assert.equal(marked, plainKey);
+    assert.equal(dotted, plainKey);
+});
+
+test('each situation quote needs at least two words', async () => {
+    const chat = chatOf([
+        'We camp tonight. We camp for three nights getting there.',
+        'Selene asks: You have a bed? Just one. A a.',
+    ]);
+    const caught = async (line) => (await judged(chat, [line])).found.length;
+    assert.equal(await caught('A | a'), 0);
+    assert.equal(await caught('the | the'), 0);
+    assert.equal(await caught('You have a bed? | We'), 0);
+    assert.equal(await caught('You | We camp for three nights'), 0);
+    assert.equal(await caught('You have a bed? | We camp'), 1);
+    assert.equal(await caught('You have | We camp for three nights'), 1);
+    assert.equal(await caught('You have a bed? | We camp tonight'), 1);
+    assert.equal(await caught('You have a | We camp for'), 1);
+});
+
+test('short clashes of two words are caught', async () => {
+    const builder = new CampaignBuilder('Orla');
+    builder.narrator('Night falls. The fire burns low.');
+    builder.narrator('Selene left.');
+    builder.player('I stay by the fire.');
+    builder.reply([
+        ['Selene', '“Good morning!”'],
+        ['Narrator', 'Selene nods. She sits.'],
+    ]);
+    const chat = ScribeIntake.read(builder.messages).messages;
+    const caught = async (line) => (await judged(chat, [line])).found.length;
+    assert.equal(await caught('Good morning! | Night falls. The fire burns low.'), 1);
+    assert.equal(await caught('Selene nods. | Selene left.'), 1);
+    assert.equal(await caught('Good morning! | Night'), 0);
+    assert.equal(await caught('Good | Night falls. The fire burns low.'), 0);
 });

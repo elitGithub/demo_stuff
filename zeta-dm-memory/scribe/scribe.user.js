@@ -8601,7 +8601,7 @@ const ScribeKeeper = Object.freeze({
     Defaults: Object.freeze({
         analyzer: 'mistralai/mistral-large-4-0',
         scribe: 'mistralai/mistral-small-3.2-24b-instruct',
-        pedant: 'mistralai/mistral-small-3.2-24b-instruct',
+        pedant: 'mistralai/mistral-large-4-0',
         size: 40,
         budget: 3,
         refresh: 6,
@@ -12345,12 +12345,14 @@ const ScribePedant = Object.freeze({
         Spelling: 'Spelling',
         Contradiction: 'Contradiction',
         Leak: 'Leak',
+        Situation: 'Situation',
     }),
 
     Block: Object.freeze({
         Contradictions: 'CONTRADICTIONS',
         Leaks: 'LEAKS',
         Misspellings: 'MISSPELLINGS',
+        Situation: 'SITUATION',
     }),
 
     Settings: Object.freeze({
@@ -12361,6 +12363,7 @@ const ScribePedant = Object.freeze({
         Pipe: '|',
         Joiner: ' | ',
         Apostrophe: "'",
+        DoubleQuote: '"',
         Unquoted: '$1',
         Unwrapped: '$2',
         Unbracketed: '$1',
@@ -12374,19 +12377,27 @@ const ScribePedant = Object.freeze({
             Player: 'PLAYER CHARACTER:',
             Ledger: 'LEDGER:',
             Unknown: 'DOES NOT KNOW:',
+            Recent: 'RECENT MESSAGES:',
             Since: 'SINCE THE BOOK WAS LAST READ:',
             Candidates: 'NAME CANDIDATES:',
         }),
         BlockAliases: Object.freeze({
             MISSPELLING: 'MISSPELLINGS',
+            SITUATIONS: 'SITUATION',
         }),
         CandidatePrefix: 'N',
         MostCandidates: 20,
         MostWords: 120,
+        MostSituations: 3,
+        RecentCount: 10,
+        RecentCharacters: 20000,
+        SituationQuote: 300,
         UnreadCharacters: 60000,
         FindingsPerFact: 1,
         FindingsPerKind: 20,
         DressPasses: 4,
+        DressMarkers: Object.freeze(['**', '__']),
+        Pair: 2,
         EdgeWidth: 3,
         NormalForm: 'NFC',
         NotFound: -1,
@@ -12394,6 +12405,10 @@ const ScribePedant = Object.freeze({
         UncheckedCategories: Object.freeze(['location']),
         ContradictionFields: 4,
         LeakFields: 3,
+        SituationFields: 2,
+        FewestSituationWords: 2,
+        QuoteField: 0,
+        EarlierStart: 1,
         FactField: 0,
         LabelField: 1,
         CategoryField: 2,
@@ -12456,6 +12471,13 @@ const ScribePedant = Object.freeze({
          */
         get NoneLine() {
             return /^\(?none/iu;
+        },
+
+        /**
+         * @return {RegExp}
+         */
+        get NoneOnly() {
+            return /^(?:none|\(none\))\.?$/iu;
         },
 
         /**
@@ -12587,6 +12609,13 @@ const ScribePedant = Object.freeze({
         /**
          * @return {RegExp}
          */
+        get DoubleQuotes() {
+            return /["«»“”„‟⹂〝〞〟＂『』﹃﹄]/gu;
+        },
+
+        /**
+         * @return {RegExp}
+         */
         get WordBefore() {
             return /(?:[\p{L}\p{N}\p{M}]|\p{L}['’])$/u;
         },
@@ -12600,10 +12629,10 @@ const ScribePedant = Object.freeze({
 
         PromptLines: Object.freeze([
             'You are the Pedant: a proofreader for an ongoing adult fiction roleplay between consenting adult characters. You never write story.',
-            'You receive PLAYER CHARACTER, a LEDGER of established facts (each with an id like F12, its subject, its category and its text), a list of what certain speakers DO NOT KNOW, the messages SINCE THE BOOK WAS LAST READ, one REPLY from the storyteller, and NAME CANDIDATES: words in the REPLY that look like known names, each line giving the name, the word of that name it looks like, and the word in the REPLY.',
-            'Find where the REPLY disagrees with the LEDGER, where a speaker uses something they do not know, and which NAME CANDIDATES are misspellings.',
+            'You receive PLAYER CHARACTER, a LEDGER of established facts (each with an id like F12, its subject, its category and its text), a list of what certain speakers DO NOT KNOW, the RECENT MESSAGES before them, the messages SINCE THE BOOK WAS LAST READ, one REPLY from the storyteller, and NAME CANDIDATES: words in the REPLY that look like known names, each line giving the name, the word of that name it looks like, and the word in the REPLY.',
+            'Find where the REPLY disagrees with the LEDGER, where a speaker uses something they do not know, which NAME CANDIDATES are misspellings, and where the REPLY does not fit what the messages above establish.',
             '',
-            'Answer with these three blocks, each starting with its === line. Leave a block out if it has nothing. Write nothing else.',
+            'Answer with these four blocks, each starting with its === line. Leave a block out if it has nothing. Write nothing else.',
             '',
             '=== CONTRADICTIONS',
             'F12 | Label | category | the words of the reply that say otherwise',
@@ -12612,6 +12641,8 @@ const ScribePedant = Object.freeze({
             '=== MISSPELLINGS',
             'N21',
             'N22',
+            '=== SITUATION',
+            "the reply's own words | the earlier words they clash with",
             '',
             'Rules.',
             "1. A contradiction is a statement in the REPLY, about the LEDGER fact's own subject, that cannot be true together with that fact: another age, number, colour, name, place or description of the same thing. Give the fact's id, its subject's label and its category exactly as the LEDGER shows them, and copy the reply's own words for the other value. Never report a fact marked (hidden) as contradicted.",
@@ -12620,6 +12651,7 @@ const ScribePedant = Object.freeze({
             '4. It is not a leak if the speaker was told or shown the fact earlier in the REPLY, or anywhere in the messages since the book was last read.',
             '5. Report only what the REPLY itself shows. Never guess. When in doubt, leave it out.',
             '6. A misspelling is a word in the REPLY that is meant as the listed known name but is written another way. An ordinary word, a word at the start of a sentence that is not meant as the name, and a different or new name are not misspellings. Report only numbers from NAME CANDIDATES. In the MISSPELLINGS block write only the numbers of the misspellings, one per line, nothing else on the line.',
+            "7. A situation clash is a statement in the REPLY that cannot be true given what the messages above establish: where the characters are, who is present, what they are doing or holding, the time, or what was just agreed or planned. Copy the reply's own words exactly, then the earlier words that establish the situation, exactly as a message above has them; each quote at most 40 words, from one sentence. Something the REPLY or a message above plainly changes (they walk to the table, the plan changes) is not a clash. Not style, not taste, not something you would have written differently. When in doubt, leave it out.",
         ]),
     }),
 
@@ -12654,6 +12686,14 @@ const ScribePedant = Object.freeze({
         Leak(finding) {
             return [finding.message, finding.fact, finding.speaker];
         },
+
+        /**
+         * @param {object} finding
+         * @return {string[]}
+         */
+        Situation(finding) {
+            return [finding.message, ScribeReplay.wording(finding.said)];
+        },
     }),
 
     /**
@@ -12687,6 +12727,7 @@ const ScribePedant = Object.freeze({
         const settings = ScribePedant.Settings;
         return ScribePedant.clean(text)
             .replace(settings.Apostrophes, settings.Apostrophe)
+            .replace(settings.DoubleQuotes, settings.DoubleQuote)
             .toLowerCase()
             .normalize(settings.NormalForm);
     },
@@ -12897,7 +12938,7 @@ const ScribePedant = Object.freeze({
      * @param {string} player
      * @param {object} message
      * @param {readonly object[]} unread
-     * @return {{ ledger: object[], candidates: object[], pairs: Array<{ speaker: object, fact: object }>, since: string|null }}
+     * @return {{ ledger: object[], candidates: object[], pairs: Array<{ speaker: object, fact: object }>, since: string|null, shown: readonly object[] }}
      */
     survey(state, player, message, unread) {
         const settings = ScribePedant.Settings;
@@ -12970,7 +13011,64 @@ const ScribePedant = Object.freeze({
                     (pair) => pair.fact === fact,
                 ),
         );
-        return { ledger, candidates, pairs, since };
+        return { ledger, candidates, pairs, since, shown: since === null ? [] : earlier };
+    },
+
+    /**
+     * @param {object} message
+     * @param {*} messages
+     * @param {readonly object[]} shown
+     * @return {readonly object[]}
+     */
+    recent(message, messages, shown) {
+        const settings = ScribePedant.Settings;
+        const seen = new Set(
+            shown.map(
+                /**
+                 * @param {{ id: string }} item
+                 * @return {string}
+                 */
+                (item) => item.id,
+            ),
+        );
+        let kept = (Array.isArray(messages) ? messages : [])
+            .filter(
+                /**
+                 * @param {{ position: number }} item
+                 * @return {boolean}
+                 */
+                (item) => item.position < message.position,
+            )
+            .slice(-settings.RecentCount)
+            .filter(
+                /**
+                 * @param {{ id: string }} item
+                 * @return {boolean}
+                 */
+                (item) => !seen.has(item.id),
+            );
+        while (kept.length > 1 && Array.from(ScribeIntake.transcript(kept)).length > settings.RecentCharacters) {
+            kept = kept.slice(1);
+        }
+        const total = Array.from(ScribeIntake.transcript(kept)).length;
+        if (kept.length === 1 && total > settings.RecentCharacters) {
+            const [only] = kept;
+            const intake = ScribeIntake.Settings;
+            const characters = Array.from(only.text);
+            const room = settings.RecentCharacters - (total - characters.length);
+            const blocks = [];
+            let left = room;
+            for (let index = only.blocks.length - 1; index >= 0 && left > 0; index--) {
+                const block = only.blocks[index];
+                const own = Array.from(block.text);
+                const suffix = block.role === ScribeIntake.Role.Player ? intake.PlayerSuffix : intake.Nothing;
+                const label = Array.from(block.speaker + suffix + intake.SpeakerSeparator).length;
+                blocks.unshift({ ...block, text: own.slice(-left).join(settings.Nothing) });
+                left -= own.length + label + settings.Newline.length;
+            }
+            kept = [{ ...only, text: characters.slice(-room).join(settings.Nothing), blocks }];
+        }
+        return Object.freeze(kept);
     },
 
     /**
@@ -13051,9 +13149,10 @@ const ScribePedant = Object.freeze({
     /**
      * @param {string} text
      * @param {readonly string[]} places
+     * @param {number} limit
      * @return {string|null}
      */
-    claimed(text, places) {
+    claimed(text, places, limit = ScribePedant.Settings.MostWords) {
         const settings = ScribePedant.Settings;
         const spaced = text.replace(settings.Tab, settings.Space);
         if (settings.Forbidden.test(spaced)) {
@@ -13063,7 +13162,7 @@ const ScribePedant = Object.freeze({
         const sought = ScribePedant.folded(words);
         const usable =
             ScribeAnswer.Settings.HasContent.test(words) &&
-            Array.from(words).length <= settings.MostWords &&
+            Array.from(words).length <= limit &&
             places.some(
                 /**
                  * @param {string} place
@@ -13125,13 +13224,15 @@ const ScribePedant = Object.freeze({
      * @param {object} message
      * @param {readonly object[]} unread
      * @param {readonly object[]} candidates
+     * @param {*} messages
      * @return {string}
      */
-    input(state, player, message, unread, candidates) {
+    input(state, player, message, unread, candidates, messages) {
         const settings = ScribePedant.Settings;
         const headings = settings.Headings;
         const labels = ScribeAnalyzer.labels(state);
         const survey = ScribePedant.survey(state, player, message, unread);
+        const recent = ScribeIntake.transcript(ScribePedant.recent(message, messages, survey.shown));
         const ledger = survey.ledger.map(
             /**
              * @param {object} fact
@@ -13177,9 +13278,14 @@ const ScribePedant = Object.freeze({
             ScribeAnalyzer.section(headings.Player, [player]),
             ScribeAnalyzer.section(headings.Ledger, ledger),
             ScribeAnalyzer.section(headings.Unknown, unknown),
+        ];
+        if (recent !== settings.Nothing) {
+            sections.push(ScribeAnalyzer.section(headings.Recent, [recent]));
+        }
+        sections.push(
             ScribeAnalyzer.section(headings.Since, since),
             ScribeAnalyzer.section(reply, [ScribeIntake.transcript([message])]),
-        ];
+        );
         if (named.length > 0) {
             sections.push(ScribeAnalyzer.section(headings.Candidates, named));
         }
@@ -13191,7 +13297,8 @@ const ScribePedant = Object.freeze({
      * @return {Readonly<{
      *     contradictions: readonly object[],
      *     leaks: readonly object[],
-     *     misspellings: readonly number[]
+     *     misspellings: readonly number[],
+     *     situations: readonly object[]
      * }>}
      */
     parse(text) {
@@ -13201,6 +13308,7 @@ const ScribePedant = Object.freeze({
         const contradictions = [];
         const leaks = [];
         const misspellings = [];
+        const situations = [];
         let block = null;
         for (const raw of typeof text === 'string' ? text.split(answer.LineBreak) : []) {
             const line = raw
@@ -13257,9 +13365,6 @@ const ScribePedant = Object.freeze({
                 }
                 continue;
             }
-            if (settings.NoneLine.test(line)) {
-                continue;
-            }
             const fields = unedged
                 .split(settings.Pipe)
                 .map(
@@ -13269,6 +13374,41 @@ const ScribePedant = Object.freeze({
                      */
                     (field) => field.trim(),
                 );
+            if (block === blocks.Situation) {
+                if (!settings.NoneOnly.test(unedged) && fields.length >= settings.SituationFields) {
+                    const dressed = fields.map(
+                        /**
+                         * @param {string} field
+                         * @return {string}
+                         */
+                        (field) => {
+                            let stripped = field.replace(settings.Wrapped, settings.Unwrapped);
+                            for (const marker of settings.DressMarkers) {
+                                if ((stripped.split(marker).length - 1) % settings.Pair === 0) {
+                                    continue;
+                                }
+                                if (stripped.startsWith(marker)) {
+                                    stripped = stripped.slice(marker.length);
+                                }
+                                if (stripped.endsWith(marker)) {
+                                    stripped = stripped.slice(0, -marker.length);
+                                }
+                            }
+                            return stripped.trim();
+                        },
+                    );
+                    situations.push(
+                        Object.freeze({
+                            said: dressed[settings.QuoteField],
+                            earlier: dressed.slice(settings.EarlierStart).join(settings.Joiner),
+                        }),
+                    );
+                }
+                continue;
+            }
+            if (settings.NoneLine.test(line)) {
+                continue;
+            }
             const id = fields[settings.FactField].replace(settings.IdDress, settings.Nothing).trim();
             const number = id.match(settings.FactNumber);
             if (number === null) {
@@ -13298,6 +13438,7 @@ const ScribePedant = Object.freeze({
             contradictions: Object.freeze(contradictions),
             leaks: Object.freeze(leaks),
             misspellings: Object.freeze(misspellings),
+            situations: Object.freeze(situations),
         });
     },
 
@@ -13330,6 +13471,53 @@ const ScribePedant = Object.freeze({
     },
 
     /**
+     * @param {object} message
+     * @return {string[]}
+     */
+    foldedBlocks(message) {
+        return message.blocks.map(
+            /**
+             * @param {{ text: string }} block
+             * @return {string}
+             */
+            (block) => ScribePedant.folded(block.text),
+        );
+    },
+
+    /**
+     * @param {object} message
+     * @param {readonly object[]} situations
+     * @param {readonly object[]} shown
+     * @return {readonly object[]}
+     */
+    situated(message, situations, shown) {
+        const settings = ScribePedant.Settings;
+        const blocks = ScribePedant.foldedBlocks(message);
+        const places = shown.flatMap(ScribePedant.foldedBlocks);
+        const repeats = new Set();
+        const kept = [];
+        for (const claim of situations) {
+            if (kept.length >= settings.MostSituations) {
+                break;
+            }
+            const said = ScribePedant.claimed(claim.said, blocks, settings.SituationQuote);
+            const earlier = ScribePedant.claimed(claim.earlier, places, settings.SituationQuote);
+            if (
+                said === null ||
+                earlier === null ||
+                ScribeText.words(said).length < settings.FewestSituationWords ||
+                ScribeText.words(earlier).length < settings.FewestSituationWords ||
+                repeats.has(ScribeReplay.wording(said))
+            ) {
+                continue;
+            }
+            repeats.add(ScribeReplay.wording(said));
+            kept.push(ScribePedant.finding(message, { kind: ScribePedant.Kind.Situation, said, book: earlier }));
+        }
+        return Object.freeze(kept);
+    },
+
+    /**
      * @param {object} state
      * @param {string} player
      * @param {object} message
@@ -13341,13 +13529,7 @@ const ScribePedant = Object.freeze({
         const settings = ScribePedant.Settings;
         const kinds = ScribePedant.Kind;
         const survey = ScribePedant.survey(state, player, message, unread);
-        const blocks = message.blocks.map(
-            /**
-             * @param {{ text: string }} block
-             * @return {string}
-             */
-            (block) => ScribePedant.folded(block.text),
-        );
+        const blocks = ScribePedant.foldedBlocks(message);
         const found = [];
         for (const claim of parsed.contradictions) {
             const fact = survey.candidates.find(
@@ -13453,23 +13635,26 @@ const ScribePedant = Object.freeze({
     },
 
     /**
-     * @param {{ state: object, player: string, message: object, unread: readonly object[], ask: function(string, string): Promise<{ text: string }> }} request
+     * @param {{ state: object, player: string, message: object, unread: readonly object[], messages: *, ask: function(string, string): Promise<{ text: string }> }} request
      * @return {Promise<readonly object[]>}
      * @throws {Error}
      */
-    async review({ state, player, message, unread, ask }) {
+    async review({ state, player, message, unread, messages, ask }) {
         if (message.fromPlayer) {
             return Object.freeze([]);
         }
         const candidates = ScribePedant.spellings(state, message).slice(0, ScribePedant.Settings.MostCandidates);
-        if (ScribePedant.survey(state, player, message, unread).ledger.length === 0 && candidates.length === 0) {
-            return Object.freeze([]);
-        }
-        const input = ScribePedant.input(state, player, message, unread, candidates);
+        const survey = ScribePedant.survey(state, player, message, unread);
+        const shown = [...ScribePedant.recent(message, messages, survey.shown), ...survey.shown];
+        const input = ScribePedant.input(state, player, message, unread, candidates, messages);
         const { text } = await ask(ScribePedant.Prompt, input);
         const parsed = ScribePedant.parse(text);
         const confirmed = ScribePedant.confirm(state, player, message, parsed, unread);
-        return Object.freeze([...confirmed, ...ScribePedant.misspelt(candidates, parsed.misspellings)]);
+        return Object.freeze([
+            ...confirmed,
+            ...ScribePedant.misspelt(candidates, parsed.misspellings),
+            ...ScribePedant.situated(message, parsed.situations, shown),
+        ]);
     },
 
     /**
@@ -13495,6 +13680,9 @@ const ScribePedant = Object.freeze({
                 !ScribePedant.sameLabel(subject.label, finding.label) ||
                 ScribePedant.names(state).has(ScribeText.normaliseName(finding.written))
             );
+        }
+        if (finding.kind === kinds.Situation) {
+            return false;
         }
         const fact = ScribeLog.lookup(state.facts, finding.fact);
         const owner = fact === undefined ? undefined : ScribeLog.lookup(state.subjects, fact.subject);
@@ -14433,6 +14621,7 @@ const ScribeLive = Object.freeze({
             Spelling: Object.freeze(['subject', 'label', 'written']),
             Contradiction: Object.freeze(['subject', 'label', 'fact', 'category', 'book', 'said']),
             Leak: Object.freeze(['subject', 'label', 'fact', 'category', 'book', 'speaker', 'speakerLabel']),
+            Situation: Object.freeze(['said', 'book']),
         }),
         SceneTexts: Object.freeze(['message', 'place', 'reach', 'summary']),
         Messages: Object.freeze({
@@ -15185,6 +15374,7 @@ const ScribeLive = Object.freeze({
                     player: view.player,
                     message,
                     unread: view.unread,
+                    messages: view.messages,
                     ask: ScribeLive.asker(live, roles.Pedant, pedantNoted),
                 });
             } catch (error) {
@@ -17231,11 +17421,16 @@ const PanelView = Object.freeze({
             GoesFirst: "The book's value goes first in the next reminder, if this room may hear it.",
             Spent: 'The book has since changed.',
             Regenerate: 'If the reply should not stand, regenerate it. The next reminder will say who does not know.',
+            RegenerateSituation: 'If the reply should not stand, regenerate it.',
+            SituationSays: 'The reply says "',
+            SituationEarlier: '"; earlier: "',
+            SituationClose: '".',
         }),
         Titles: Object.freeze({
             Spelling: 'Name spelt another way',
             Contradiction: 'The reply contradicts the book',
             Leak: 'Someone knows what they were not told',
+            Situation: "The reply doesn't fit what's happening",
             Unknown: 'A finding of a kind this panel does not know',
         }),
         Actions: Object.freeze({
@@ -18050,7 +18245,7 @@ const PanelView = Object.freeze({
             (finding) => {
                 const open = finding.status === ScribeLive.Status.Open;
                 const can = open ? (finding.can ?? null) : null;
-                const known = [kinds.Spelling, kinds.Contradiction, kinds.Leak].includes(finding.kind);
+                const known = [kinds.Spelling, kinds.Contradiction, kinds.Leak, kinds.Situation].includes(finding.kind);
                 let title = titles.Unknown;
                 let detail = words.Nothing;
                 if (finding.kind === kinds.Spelling) {
@@ -18083,6 +18278,14 @@ const PanelView = Object.freeze({
                         words.Space +
                         speaker +
                         words.NeverTold;
+                } else if (finding.kind === kinds.Situation) {
+                    title = titles.Situation;
+                    detail =
+                        words.SituationSays +
+                        PanelView.named(finding.said) +
+                        words.SituationEarlier +
+                        PanelView.named(finding.book) +
+                        words.SituationClose;
                 }
                 const listed = open || finding.status === ScribeLive.Status.Reminded;
                 const possible = listed ? [actions.Dismiss] : [];
@@ -18112,6 +18315,9 @@ const PanelView = Object.freeze({
                     }
                     if (leak && open) {
                         notes.push(words.Regenerate);
+                    }
+                    if (finding.kind === kinds.Situation && open) {
+                        notes.push(words.RegenerateSituation);
                     }
                 }
                 return [

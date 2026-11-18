@@ -3177,3 +3177,79 @@ test('outgoing and sent are the same pieces', async () => {
     twice.live.sent();
     assert.equal(twice.live.view().sends, 1);
 });
+
+const SITUATION_SAID = 'hums by the fire';
+const SITUATION_BOOK = 'The tale goes on, line 39.';
+const PEDANT_SITUATION = answer({ SITUATION: [`${SITUATION_SAID} | ${SITUATION_BOOK}`] });
+
+test('a situation finding is raised, kept, dismissed and dropped with its reply', async () => {
+    const { keeper, storage, model, notify, live } = rig();
+    model.pedant = PEDANT_SITUATION;
+    await live.reply(at(41));
+    assert.deepEqual(statuses(live), [['Situation', 'MESSAGE-41', 'Open']]);
+    const key = keyOf(live, 'Situation', 'MESSAGE-41');
+    const raised = findingOf(live, key);
+    assert.equal(raised.said, SITUATION_SAID);
+    assert.equal(raised.book, SITUATION_BOOK);
+    assert.deepEqual(plain(raised.can), { told: false, spent: false });
+
+    const pedants = model.calls.filter((call) => call.role === 'Pedant');
+    assert.equal(pedants.length, 1);
+    assert.equal(pedants[0].user.includes(`RECENT MESSAGES:\n${ScribeIntake.transcript(story.slice(30, 40))}`), true);
+
+    assert.deepEqual(ledOf(storage), []);
+    live.outgoing('Onward.');
+    live.sent();
+    assert.equal(statusOf(live, key), 'Open');
+    assert.equal(live.view().due, false);
+
+    live.close();
+    const again = following(
+        keeper,
+        ScribeLive.open({ keeper, storage, roomId: ROOM, ask: model.ask, clock: CLOCK, notify }),
+    );
+    assert.deepEqual(statuses(again), [['Situation', 'MESSAGE-41', 'Open']]);
+    assert.equal(findingOf(again, key).said, SITUATION_SAID);
+    assert.equal(findingOf(again, key).book, SITUATION_BOOK);
+
+    again.dismiss(key);
+    assert.equal(statusOf(again, key), 'Dismissed');
+    const pedantCalls = () => model.calls.filter((call) => call.role === 'Pedant').length;
+    for (const said of [SITUATION_SAID, `${SITUATION_SAID}.`]) {
+        model.pedant = answer({ SITUATION: [`${said} | ${SITUATION_BOOK}`] });
+        await again.reply(at(45));
+        keeper.change({ state: revised(keeper.current.state) });
+        const checked = pedantCalls();
+        await again.reply(at(41));
+        assert.equal(pedantCalls(), checked + 1, `rechecked with ${said}`);
+        assert.equal(statusOf(again, key), 'Dismissed', said);
+        assert.deepEqual(
+            statuses(again).filter((entry) => entry[1] === 'MESSAGE-41'),
+            [['Situation', 'MESSAGE-41', 'Dismissed']],
+            said,
+        );
+    }
+    await again.told(key);
+    assert.equal(statusOf(again, key), 'Dismissed');
+
+    model.pedant = 'All of it fits.';
+    const regenerated = variant(41, [['Narrator', 'Halvard, forty winters old, sleeps by the fire.']], 'OTHER-41');
+    await again.reply(regenerated);
+    assert.deepEqual(statuses(again), []);
+});
+
+test('a situation finding with a missing quote is not kept', () => {
+    const { keeper, model, notify } = rig();
+    const shaped = new FakeStorage();
+    const finding = {
+        kind: 'Situation',
+        message: 'MESSAGE-41',
+        position: 41,
+        said: SITUATION_SAID,
+        key: 'situation-key',
+        status: 'Open',
+    };
+    ScribeStore.write(shaped, ROOM, ScribeStore.Kind.Live, { findings: [finding], sends: 0 });
+    const reopened = ScribeLive.open({ keeper, storage: shaped, roomId: ROOM, ask: model.ask, clock: CLOCK, notify });
+    assert.equal(reopened.view().findings.length, 0);
+});

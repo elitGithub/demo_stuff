@@ -2570,6 +2570,53 @@ test('a leak offers no correction', async () => {
     assert.equal(rows[0].textContent.includes(regenerate), true);
 });
 
+test('a situation finding is shown with both quotes and a Dismiss', async () => {
+    const state = replay(findingsBook());
+    const situation = {
+        kind: Kind.Situation,
+        message: 'MESSAGE-99',
+        position: 99,
+        subject: null,
+        label: null,
+        fact: null,
+        category: null,
+        book: 'We camp for three nights getting there',
+        said: 'You have a bed?',
+        speaker: null,
+        speakerLabel: null,
+        written: null,
+        key: 'Situation|MESSAGE-99|you have a bed?',
+        status: Status.Open,
+        can: { told: false, spent: false },
+    };
+    const hint = 'If the reply should not stand, regenerate it.';
+    const [open] = plain(PanelView.findings(state, liveView([situation])));
+    assert.deepEqual(open, {
+        key: situation.key,
+        kind: Kind.Situation,
+        status: Status.Open,
+        title: "The reply doesn't fit what's happening",
+        detail: 'The reply says "You have a bed?"; earlier: "We camp for three nights getting there".',
+        actions: ['Dismiss'],
+        notes: [hint],
+        draft: null,
+    });
+    const [gone] = plain(PanelView.findings(state, liveView([{ ...situation, status: Status.Dismissed }])));
+    assert.deepEqual([gone.title, gone.actions, gone.notes], [open.title, [], []]);
+
+    const panel = mounted(findingsBook(), { live: liveView([situation]) });
+    assert.equal(panel.text('scribe-badge'), '1 finding');
+    await panel.tab('Findings');
+    const rows = panel.rows('findings');
+    assert.equal(rows.length, 1);
+    assert.deepEqual(buttonStates(rows[0]), ['Dismiss:false']);
+    assert.equal(rows[0].textContent.includes(hint), true);
+    assert.equal(rows[0].textContent.includes('We camp for three nights getting there'), true);
+    panel.button(rows[0], 'Dismiss').click();
+    await panel.flush();
+    assert.deepEqual(panel.live.calls.at(-1), { name: 'dismiss', args: [situation.key] });
+});
+
 test('accept is gone', async () => {
     const state = replay(findingsBook());
     const shapes = [

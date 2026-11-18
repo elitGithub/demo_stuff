@@ -37,6 +37,7 @@ const ScribeLive = Object.freeze({
             Spelling: Object.freeze(['subject', 'label', 'written']),
             Contradiction: Object.freeze(['subject', 'label', 'fact', 'category', 'book', 'said']),
             Leak: Object.freeze(['subject', 'label', 'fact', 'category', 'book', 'speaker', 'speakerLabel']),
+            Situation: Object.freeze(['said', 'book']),
         }),
         SceneTexts: Object.freeze(['message', 'place', 'reach', 'summary']),
         Messages: Object.freeze({
@@ -789,6 +790,7 @@ const ScribeLive = Object.freeze({
                     player: view.player,
                     message,
                     unread: view.unread,
+                    messages: view.messages,
                     ask: ScribeLive.asker(live, roles.Pedant, pedantNoted),
                 });
             } catch (error) {

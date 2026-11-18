@@ -2,8 +2,10 @@ import assert from 'node:assert/strict';
 import { readFileSync } from 'node:fs';
 import test from 'node:test';
 import CampaignBuilder from './support/CampaignBuilder.mjs';
+import FakeChat from './support/FakeChat.mjs';
 import FakeStorage from './support/FakeStorage.mjs';
 import PanelHarness from './support/PanelHarness.mjs';
+import PanelLive from './support/PanelLive.mjs';
 
 const scripts = PanelHarness.load();
 const { ScribeIntake, ScribeAnswer, ScribeLog, ScribeReplay, BenchView, ScribeStore, PanelStyle, PanelView } = scripts;
@@ -114,6 +116,7 @@ function keeperView(log, changes = {}) {
         phase: Phase.Idle,
         roomId: room,
         reader: true,
+        booked: true,
         total: story.length,
         settled: story.length - 1,
         read: story.filter((message) => Object.hasOwn(log.read, message.id)).length,
@@ -626,7 +629,7 @@ test('a collapsed panel draws only its header', async () => {
 test('the key is saved and never shown', async () => {
     const key = 'sk-or-v1-halvard-0123456789abcdef';
     const panel = mounted(disputedBook());
-    await panel.tab('Progress');
+    await panel.tab('Settings');
     assert.equal(panel.text('scribe-key-state'), 'No key yet');
     const field = panel.byId('scribe-key');
     assert.equal(field.type, 'password');
@@ -649,7 +652,7 @@ test('the key is saved and never shown', async () => {
     assert.equal(panel.text('scribe-key-outcome'), '');
     panel.redraw();
     await panel.tab('Summary');
-    await panel.tab('Progress');
+    await panel.tab('Settings');
     assert.equal(panel.text('scribe-key-state'), 'A key is saved');
     for (const element of panel.document.elements) {
         assert.equal(element.textContent.includes(key), false, element.tagName);
@@ -663,7 +666,7 @@ test('the key is saved and never shown', async () => {
 
 test('settings are validated before they are saved', async () => {
     const panel = mounted(disputedBook());
-    await panel.tab('Progress');
+    await panel.tab('Settings');
     /**
      * @param {string} name
      * @return {import('./support/PanelElement.mjs').default}
@@ -728,17 +731,17 @@ test('settings are validated before they are saved', async () => {
 test('adopting asks before replacing a book', async () => {
     const fresh = mounted(ScribeLog.create(), { keeper: { phase: Phase.NoBook } });
     await fresh.tab('Progress');
-    assert.equal(fresh.byId('scribe-setup').open, true);
-    assert.equal(fresh.text('scribe-adopt'), 'Adopt this chat');
+    assert.equal(fresh.byId('scribe-adopt').hidden, true);
+    assert.equal(fresh.text('scribe-next'), 'Adopt this chat');
     fresh.confirming = false;
-    fresh.click('scribe-adopt');
+    fresh.click('scribe-next');
     await fresh.flush();
     assert.deepEqual(fresh.questions, []);
     assert.deepEqual(fresh.keeper.called('adopt'), [[settings]]);
     const log = disputedBook();
     const kept = mounted(log);
     await kept.tab('Progress');
-    assert.equal(kept.byId('scribe-setup').open, false);
+    assert.equal(kept.byId('scribe-adopt').hidden, false);
     assert.equal(kept.text('scribe-adopt'), 'Start the book over');
     kept.confirming = false;
     kept.click('scribe-adopt');
@@ -1057,13 +1060,15 @@ test('everything is locked while the keeper is busy', async () => {
         ],
         Book: ['Remove', 'Make public', 'Remove', 'Make public', 'Remove', 'Make public', 'Remove', 'Make public', 'Add the fact', 'Split'],
         Findings: ['They were told'],
-        Progress: ['Save settings', 'Pull the chat again', 'Resume', 'Start the book over'],
+        Progress: ['Pull the chat again', 'Resume', 'Start the book over'],
+        Settings: ['Save settings'],
     };
     const free = {
         Rulings: ['Work it out'],
         Book: ['Aldric', 'Aldrich', 'Halvard', 'Mirelle', 'Oswin', 'Oswin (the miller)'],
         Findings: ['Dismiss', 'Rule it...', 'Dismiss', 'Clear', 'Suggest one'],
-        Progress: ['Save key', 'Export', 'Pause'],
+        Progress: ['Export', 'Pause'],
+        Settings: ['Save key'],
     };
     /**
      * @return {Promise<void>}
@@ -1109,11 +1114,12 @@ test('everything is locked while the keeper is busy', async () => {
     assert.deepEqual(panel.actionsWhere('Rulings', true), []);
     const loading = mounted(ScribeLog.create(), { keeper: { phase: Phase.Loading } });
     await loading.tab('Progress');
-    assert.equal(loading.byId('scribe-adopt').disabled, true);
+    assert.equal(loading.byId('scribe-adopt').hidden, true);
     assert.equal(loading.byId('scribe-resume').disabled, true);
     const empty = mounted(ScribeLog.create(), { keeper: { phase: Phase.NoBook } });
     await empty.tab('Progress');
-    assert.equal(empty.byId('scribe-adopt').disabled, false);
+    assert.equal(empty.byId('scribe-adopt').hidden, true);
+    assert.equal(empty.byId('scribe-next').disabled, false);
     assert.equal(empty.byId('scribe-resume').disabled, true);
     assert.equal(empty.byId('scribe-pause').disabled, false);
 });
@@ -1153,11 +1159,12 @@ test('a watching tab changes nothing', async () => {
         'Pause',
         'Pull the chat again',
         'Resume',
-        'Save key',
-        'Save settings',
         'Start the book over',
     ]);
-    for (const name of ['summary', 'book', 'timeline', 'rulings', 'findings', 'progress']) {
+    await panel.tab('Settings');
+    assert.deepEqual(panel.actionsWhere('Settings', false), []);
+    assert.deepEqual(panel.actionsWhere('Settings', true).sort(), ['Save key', 'Save settings']);
+    for (const name of ['summary', 'book', 'timeline', 'rulings', 'findings', 'progress', 'settings']) {
         assert.equal(panel.byId(`scribe-tab-${name}`).disabled, false, name);
     }
     panel.click('scribe-adopt');
@@ -1643,7 +1650,7 @@ test('a book loading from storage is shown but locked', async () => {
     assert.equal(panel.rows('facts').length, 2);
     assert.deepEqual(panel.actionsWhere('Book', true), ['Remove', 'Make public', 'Remove', 'Make public', 'Add the fact', 'Split']);
     await panel.tab('Progress');
-    assert.equal(panel.byId('scribe-adopt').disabled, true);
+    assert.equal(panel.byId('scribe-adopt').hidden, true);
     assert.equal(panel.byId('scribe-pull').disabled, true);
     assert.equal(panel.byId('scribe-pause').disabled, false);
     panel.keeper.current = keeperView(log);
@@ -1770,16 +1777,14 @@ test('a throw never locks the panel', async () => {
     assert.deepEqual(panel.actionsWhere('Rulings', true), []);
     assert.equal(panel.keeper.called('rule').length, 1);
     await panel.tab('Progress');
-    broken.fail('scribe:key');
     panel.click('scribe-pull');
     await panel.flush();
     assert.equal(panel.keeper.called('pull').length, 1);
-    assert.equal(panel.text('scribe-key-state'), 'No key yet');
     broken.fail('scribe:key');
-    panel.redraw();
+    await panel.tab('Settings');
     assert.equal(panel.text('scribe-key-state'), 'The key could not be read');
-    assert.equal(panel.text('scribe-failure-progress'), '');
-    assert.deepEqual(panel.actionsWhere('Progress', true), []);
+    assert.equal(panel.text('scribe-failure-settings'), '');
+    assert.deepEqual(panel.actionsWhere('Settings', true), []);
     panel.redraw();
     assert.equal(panel.text('scribe-key-state'), 'No key yet');
     await panel.tab('Rulings');
@@ -1929,34 +1934,44 @@ test('mounting again replaces', () => {
 
 test('adopt uses what the fields show', async () => {
     const panel = mounted(ScribeLog.create(), { keeper: { phase: Phase.NoBook } });
-    await panel.tab('Progress');
+    await panel.tab('Settings');
     panel.byId('scribe-setting-budget').value = '0.01';
     panel.byId('scribe-setting-analyzer').value = 'mistralai/a-cheap-model';
-    panel.click('scribe-adopt');
+    panel.click('scribe-next');
     await panel.flush();
     assert.deepEqual(panel.keeper.called('adopt'), [
         [{ ...settings, analyzer: 'mistralai/a-cheap-model', budget: 0.01 }],
     ]);
+    await panel.tab('Summary');
     panel.byId('scribe-setting-budget').value = '-2';
-    panel.click('scribe-adopt');
+    panel.click('scribe-next');
     await panel.flush();
     assert.equal(panel.keeper.called('adopt').length, 1);
+    assert.equal(panel.byId('scribe-section-settings').hidden, false);
+    assert.equal(panel.byId('scribe-section-summary').hidden, true);
+    assert.equal(panel.focused(), 'INPUT|scribe-setting-budget|-2');
     assert.equal(panel.byId('scribe-setting-budget').getAttribute('aria-invalid'), 'true');
     assert.equal(panel.text('scribe-setting-budget-problem'), 'The budget must be a number of dollars, more than 0.');
-    assert.equal(panel.text('scribe-controls-outcome'), 'Nothing was started: a field above needs attention.');
+    assert.equal(panel.text('scribe-next-outcome'), 'A field on the Settings tab needs attention.');
     const kept = mounted(disputedBook());
-    await kept.tab('Progress');
+    await kept.tab('Settings');
     kept.byId('scribe-setting-size').value = 'forty';
+    kept.byId('scribe-setting-refresh').value = 'many';
+    await kept.tab('Progress');
     kept.click('scribe-adopt');
     await kept.flush();
     assert.deepEqual(kept.questions, []);
     assert.deepEqual(kept.keeper.calls, []);
-    assert.equal(kept.byId('scribe-setup').open, true);
+    assert.equal(kept.byId('scribe-section-settings').hidden, false);
+    assert.equal(kept.focused(), 'INPUT|scribe-setting-size|forty');
+    assert.equal(kept.text('scribe-controls-outcome'), 'A field on the Settings tab needs attention.');
     kept.byId('scribe-setting-size').value = '25';
+    kept.byId('scribe-setting-refresh').value = '4';
+    await kept.tab('Progress');
     kept.click('scribe-adopt');
     await kept.flush();
     assert.deepEqual(kept.questions, ['Start a new book? It replaces the saved book for this chat.']);
-    assert.deepEqual(kept.keeper.called('adopt'), [[{ ...settings, size: 25 }]]);
+    assert.deepEqual(kept.keeper.called('adopt'), [[{ ...settings, size: 25, refresh: 4 }]]);
 });
 
 test("a row's buttons wait together", async () => {
@@ -2034,6 +2049,7 @@ test('a second press does nothing', async () => {
     panel.click('scribe-export');
     await panel.flush();
     assert.equal(panel.downloads.length, 1);
+    await panel.tab('Settings');
     panel.byId('scribe-key').value = 'sk-or-v1-oswin-00112233445566';
     panel.click('scribe-save-key');
     panel.click('scribe-save-key');
@@ -2339,12 +2355,13 @@ test('destructive actions are never primary or rightmost', async () => {
     const controls = panel.byId('scribe-adopt').parent.children;
     assert.deepEqual(
         controls.map((element) => element.textContent),
-        ['Start the book over', 'Export', 'Pull the chat again', 'Pause', 'Resume'],
+        ['Pull the chat again', 'Pause', 'Resume', 'Export', 'Start the book over'],
     );
     assert.equal(panel.byId('scribe-adopt').classes.has('primary'), false);
     const fresh = mounted(ScribeLog.create(), { keeper: { phase: Phase.NoBook } });
     await fresh.tab('Progress');
-    assert.equal(fresh.byId('scribe-adopt').classes.has('primary'), true);
+    assert.equal(fresh.byId('scribe-adopt').hidden, true);
+    assert.equal(fresh.byId('scribe-next').classes.has('primary'), true);
     await panel.tab('Rulings');
     assert.deepEqual(
         panel.rowSaying('likes', 'Oswin and Oswin (the miller)')
@@ -2380,7 +2397,7 @@ test('a failed key save does not echo the key', async () => {
     const key = 'sk-or-v1-tamsin-a1b2c3d4e5f6';
     const storage = new FakeStorage().refuseSetsMatching(/^scribe:key$/);
     const panel = mounted(disputedBook(), { storage });
-    await panel.tab('Progress');
+    await panel.tab('Settings');
     panel.byId('scribe-key').value = key;
     panel.click('scribe-save-key');
     await panel.flush();
@@ -2946,7 +2963,8 @@ test('a budget of 0 is refused', async () => {
         assert.deepEqual(panel.questions, [], budget);
         assert.equal(panel.byId('scribe-setting-budget').getAttribute('aria-invalid'), 'true', budget);
         assert.equal(panel.text('scribe-setting-budget-problem'), 'The budget must be a number of dollars, more than 0.');
-        assert.equal(panel.text('scribe-controls-outcome'), 'Nothing was started: a field above needs attention.');
+        assert.equal(panel.text('scribe-controls-outcome'), 'A field on the Settings tab needs attention.');
+        assert.equal(panel.focused(), `INPUT|scribe-setting-budget|${budget}`);
     }
 });
 
@@ -3170,10 +3188,8 @@ test('the header offers the next step', () => {
         const button = panel.byId('scribe-next');
         return { hidden: button.hidden, text: button.textContent };
     };
-    const progress = mounted(log, { keeper: { phase: Phase.NoBook } });
-    const adoptWord = progress.byId('scribe-adopt').textContent;
-    assert.equal(adoptWord, 'Adopt this chat');
-    const resumeWord = progress.byId('scribe-resume').textContent;
+    const adoptWord = 'Adopt this chat';
+    const resumeWord = mounted(log).byId('scribe-resume').textContent;
     assert.deepEqual(offered({ phase: Phase.NoBook }), { hidden: false, text: adoptWord });
     assert.deepEqual(offered(stoppedFailed), { hidden: false, text: resumeWord });
     assert.deepEqual(offered({ phase: Phase.Stopped, stop: { reason: 'Paused', problem: null } }), {
@@ -3195,7 +3211,7 @@ test('the header offers the next step', () => {
 });
 
 test('the header button does what the Progress button does', async () => {
-    const adopting = mounted(ScribeLog.create(), { keeper: { phase: Phase.NoBook } });
+    const adopting = mounted(disputedBook());
     await adopting.tab('Progress');
     adopting.click('scribe-adopt');
     await adopting.flush();
@@ -3218,20 +3234,24 @@ test('the header button does what the Progress button does', async () => {
     assert.deepEqual(stopped.keeper.called('adopt'), []);
 });
 
-test('the header button is locked like the Progress one', async () => {
+test('the header button is locked like the Progress one, except during a routine poll', async () => {
     const cases = [
         { ...stoppedFailed, reader: false },
         { ...stoppedFailed, flight: 'Reading #41 to #80' },
         stoppedFailed,
-        { phase: Phase.NoBook, reader: false },
-        { phase: Phase.NoBook },
     ];
     for (const changes of cases) {
         const panel = mounted(ScribeLog.create(), { keeper: changes });
         await panel.tab('Progress');
-        const twin = changes.phase === Phase.NoBook ? 'scribe-adopt' : 'scribe-resume';
-        assert.equal(panel.byId('scribe-next').disabled, panel.byId(twin).disabled, JSON.stringify(changes));
+        assert.equal(
+            panel.byId('scribe-next').disabled,
+            panel.byId('scribe-resume').disabled,
+            JSON.stringify(changes),
+        );
     }
+    const watcher = mounted(ScribeLog.create(), { keeper: { phase: Phase.NoBook, reader: false } });
+    assert.equal(watcher.byId('scribe-next').disabled, true);
+    assert.equal(mounted(ScribeLog.create(), { keeper: { phase: Phase.NoBook } }).byId('scribe-next').disabled, false);
     const locked = mounted(ScribeLog.create(), { keeper: { ...stoppedFailed, reader: false } });
     assert.equal(locked.byId('scribe-next').disabled, true);
     const open = mounted(ScribeLog.create(), { keeper: stoppedFailed });
@@ -3245,6 +3265,28 @@ test('the header button is locked like the Progress one', async () => {
     await open.flush();
     assert.equal(open.byId('scribe-next').disabled, false);
     assert.equal(open.byId('scribe-resume').disabled, false);
+    const paused = await realKeeper(13);
+    await paused.keeper.adopt({});
+    await paused.harness.flush();
+    paused.keeper.pause();
+    await paused.harness.flush();
+    const pausedPoll = await polling(paused);
+    assert.equal(paused.keeper.view().busy, 'Looking');
+    assert.equal(paused.harness.byId('scribe-next').hidden, false);
+    assert.equal(paused.harness.byId('scribe-next').textContent, paused.harness.byId('scribe-resume').textContent);
+    assert.equal(paused.harness.byId('scribe-next').disabled, false);
+    assert.equal(paused.harness.byId('scribe-resume').disabled, true);
+    paused.harness.click('scribe-next');
+    await paused.harness.flush();
+    assert.equal(paused.harness.text('scribe-next-outcome'), pulling);
+    pausedPoll.release();
+    await pausedPoll.ticking;
+    await paused.harness.flush();
+    assert.equal(paused.harness.byId('scribe-next').disabled, false);
+    assert.equal(paused.harness.byId('scribe-resume').disabled, false);
+    assert.equal(paused.harness.text('scribe-next-outcome'), '');
+    assert.equal(paused.harness.byId('scribe-trouble').hidden, true);
+    assert.equal(paused.harness.text('scribe-trouble'), '');
 });
 
 test('a failure is said beside the header button', async () => {
@@ -3428,7 +3470,7 @@ test('elapsed and progress are worded right', () => {
 });
 
 test('empty tabs say why', async () => {
-    const noBook = 'No book yet. Press Adopt this chat above to start the first reading. Nothing is read, and nothing is spent, before that.';
+    const noBook = 'No book yet. Nothing is read, and nothing is spent, before you adopt this chat.';
     const under = 'The first reading is under way. This fills as each stretch lands.';
     const nothing = 'Nothing has been read yet. Press Resume above.';
     const states = [
@@ -3444,7 +3486,7 @@ test('empty tabs say why', async () => {
             assert.equal(shown.hidden, false, name);
             assert.equal(shown.textContent, sentence, name);
         }
-        for (const name of ['Findings', 'Progress']) {
+        for (const name of ['Findings', 'Progress', 'Settings']) {
             const hollow = panel.section(name).children.filter((child) => child.id.startsWith('scribe-empty-'));
             assert.equal(hollow.length, 0, name);
         }
@@ -3455,17 +3497,562 @@ test('empty tabs say why', async () => {
     }
 });
 
-test('a refused header Adopt names the Progress tab', async () => {
+test('a refused header Adopt names the Settings tab', async () => {
     const bad = { phase: Phase.NoBook, settings: { ...settings, size: 'many' } };
     const panel = mounted(ScribeLog.create(), { keeper: bad });
     panel.click('scribe-next');
     await panel.flush();
-    assert.equal(panel.text('scribe-next-outcome'), 'A setup field on the Progress tab needs attention.');
+    assert.equal(panel.text('scribe-next-outcome'), 'A field on the Settings tab needs attention.');
+    assert.equal(panel.byId('scribe-section-settings').hidden, false);
     assert.deepEqual(panel.keeper.called('adopt'), []);
-    const progress = mounted(ScribeLog.create(), { keeper: bad });
+    const progress = mounted(disputedBook(), { keeper: { settings: { ...settings, size: 'many' } } });
     await progress.tab('Progress');
     progress.click('scribe-adopt');
     await progress.flush();
-    assert.equal(progress.text('scribe-controls-outcome'), 'Nothing was started: a field above needs attention.');
+    assert.equal(progress.text('scribe-controls-outcome'), 'A field on the Settings tab needs attention.');
     assert.equal(progress.text('scribe-next-outcome'), '');
+    assert.equal(progress.byId('scribe-section-settings').hidden, false);
+});
+
+test('Adopt waits for the pull and says why', async () => {
+    const reason = 'Nothing has been pulled from the chat yet';
+    const log = ScribeLog.create();
+    const panel = mounted(log, { keeper: { phase: Phase.NoBook, adoptBlock: reason } });
+    assert.equal(panel.byId('scribe-next').disabled, true);
+    assert.equal(panel.byId('scribe-next-outcome').hidden, false);
+    assert.equal(panel.text('scribe-next-outcome'), reason);
+    panel.click('scribe-next');
+    await panel.flush();
+    assert.deepEqual(panel.keeper.calls, []);
+    panel.keeper.current = keeperView(log, { phase: Phase.NoBook });
+    panel.redraw();
+    assert.equal(panel.byId('scribe-next').disabled, false);
+    assert.equal(panel.byId('scribe-next-outcome').hidden, true);
+    assert.equal(panel.text('scribe-next-outcome'), '');
+    await panel.tab('Progress');
+    assert.equal(panel.text('scribe-next-outcome'), '');
+});
+
+test('a block is never said for Resume', () => {
+    const panel = mounted(ScribeLog.create(), { keeper: { ...stoppedFailed, adoptBlock: 'Another tab is reading' } });
+    assert.equal(panel.byId('scribe-next').disabled, false);
+    assert.equal(panel.byId('scribe-next-outcome').hidden, true);
+    const idle = mounted(ScribeLog.create(), { keeper: { phase: Phase.Idle, adoptBlock: 'Another tab is reading' } });
+    assert.equal(idle.byId('scribe-next-outcome').hidden, true);
+});
+
+test('a refusal goes when the state it reported has moved', async () => {
+    const log = ScribeLog.create();
+    const noBook = { phase: Phase.NoBook, pulled: null };
+    const moves = [
+        ['the pull lands', { ...noBook, pulled: { end: 'NoCursor', count: 13, skipped: 0, at: 5 } }],
+        ['another tab takes over', { ...noBook, phase: Phase.Watching, reader: false }],
+        ['the block changes', { ...noBook, adoptBlock: 'The chat could not be compared with the book' }],
+        ['the stop reason changes', { ...noBook, stop: { reason: 'Budget', problem: null } }],
+    ];
+    for (const [name, changes] of moves) {
+        const panel = mounted(log, { keeper: noBook });
+        panel.keeper.failure = new Error('The key was refused');
+        panel.click('scribe-next');
+        await panel.flush();
+        assert.equal(panel.text('scribe-next-outcome'), 'The key was refused', name);
+        panel.redraw();
+        assert.equal(panel.text('scribe-next-outcome'), 'The key was refused', name);
+        panel.keeper.current = keeperView(log, changes);
+        panel.redraw();
+        assert.equal(panel.byId('scribe-next-outcome').textContent.includes('The key was refused'), false, name);
+    }
+    const resuming = mounted(log, { keeper: stoppedFailed });
+    resuming.keeper.failure = new Error('The key was refused');
+    resuming.click('scribe-next');
+    await resuming.flush();
+    assert.equal(resuming.text('scribe-next-outcome'), 'The key was refused');
+    resuming.keeper.current = keeperView(log, { phase: Phase.Stopped, stop: { reason: 'Budget', problem: null } });
+    resuming.redraw();
+    assert.equal(resuming.text('scribe-next-outcome'), '');
+    const controls = mounted(log, { keeper: stoppedFailed });
+    await controls.tab('Progress');
+    controls.keeper.failure = new Error('The key was refused');
+    controls.click('scribe-resume');
+    await controls.flush();
+    assert.equal(controls.text('scribe-controls-outcome'), 'The key was refused');
+    controls.keeper.current = keeperView(log, {
+        ...stoppedFailed,
+        pulled: { end: 'NoCursor', count: 1, skipped: 0, at: 9 },
+    });
+    controls.redraw();
+    assert.equal(controls.text('scribe-controls-outcome'), '');
+});
+
+test('a refusal stays while the state has not moved, and a success outlives a pull', async () => {
+    const log = disputedBook();
+    const panel = mounted(log, { keeper: stoppedFailed });
+    panel.keeper.failure = new Error('The key was refused');
+    panel.click('scribe-next');
+    await panel.flush();
+    for (let turn = 0; turn < 3; turn++) {
+        panel.keeper.current = keeperView(log, { ...stoppedFailed, spentToday: 0.2 + turn });
+        panel.redraw();
+    }
+    assert.equal(panel.text('scribe-next-outcome'), 'The key was refused');
+    await panel.tab('Progress');
+    panel.click('scribe-export');
+    await panel.flush();
+    assert.equal(panel.text('scribe-controls-outcome').startsWith('Exported '), true);
+    panel.keeper.current = keeperView(log, { pulled: { end: 'NoCursor', count: 1, skipped: 0, at: 77 } });
+    panel.redraw();
+    assert.equal(panel.text('scribe-controls-outcome').startsWith('Exported '), true);
+});
+
+test('the Settings tab holds the key and every setting', async () => {
+    const panel = mounted(disputedBook());
+    assert.equal(panel.byId('scribe-tab-settings').textContent, 'Settings');
+    const inside = panel.section('Settings').descendants();
+    const ids = new Set(inside.map((element) => element.id));
+    for (const id of [
+        'scribe-key-state',
+        'scribe-key',
+        'scribe-save-key',
+        'scribe-key-outcome',
+        'scribe-setting-analyzer',
+        'scribe-setting-scribe',
+        'scribe-setting-pedant',
+        'scribe-setting-size',
+        'scribe-setting-budget',
+        'scribe-setting-refresh',
+        'scribe-save-settings',
+        'scribe-settings-outcome',
+    ]) {
+        assert.equal(ids.has(id), true, id);
+    }
+    assert.equal(inside.some((element) => element.tagName === 'DETAILS'), false);
+    assert.equal(panel.section('Progress').descendants().some((element) => element.id === 'scribe-key'), false);
+});
+
+test('Start the book over shows only when there is a book', async () => {
+    const hidden = async (changes, log = ScribeLog.create()) => {
+        const panel = mounted(log, { keeper: changes });
+        await panel.tab('Progress');
+        return panel.byId('scribe-adopt').hidden;
+    };
+    assert.equal(await hidden({ phase: Phase.NoBook }), true);
+    assert.equal(await hidden({ phase: Phase.Loading }), true);
+    assert.equal(await hidden({ phase: Phase.Idle }, disputedBook()), false);
+    assert.equal(await hidden({ phase: Phase.Stopped, stop: { reason: 'Paused', problem: null } }), false);
+    assert.equal(await hidden({ phase: Phase.Stopped, problem: 'The saved book of this chat is damaged' }), false);
+    assert.equal(await hidden({ phase: Phase.Watching, reader: false }, disputedBook()), false);
+    assert.equal(await hidden({ phase: Phase.Watching, reader: false, booked: false }), true);
+});
+
+test("a watcher's Progress tab says whether it pulled", async () => {
+    const log = disputedBook();
+    const watcher = mounted(log, { keeper: { phase: Phase.Watching, reader: false, pulled: null } });
+    await watcher.tab('Progress');
+    assert.equal(watcher.byId('scribe-pulled').hidden, false);
+    assert.equal(watcher.text('scribe-pulled'), 'This tab has not pulled the chat; another tab is reading it.');
+    watcher.keeper.current = keeperView(log, {
+        phase: Phase.Watching,
+        reader: false,
+        pulled: { end: 'NoCursor', count: 40, skipped: 0, at: 3 },
+    });
+    watcher.redraw();
+    assert.equal(watcher.text('scribe-pulled'), 'Last pull: 40 messages, ended NoCursor');
+    const reader = mounted(log, { keeper: { pulled: null } });
+    await reader.tab('Progress');
+    assert.equal(reader.byId('scribe-pulled').hidden, true);
+    reader.keeper.current = keeperView(log, { pulled: { end: 'NoCursor', count: 40, skipped: 0, at: 3 } });
+    reader.redraw();
+    assert.equal(reader.byId('scribe-pulled').hidden, false);
+});
+
+test('Progress holds the controls, the last pull, the readings and the calls in order', async () => {
+    const panel = mounted(disputedBook(), { keeper: { pulled: { end: 'NoCursor', count: 40, skipped: 0, at: 3 } } });
+    await panel.tab('Progress');
+    const children = panel.section('Progress').children;
+    const positions = ['scribe-adopt', 'scribe-pulled', 'scribe-list-lines', 'scribe-list-calls'].map((id) =>
+        children.findIndex((child) => child.id === id || child.descendants().some((inner) => inner.id === id)),
+    );
+    assert.equal(positions.every((position) => position >= 0), true, JSON.stringify(positions));
+    assert.deepEqual([...positions].sort((first, second) => first - second), positions);
+});
+
+test('seven tabs wrap at phone width', () => {
+    const panel = mounted(disputedBook(), { width: 390 });
+    const tabs = panel.byId('scribe-tab-summary').parent.children;
+    assert.deepEqual(
+        tabs.map((tab) => tab.textContent),
+        ['Summary', 'Book', 'Timeline', 'Rulings', 'Findings', 'Progress', 'Settings'],
+    );
+    assert.match(PanelStyle.Text, /\.tabs \{[^}]*flex-wrap: wrap;/);
+    assert.doesNotMatch(PanelStyle.Text, /\.tabs \{[^}]*(white-space: nowrap|overflow-x: (scroll|auto))/);
+});
+
+const pulling = scripts.ScribeKeeper.Settings.Messages.Pulling;
+const refused = 'The key was refused';
+
+/**
+ * @param {number} length
+ * @param {string|null} hold
+ * @param {(keeper: object) => object} wrap
+ * @return {Promise<{ harness: PanelHarness, keeper: object, chat: FakeChat, release: Function|null }>}
+ */
+async function realKeeper(length, hold = null, wrap = (keeper) => keeper) {
+    const settle = async () => {
+        for (let turn = 0; turn < 200; turn++) {
+            await new Promise((resolve) => setImmediate(resolve));
+        }
+    };
+    const chat = new FakeChat(length);
+    const release = hold === null ? null : chat.hold(hold);
+    const harness = new PanelHarness(scripts, { keeper: null, live: liveView() });
+    const clock = harness.clock;
+    const keeper = await scripts.ScribeKeeper.open({
+        storage: harness.storage,
+        roomId: 'harbour',
+        tabId: 'tab-1',
+        zeta: chat.zeta('tab-1'),
+        ask: async () => ({ text: '=== FACTS', cost: 0.01 }),
+        clock: { now: () => clock.now(), today: () => '2026-11-15' },
+        notify: () => {
+            if (harness.handle !== null) {
+                harness.redraw();
+            }
+        },
+    });
+    await settle();
+    harness.keeper = wrap(keeper);
+    harness.live = new PanelLive(liveView());
+    harness.mount();
+    return { harness, keeper, chat, release };
+}
+
+/**
+ * @param {{ harness: PanelHarness, keeper: object, chat: FakeChat }} setup
+ * @return {Promise<{ ticking: Promise<void>, release: Function }>}
+ */
+async function polling(setup) {
+    const release = setup.chat.hold('newest');
+    setup.harness.clock.time = setup.harness.clock.now() + 20000;
+    const ticking = setup.keeper.tick();
+    await setup.harness.flush();
+    return { ticking, release };
+}
+
+test('the first pull hides Adopt under its headline, and a routine poll never does', async () => {
+    const first = await realKeeper(13, 'history');
+    const { harness, keeper } = first;
+    assert.equal(keeper.view().adoptBlock, pulling);
+    assert.equal(keeper.view().busy, 'Pulling');
+    assert.equal(harness.byId('scribe-next').hidden, true);
+    assert.equal(harness.text('scribe-headline'), 'Pulling the chat: 0 messages');
+    assert.equal(harness.byId('scribe-next-outcome').hidden, true);
+    first.release();
+    await harness.flush();
+    assert.equal(harness.byId('scribe-next').disabled, false);
+    assert.equal(harness.text('scribe-next-outcome'), '');
+    for (let turn = 0; turn < 3; turn++) {
+        const poll = await polling(first);
+        assert.equal(keeper.view().busy, 'Looking');
+        assert.equal(harness.byId('scribe-next').hidden, false);
+        assert.equal(harness.byId('scribe-next').disabled, false);
+        assert.equal(harness.text('scribe-next-outcome'), '');
+        poll.release();
+        await poll.ticking;
+        await harness.flush();
+        assert.equal(harness.byId('scribe-next').hidden, false);
+        assert.equal(harness.byId('scribe-next').disabled, false);
+        assert.equal(harness.text('scribe-next-outcome'), '');
+    }
+});
+
+test('a redraw during a routine poll keeps the header Adopt shown and enabled with no line', async () => {
+    const setup = await realKeeper(13);
+    const { harness, keeper } = setup;
+    const poll = await polling(setup);
+    assert.equal(keeper.view().busy, 'Looking');
+    assert.equal(keeper.view().flight, 'Looking for new messages');
+    await harness.tab('Settings');
+    await harness.flush();
+    assert.equal(harness.byId('scribe-next').hidden, false);
+    assert.equal(harness.byId('scribe-next').disabled, false);
+    assert.equal(harness.byId('scribe-next-outcome').hidden, true);
+    poll.release();
+    await poll.ticking;
+    await harness.flush();
+    assert.equal(harness.byId('scribe-next').hidden, false);
+    assert.equal(harness.byId('scribe-next').disabled, false);
+    assert.equal(harness.byId('scribe-next-outcome').hidden, true);
+});
+
+test('a press on Adopt during a routine poll leaves no line when the poll ends', async () => {
+    const setup = await realKeeper(13);
+    const { harness } = setup;
+    const poll = await polling(setup);
+    harness.click('scribe-next');
+    await harness.flush();
+    assert.equal(harness.text('scribe-next-outcome'), pulling);
+    poll.release();
+    await poll.ticking;
+    await harness.flush();
+    assert.equal(harness.byId('scribe-next').disabled, false);
+    assert.equal(harness.text('scribe-next-outcome'), '');
+    for (let turn = 0; turn < 3; turn++) {
+        await setup.keeper.tick();
+        await harness.flush();
+        assert.equal(harness.text('scribe-next-outcome'), '');
+    }
+});
+
+test('every Book-guarded control is locked during a poll, and a refusal said then is gone after it', async () => {
+    for (const withBook of [false, true]) {
+        const gate = { release: null };
+        const waiting = new Promise((resolve) => {
+            gate.release = resolve;
+        });
+        const setup = await realKeeper(13, null, (keeper) => ({
+            ...keeper,
+            configure: async (given) => {
+                await waiting;
+                return keeper.configure(given);
+            },
+        }));
+        const { harness, keeper } = setup;
+        if (withBook) {
+            await keeper.adopt({});
+            await harness.flush();
+        }
+        await harness.tab('Settings');
+        assert.equal(harness.byId('scribe-save-settings').disabled, false);
+        harness.click('scribe-save-settings');
+        await harness.flush();
+        const poll = await polling(setup);
+        assert.equal(harness.byId('scribe-save-settings').disabled, true);
+        gate.release();
+        await harness.flush();
+        assert.equal(harness.text('scribe-settings-outcome'), pulling);
+        poll.release();
+        await poll.ticking;
+        await harness.flush();
+        assert.equal(harness.text('scribe-settings-outcome'), '');
+        assert.equal(harness.byId('scribe-save-settings').disabled, false);
+        const quiet = await polling(setup);
+        assert.equal(harness.byId('scribe-save-settings').disabled, true);
+        quiet.release();
+        await quiet.ticking;
+        await harness.flush();
+        assert.equal(harness.byId('scribe-save-settings').disabled, false);
+    }
+});
+
+test('a refusal stored while settled survives a routine poll on any outlet', async () => {
+    const setup = await realKeeper(13, null, (keeper) => ({
+        ...keeper,
+        configure: async () => {
+            throw new Error(refused);
+        },
+    }));
+    const { harness, keeper } = setup;
+    await harness.tab('Settings');
+    harness.click('scribe-save-settings');
+    await harness.flush();
+    assert.equal(harness.text('scribe-settings-outcome'), refused);
+    const poll = await polling(setup);
+    assert.equal(harness.text('scribe-settings-outcome'), refused);
+    poll.release();
+    await poll.ticking;
+    await harness.flush();
+    assert.equal(harness.text('scribe-settings-outcome'), refused);
+    for (let turn = 0; turn < 3; turn++) {
+        await keeper.tick();
+        await harness.flush();
+        assert.equal(harness.text('scribe-settings-outcome'), refused);
+    }
+    await harness.tab('Summary');
+    await harness.tab('Settings');
+    assert.equal(harness.text('scribe-settings-outcome'), refused);
+});
+
+test('a controls refusal stored while settled survives a step that reads a stretch', async () => {
+    for (const variant of ['resume', 'field']) {
+        const setup = await realKeeper(13, null, (keeper) => ({
+            ...keeper,
+            resume: async () => {
+                throw new Error(refused);
+            },
+        }));
+        const { harness, keeper, chat } = setup;
+        await keeper.adopt({});
+        await harness.flush();
+        await harness.tab('Progress');
+        const field = 'A field on the Settings tab needs attention.';
+        if (variant === 'resume') {
+            harness.click('scribe-resume');
+        } else {
+            await harness.tab('Settings');
+            harness.byId('scribe-setting-size').value = 'many';
+            await harness.tab('Progress');
+            harness.click('scribe-adopt');
+            await harness.flush();
+            await harness.tab('Progress');
+        }
+        await harness.flush();
+        const line = variant === 'resume' ? refused : field;
+        assert.equal(harness.text('scribe-controls-outcome'), line);
+        for (let round = 0; round < 3; round++) {
+            chat.add(20);
+            harness.clock.time = harness.clock.now() + 20000;
+            await keeper.tick();
+            await harness.flush();
+            assert.equal(harness.text('scribe-controls-outcome'), line);
+        }
+        assert.equal(keeper.view().read, 52);
+    }
+});
+
+test('the field line on the controls goes when the field it named is fixed', async () => {
+    const panel = mounted(ScribeLog.create(), {
+        keeper: { phase: Phase.Idle, settings: { ...settings, size: 'many' } },
+    });
+    await panel.tab('Progress');
+    panel.click('scribe-adopt');
+    await panel.flush();
+    const line = 'A field on the Settings tab needs attention.';
+    assert.equal(panel.byId('scribe-section-settings').hidden, false);
+    await panel.tab('Progress');
+    assert.equal(panel.text('scribe-controls-outcome'), line);
+    const size = panel.byId('scribe-setting-size');
+    size.value = '30';
+    size.dispatchEvent({ type: 'input' });
+    assert.equal(panel.text('scribe-controls-outcome'), '');
+    assert.equal(panel.text('scribe-next-outcome'), '');
+});
+
+test('a refusal stored while settled survives a poll, and one said during a poll goes when it ends', async () => {
+    const log = ScribeLog.create();
+    const paused = { phase: Phase.Stopped, stop: { reason: 'Paused', problem: null } };
+    const polling = { ...paused, adoptBlock: pulling, flight: 'Looking for new messages' };
+    const settled = mounted(log, { keeper: paused });
+    settled.keeper.failure = new Error(refused);
+    settled.click('scribe-next');
+    await settled.flush();
+    assert.equal(settled.text('scribe-next-outcome'), refused);
+    for (const view of [polling, paused, polling, polling, paused]) {
+        settled.keeper.current = keeperView(log, view);
+        settled.redraw();
+        assert.equal(settled.text('scribe-next-outcome'), refused);
+    }
+    const noBook = { phase: Phase.NoBook };
+    const racing = mounted(log, { keeper: noBook });
+    const held = racing.keeper.hold();
+    racing.click('scribe-next');
+    racing.keeper.current = keeperView(log, { ...noBook, adoptBlock: pulling });
+    racing.redraw();
+    held.fail(new Error(pulling));
+    await racing.flush();
+    assert.equal(racing.text('scribe-next-outcome'), pulling);
+    racing.keeper.current = keeperView(log, noBook);
+    racing.redraw();
+    assert.equal(racing.text('scribe-next-outcome'), '');
+    assert.equal(racing.byId('scribe-next').disabled, false);
+});
+
+test('the header Trouble line goes with the refusal it mirrors', async () => {
+    const log = ScribeLog.create();
+    const states = [
+        { phase: Phase.Stopped, stop: { reason: 'Budget', problem: null } },
+        { phase: Phase.Idle, pulled: { end: 'NoCursor', count: 3, skipped: 0, at: 99 } },
+    ];
+    for (const state of states) {
+        const panel = mounted(log, { keeper: stoppedFailed });
+        await panel.tab('Progress');
+        const held = panel.keeper.hold();
+        panel.click('scribe-resume');
+        await panel.flush();
+        await panel.tab('Summary');
+        held.fail(new Error(refused));
+        await panel.flush();
+        assert.equal(panel.text('scribe-trouble'), refused);
+        assert.equal(panel.byId('scribe-trouble').hidden, false);
+        panel.keeper.current = keeperView(log, state);
+        panel.redraw();
+        assert.equal(panel.text('scribe-trouble'), '');
+        assert.equal(panel.byId('scribe-trouble').hidden, true);
+        assert.equal(panel.text('scribe-controls-outcome'), '');
+    }
+});
+
+test('the collapsed strip hides every outcome line', () => {
+    const panel = mounted(ScribeLog.create(), {
+        keeper: { phase: Phase.NoBook, adoptBlock: pulling },
+        width: 390,
+        storage: new FakeStorage(),
+    });
+    assert.equal(panel.byId('scribe-panel').classes.has('collapsed'), true);
+    assert.equal(panel.byId('scribe-next-outcome').classes.has('outcome'), true);
+    assert.equal(panel.text('scribe-next-outcome'), pulling);
+    assert.match(PanelStyle.Text, /\.panel\.collapsed \.outcome[,\s][^{]*\{[^}]*display: none;/);
+    assert.doesNotMatch(PanelStyle.Text, /\.setup\b/);
+});
+
+test('a field refusal at phone width opens the panel and focuses the field', async () => {
+    const panel = mounted(ScribeLog.create(), {
+        keeper: { phase: Phase.NoBook, settings: { ...settings, size: 'many' } },
+        width: 390,
+        storage: new FakeStorage(),
+    });
+    assert.equal(panel.byId('scribe-panel').classes.has('collapsed'), true);
+    panel.click('scribe-next');
+    await panel.flush();
+    assert.equal(panel.byId('scribe-panel').classes.has('collapsed'), false);
+    assert.equal(panel.byId('scribe-body').hidden, false);
+    assert.equal(panel.byId('scribe-section-settings').hidden, false);
+    assert.equal(panel.focused(), 'INPUT|scribe-setting-size|many');
+    assert.deepEqual(panel.keeper.called('adopt'), []);
+});
+
+test('the field line goes when the field it named is fixed', async () => {
+    const panel = mounted(ScribeLog.create(), {
+        keeper: { phase: Phase.NoBook, settings: { ...settings, size: 'many', budget: 0 } },
+    });
+    panel.click('scribe-next');
+    await panel.flush();
+    const line = 'A field on the Settings tab needs attention.';
+    assert.equal(panel.text('scribe-next-outcome'), line);
+    const budget = panel.byId('scribe-setting-budget');
+    budget.value = '3';
+    budget.dispatchEvent({ type: 'input' });
+    assert.equal(panel.text('scribe-next-outcome'), line);
+    const size = panel.byId('scribe-setting-size');
+    size.value = '4';
+    size.dispatchEvent({ type: 'input' });
+    assert.equal(panel.text('scribe-next-outcome'), '');
+    assert.equal(panel.text('scribe-setting-size-problem'), '');
+    const again = mounted(ScribeLog.create(), {
+        keeper: { phase: Phase.NoBook, settings: { ...settings, size: 'many' } },
+    });
+    again.click('scribe-next');
+    await again.flush();
+    const wrong = again.byId('scribe-setting-size');
+    wrong.value = 'few';
+    wrong.dispatchEvent({ type: 'input' });
+    assert.equal(again.text('scribe-next-outcome'), line);
+});
+
+test('a failure that lands during a composition is compared when it ends', async () => {
+    const log = ScribeLog.create();
+    const panel = mounted(log, { keeper: stoppedFailed });
+    const held = panel.keeper.hold();
+    panel.click('scribe-next');
+    await panel.flush();
+    const search = panel.byId('scribe-search');
+    search.dispatchEvent({ type: 'compositionstart', bubbles: true });
+    held.fail(new Error(refused));
+    await panel.flush();
+    panel.keeper.current = keeperView(log, { phase: Phase.Stopped, stop: { reason: 'Budget', problem: null } });
+    panel.redraw();
+    search.dispatchEvent({ type: 'compositionend', bubbles: true });
+    await panel.flush();
+    assert.equal(panel.text('scribe-next-outcome'), '');
+    panel.redraw();
+    assert.equal(panel.text('scribe-next-outcome'), '');
 });

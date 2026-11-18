@@ -112,6 +112,7 @@ h4 {
 
 .panel.collapsed .headline,
 .panel.collapsed .spend,
+.panel.collapsed .outcome,
 .panel.collapsed .trouble {
     display: none;
 }
@@ -392,8 +393,7 @@ details summary {
     margin: 0;
 }
 
-.form,
-.setup {
+.form {
     border: 1px solid var(--scribe-line);
     border-radius: var(--scribe-radius);
     margin: var(--scribe-gap) 0;

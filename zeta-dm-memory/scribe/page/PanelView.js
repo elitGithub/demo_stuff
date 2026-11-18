@@ -35,8 +35,7 @@ const PanelView = Object.freeze({
             ReadingOne: ' reading to go.',
             ReadingMany: ' readings to go.',
             Minutes: ':',
-            NoBookYet:
-                'No book yet. Press Adopt this chat above to start the first reading. Nothing is read, and nothing is spent, before that.',
+            NoBookYet: 'No book yet. Nothing is read, and nothing is spent, before you adopt this chat.',
             FirstUnderWay: 'The first reading is under way. This fills as each stretch lands.',
             NothingReadYet: 'Nothing has been read yet. Press Resume above.',
             ProblemOpen: ' Problem: ',
@@ -166,7 +165,7 @@ const PanelView = Object.freeze({
         const stops = ScribeAdoption.Stop;
         const flight = keeperView.flight ?? null;
         const stop = keeperView.stop ?? null;
-        if (flight !== null) {
+        if (flight !== null && flight !== ScribeKeeper.Settings.Flight.Looking) {
             return null;
         }
         if (keeperView.phase === phases.NoBook) {

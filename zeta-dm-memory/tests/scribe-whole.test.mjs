@@ -510,7 +510,7 @@ async function opened(walk) {
  * @return {Promise<void>}
  */
 async function saveKey(walk, tab) {
-    tab.panel.tab('Progress');
+    tab.panel.tab('Settings');
     tab.panel.type('scribe-key', KEY);
     tab.panel.click('scribe-save-key');
     await settle();
@@ -523,10 +523,10 @@ async function saveKey(walk, tab) {
  * @return {Promise<void>}
  */
 async function adopt(walk, tab, budget) {
-    tab.panel.tab('Progress');
+    tab.panel.tab('Settings');
     tab.panel.type('scribe-setting-size', '30');
     tab.panel.type('scribe-setting-budget', budget);
-    tab.panel.click('scribe-adopt');
+    tab.panel.click('scribe-next');
     await until(walk, 'the adoption to finish', () => tab.panel.headline().startsWith('Up to date'), 15000);
     await until(
         walk,
@@ -712,13 +712,14 @@ test('4. adopt', async () => {
     const walk = world();
     const tab = await opened(walk);
     await saveKey(walk, tab);
-    tab.panel.tab('Progress');
+    tab.panel.tab('Summary');
     tab.panel.type('scribe-setting-size', '30');
     tab.panel.type('scribe-setting-budget', '0');
-    tab.panel.click('scribe-adopt');
+    tab.panel.click('scribe-next');
     await pass(walk, 2000);
     assert.equal(tab.panel.text('scribe-setting-budget-problem'), 'The budget must be a number of dollars, more than 0.');
-    assert.equal(tab.panel.text('scribe-controls-outcome'), 'Nothing was started: a field above needs attention.');
+    assert.equal(tab.panel.text('scribe-next-outcome'), 'A field on the Settings tab needs attention.');
+    assert.equal(tab.panel.byId('scribe-section-settings').hidden, false);
     assert.equal(walk.model.calls.length, 0);
     assert.equal(stored(walk, 'book'), null);
     await adopt(walk, tab, '1.2');
@@ -1230,6 +1231,43 @@ test('14. without browser locks, the second tab is still a watcher', async () =>
 });
 
 /**
+ * @param {WholeTab} tab
+ * @return {void}
+ */
+function assertAdoptReady(tab) {
+    assert.equal(tab.panel.headline().startsWith('No book for this chat yet'), true);
+    assert.equal(tab.panel.byId('scribe-next').hidden, false);
+    assert.equal(tab.panel.byId('scribe-next').disabled, false);
+    assert.equal(tab.panel.text('scribe-next-outcome'), '');
+}
+
+test('21. once the first pull has landed, Adopt is enabled with no line under it, locks or none', async () => {
+    for (const locks of [true, false]) {
+        const walk = world({ locks });
+        const tab = await opened(walk);
+        assertAdoptReady(tab);
+        await pass(walk, TICK_MS * 3);
+        assertAdoptReady(tab);
+    }
+});
+
+test('21. a second tab that takes over a chat with no book ends with Adopt enabled', async () => {
+    const walk = world();
+    const tab = await opened(walk);
+    const second = await secondTab(walk);
+    tab.show('hidden');
+    await until(
+        walk,
+        'step 21: the second tab to take over',
+        () => second.panel.headline().startsWith('No book for this chat yet'),
+        TICK_MS * 2,
+    );
+    assertAdoptReady(second);
+    await pass(walk, TICK_MS * 3);
+    assertAdoptReady(second);
+});
+
+/**
  * @param {object} walk
  * @param {WholeTab} tab
  * @return {Promise<void>}
@@ -1565,9 +1603,9 @@ async function wholeWalk() {
     await first.openPage();
     await pass(walk, 3000);
     await saveKey(walk, first);
-    first.panel.tab('Progress');
+    first.panel.tab('Settings');
     first.panel.type('scribe-setting-budget', '0');
-    first.panel.click('scribe-adopt');
+    first.panel.click('scribe-next');
     await pass(walk, 1000);
     await adopt(walk, first, '3');
     const tab = await reload(walk, first);
@@ -1618,7 +1656,7 @@ async function wholeWalk() {
     await pass(walk, 1000);
     await quiet(walk, 'step 18: before the failing answer');
     const budget = (spentToday(walk) + 0.3).toFixed(2);
-    tab.panel.tab('Progress');
+    tab.panel.tab('Settings');
     tab.panel.type('scribe-setting-budget', budget);
     tab.panel.click('scribe-save-settings');
     await pass(walk, 1000);
@@ -1632,7 +1670,7 @@ async function wholeWalk() {
     await pass(walk, TICK_MS * 2);
     const afterSpent = walk.model.calls.length;
     walk.model.answers.Pedant = pedantAnswer;
-    tab.panel.tab('Progress');
+    tab.panel.tab('Settings');
     tab.panel.type('scribe-setting-budget', '6');
     tab.panel.click('scribe-save-settings');
     await pass(walk, 1000);

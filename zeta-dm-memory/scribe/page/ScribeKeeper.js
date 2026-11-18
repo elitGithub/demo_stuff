@@ -15,6 +15,7 @@ const ScribeKeeper = Object.freeze({
     }),
 
     Busy: Object.freeze({
+        Looking: 'Looking',
         Pulling: 'Pulling',
         Reading: 'Reading',
     }),
@@ -306,6 +307,48 @@ const ScribeKeeper = Object.freeze({
 
     /**
      * @param {object} keeper
+     * @return {string|null}
+     */
+    blocked(keeper) {
+        const messages = ScribeKeeper.Settings.Messages;
+        const busy = ScribeKeeper.Busy;
+        if (keeper.closed) {
+            return messages.Closed;
+        }
+        if (!keeper.reader) {
+            return messages.Watching;
+        }
+        if (keeper.unloaded !== null) {
+            return keeper.unloaded;
+        }
+        if (keeper.busy === busy.Reading) {
+            return messages.Reading;
+        }
+        if (keeper.busy === busy.Pulling) {
+            return messages.Pulling;
+        }
+        const replacing = keeper.mismatch !== null && !keeper.partial;
+        if (!replacing) {
+            const hold = ScribeKeeper.held(keeper);
+            if (hold !== null) {
+                return hold;
+            }
+            if (!keeper.compared) {
+                return keeper.problem ?? messages.Unsettled;
+            }
+        }
+        if (keeper.owed.size > ScribeKeeper.Settings.NoCount) {
+            return keeper.owing;
+        }
+        try {
+            return ScribeKeeper.still(keeper) ? null : messages.Watching;
+        } catch (error) {
+            return ScribeKeeper.words(error);
+        }
+    },
+
+    /**
+     * @param {object} keeper
      * @return {Readonly<object>}
      */
     view(keeper) {
@@ -315,6 +358,8 @@ const ScribeKeeper = Object.freeze({
             phase: keeper.phase,
             roomId: keeper.roomId,
             reader: keeper.reader,
+            busy: keeper.busy,
+            booked: keeper.book !== null || keeper.damaged !== null,
             total: messages.length,
             settled: Math.max(messages.length - 1, ScribeKeeper.Settings.NoCount),
             read: keeper.read,
@@ -330,6 +375,7 @@ const ScribeKeeper = Object.freeze({
             began: keeper.flight === null ? null : keeper.began,
             stop: keeper.stop,
             pulled: keeper.lastPull,
+            adoptBlock: ScribeKeeper.blocked(keeper),
             mismatch: keeper.mismatch !== null,
             trusted: keeper.reader && keeper.unloaded === null && keeper.book !== null && keeper.book.adopted && ScribeKeeper.held(keeper) === null,
             edition: keeper.edition,
@@ -1061,6 +1107,7 @@ const ScribeKeeper = Object.freeze({
         const settings = ScribeKeeper.Settings;
         const flight = settings.Flight;
         const epoch = keeper.epoch;
+        keeper.busy = ScribeKeeper.Busy.Pulling;
         keeper.pulledAt = keeper.clock.now();
         keeper.flight = flight.PullOpen + settings.NoCount + flight.PullClose;
         keeper.began = keeper.pulledAt;
@@ -1574,14 +1621,27 @@ const ScribeKeeper = Object.freeze({
      */
     async begin(keeper) {
         const epoch = keeper.epoch;
-        keeper.busy = ScribeKeeper.Busy.Pulling;
+        ScribeKeeper.occupy(keeper, ScribeKeeper.Busy.Pulling);
         try {
             await ScribeKeeper.start(keeper);
         } finally {
             if (keeper.epoch === epoch) {
-                keeper.busy = null;
+                ScribeKeeper.occupy(keeper, null);
             }
         }
+    },
+
+    /**
+     * @param {object} keeper
+     * @param {string|null} busy
+     * @return {void}
+     */
+    occupy(keeper, busy) {
+        if (keeper.busy === busy) {
+            return;
+        }
+        keeper.busy = busy;
+        ScribeKeeper.tell(keeper, { kind: ScribeKeeper.Event.Changed });
     },
 
     /**
@@ -1652,7 +1712,7 @@ const ScribeKeeper = Object.freeze({
             return;
         }
         const epoch = keeper.epoch;
-        keeper.busy = ScribeKeeper.Busy.Pulling;
+        ScribeKeeper.occupy(keeper, ScribeKeeper.Busy.Looking);
         try {
             let fresh = false;
             const reloading = keeper.unloaded !== null;
@@ -1681,7 +1741,7 @@ const ScribeKeeper = Object.freeze({
             }
         } finally {
             if (keeper.epoch === epoch) {
-                keeper.busy = null;
+                ScribeKeeper.occupy(keeper, null);
             }
         }
     },
@@ -1721,7 +1781,7 @@ const ScribeKeeper = Object.freeze({
         if (keeper.busy === busy.Reading) {
             throw new Error(messages.Reading);
         }
-        if (keeper.busy === busy.Pulling) {
+        if (keeper.busy !== null) {
             throw new Error(messages.Pulling);
         }
     },
@@ -2097,12 +2157,12 @@ const ScribeKeeper = Object.freeze({
             pull: async () => {
                 ScribeKeeper.guard(keeper);
                 const epoch = keeper.epoch;
-                keeper.busy = ScribeKeeper.Busy.Pulling;
+                ScribeKeeper.occupy(keeper, ScribeKeeper.Busy.Pulling);
                 try {
                     await ScribeKeeper.history(keeper);
                 } finally {
                     if (keeper.epoch === epoch) {
-                        keeper.busy = null;
+                        ScribeKeeper.occupy(keeper, null);
                     }
                 }
             },

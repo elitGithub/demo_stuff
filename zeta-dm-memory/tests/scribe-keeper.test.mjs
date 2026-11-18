@@ -628,7 +628,7 @@ test('a reply event is sent for a new or changed newest message', async () => {
     events.length = 0;
     await keeper.tick();
     assert.equal(replies(events).length, 0);
-    assert.equal(events.length, 0);
+    assert.equal(events.length, 2);
 });
 
 test('an edited message is read again', async () => {
@@ -1653,7 +1653,7 @@ test('an answered question is filed at once', async () => {
     await keeper.tick();
     await keeper.tick();
     assert.equal(model.calls.length, 4);
-    assert.equal(events.length, 0);
+    assert.equal(events.length, 4);
 });
 
 test('a storage failure is tried again', async () => {
@@ -2791,7 +2791,7 @@ test('the budget lifts only above it', async () => {
     for (let turn = 0; turn < 4; turn++) {
         await keeper.tick();
     }
-    assert.equal(events.length, 0);
+    assert.equal(events.length, 8);
     assert.equal(model.calls.length, 2);
 });
 
@@ -3685,4 +3685,265 @@ test('the view says when the step began', async () => {
     await adopting;
     assert.equal(reading.keeper.view().flight, null);
     assert.equal(reading.keeper.view().began, null);
+});
+
+/**
+ * @param {object} keeper
+ * @param {FakeStorage} storage
+ * @return {string|null}
+ */
+function blockOf(keeper, storage) {
+    const writes = () => JSON.stringify(storage.calls.filter((call) => call.operation !== 'get'));
+    const stored = () => JSON.stringify([...storage.values.entries()]);
+    const before = { writes: writes(), stored: stored(), view: JSON.stringify(keeper.view()) };
+    const block = keeper.view().adoptBlock;
+    assert.equal(writes(), before.writes);
+    assert.equal(stored(), before.stored);
+    assert.equal(JSON.stringify(keeper.view()), before.view);
+    return block;
+}
+
+test('a mismatch whose pull was cut short is not replaced, and blocked and adopt agree', async () => {
+    const mismatched = await adopted();
+    mismatched.chat.renameAll('OTHER');
+    for (let turn = 0; turn < 2; turn++) {
+        mismatched.clock.time += MINUTE;
+        await mismatched.keeper.tick();
+    }
+    assert.equal(mismatched.keeper.view().mismatch, true);
+    mismatched.chat.cutShort('Failed', 20, 'Zeta could not be reached');
+    mismatched.clock.time += MINUTE;
+    await mismatched.keeper.tick();
+    const block = blockOf(mismatched.keeper, mismatched.storage);
+    assert.equal(block, `${FAR}Zeta could not be reached${FAR_AGAIN}`);
+    await assert.rejects(mismatched.keeper.adopt({}), { message: block });
+});
+
+test('the keeper tells when it starts and stops being busy, and not when nothing changed', async () => {
+    const seen = [];
+    const busies = [];
+    const holder = { keeper: null };
+    const chat = new FakeChat(100);
+    const { keeper, clock } = await opened(chat, analyst(), {
+        onNotify: () => {
+            if (holder.keeper !== null) {
+                seen.push(holder.keeper.view().adoptBlock);
+                busies.push(holder.keeper.view().busy);
+            }
+        },
+    });
+    holder.keeper = keeper;
+    assert.equal(keeper.view().adoptBlock, null);
+    assert.equal(keeper.view().busy, null);
+    seen.length = 0;
+    busies.length = 0;
+    clock.time += MINUTE;
+    await keeper.tick();
+    assert.deepEqual(seen, [null, null]);
+    assert.deepEqual(busies, ['Looking', null]);
+    seen.length = 0;
+    const release = chat.hold('history');
+    const pulling = keeper.pull();
+    await until(() => seen.length >= 1);
+    assert.equal(seen[0], PULLING);
+    release();
+    await pulling;
+    assert.equal(seen.at(-1), null);
+    assert.equal(keeper.view().adoptBlock, null);
+});
+
+test('adoptBlock names what adopt would refuse and changes nothing', async () => {
+    const refusal = /^The storage refused to set scribe:spent:/;
+    const early = new FakeChat(10);
+    early.fail('history', new Error('No login seen yet'));
+    const blank = await opened(early, analyst());
+    assert.equal(blockOf(blank.keeper, blank.storage), NOTHING_PULLED);
+    await assert.rejects(blank.keeper.adopt({}), { message: NOTHING_PULLED });
+
+    const cut = new FakeChat(300);
+    cut.cutShort('Failed', 62, 'Zeta could not be reached');
+    const partial = await opened(cut, analyst());
+    assert.equal(blockOf(partial.keeper, partial.storage), UNREACHED);
+    await assert.rejects(partial.keeper.adopt({}), { message: UNREACHED });
+
+    const suspect = await adopted();
+    suspect.chat.renameAll('OTHER');
+    suspect.clock.time += MINUTE;
+    await suspect.keeper.tick();
+    assert.equal(blockOf(suspect.keeper, suspect.storage), SUSPECT);
+    await assert.rejects(suspect.keeper.adopt({}), { message: SUSPECT });
+
+    const replacing = await adopted();
+    replacing.chat.renameAll('OTHER');
+    replacing.clock.time += MINUTE;
+    await replacing.keeper.tick();
+    replacing.clock.time += MINUTE;
+    await replacing.keeper.tick();
+    assert.equal(replacing.keeper.view().mismatch, true);
+    assert.equal(blockOf(replacing.keeper, replacing.storage), null);
+    await replacing.keeper.adopt({});
+    assert.equal(replacing.keeper.view().mismatch, false);
+
+    const unjoined = await adopted();
+    unjoined.chat.add(41);
+    await unjoined.keeper.tick();
+    assert.equal(blockOf(unjoined.keeper, unjoined.storage), UNJOINED);
+    await assert.rejects(unjoined.keeper.adopt({}), { message: UNJOINED });
+
+    const disorder = new FakeChat(100);
+    disorder.retime(50, FakeChat.time(10));
+    const unsettled = await opened(disorder, analyst());
+    assert.equal(blockOf(unsettled.keeper, unsettled.storage), DISORDER);
+    await assert.rejects(unsettled.keeper.adopt({}), { message: DISORDER });
+
+    const first = await adopted();
+    const second = await opened(first.chat, analyst(), { storage: first.storage, clock: first.clock, tabId: 'tab-2' });
+    assert.equal(blockOf(second.keeper, second.storage), WATCHING);
+    await assert.rejects(second.keeper.adopt({}), { message: WATCHING });
+
+    const closing = await adopted();
+    closing.keeper.close();
+    const closed = blockOf(closing.keeper, closing.storage);
+    assert.equal(closed, 'This chat has been closed');
+    await assert.rejects(closing.keeper.adopt({}), { message: closed });
+
+    const ready = await opened(new FakeChat(100), analyst());
+    assert.equal(blockOf(ready.keeper, ready.storage), null);
+    await ready.keeper.adopt({});
+    assert.equal(ready.keeper.view().read, 99);
+
+    const pullChat = new FakeChat(100);
+    const pulling = await opened(pullChat, analyst());
+    const release = pullChat.hold('history');
+    const pull = pulling.keeper.pull();
+    await until(() => pullChat.count('tab-1', 'history') === 2);
+    assert.equal(blockOf(pulling.keeper, pulling.storage), PULLING);
+    await assert.rejects(pulling.keeper.adopt({}), { message: PULLING });
+    release();
+    await pull;
+    assert.equal(blockOf(pulling.keeper, pulling.storage), null);
+
+    const held = gate();
+    const slow = analyst({ hold: () => held.promise });
+    const reading = await opened(new FakeChat(100), slow);
+    const adopting = reading.keeper.adopt({});
+    await until(() => slow.calls.length === 1);
+    assert.equal(blockOf(reading.keeper, reading.storage), READING);
+    await assert.rejects(reading.keeper.adopt({}), { message: READING });
+    held.release();
+    await adopting;
+
+    let claimed = true;
+    const claiming = await opened(new FakeChat(100), analyst(), { claim: () => claimed });
+    assert.equal(blockOf(claiming.keeper, claiming.storage), null);
+    claimed = false;
+    assert.equal(blockOf(claiming.keeper, claiming.storage), WATCHING);
+    assert.equal(claiming.keeper.view().reader, true);
+    await assert.rejects(claiming.keeper.adopt({}), { message: WATCHING });
+
+    let failing = false;
+    const unreadable = await opened(new FakeChat(100), analyst(), {
+        claim: () => {
+            if (failing) {
+                throw new Error('The claim could not be read');
+            }
+            return true;
+        },
+    });
+    failing = true;
+    assert.equal(blockOf(unreadable.keeper, unreadable.storage), 'The claim could not be read');
+    assert.equal(unreadable.keeper.view().reader, true);
+
+    const owing = new FakeStorage();
+    const paying = await opened(new FakeChat(100), analyst({ cost: 0.05 }), { storage: owing });
+    owing.refuseSetsMatching(SPENT);
+    await paying.keeper.adopt({});
+    paying.clock.time += MINUTE;
+    await paying.keeper.tick();
+    const owed = blockOf(paying.keeper, owing);
+    assert.match(owed, refusal);
+    await assert.rejects(paying.keeper.adopt({}), { message: owed });
+    owing.allow();
+    assert.match(blockOf(paying.keeper, owing), refusal);
+    await paying.keeper.tick();
+    assert.equal(blockOf(paying.keeper, owing), null);
+    await paying.keeper.adopt({});
+});
+
+test('a step that reads a stretch tells 6 times and never shows the keeper idle while it reads', async () => {
+    const holder = { keeper: null };
+    const tells = [];
+    const chat = new FakeChat(13);
+    const { keeper, clock } = await adopted({
+        chat,
+        onNotify: () => {
+            if (holder.keeper !== null) {
+                const view = holder.keeper.view();
+                tells.push({ phase: view.phase, busy: view.busy, flying: view.flight !== null });
+            }
+        },
+    });
+    holder.keeper = keeper;
+    chat.add(20);
+    clock.time += MINUTE;
+    await keeper.tick();
+    chat.add(20);
+    tells.length = 0;
+    clock.time += MINUTE;
+    await keeper.tick();
+    assert.equal(keeper.view().read, 52);
+    assert.equal(tells.length, 6);
+    assert.deepEqual(
+        tells.filter((tell) => tell.phase === 'Reading' && tell.busy === null),
+        [],
+    );
+    assert.deepEqual(tells.at(-1), { phase: 'Idle', busy: null, flying: false });
+});
+
+test('a poll that turns into a whole pull tells Looking, then Pulling, then Reading, then nothing', async () => {
+    const holder = { keeper: null };
+    const tells = [];
+    const chat = new FakeChat(100);
+    const { keeper, clock } = await adopted({
+        chat,
+        onNotify: () => {
+            if (holder.keeper !== null) {
+                const view = holder.keeper.view();
+                tells.push({ busy: view.busy, block: view.adoptBlock });
+            }
+        },
+    });
+    holder.keeper = keeper;
+    chat.add(40);
+    const release = chat.hold('history');
+    tells.length = 0;
+    clock.time += MINUTE;
+    const ticking = keeper.tick();
+    await until(() => chat.count('tab-1', 'history') === 2);
+    assert.equal(keeper.view().busy, 'Pulling');
+    assert.equal(keeper.view().adoptBlock, PULLING);
+    release();
+    await ticking;
+    const busies = tells.map((tell) => tell.busy).filter((busy, index, all) => index === 0 || busy !== all[index - 1]);
+    assert.deepEqual(busies, ['Looking', 'Pulling', 'Reading', null]);
+    assert.equal(
+        tells.filter((tell) => tell.busy === 'Pulling').every((tell) => tell.block === PULLING),
+        true,
+    );
+    assert.equal(keeper.view().adoptBlock, null);
+});
+
+test('a routine poll says Looking and never Pulling', async () => {
+    const chat = new FakeChat(100);
+    const { keeper, clock } = await adopted({ chat });
+    const release = chat.hold('newest');
+    clock.time += MINUTE;
+    const ticking = keeper.tick();
+    await until(() => keeper.view().busy !== null);
+    assert.equal(keeper.view().adoptBlock, null);
+    assert.equal(keeper.view().busy, 'Looking');
+    await assert.rejects(keeper.adopt({}), { message: PULLING });
+    release();
+    await ticking;
+    assert.equal(keeper.view().busy, null);
 });

@@ -223,8 +223,8 @@ The chat box lives inside a frame served by `frame.pingpong.ai`, so the script r
 
 ### First evening
 
-1. **Progress** tab, *Key and settings*: paste your OpenRouter key and press **Save key**. The key is kept in Tampermonkey's storage and sent only in the request to OpenRouter. Decline the browser's offer to save it as a password.
-2. Check the three models, the messages per stretch (40), the sends between reminders (6) and the day's budget in dollars (3), then press **Adopt this chat**. The scribe pulls the whole chat with the page's own login, then reads it stretch by stretch. A long chat takes a while and costs most of what the scribe will ever cost for it. **Pause** stops after the stretch in flight; **Resume** goes on.
+1. **Settings** tab: paste your OpenRouter key and press **Save key**. The key is kept in Tampermonkey's storage and sent only in the request to OpenRouter. Decline the browser's offer to save it as a password.
+2. On the same tab, check the three models, the messages per stretch (40), the sends between reminders (6) and the day's budget in dollars (3), then press **Adopt this chat** in the panel header. The scribe pulls the whole chat with the page's own login, then reads it stretch by stretch. A long chat takes a while and costs most of what the scribe will ever cost for it. **Pause** stops after the stretch in flight; **Resume** goes on.
 3. **Rulings** tab: rule what the engine could not decide (conflicts, look-alikes, questions). Your rulings outrank the story and survive every later reading.
 4. Play. From then on the scribe works at the newest message.
 
@@ -236,7 +236,7 @@ The chat box lives inside a frame served by `frame.pingpong.ai`, so the script r
 - **Tell the scribe.** Write what the book should know. **Work it out** shows what would change in the book; **File it** files exactly that. Nothing typed here is sent to the chat.
 - **Regenerated and edited replies.** Findings about a reply that was regenerated, edited or deleted go away, and the new text is checked. An edit to an old message is noticed at the next whole pull (**Pull the chat again**), and only its stretch is read again.
 
-The other tabs: **Summary** (what needs you, the cast, where the story stands), **Book** (every subject with its facts; add, remove, make public, split), **Timeline** (scenes by day), **Progress** (readings, the last model calls, how the last pull ended, **Export**, **Start the book over**).
+The other tabs: **Summary** (what needs you, the cast, where the story stands), **Book** (every subject with its facts; add, remove, make public, split), **Timeline** (scenes by day), **Progress** (readings, the last model calls, how the last pull ended, **Export**, **Start the book over**), **Settings** (the key, the models, the sizes and the budget).
 
 ### Money
 

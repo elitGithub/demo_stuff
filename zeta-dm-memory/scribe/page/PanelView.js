@@ -30,7 +30,17 @@ const PanelView = Object.freeze({
             Budget: "the day's budget is spent.",
             NoReason: 'the reason was not recorded.',
             Watching: 'Another tab is reading this chat.',
+            MessagesRead: ' messages read.',
+            AboutOpen: ' About ',
+            ReadingOne: ' reading to go.',
+            ReadingMany: ' readings to go.',
+            Minutes: ':',
+            NoBookYet:
+                'No book yet. Press Adopt this chat above to start the first reading. Nothing is read, and nothing is spent, before that.',
+            FirstUnderWay: 'The first reading is under way. This fills as each stretch lands.',
+            NothingReadYet: 'Nothing has been read yet. Press Resume above.',
             ProblemOpen: ' Problem: ',
+            LoginWait: " Waiting for the site's login: it is taken from the page's next request to Zeta.",
             ScribeOpen: ' Scribe: ',
             Hidden: ' (hidden)',
             Toward: ' toward ',
@@ -66,7 +76,107 @@ const PanelView = Object.freeze({
         StringType: 'string',
         NumberType: 'number',
         ObjectType: 'object',
+        SecondsPerMinute: 60,
+        MillisecondsPerSecond: 1000,
+        SecondDigits: 2,
+        NoCount: 0,
     }),
+
+    /**
+     * @param {number} milliseconds
+     * @return {string}
+     */
+    elapsed(milliseconds) {
+        const settings = PanelView.Settings;
+        const valid = Number.isFinite(milliseconds) && milliseconds > settings.NoCount;
+        const seconds = valid ? Math.floor(milliseconds / settings.MillisecondsPerSecond) : settings.NoCount;
+        const minutes = Math.floor(seconds / settings.SecondsPerMinute);
+        const rest = String(seconds % settings.SecondsPerMinute).padStart(settings.SecondDigits, '0');
+        return String(minutes) + settings.Words.Minutes + rest;
+    },
+
+    /**
+     * @param {{ read: number, total: number, unread: readonly *[], settings: { size: number } }} keeperView
+     * @return {string}
+     */
+    progress(keeperView) {
+        const settings = PanelView.Settings;
+        const words = settings.Words;
+        let line = PanelView.number(keeperView.read) + words.Of + PanelView.number(keeperView.total) + words.MessagesRead;
+        const left = PanelView.listed(keeperView.unread).length;
+        if (left > settings.NoCount) {
+            const readings = Math.ceil(left / keeperView.settings.size);
+            line +=
+                words.AboutOpen +
+                PanelView.number(readings) +
+                (readings === settings.Single ? words.ReadingOne : words.ReadingMany);
+        }
+        return line;
+    },
+
+    /**
+     * @param {{ phase: string, read: number, flight: string|null }} keeperView
+     * @return {string|null}
+     */
+    empty(keeperView) {
+        const settings = PanelView.Settings;
+        const words = settings.Words;
+        const phases = ScribeKeeper.Phase;
+        if (keeperView.phase === phases.NoBook) {
+            return words.NoBookYet;
+        }
+        const booked = [phases.Reading, phases.Idle, phases.Stopped].includes(keeperView.phase);
+        if (!booked || keeperView.read !== settings.NoCount) {
+            return null;
+        }
+        if ((keeperView.flight ?? null) !== null) {
+            return words.FirstUnderWay;
+        }
+        return keeperView.phase === phases.Stopped ? words.NothingReadYet : null;
+    },
+
+    /**
+     * @param {{ pass: string, first: number|null, last: number|null, read: number, refusedLines?: *, refusedOperations?: * }} report
+     * @return {string}
+     */
+    finished(report) {
+        return BenchView.progress({
+            ...report,
+            refusedLines: PanelView.listed(report.refusedLines),
+            refusedOperations: PanelView.listed(report.refusedOperations),
+        });
+    },
+
+    Step: Object.freeze({
+        Adopt: 'Adopt',
+        Resume: 'Resume',
+    }),
+
+    /**
+     * @param {{ phase: string, flight: string|null, stop: { reason: string }|null }} keeperView
+     * @return {string|null}
+     */
+    next(keeperView) {
+        const phases = ScribeKeeper.Phase;
+        const stops = ScribeAdoption.Stop;
+        const flight = keeperView.flight ?? null;
+        const stop = keeperView.stop ?? null;
+        if (flight !== null) {
+            return null;
+        }
+        if (keeperView.phase === phases.NoBook) {
+            return PanelView.Step.Adopt;
+        }
+        if (
+            keeperView.phase === phases.Stopped &&
+            stop !== null &&
+            stop.reason !== stops.Budget &&
+            stop.reason !== stops.Done
+        ) {
+            return PanelView.Step.Resume;
+        }
+        return null;
+    },
 
     /**
      * @param {{ phase: string, total: number, read: number, flight: string|null, stop: { reason: string, problem: string|null }|null, problem: string|null }} keeperView
@@ -110,7 +220,9 @@ const PanelView = Object.freeze({
             const recorded = typeof reason === settings.StringType && reason.trim() !== words.Nothing;
             line = words.StoppedOpen + (recorded ? reason : words.NoReason);
         }
-        if (problem !== null) {
+        if (problem === ZetaSource.Settings.Messages.NoLogin) {
+            line += words.LoginWait;
+        } else if (problem !== null) {
             line += words.ProblemOpen + PanelView.said(problem);
         }
         const scribe = liveView.problem ?? null;

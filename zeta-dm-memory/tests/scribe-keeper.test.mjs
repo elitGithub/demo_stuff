@@ -3631,3 +3631,52 @@ test('the view shows what storage holds for the day', async () => {
     assert.equal(keeper.view().problem, before, 'after the refused read');
     assert.equal(cents(keeper.view().spentToday), 78, 'the read works again');
 });
+
+test('the view says when the step began', async () => {
+    const { chat, keeper: first, storage, clock } = await adopted();
+    assert.equal(first.view().flight, null);
+    assert.equal(first.view().began, null);
+    first.close();
+    chat.add(5);
+    const release = chat.hold('history');
+    const { keeper } = await opened(chat, analyst(), { storage, clock, tabId: 'tab-2', wait: false });
+    assert.equal(keeper.view().flight, 'Pulling the chat: 0 messages');
+    assert.equal(keeper.view().began, START);
+    clock.time = START + 9000;
+    assert.equal(keeper.view().began, START);
+    release();
+    await until(() => keeper.view().phase !== 'Loading');
+    assert.equal(keeper.view().began, null);
+    keeper.close();
+
+    const chatTwo = new FakeChat(100);
+    const opening = gate();
+    const second = gate();
+    const model = analyst({
+        /**
+         * @param {{ marks: number[] }} call
+         * @return {Promise<void>|null}
+         */
+        hold: (call) => {
+            if (call.marks[0] === 1) {
+                return opening.promise;
+            }
+            return call.marks[0] === 41 ? second.promise : null;
+        },
+    });
+    const readClock = clockAt();
+    const reading = await opened(chatTwo, model, { clock: readClock });
+    assert.equal(reading.keeper.view().began, null);
+    const adopting = reading.keeper.adopt({});
+    await until(() => model.calls.length === 1);
+    assert.equal(reading.keeper.view().began, START);
+    readClock.time = START + 120000;
+    opening.release();
+    await until(() => model.calls.length === 2);
+    assert.equal(reading.keeper.view().began, START + 120000);
+    readClock.time = START + 300000;
+    second.release();
+    await adopting;
+    assert.equal(reading.keeper.view().flight, null);
+    assert.equal(reading.keeper.view().began, null);
+});

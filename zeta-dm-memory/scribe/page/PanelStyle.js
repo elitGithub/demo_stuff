@@ -121,6 +121,32 @@ h4 {
     writing-mode: vertical-rl;
 }
 
+.activity {
+    flex: 1 1 100%;
+    display: flex;
+    flex-direction: column;
+    gap: var(--scribe-gap-small);
+}
+
+.activity p {
+    margin: 0;
+    color: var(--scribe-muted);
+}
+
+.meter {
+    width: 100%;
+    accent-color: var(--scribe-accent);
+}
+
+.hollow {
+    margin: 0 0 var(--scribe-gap);
+    color: var(--scribe-muted);
+}
+
+.panel.collapsed .activity p {
+    display: none;
+}
+
 .headline {
     flex: 1 1 100%;
     margin: 0;

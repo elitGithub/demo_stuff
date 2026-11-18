@@ -327,6 +327,7 @@ const ScribeKeeper = Object.freeze({
             settings: keeper.settings,
             spentToday: keeper.spentToday,
             flight: keeper.flight,
+            began: keeper.flight === null ? null : keeper.began,
             stop: keeper.stop,
             pulled: keeper.lastPull,
             mismatch: keeper.mismatch !== null,
@@ -1062,6 +1063,7 @@ const ScribeKeeper = Object.freeze({
         const epoch = keeper.epoch;
         keeper.pulledAt = keeper.clock.now();
         keeper.flight = flight.PullOpen + settings.NoCount + flight.PullClose;
+        keeper.began = keeper.pulledAt;
         ScribeKeeper.tell(keeper, { kind: ScribeKeeper.Event.Changed });
         let result = null;
         try {
@@ -1127,6 +1129,7 @@ const ScribeKeeper = Object.freeze({
         const epoch = keeper.epoch;
         const before = keeper.problem;
         keeper.flight = ScribeKeeper.Settings.Flight.Looking;
+        keeper.began = keeper.clock.now();
         let page = null;
         try {
             page = await keeper.zeta.newest();
@@ -1353,6 +1356,7 @@ const ScribeKeeper = Object.freeze({
         keeper.busy = ScribeKeeper.Busy.Reading;
         keeper.phase = ScribeKeeper.Phase.Reading;
         keeper.flight = ScribeKeeper.reading(keeper, chosen);
+        keeper.began = keeper.clock.now();
         ScribeKeeper.tell(keeper, { kind: ScribeKeeper.Event.Changed });
         let result = null;
         try {
@@ -1464,6 +1468,7 @@ const ScribeKeeper = Object.freeze({
                     keeper.lines.unshift(report);
                     keeper.lines.splice(settings.LastLines);
                     keeper.flight = ScribeKeeper.reading(keeper, chosen);
+                    keeper.began = keeper.clock.now();
                     ScribeKeeper.tell(keeper, { kind: ScribeKeeper.Event.Progress });
                 },
                 /**
@@ -1881,6 +1886,7 @@ const ScribeKeeper = Object.freeze({
             throw new Error(messages.Watching);
         }
         keeper.flight = flight;
+        keeper.began = keeper.clock.now();
         try {
             ScribeStore.write(keeper.storage, keeper.roomId, ScribeStore.Kind.Book, book);
         } catch (error) {
@@ -2230,6 +2236,7 @@ const ScribeKeeper = Object.freeze({
             made: Object.freeze([]),
             busy: null,
             flight: null,
+            began: null,
             problem: null,
             calls: [],
             lines: [],

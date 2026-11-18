@@ -3113,3 +3113,312 @@ test('nothing is read after unmount', () => {
     assert.deepEqual(reads, { keeper: 1, live: 1 });
     assert.equal(panel.hosts().length, 0);
 });
+
+const stoppedFailed = { phase: Phase.Stopped, stop: { reason: 'Failed', problem: 'answer was cut off' } };
+
+test('the header offers the next step', () => {
+    const log = ScribeLog.create();
+    const offered = (changes) => {
+        const panel = mounted(log, { keeper: changes });
+        const button = panel.byId('scribe-next');
+        return { hidden: button.hidden, text: button.textContent };
+    };
+    const progress = mounted(log, { keeper: { phase: Phase.NoBook } });
+    const adoptWord = progress.byId('scribe-adopt').textContent;
+    assert.equal(adoptWord, 'Adopt this chat');
+    const resumeWord = progress.byId('scribe-resume').textContent;
+    assert.deepEqual(offered({ phase: Phase.NoBook }), { hidden: false, text: adoptWord });
+    assert.deepEqual(offered(stoppedFailed), { hidden: false, text: resumeWord });
+    assert.deepEqual(offered({ phase: Phase.Stopped, stop: { reason: 'Paused', problem: null } }), {
+        hidden: false,
+        text: resumeWord,
+    });
+    for (const changes of [
+        { phase: Phase.Stopped, stop: { reason: 'Budget', problem: null } },
+        { phase: Phase.Stopped, stop: { reason: 'Done', problem: null } },
+        { phase: Phase.Stopped, stop: null },
+        { phase: Phase.Idle },
+        { phase: Phase.Loading },
+        { phase: Phase.Watching, reader: false },
+        { phase: Phase.Reading, flight: 'Reading #41 to #80' },
+        { ...stoppedFailed, flight: 'Pulling the chat: 10 messages' },
+    ]) {
+        assert.equal(offered(changes).hidden, true, JSON.stringify(changes));
+    }
+});
+
+test('the header button does what the Progress button does', async () => {
+    const adopting = mounted(ScribeLog.create(), { keeper: { phase: Phase.NoBook } });
+    await adopting.tab('Progress');
+    adopting.click('scribe-adopt');
+    await adopting.flush();
+    const adopted = adopting.keeper.called('adopt');
+    assert.equal(adopted.length, 1);
+    const header = mounted(ScribeLog.create(), { keeper: { phase: Phase.NoBook } });
+    header.click('scribe-next');
+    await header.flush();
+    assert.deepEqual(header.keeper.called('adopt'), adopted);
+    assert.deepEqual(header.keeper.called('resume'), []);
+    const resuming = mounted(ScribeLog.create(), { keeper: stoppedFailed });
+    await resuming.tab('Progress');
+    resuming.click('scribe-resume');
+    await resuming.flush();
+    assert.equal(resuming.keeper.called('resume').length, 1);
+    const stopped = mounted(ScribeLog.create(), { keeper: stoppedFailed });
+    stopped.click('scribe-next');
+    await stopped.flush();
+    assert.deepEqual(stopped.keeper.called('resume'), resuming.keeper.called('resume'));
+    assert.deepEqual(stopped.keeper.called('adopt'), []);
+});
+
+test('the header button is locked like the Progress one', async () => {
+    const cases = [
+        { ...stoppedFailed, reader: false },
+        { ...stoppedFailed, flight: 'Reading #41 to #80' },
+        stoppedFailed,
+        { phase: Phase.NoBook, reader: false },
+        { phase: Phase.NoBook },
+    ];
+    for (const changes of cases) {
+        const panel = mounted(ScribeLog.create(), { keeper: changes });
+        await panel.tab('Progress');
+        const twin = changes.phase === Phase.NoBook ? 'scribe-adopt' : 'scribe-resume';
+        assert.equal(panel.byId('scribe-next').disabled, panel.byId(twin).disabled, JSON.stringify(changes));
+    }
+    const locked = mounted(ScribeLog.create(), { keeper: { ...stoppedFailed, reader: false } });
+    assert.equal(locked.byId('scribe-next').disabled, true);
+    const open = mounted(ScribeLog.create(), { keeper: stoppedFailed });
+    assert.equal(open.byId('scribe-next').disabled, false);
+    const held = open.keeper.hold();
+    open.click('scribe-next');
+    await open.tab('Progress');
+    assert.equal(open.byId('scribe-resume').disabled, true);
+    assert.equal(open.byId('scribe-next').disabled, true);
+    held.open();
+    await open.flush();
+    assert.equal(open.byId('scribe-next').disabled, false);
+    assert.equal(open.byId('scribe-resume').disabled, false);
+});
+
+test('a failure is said beside the header button', async () => {
+    const panel = mounted(ScribeLog.create(), { keeper: stoppedFailed });
+    assert.equal(panel.text('scribe-next-outcome'), '');
+    panel.keeper.failure = new Error('The key was refused');
+    panel.click('scribe-next');
+    await panel.flush();
+    assert.equal(panel.text('scribe-next-outcome'), 'The key was refused');
+    assert.equal(panel.text('scribe-controls-outcome'), '');
+    assert.equal(panel.byId('scribe-trouble').hidden, true);
+    const progress = mounted(ScribeLog.create(), { keeper: stoppedFailed });
+    await progress.tab('Progress');
+    progress.keeper.failure = new Error('The key was refused');
+    progress.click('scribe-resume');
+    await progress.flush();
+    assert.equal(progress.text('scribe-controls-outcome'), 'The key was refused');
+    assert.equal(progress.text('scribe-next-outcome'), '');
+});
+
+test('the header button works while the body is folded', async () => {
+    const panel = mounted(ScribeLog.create(), { keeper: stoppedFailed });
+    panel.click('scribe-toggle');
+    assert.equal(panel.byId('scribe-panel').classes.has('collapsed'), true);
+    const button = panel.byId('scribe-next');
+    assert.equal(button.hidden, false);
+    assert.equal(button.disabled, false);
+    panel.click('scribe-next');
+    await panel.flush();
+    assert.equal(panel.keeper.called('resume').length, 1);
+});
+
+test('a button that goes away leaves no trouble', async () => {
+    const panel = mounted(ScribeLog.create(), { keeper: stoppedFailed });
+    const held = panel.keeper.hold();
+    panel.click('scribe-next');
+    panel.keeper.current = keeperView(ScribeLog.create(), { phase: Phase.Reading, flight: 'Reading #41 to #80' });
+    panel.redraw();
+    assert.equal(panel.byId('scribe-next').hidden, true);
+    held.open();
+    await panel.flush();
+    assert.equal(panel.byId('scribe-trouble').hidden, true);
+    assert.equal(panel.byId('scribe-next').hidden, true);
+    const failing = mounted(ScribeLog.create(), { keeper: stoppedFailed });
+    const refused = failing.keeper.hold();
+    failing.click('scribe-next');
+    failing.keeper.current = keeperView(ScribeLog.create(), { phase: Phase.Reading, flight: 'Reading #41 to #80' });
+    failing.redraw();
+    refused.fail(new Error('The key was refused'));
+    await failing.flush();
+    assert.equal(failing.byId('scribe-trouble').hidden, true);
+    assert.equal(failing.text('scribe-next-outcome'), 'The key was refused');
+});
+
+test('a login not yet seen reads as a wait', () => {
+    const messages = scripts.ZetaSource.Settings.Messages;
+    const base = { phase: Phase.NoBook, total: 0, read: 0, flight: null, stop: null };
+    const waiting = PanelView.headline({ ...base, problem: messages.NoLogin }, {});
+    assert.equal(waiting.includes("Waiting for the site's login"), true);
+    assert.equal(waiting.includes('Problem:'), false);
+    const other = PanelView.headline({ ...base, problem: messages.NoRoom }, {});
+    assert.equal(other.includes('Problem: ' + messages.NoRoom), true);
+    assert.equal(other.includes("Waiting for the site's login"), false);
+});
+
+const finishedReport = {
+    pass: 'Story',
+    first: 1,
+    last: 40,
+    read: 40,
+    total: 864,
+    spent: 0.01,
+    calls: 1,
+    unpriced: 0,
+    stored: 3,
+    refusedLines: [],
+    refusedOperations: [],
+};
+
+/**
+ * @param {number} read
+ * @param {number} total
+ * @param {object} changes
+ * @return {object}
+ */
+function working(read, total, changes = {}) {
+    return {
+        phase: Phase.Reading,
+        flight: 'Reading #41 to #80',
+        began: PanelHarness.StartTime,
+        total,
+        read,
+        unread: Array.from({ length: total - read }, (unused, index) => index),
+        ...changes,
+    };
+}
+
+test('the header shows the work under way', async () => {
+    const idle = mounted(ScribeLog.create());
+    assert.equal(idle.byId('scribe-activity').hidden, true);
+    const panel = mounted(ScribeLog.create(), { keeper: working(40, 864) });
+    assert.equal(panel.byId('scribe-activity').hidden, false);
+    assert.equal(panel.byId('scribe-meter').getAttribute('max'), '864');
+    assert.equal(panel.byId('scribe-meter').getAttribute('value'), '40');
+    const counts = panel.text('scribe-counts');
+    assert.equal(counts.includes('40 of 864 messages read.'), true);
+    assert.equal(counts.includes('About 21 readings to go.'), true);
+    await panel.tab('Timeline');
+    assert.equal(panel.byId('scribe-activity').hidden, false);
+    panel.click('scribe-toggle');
+    assert.equal(panel.byId('scribe-panel').classes.has('collapsed'), true);
+    assert.equal(panel.byId('scribe-activity').hidden, false);
+    assert.equal(panel.byId('scribe-meter').getAttribute('max'), '864');
+    for (const flight of ['Pulling the chat: 120 messages', 'Looking for new messages', 'Saving a ruling']) {
+        const other = mounted(ScribeLog.create(), { keeper: working(40, 864, { flight }) });
+        assert.equal(other.byId('scribe-activity').hidden, false, flight);
+        assert.equal(other.byId('scribe-meter').getAttribute('value'), null, flight);
+    }
+    for (const flight of ['Filing the answered questions', 'Finishing the reading']) {
+        const other = mounted(ScribeLog.create(), { keeper: working(40, 864, { flight }) });
+        assert.equal(other.byId('scribe-meter').getAttribute('value'), '40', flight);
+    }
+});
+
+test('the clock moves without a redraw', async () => {
+    const panel = mounted(ScribeLog.create(), { keeper: working(40, 864) });
+    assert.equal(panel.text('scribe-clock'), 'This step: 0:00');
+    panel.clock.advance(7000);
+    assert.equal(panel.text('scribe-clock'), 'This step: 0:07');
+    await panel.tab('Book');
+    const search = panel.byId('scribe-search');
+    search.value = 'halv';
+    search.focus();
+    const before = panel.focused();
+    panel.clock.advance(1000);
+    assert.equal(panel.text('scribe-clock'), 'This step: 0:08');
+    assert.equal(search.value, 'halv');
+    assert.equal(panel.focused(), before);
+    assert.equal(before.startsWith('INPUT|scribe-search'), true);
+});
+
+test('one timer and it ends', async () => {
+    const panel = mounted(ScribeLog.create(), { keeper: working(40, 864) });
+    assert.equal(panel.clock.intervals, 1);
+    for (let turn = 0; turn < 4; turn++) {
+        panel.redraw();
+    }
+    await panel.tab('Rulings');
+    assert.equal(panel.clock.intervals, 1);
+    panel.keeper.current = keeperView(ScribeLog.create());
+    panel.redraw();
+    assert.equal(panel.clock.intervals, 0);
+    panel.keeper.current = keeperView(ScribeLog.create(), working(40, 864));
+    panel.redraw();
+    assert.equal(panel.clock.intervals, 1);
+    panel.handle.unmount();
+    assert.equal(panel.clock.intervals, 0);
+});
+
+test('the last finished step is the Readings wording', async () => {
+    const panel = mounted(ScribeLog.create(), { keeper: working(40, 864, { lines: [finishedReport] }) });
+    const finished = panel.text('scribe-finished');
+    assert.equal(finished.startsWith('Last finished: '), true);
+    await panel.tab('Progress');
+    assert.equal(finished.slice('Last finished: '.length), panel.rowTexts('lines')[0]);
+    const none = mounted(ScribeLog.create(), { keeper: working(40, 864) });
+    assert.equal(none.byId('scribe-finished').hidden, true);
+});
+
+test('elapsed and progress are worded right', () => {
+    assert.equal(PanelView.elapsed(7000), '0:07');
+    assert.equal(PanelView.elapsed(130000), '2:10');
+    assert.equal(PanelView.elapsed(3665000), '61:05');
+    assert.equal(PanelView.elapsed(-5), '0:00');
+    assert.equal(PanelView.elapsed(Number.NaN), '0:00');
+    const view = (left) => ({ read: 40, total: 100, unread: Array.from({ length: left }, (unused, index) => index), settings: { size: 40 } });
+    assert.equal(PanelView.progress(view(0)), '40 of 100 messages read.');
+    assert.equal(PanelView.progress(view(1)), '40 of 100 messages read. About 1 reading to go.');
+    assert.equal(PanelView.progress(view(40)), '40 of 100 messages read. About 1 reading to go.');
+    assert.equal(PanelView.progress(view(41)), '40 of 100 messages read. About 2 readings to go.');
+});
+
+test('empty tabs say why', async () => {
+    const noBook = 'No book yet. Press Adopt this chat above to start the first reading. Nothing is read, and nothing is spent, before that.';
+    const under = 'The first reading is under way. This fills as each stretch lands.';
+    const nothing = 'Nothing has been read yet. Press Resume above.';
+    const states = [
+        [noBook, { phase: Phase.NoBook, read: 0 }],
+        [under, { phase: Phase.Reading, read: 0, flight: 'Reading #1 to #40', began: PanelHarness.StartTime }],
+        [nothing, { phase: Phase.Stopped, read: 0, stop: { reason: 'Failed', problem: 'cut' } }],
+    ];
+    for (const [sentence, changes] of states) {
+        const panel = mounted(ScribeLog.create(), { keeper: changes });
+        for (const name of ['Summary', 'Book', 'Timeline', 'Rulings']) {
+            await panel.tab(name);
+            const shown = panel.byId(`scribe-empty-${name.toLowerCase()}`);
+            assert.equal(shown.hidden, false, name);
+            assert.equal(shown.textContent, sentence, name);
+        }
+        for (const name of ['Findings', 'Progress']) {
+            const hollow = panel.section(name).children.filter((child) => child.id.startsWith('scribe-empty-'));
+            assert.equal(hollow.length, 0, name);
+        }
+    }
+    const read = mounted(ScribeLog.create(), { keeper: { phase: Phase.Stopped, read: 5, stop: { reason: 'Failed', problem: 'cut' } } });
+    for (const name of ['Summary', 'Book', 'Timeline', 'Rulings']) {
+        assert.equal(read.byId(`scribe-empty-${name.toLowerCase()}`).hidden, true, name);
+    }
+});
+
+test('a refused header Adopt names the Progress tab', async () => {
+    const bad = { phase: Phase.NoBook, settings: { ...settings, size: 'many' } };
+    const panel = mounted(ScribeLog.create(), { keeper: bad });
+    panel.click('scribe-next');
+    await panel.flush();
+    assert.equal(panel.text('scribe-next-outcome'), 'A setup field on the Progress tab needs attention.');
+    assert.deepEqual(panel.keeper.called('adopt'), []);
+    const progress = mounted(ScribeLog.create(), { keeper: bad });
+    await progress.tab('Progress');
+    progress.click('scribe-adopt');
+    await progress.flush();
+    assert.equal(progress.text('scribe-controls-outcome'), 'Nothing was started: a field above needs attention.');
+    assert.equal(progress.text('scribe-next-outcome'), '');
+});

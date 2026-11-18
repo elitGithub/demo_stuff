@@ -18,6 +18,7 @@ export default class PanelHarness {
         'core/ScribeAnalyzer',
         'core/ScribeGateway',
         'core/ScribeAdoption',
+        'page/ZetaSource',
         'bench/BenchView',
         'page/ScribeStore',
     ]);
@@ -116,6 +117,8 @@ export default class PanelHarness {
         this.keeper = new PanelKeeper(options.keeper);
         this.live = new PanelLive(options.live);
         this.clock = new FakeClock(PanelHarness.StartTime);
+        this.document.defaultView.setInterval = (callback, delay) => this.clock.setInterval(callback, delay);
+        this.document.defaultView.clearInterval = (id) => this.clock.clearInterval(id);
         this.confirming = true;
         this.questions = [];
         this.downloads = [];

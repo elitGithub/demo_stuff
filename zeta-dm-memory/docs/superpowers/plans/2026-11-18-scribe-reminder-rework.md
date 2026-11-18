@@ -168,6 +168,8 @@ All four files pass, the userscript is rebuilt, and the verification record has 
 
 Design points 3 to 10, with the story read of point 5.
 
+**Added by the operator 2026-11-18 ("we should read the profile too, it makes figuring the story out easier"; placement approved "go already"):** with the room and story reads, the scribe reads the room's chat profile once per room per page load (`GET /v1/rooms/:roomId/user-plot-chat-profiles/me`, the page's own login, through the same `ZetaSource.get`). The profile's text (the field that holds the description; field names confirmed or a fallback list in Settings, as for the plot id) is given as context, under a heading `PLAYER CHARACTER PROFILE:` capped at 2,000 characters, to the reading model (`ScribeAnalyzer` input), the checker (`ScribePedant.input`) and the scene call (`ScribeScene` input). Unreadable: the section is left out and the Progress tab says so once per room, beside the story notice. Tests: the three inputs carry the section when readable and leave it out when not; the read happens once per room; FakeZeta serves the profile.
+
 ### Files
 
 - `scribe/page/ScribeReminder.js` (rewritten inside the file)

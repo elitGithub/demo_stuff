@@ -13,6 +13,7 @@ const ScribeLive = Object.freeze({
         FindingsKept: 200,
         DismissedKept: 500,
         CheckedKept: 8,
+        NotesKept: 100,
         AnswersKept: 16,
         FirstMost: 5,
         FirstFinding: 0,
@@ -236,6 +237,137 @@ const ScribeLive = Object.freeze({
 
     /**
      * @param {*} value
+     * @return {object|null}
+     */
+    note(value) {
+        const settings = ScribeLive.Settings;
+        const sound =
+            ScribeLive.isObject(value) &&
+            ScribeLive.isText(value.name) &&
+            value.name !== settings.Nothing &&
+            Object.values(ScribePedant.Note).includes(value.kind) &&
+            ScribeLive.isText(value.text) &&
+            value.text !== settings.Nothing &&
+            ScribeLive.isText(value.message) &&
+            ScribeLive.isText(value.fingerprint) &&
+            Number.isSafeInteger(value.position);
+        return sound
+            ? {
+                  name: value.name,
+                  kind: value.kind,
+                  text: value.text,
+                  message: value.message,
+                  fingerprint: value.fingerprint,
+                  position: value.position,
+              }
+            : null;
+    },
+
+    /**
+     * @param {*} value
+     * @return {object[]}
+     */
+    notes(value) {
+        if (!Array.isArray(value)) {
+            return [];
+        }
+        const kept = [];
+        for (const item of value) {
+            const note = ScribeLive.note(item);
+            if (note !== null) {
+                kept.push(note);
+            }
+        }
+        return kept;
+    },
+
+    /**
+     * @param {readonly object[]} given
+     * @param {object} message
+     * @return {object[]}
+     */
+    stamped(given, message) {
+        return given.map(
+            /**
+             * @param {{ name: string, kind: string, text: string }} note
+             * @return {object}
+             */
+            (note) => ({
+                name: note.name,
+                kind: note.kind,
+                text: note.text,
+                message: message.id,
+                fingerprint: message.fingerprint,
+                position: message.position,
+            }),
+        );
+    },
+
+    /**
+     * @param {readonly object[]} notes
+     * @param {readonly object[]} given
+     * @param {object} message
+     * @return {object[]}
+     */
+    noted(notes, given, message) {
+        const settings = ScribeLive.Settings;
+        const keyOf =
+            /**
+             * @param {{ name: string, kind: string }} note
+             * @return {string}
+             */
+            (note) => JSON.stringify([ScribeText.normaliseName(note.name), note.kind]);
+        const standing = new Map();
+        for (const note of notes) {
+            if (note.message !== message.id) {
+                standing.set(keyOf(note), note);
+            }
+        }
+        for (const note of ScribeLive.stamped(given, message)) {
+            const key = keyOf(note);
+            const older = standing.get(key);
+            if (older === undefined || older.position <= note.position) {
+                standing.set(key, note);
+            }
+        }
+        const all = [...standing.values()];
+        const youngest = [...all]
+            .sort(
+                /**
+                 * @param {{ position: number }} first
+                 * @param {{ position: number }} second
+                 * @return {number}
+                 */
+                (first, second) => second.position - first.position,
+            )
+            .slice(settings.FirstFinding, settings.NotesKept);
+        return all.filter(
+            /**
+             * @param {object} note
+             * @return {boolean}
+             */
+            (note) => youngest.includes(note),
+        );
+    },
+
+    /**
+     * @param {readonly object[]} notes
+     * @param {Readonly<object>} keeperView
+     * @return {object[]}
+     */
+    standing(notes, keeperView) {
+        const read = keeperView.lastRead;
+        return ScribeLive.pruned(notes, keeperView.messages).filter(
+            /**
+             * @param {{ kind: string, position: number }} note
+             * @return {boolean}
+             */
+            (note) => note.kind !== ScribePedant.Note.Looks || read === null || note.position > read.position,
+        );
+    },
+
+    /**
+     * @param {*} value
      * @return {string|null}
      */
     edited(value) {
@@ -341,6 +473,7 @@ const ScribeLive = Object.freeze({
             forced: false,
             sends: settings.NoSends,
             findings: [],
+            notes: [],
             dismissed: [],
             suggestion: null,
             seen: null,
@@ -374,6 +507,7 @@ const ScribeLive = Object.freeze({
         record.forced = saved.forced === true;
         record.sends = Number.isSafeInteger(saved.sends) && saved.sends >= settings.NoSends ? saved.sends : settings.NoSends;
         record.findings = ScribeLive.findings(saved.findings);
+        record.notes = ScribeLive.notes(saved.notes);
         const dismissed = ScribeLive.isTexts(saved.dismissed) ? [...saved.dismissed] : [];
         for (const finding of [...record.findings].reverse()) {
             if (finding.status === ScribeLive.Status.Dismissed && !dismissed.includes(finding.fault)) {
@@ -414,6 +548,7 @@ const ScribeLive = Object.freeze({
                         revision: entry.revision,
                         now: entry.now,
                         findings: ScribeLive.findings(entry.findings),
+                        notes: ScribeLive.notes(entry.notes),
                     });
                 }
             }
@@ -511,8 +646,10 @@ const ScribeLive = Object.freeze({
         }
         try {
             const kept = ScribeLive.pruned(record.findings, view.messages);
-            if (kept.length !== record.findings.length) {
+            const notes = ScribeLive.standing(record.notes, view);
+            if (kept.length !== record.findings.length || notes.length !== record.notes.length) {
                 record.findings = kept;
+                record.notes = notes;
                 ScribeLive.save(live);
             }
         } catch (error) {
@@ -821,6 +958,7 @@ const ScribeLive = Object.freeze({
         };
         let found = null;
         let raised = null;
+        let notes = null;
         if (remembered === undefined) {
             const sceneNoted = { failure: null };
             try {
@@ -840,7 +978,7 @@ const ScribeLive = Object.freeze({
             }
             const pedantNoted = { failure: null };
             try {
-                raised = await ScribePedant.review({
+                const reviewed = await ScribePedant.review({
                     state: view.state,
                     player: view.player,
                     message,
@@ -848,6 +986,8 @@ const ScribeLive = Object.freeze({
                     messages: view.messages,
                     ask: ScribeLive.asker(live, roles.Pedant, pedantNoted),
                 });
+                raised = reviewed.findings;
+                notes = reviewed.notes;
             } catch (error) {
                 live.problem = ScribeLive.words(error);
             }
@@ -865,6 +1005,7 @@ const ScribeLive = Object.freeze({
         } else {
             found = remembered.now;
             raised = remembered.findings;
+            notes = remembered.notes;
         }
         const now = found === null ? previous : found;
         const draft = ScribeLive.merged(
@@ -906,6 +1047,9 @@ const ScribeLive = Object.freeze({
             message,
             remembered !== undefined,
         );
+        if (notes !== null) {
+            record.notes = ScribeLive.noted(ScribeLive.standing(record.notes, latest), notes, message);
+        }
         if (remembered === undefined && found !== null && raised !== null) {
             const entry = {
                 id: message.id,
@@ -925,6 +1069,7 @@ const ScribeLive = Object.freeze({
                         status: statuses.Open,
                     }),
                 ),
+                notes: ScribeLive.stamped(notes, message),
             };
             record.checked = [
                 entry,

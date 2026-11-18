@@ -200,9 +200,9 @@ const scenes = [
 const promptLines = [
     'You are the Pedant: a proofreader for an ongoing adult fiction roleplay between consenting adult characters. You never write story.',
     'You receive PLAYER CHARACTER, a LEDGER of established facts (each with an id like F12, its subject, its category and its text), a list of what certain speakers DO NOT KNOW, the RECENT MESSAGES before them, the messages SINCE THE BOOK WAS LAST READ, one REPLY from the storyteller, and NAME CANDIDATES: words in the REPLY that look like known names, each line giving the name, the word of that name it looks like, and the word in the REPLY.',
-    'Find where the REPLY disagrees with the LEDGER, where a speaker uses something they do not know, which NAME CANDIDATES are misspellings, and where the REPLY does not fit what the messages above establish.',
+    'Find where the REPLY disagrees with the LEDGER, where a speaker uses something they do not know, which NAME CANDIDATES are misspellings, where the REPLY does not fit what the messages above establish, and what the characters wear and look like now.',
     '',
-    'Answer with these four blocks, each starting with its === line. Leave a block out if it has nothing. Write nothing else.',
+    'Answer with these five blocks, each starting with its === line. Leave a block out if it has nothing. Write nothing else.',
     '',
     '=== CONTRADICTIONS',
     'F12 | Label | category | the words of the reply that say otherwise',
@@ -213,6 +213,9 @@ const promptLines = [
     'N22',
     '=== SITUATION',
     "the reply's own words | the earlier words they clash with",
+    '=== NOW',
+    'Name | wearing | what they wear now',
+    'Name | looks | how they look',
     '',
     'Rules.',
     "1. A contradiction is a statement in the REPLY, about the LEDGER fact's own subject, that cannot be true together with that fact: another age, number, colour, name, place or description of the same thing. Give the fact's id, its subject's label and its category exactly as the LEDGER shows them, and copy the reply's own words for the other value. Never report a fact marked (hidden) as contradicted.",
@@ -222,6 +225,7 @@ const promptLines = [
     '5. Report only what the REPLY itself shows. Never guess. When in doubt, leave it out.',
     '6. A misspelling is a word in the REPLY that is meant as the listed known name but is written another way. An ordinary word, a word at the start of a sentence that is not meant as the name, and a different or new name are not misspellings. Report only numbers from NAME CANDIDATES. In the MISSPELLINGS block write only the numbers of the misspellings, one per line, nothing else on the line.',
     "7. A situation clash is a statement in the REPLY that cannot be true given what the messages above establish: where the characters are, who is present, what they are doing or holding, the time, or what was just agreed or planned. Copy the reply's own words exactly, then the earlier words that establish the situation, exactly as a message above has them; each quote at most 40 words, from one sentence. Something the REPLY or a message above plainly changes (they walk to the table, the plan changes) is not a clash. Not style, not taste, not something you would have written differently. When in doubt, leave it out.",
+    '8. NOW: for each character present in the REPLY whose clothing the REPLY or the messages above state, write one wearing line with what they wear now; for any character whose looks the REPLY or the messages above state, write one looks line. Only what is stated; never guess. At most 12 lines. Write each name as the messages write it.',
 ];
 
 /**
@@ -674,6 +678,7 @@ test('the answer is read', () => {
         leaks: [{ fact: 'F13', speaker: 'Mirelle', words: 'you ran from the siege' }],
         misspellings: [],
         situations: [],
+        now: [],
     });
     const dressed = ['**=== contradictions ===**', 'F7 | Mirelle | build | tall', '#LEAKS:', 'F8 | Orla | it'].join(
         '\r\n',
@@ -683,6 +688,7 @@ test('the answer is read', () => {
         leaks: [{ fact: 'F8', speaker: 'Orla', words: 'it' }],
         misspellings: [],
         situations: [],
+        now: [],
     });
     for (const unreadable of ['', 'All of it agrees with the book.', null, 42]) {
         assert.deepEqual(plain(ScribePedant.parse(unreadable)), {
@@ -690,6 +696,7 @@ test('the answer is read', () => {
             leaks: [],
             misspellings: [],
             situations: [],
+            now: [],
         });
     }
 });
@@ -1352,7 +1359,9 @@ test('review joins both and passes a failed model call on', async () => {
         MISSPELLINGS: ['N1'],
     });
     const good = scriptedAsk({ text });
-    const found = await ScribePedant.review({ state, player: 'Orla', message: reply, unread, ask: good.ask });
+    const reviewedBoth = await ScribePedant.review({ state, player: 'Orla', message: reply, unread, ask: good.ask });
+    const found = reviewedBoth.findings;
+    assert.deepEqual(plain(reviewedBoth.notes), []);
     assert.deepEqual(plain(found.map((finding) => [finding.kind, finding.written ?? finding.fact])), [
         ['Contradiction', ids.age],
         ['Leak', ids.status],
@@ -1374,20 +1383,20 @@ test('review joins both and passes a failed model call on', async () => {
     for (const [index, given] of answers.entries()) {
         const ask = scriptedAsk(given).ask;
         const kept = await ScribePedant.review({ state, player: 'Orla', message: reply, unread, ask });
-        assert.deepEqual(plain(kept), [], `${index}`);
+        assert.deepEqual(plain(kept), { findings: [], notes: [] }, `${index}`);
     }
 
     const played = scriptedAsk({ text });
     const own = at(47);
     assert.equal(own.fromPlayer, true);
     const none = await ScribePedant.review({ state, player: 'Orla', message: own, unread: [own], ask: played.ask });
-    assert.equal(none.length, 0);
+    assert.deepEqual(plain(none), { findings: [], notes: [] });
     assert.equal(played.calls.length, 0);
 
     const empty = subjectsOnly(['Halvard', 'Mirelle', 'Orla']).state;
     const idle = scriptedAsk({ text: answer({ MISSPELLINGS: ['N1'] }) });
     const alone = await ScribePedant.review({ state: empty, player: 'Orla', message: reply, unread, ask: idle.ask });
-    assert.deepEqual(plain(alone.map((finding) => finding.kind)), ['Spelling']);
+    assert.deepEqual(plain(alone.findings.map((finding) => finding.kind)), ['Spelling']);
     assert.equal(idle.calls.length, 1);
     assert.equal(idle.calls[0][1].includes('NAME CANDIDATES:\nN1 | Halvard | Halvard | Halvart'), true);
 
@@ -1400,7 +1409,7 @@ test('review joins both and passes a failed model call on', async () => {
         unread: [quiet],
         ask: silent.ask,
     });
-    assert.equal(nothing.length, 0);
+    assert.equal(nothing.findings.length, 0);
     assert.equal(silent.calls.length, 1);
     assert.equal(silent.calls[0][1].includes('NAME CANDIDATES:'), false);
 });
@@ -1420,14 +1429,15 @@ function withoutLook(candidate) {
  * @param {string} text
  * @return {Promise<readonly object[]>}
  */
-function reviewed(state, message, text) {
-    return ScribePedant.review({
+async function reviewed(state, message, text) {
+    const result = await ScribePedant.review({
         state,
         player: 'Orla',
         message,
         unread: [message],
         ask: scriptedAsk({ text }).ask,
     });
+    return result.findings;
 }
 
 test('the model judges which candidates are misspellings', async () => {
@@ -1484,7 +1494,7 @@ test('at most twenty candidates are sent', async () => {
     const reply = narration(typos.join(' and ') + ' wait.');
     assert.equal(ScribePedant.spellings(book25, reply).length >= 25, true);
     const asked = scriptedAsk({ text: '=== MISSPELLINGS\nN20\nN21\nN25' });
-    const found = await ScribePedant.review({
+    const { findings: found } = await ScribePedant.review({
         state: book25,
         player: 'Orla',
         message: reply,
@@ -1526,7 +1536,7 @@ test('a candidate line gives the name word it looks like, alias and merged names
     });
     const spoken = narration('Wolfrick waits by the boat.');
     const asked = scriptedAsk({ text: '=== MISSPELLINGS\nN1' });
-    const found = await ScribePedant.review({
+    const { findings: found } = await ScribePedant.review({
         state: aliased,
         player: 'Orla',
         message: spoken,
@@ -2005,15 +2015,16 @@ test('nothing is changed', async () => {
         LEAKS: [`${ids.status} | Mirelle | You deserted`],
         MISSPELLINGS: ['N1'],
     });
-    const found = await ScribePedant.review({
+    const reviewedAll = await ScribePedant.review({
         state,
         player: 'Orla',
         message: reply,
         unread: [reply],
         ask: scriptedAsk({ text }).ask,
     });
+    const found = reviewedAll.findings;
     assert.deepEqual(plain(found.map((finding) => finding.kind)), ['Contradiction', 'Leak', 'Spelling']);
-    assertFrozenDeep(found, 'review');
+    assertFrozenDeep(reviewedAll, 'review');
     assertFrozenDeep(ScribePedant.spellings(state, reply), 'spellings');
     const parsed = ScribePedant.parse(text);
     assertFrozenDeep(parsed, 'parse');
@@ -2064,7 +2075,7 @@ function fillers(count) {
 async function judged(messages, lines, unread = null) {
     const reply = messages[messages.length - 1];
     const asked = scriptedAsk({ text: answer({ SITUATION: lines }) });
-    const found = await ScribePedant.review({
+    const { findings: found } = await ScribePedant.review({
         state: subjectsOnly(['Orla']).state,
         player: 'Orla',
         message: reply,
@@ -2093,14 +2104,27 @@ test('the prompt carries the situation check', () => {
     assert.equal(prompt.includes('the RECENT MESSAGES before them, the messages SINCE THE BOOK WAS LAST READ'), true);
     assert.equal(
         prompt.includes(
-            'which NAME CANDIDATES are misspellings, and where the REPLY does not fit what the messages above establish.',
+            'which NAME CANDIDATES are misspellings, where the REPLY does not fit what the messages above establish, and what the characters wear and look like now.',
         ),
         true,
     );
-    assert.equal(prompt.includes('Answer with these four blocks'), true);
+    assert.equal(prompt.includes('Answer with these five blocks'), true);
     assert.equal(prompt.includes("=== SITUATION\nthe reply's own words | the earlier words they clash with"), true);
-    assert.equal(prompt.split('\n').includes(promptLines[promptLines.length - 1]), true);
-    assert.equal(promptLines[promptLines.length - 1].startsWith('7. A situation clash'), true);
+    assert.equal(prompt.split('\n').includes(promptLines[promptLines.length - 2]), true);
+    assert.equal(promptLines[promptLines.length - 2].startsWith('7. A situation clash'), true);
+});
+
+test('the prompt asks for the live notes', () => {
+    const prompt = ScribePedant.Prompt;
+    const lines = prompt.split('\n');
+    const example = lines.indexOf('=== NOW');
+    assert.equal(lines[example - 1], "the reply's own words | the earlier words they clash with");
+    assert.equal(lines[example + 1], 'Name | wearing | what they wear now');
+    assert.equal(lines[example + 2], 'Name | looks | how they look');
+    assert.equal(lines[lines.length - 1], promptLines[promptLines.length - 1]);
+    assert.equal(lines[lines.length - 1].startsWith('8. NOW: '), true);
+    assert.equal(lines[lines.length - 1].includes('At most 12 lines.'), true);
+    assert.equal(prompt, promptLines.join('\n'));
 });
 
 test('recent messages fill what the since section does not show', () => {
@@ -2335,7 +2359,7 @@ test('review returns contradictions, leaks, spellings, then situations', async (
         CONTRADICTIONS: [`${ids.age} | Halvard | age | forty`],
     });
     const asked = scriptedAsk({ text });
-    const found = await ScribePedant.review({
+    const result = await ScribePedant.review({
         state,
         player: 'Orla',
         message: reply,
@@ -2343,9 +2367,10 @@ test('review returns contradictions, leaks, spellings, then situations', async (
         messages: story,
         ask: asked.ask,
     });
+    const found = result.findings;
     assert.deepEqual(plain(found.map((finding) => finding.kind)), ['Contradiction', 'Leak', 'Spelling', 'Situation']);
     assert.equal(asked.calls[0][1].includes('RECENT MESSAGES:'), true);
-    assertFrozenDeep(found, 'review');
+    assertFrozenDeep(result, 'review');
 });
 
 test('a situation finding has a stable key and is never spent', async () => {
@@ -2473,4 +2498,303 @@ test('short clashes of two words are caught', async () => {
     assert.equal(await caught('Selene nods. | Selene left.'), 1);
     assert.equal(await caught('Good morning! | Night'), 0);
     assert.equal(await caught('Good | Night falls. The fire burns low.'), 0);
+});
+
+test('the live notes are read', () => {
+    const notes = (text) => plain(ScribePedant.parse(text).now);
+    assert.deepEqual(notes('=== NOW\nThessaly | wearing | a dented breastplate\nThessaly | looks | teal eyes, tall'), [
+        { name: 'Thessaly', kind: 'wearing', text: 'a dented breastplate' },
+        { name: 'Thessaly', kind: 'looks', text: 'teal eyes, tall' },
+    ]);
+    assert.deepEqual(notes('=== NOW\n| **Thessaly** | `Wearing:` | _a travel cloak_ |\n- Veyra | Looks: | grey'), [
+        { name: 'Thessaly', kind: 'wearing', text: 'a travel cloak' },
+        { name: 'Veyra', kind: 'looks', text: 'grey' },
+    ]);
+    assert.deepEqual(notes('=== NOW\nThessaly | wearing\nThessaly'), []);
+    assert.deepEqual(notes('=== NOW\nThessaly | wearing | a cloak | and boots'), [
+        { name: 'Thessaly', kind: 'wearing', text: 'a cloak | and boots' },
+    ]);
+    assert.deepEqual(notes('=== NOW\n(none)\nnone\n(None).'), []);
+    assert.deepEqual(notes('=== NOW\n\n```\nThessaly | wearing | a cloak\n```'), [
+        { name: 'Thessaly', kind: 'wearing', text: 'a cloak' },
+    ]);
+    const before = ScribePedant.parse('=== NOW\nA | wearing | x\n=== CONTRADICTIONS\nF1 | Halvard | age | forty');
+    assert.equal(before.now.length, 1);
+    assert.equal(before.contradictions.length, 1);
+    const after = ScribePedant.parse('=== CONTRADICTIONS\nF1 | Halvard | age | forty\n=== NOW\nA | wearing | x\nF2 | B | c');
+    assert.equal(after.now.length, 2);
+    assert.equal(after.contradictions.length, 1);
+    const switched = ScribePedant.parse('=== MISSPELLINGS\nN2\n=== NOW\nA | looks | tall');
+    assert.deepEqual(plain(switched.misspellings), [2]);
+    assert.deepEqual(plain(switched.now), [{ name: 'A', kind: 'looks', text: 'tall' }]);
+    const reversed = ScribePedant.parse('=== NOW\nA | looks | tall\n=== MISSPELLINGS\nN4');
+    assert.deepEqual(plain(reversed.misspellings), [4]);
+    assert.equal(reversed.now.length, 1);
+    assert.equal(Object.isFrozen(before.now), true);
+    assert.equal(Object.isFrozen(before.now[0]), true);
+});
+
+/**
+ * @param {string[]} texts
+ * @return {object}
+ */
+function placed(texts) {
+    return { blocks: texts.map((text) => ({ text, speaker: 'Narrator', role: 'Narrator' })) };
+}
+
+/**
+ * @param {object[]} lines
+ * @param {object} message
+ * @param {object[]} shown
+ * @return {object[]}
+ */
+function keptNotes(lines, message = placed(['Thessaly stands by the door with Veyra.']), shown = []) {
+    return plain(ScribePedant.noted(message, lines, shown));
+}
+
+/**
+ * @param {string} name
+ * @param {string} kind
+ * @param {string} text
+ * @return {{ name: string, kind: string, text: string }}
+ */
+function line(name, kind, text) {
+    return { name, kind, text };
+}
+
+test('a note is kept only when its name is in the reply or the messages shown', () => {
+    const reply = placed(['Thessaly stands by the door.']);
+    const shown = [placed(['Earlier, Veyra waited.'])];
+    const found = keptNotes(
+        [
+            line('Thessaly', 'wearing', 'a cloak'),
+            line('veyra', 'looks', 'tall'),
+            line('Selene', 'wearing', 'a hat'),
+        ],
+        reply,
+        shown,
+    );
+    assert.deepEqual(found, [
+        { name: 'Thessaly', kind: 'Wearing', text: 'a cloak' },
+        { name: 'veyra', kind: 'Looks', text: 'tall' },
+    ]);
+    assert.equal(keptNotes([line('Thessaly', 'wearing', 'a cloak')], reply, []).length, 1);
+    assert.equal(keptNotes([line('Veyra', 'wearing', 'a cloak')], reply, []).length, 0);
+    const speaking = { blocks: [{ text: 'Hello there.', speaker: 'Selene', role: 'Character' }] };
+    assert.equal(keptNotes([line('Selene', 'looks', 'small')], speaking, []).length, 1);
+    assert.equal(keptNotes([line('Sele', 'looks', 'small')], speaking, []).length, 0);
+    assert.equal(keptNotes([line('Selene', 'looks', 'small')], placed(['Hello there.']), []).length, 0);
+});
+
+test('a name must have a letter and a word of its own in the messages', () => {
+    const reply = placed(['Room 123 holds Thessalyn and the Brand-new door.']);
+    assert.deepEqual(keptNotes([line('123', 'looks', 'tall')], reply), []);
+    assert.deepEqual(keptNotes([line('Thessaly', 'looks', 'tall')], reply), []);
+    assert.deepEqual(keptNotes([line('', 'looks', 'tall')], reply), []);
+    assert.equal(keptNotes([line('Thessalyn', 'looks', 'tall')], reply).length, 1);
+});
+
+test('a note text is at most 120 characters and an astral character counts once', () => {
+    const body = (count) => 'a'.repeat(count);
+    assert.equal(keptNotes([line('Thessaly', 'looks', body(120))]).length, 1);
+    assert.equal(keptNotes([line('Thessaly', 'looks', body(121))]).length, 0);
+    assert.equal(keptNotes([line('Thessaly', 'looks', body(119) + astral)]).length, 1);
+    assert.equal(keptNotes([line('Thessaly', 'looks', body(120) + astral)]).length, 0);
+    assert.equal(keptNotes([line('Thessaly', 'looks', '')]).length, 0);
+});
+
+test('a note with a bracket, an at sign or a line break in the text or the name is dropped', () => {
+    const reply = placed(['Thessaly stands by the door. Thes[saly and Thes@aly and Thes]saly wait.']);
+    for (const text of ['a [red] cloak', 'a red] cloak', 'tall @ night', `tall${separator}grey`, 'tall\ngrey']) {
+        assert.deepEqual(keptNotes([line('Thessaly', 'looks', text)], reply), [], JSON.stringify(text));
+    }
+    for (const name of ['Thes[saly', 'Thes@aly', 'Thes]saly']) {
+        assert.deepEqual(keptNotes([line(name, 'looks', 'tall')], reply), [], name);
+    }
+    assert.equal(keptNotes([line('Thessaly', 'looks', 'tall | grey, he said: "x"')], reply).length, 1);
+});
+
+test('a name in the possessive or a contraction is found, a longer word is not', () => {
+    const reply = placed(["Selene's silver hair glints; Thessaly'll wait; Veyra’d go; Orla’re here; Mavan’ve; Brin's."]);
+    const names = ['Selene', 'Thessaly', 'Veyra', 'Orla', 'Mavan', 'Brin'];
+    const found = keptNotes(
+        names.map((name) => line(name, 'looks', 'tall')),
+        reply,
+    );
+    assert.deepEqual(
+        found.map((note) => note.name),
+        names,
+    );
+    assert.equal(keptNotes([line('Selene', 'looks', 'tall')], placed(['Selenes hair glints.'])).length, 0);
+    assert.equal(keptNotes([line('Selene', 'looks', 'tall')], placed(["Selene'sx hair glints."])).length, 0);
+    assert.equal(keptNotes([line('Selene', 'looks', 'tall')], placed(["Selene's"])).length, 1);
+    assert.equal(keptNotes([line('Selene', 'looks', 'tall')], placed(["Selene'llx"])).length, 0);
+});
+
+test('the player written with the transcript suffix is kept without it', () => {
+    const speaking = { blocks: [{ text: 'I wait.', speaker: 'Orla', role: 'Player' }] };
+    assert.deepEqual(keptNotes([line('Orla (player)', 'wearing', 'a grey travel cloak')], speaking), [
+        { name: 'Orla', kind: 'Wearing', text: 'a grey travel cloak' },
+    ]);
+    assert.equal(keptNotes([line('Orla (player)', 'wearing', 'a cloak'), line('Orla', 'wearing', 'a hat')], speaking).length, 1);
+    assert.equal(keptNotes([line('Orla (player)', 'wearing', 'a cloak')], placed(['Hello there.'])).length, 0);
+    assert.equal(keptNotes([line(' (player)', 'wearing', 'a cloak')], speaking).length, 0);
+});
+
+test('a block with no speaker name does not stop the note check', () => {
+    const blocks = [
+        { text: 'Thessaly stands here.', speaker: null, role: 'Narrator' },
+        { text: 'Hello.', role: 'Narrator' },
+        { text: 'Hello.', speaker: 7, role: 'Narrator' },
+    ];
+    assert.equal(keptNotes([line('Thessaly', 'looks', 'tall')], { blocks }, [{ blocks }]).length, 1);
+    assert.equal(keptNotes([line('Selene', 'looks', 'tall')], { blocks }, [{ blocks }]).length, 0);
+});
+
+test('a filler text says nothing and is dropped', () => {
+    const fillers = [
+        'not stated',
+        'Unknown',
+        'UNCLEAR.',
+        'none',
+        '(none)',
+        'N/A',
+        '-',
+        '?',
+        'not mentioned',
+        'Not described.',
+        'same',
+        'unchanged',
+        '(None).',
+        '...',
+        '  ',
+    ];
+    for (const filler of fillers) {
+        assert.deepEqual(keptNotes([line('Thessaly', 'wearing', filler)]), [], JSON.stringify(filler));
+    }
+    assert.equal(keptNotes([line('Thessaly', 'wearing', 'the same grey cloak')]).length, 1);
+    assert.equal(keptNotes([line('Thessaly', 'wearing', 'nonetheless dressed')]).length, 1);
+});
+
+test('an unknown kind is dropped', () => {
+    assert.deepEqual(keptNotes([line('Thessaly', 'hair', 'silver'), line('Thessaly', 'Wearing', 'a cloak')]), []);
+    assert.equal(keptNotes([line('Thessaly', 'wearing', 'a cloak'), line('Thessaly', 'looks', 'tall')]).length, 2);
+});
+
+test('at most twelve notes are kept, in answer order, and a repeat keeps the first', () => {
+    const names = ['Alder', 'Birch', 'Cedar', 'Dogwood', 'Elm', 'Fir', 'Gorse', 'Hazel', 'Ivy', 'Juniper', 'Larch', 'Maple', 'Nettle'];
+    const reply = placed([names.join(' and ')]);
+    const lines = names.map((name) => line(name, 'wearing', `${name} coat`));
+    const found = keptNotes(lines, reply);
+    assert.equal(found.length, 12);
+    assert.deepEqual(
+        found.map((note) => note.name),
+        names.slice(0, 12),
+    );
+    const repeats = keptNotes(
+        [
+            line('Thessaly', 'wearing', 'a cloak'),
+            line('THESSALY', 'wearing', 'a coat'),
+            line('Thessaly', 'looks', 'tall'),
+            line('thessaly', 'looks', 'short'),
+        ],
+        placed(['Thessaly stands here.']),
+    );
+    assert.deepEqual(repeats, [
+        { name: 'Thessaly', kind: 'Wearing', text: 'a cloak' },
+        { name: 'Thessaly', kind: 'Looks', text: 'tall' },
+    ]);
+    const crowded = keptNotes(
+        [...names.map((name) => line(name, 'wearing', 'x')), line('Alder', 'wearing', 'y')],
+        reply,
+    );
+    assert.equal(crowded.length, 12);
+    const repeated = [
+        ...names.slice(0, 11).map((name) => line(name, 'wearing', 'x')),
+        line('Alder', 'wearing', 'again'),
+        line('Maple', 'wearing', 'last'),
+    ];
+    assert.deepEqual(
+        keptNotes(repeated, reply).map((note) => note.name),
+        [...names.slice(0, 11), 'Maple'],
+    );
+    assertFrozenDeep(ScribePedant.noted(reply, lines, []), 'noted');
+});
+
+test('review returns the notes beside the findings', async () => {
+    const { state } = book();
+    const reply = at(53);
+    const text = answer({
+        NOW: ['Halvart | wearing | a dented breastplate', 'Mirelle | looks | grey hair, short', 'Zorbax | wearing | a hood'],
+    });
+    const found = await ScribePedant.review({
+        state,
+        player: 'Orla',
+        message: reply,
+        unread: [reply],
+        messages: story,
+        ask: scriptedAsk({ text }).ask,
+    });
+    assertFrozenDeep(found, 'review');
+    assert.deepEqual(plain(found.findings), []);
+    assert.deepEqual(plain(found.notes), [
+        { name: 'Halvart', kind: 'Wearing', text: 'a dented breastplate' },
+        { name: 'Mirelle', kind: 'Looks', text: 'grey hair, short' },
+    ]);
+});
+
+test('a name only in an older message outside the recent ones is dropped', async () => {
+    const texts = ['Thessaly hums.', ...fillers(9), 'Veyra waits.', ...fillers(3), 'The reply.'];
+    const messages = chatOf(texts);
+    const reply = messages[messages.length - 1];
+    const asked = scriptedAsk({
+        text: answer({ NOW: ['Thessaly | wearing | a cloak', 'Veyra | wearing | a coat'] }),
+    });
+    const found = await ScribePedant.review({
+        state: subjectsOnly(['Orla']).state,
+        player: 'Orla',
+        message: reply,
+        unread: [reply],
+        messages,
+        ask: asked.ask,
+    });
+    assert.equal(asked.calls[0][1].includes('Thessaly hums.'), false);
+    assert.deepEqual(plain(found.notes), [{ name: 'Veyra', kind: 'Wearing', text: 'a coat' }]);
+});
+
+test('a name only as a speaker label of the reply is kept, and a name in no message is dropped', async () => {
+    const builder = new CampaignBuilder('Orla');
+    builder.reply([
+        ['Thessaly', '“Hello there.”'],
+        ['Narrator', 'The door opens.'],
+    ]);
+    const [reply] = ScribeIntake.read(builder.messages).messages;
+    const asked = scriptedAsk({ text: answer({ NOW: ['Thessaly | looks | tall', 'Zorbax | wearing | a hat'] }) });
+    const found = await ScribePedant.review({
+        state: subjectsOnly(['Orla']).state,
+        player: 'Orla',
+        message: reply,
+        unread: [reply],
+        messages: [reply],
+        ask: asked.ask,
+    });
+    assert.deepEqual(plain(found.notes), [{ name: 'Thessaly', kind: 'Looks', text: 'tall' }]);
+});
+
+test('a player message gives no notes and the model failing gives none', async () => {
+    const own = at(47);
+    const played = await ScribePedant.review({ state: book().state, player: 'Orla', message: own, unread: [own], ask: null });
+    assert.deepEqual(plain(played), { findings: [], notes: [] });
+    await assert.rejects(
+        ScribePedant.review({
+            state: book().state,
+            player: 'Orla',
+            message: at(53),
+            unread: [at(53)],
+            ask: async () => {
+                throw new Error('the model is down');
+            },
+        }),
+        /the model is down/u,
+    );
 });

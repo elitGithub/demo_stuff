@@ -3950,3 +3950,329 @@ test('a situation finding with a missing quote is not kept', () => {
     const reopened = ScribeLive.open({ keeper, storage: shaped, roomId: ROOM, ask: model.ask, clock: CLOCK, notify });
     assert.equal(reopened.view().findings.length, 0);
 });
+
+/**
+ * @param {FakeStorage} storage
+ * @return {object[]}
+ */
+function notesOf(storage) {
+    return plain(ScribeStore.read(storage, ROOM, ScribeStore.Kind.Live).notes);
+}
+
+/**
+ * @param {{ id: string, fingerprint: string, position: number }} message
+ * @param {string} name
+ * @param {string} kind
+ * @param {string} text
+ * @return {object}
+ */
+function stamped(message, name, kind, text) {
+    return { name, kind, text, message: message.id, fingerprint: message.fingerprint, position: message.position };
+}
+
+/**
+ * @param {...string} lines
+ * @return {string}
+ */
+function nowOf(...lines) {
+    return answer({ NOW: lines });
+}
+
+const BARE = Object.freeze({
+    now: null,
+    ready: null,
+    led: [],
+    sends: 0,
+    findings: [],
+    suggestion: null,
+    seen: null,
+    reminded: null,
+});
+
+test('the live notes of a checked reply are stored with its message and survive a reload', async () => {
+    const { storage, model, live } = rig();
+    model.pedant = nowOf('Halvard | wearing | a dented breastplate', 'Halvard | looks | silver hair');
+    await live.reply(at(41));
+    assert.deepEqual(notesOf(storage), [
+        stamped(at(41), 'Halvard', 'Wearing', 'a dented breastplate'),
+        stamped(at(41), 'Halvard', 'Looks', 'silver hair'),
+    ]);
+    assert.equal(live.view().problem, null);
+    live.close();
+
+    const reopened = rig({}, storage);
+    reopened.model.pedant = nowOf('Mirelle | wearing | a grey shawl');
+    await reopened.live.reply(at(43));
+    assert.deepEqual(notesOf(storage), [
+        stamped(at(41), 'Halvard', 'Wearing', 'a dented breastplate'),
+        stamped(at(41), 'Halvard', 'Looks', 'silver hair'),
+        stamped(at(43), 'Mirelle', 'Wearing', 'a grey shawl'),
+    ]);
+});
+
+test('notes for a name in the possessive and for the player with his suffix are kept', async () => {
+    const message = variant(41, [['Narrator', "Selene's silver hair glints; Thessaly's breastplate is dented."]], null);
+    const { storage, model, live } = rig();
+    model.pedant = nowOf('Selene | looks | silver hair', 'Thessaly | wearing | a dented breastplate');
+    await live.reply(message);
+    assert.deepEqual(notesOf(storage), [
+        stamped(message, 'Selene', 'Looks', 'silver hair'),
+        stamped(message, 'Thessaly', 'Wearing', 'a dented breastplate'),
+    ]);
+    const player = rig();
+    player.model.pedant = nowOf('Orla (player) | wearing | a grey travel cloak');
+    await player.live.reply(at(43));
+    assert.deepEqual(notesOf(player.storage), [stamped(at(43), 'Orla', 'Wearing', 'a grey travel cloak')]);
+});
+
+test('a filler note never replaces a stated one', async () => {
+    const { storage, model, live } = rig();
+    model.pedant = nowOf('Halvard | wearing | a dented breastplate');
+    await live.reply(at(41));
+    model.pedant = nowOf('Halvard | wearing | not stated', 'Mirelle | wearing | unknown', 'Halvard | looks | -');
+    await live.reply(at(43));
+    assert.deepEqual(notesOf(storage), [stamped(at(41), 'Halvard', 'Wearing', 'a dented breastplate')]);
+});
+
+test('a newer wearing note replaces the older one and an older reply never does', async () => {
+    const { storage, model, live, keeper } = rig();
+    keeper.pinned = true;
+    model.pedant = nowOf('Halvart | wearing | a green tunic');
+    await live.reply(at(47));
+    assert.deepEqual(notesOf(storage), [stamped(at(47), 'Halvart', 'Wearing', 'a green tunic')]);
+    model.pedant = nowOf('Halvart | wearing | a grey cloak', 'Halvart | looks | tall');
+    await live.reply(at(43));
+    assert.deepEqual(notesOf(storage), [
+        stamped(at(47), 'Halvart', 'Wearing', 'a green tunic'),
+        stamped(at(43), 'Halvart', 'Looks', 'tall'),
+    ]);
+    model.pedant = nowOf('HALVART | wearing | a red coat');
+    await live.reply(at(49));
+    assert.deepEqual(
+        notesOf(storage).sort((first, second) => first.position - second.position),
+        [stamped(at(43), 'Halvart', 'Looks', 'tall'), stamped(at(49), 'HALVART', 'Wearing', 'a red coat')],
+    );
+});
+
+test('noted keys a note by its name without case or a leading the, and by its kind', () => {
+    const first = { id: 'A', fingerprint: 'fa', position: 5 };
+    const base = [stamped(first, 'Thessaly', 'Wearing', 'a cloak')];
+    const given = (name, text, kind = 'Wearing') => [{ name, kind, text }];
+    const at4 = { id: 'B', fingerprint: 'fb', position: 4 };
+    assert.deepEqual(plain(ScribeLive.noted(base, given('Thessaly', 'a coat'), at4)), plain(base));
+    const same = { id: 'C', fingerprint: 'fc', position: 5 };
+    assert.deepEqual(plain(ScribeLive.noted(base, given('THESSALY', 'a coat'), same)), [
+        stamped(same, 'THESSALY', 'Wearing', 'a coat'),
+    ]);
+    const newer = { id: 'D', fingerprint: 'fd', position: 6 };
+    assert.deepEqual(plain(ScribeLive.noted(base, given('The Thessaly', 'a coat'), newer)), [
+        stamped(newer, 'The Thessaly', 'Wearing', 'a coat'),
+    ]);
+    assert.equal(ScribeLive.noted(base, given('Thessaly', 'tall', 'Looks'), newer).length, 2);
+    assert.deepEqual(plain(ScribeLive.noted(base, [], first)), []);
+    const other = [...base, stamped(newer, 'Veyra', 'Looks', 'short')];
+    assert.deepEqual(plain(ScribeLive.noted(other, given('Thessaly', 'a coat'), first)), [
+        stamped(newer, 'Veyra', 'Looks', 'short'),
+        stamped(first, 'Thessaly', 'Wearing', 'a coat'),
+    ]);
+});
+
+test('noted keeps the newest hundred by position', () => {
+    const notes = Array.from({ length: 100 }, (unused, index) =>
+        stamped({ id: `M${index + 1}`, fingerprint: 'f', position: index + 1 }, `Name${index + 1}`, 'Wearing', 'x'),
+    );
+    const newest = { id: 'M101', fingerprint: 'f', position: 101 };
+    const added = ScribeLive.noted(notes, [{ name: 'Fresh', kind: 'Wearing', text: 'y' }], newest);
+    assert.equal(added.length, 100);
+    assert.equal(added.some((note) => note.name === 'Name1'), false);
+    assert.equal(added.some((note) => note.name === 'Fresh'), true);
+    const oldest = { id: 'M0', fingerprint: 'f', position: 0 };
+    const refused = ScribeLive.noted(notes, [{ name: 'Stale', kind: 'Wearing', text: 'y' }], oldest);
+    assert.equal(refused.length, 100);
+    assert.equal(refused.some((note) => note.name === 'Stale'), false);
+});
+
+test('a regenerated or an edited reply drops the notes it gave and its new check adds the new ones', async () => {
+    const { storage, model, live } = rig();
+    model.pedant = nowOf('Halvard | wearing | a coat');
+    await live.reply(at(47));
+    assert.deepEqual(notesOf(storage), [stamped(at(47), 'Halvard', 'Wearing', 'a coat')]);
+
+    model.pedant = nowOf('Halvard | wearing | a hat');
+    const regenerated = variant(47, [['Narrator', 'Halvard, thirty winters old, walks out past Halvart.']], 'OTHER-47');
+    await live.reply(regenerated);
+    assert.deepEqual(notesOf(storage), [stamped(regenerated, 'Halvard', 'Wearing', 'a hat')]);
+
+    model.pedant = '';
+    const third = variant(47, [['Narrator', 'Halvard, forty winters old, sleeps past Halvart.']], 'THIRD-47');
+    await live.reply(third);
+    assert.deepEqual(notesOf(storage), []);
+
+    const edited = rig();
+    edited.model.pedant = nowOf('Halvard | wearing | a coat');
+    await edited.live.reply(at(47));
+    edited.model.pedant = nowOf('Halvard | wearing | a hood');
+    const reworded = variant(47, [['Narrator', 'Halvard, forty winters old, walks out hooded past Halvart.']], null);
+    assert.equal(reworded.id, at(47).id);
+    assert.notEqual(reworded.fingerprint, at(47).fingerprint);
+    await edited.live.reply(reworded);
+    assert.deepEqual(notesOf(edited.storage), [stamped(reworded, 'Halvard', 'Wearing', 'a hood')]);
+    edited.model.pedant = '';
+    const bare = variant(47, [['Narrator', 'Halvard, forty winters old, walks out bare past Halvart.']], null);
+    await edited.live.reply(bare);
+    assert.deepEqual(notesOf(edited.storage), []);
+});
+
+test('a looks note goes when the book has read its message and a wearing note stays', async () => {
+    const { keeper, storage, model, live } = rig();
+    model.pedant = nowOf('Halvart | wearing | a cloak', 'Halvart | looks | green eyes');
+    await live.reply(at(43));
+    const both = notesOf(storage);
+    assert.equal(both.length, 2);
+    keeper.change({ lastRead: { id: 'MESSAGE-42', position: 42 } });
+    live.view();
+    assert.deepEqual(notesOf(storage), both);
+    keeper.change({ lastRead: null });
+    live.view();
+    assert.deepEqual(notesOf(storage), both);
+    const saves = storage.count('set');
+    keeper.change({ lastRead: { id: 'MESSAGE-43', position: 43 } });
+    live.view();
+    assert.deepEqual(notesOf(storage), [stamped(at(43), 'Halvart', 'Wearing', 'a cloak')]);
+    assert.equal(storage.count('set') > saves, true);
+
+    model.scene = ROAD;
+    model.pedant = '';
+    await live.reply(at(47));
+    assert.equal(live.view().now.day, 2);
+    assert.deepEqual(notesOf(storage), [stamped(at(43), 'Halvart', 'Wearing', 'a cloak')]);
+});
+
+test('a checker that did not run leaves the notes as they were and asks for nothing new', async () => {
+    const { keeper, storage, model, live } = rig();
+    model.pedant = nowOf('Halvard | wearing | a cloak');
+    await live.reply(at(41));
+    const before = notesOf(storage);
+    assert.equal(before.length, 1);
+
+    model.pedant = nowOf('Halvart | wearing | a hat');
+    model.failing.add('Pedant');
+    await live.reply(at(43));
+    assert.deepEqual(notesOf(storage), before);
+    assert.equal(model.calls.filter((call) => call.system === ScribePedant.Prompt).length, 2);
+    model.failing.clear();
+
+    model.refusals.set(ScribePedant.Prompt, 'The model refused');
+    await live.reply(at(47));
+    assert.deepEqual(notesOf(storage), before);
+    model.refusals.clear();
+
+    keeper.change({ spentToday: 3 });
+    const calls = model.calls.length;
+    await live.reply(at(49));
+    assert.equal(model.calls.length, calls);
+    assert.deepEqual(notesOf(storage), before);
+});
+
+test('a checked reply seen again gives its notes back without a call, and an old entry gives none', async () => {
+    const first = rig();
+    first.model.pedant = `${PEDANT}\n${nowOf('Halvard | wearing | a cloak')}`;
+    await first.live.reply(at(41));
+    first.live.close();
+    const saved = ScribeStore.read(first.storage, ROOM, ScribeStore.Kind.Live);
+    assert.deepEqual(plain(saved.checked[0].notes), [stamped(at(41), 'Halvard', 'Wearing', 'a cloak')]);
+    const findings = statuses(first.live);
+    assert.equal(findings.length > 0, true);
+
+    const storage = new FakeStorage();
+    ScribeStore.write(storage, ROOM, ScribeStore.Kind.Live, { ...saved, notes: [], seen: null });
+    const reopened = rig({}, storage);
+    await reopened.live.reply(at(41));
+    assert.equal(reopened.model.calls.length, 0);
+    assert.deepEqual(notesOf(storage), [stamped(at(41), 'Halvard', 'Wearing', 'a cloak')]);
+    assert.deepEqual(statuses(reopened.live), findings);
+
+    const older = new FakeStorage();
+    const checked = saved.checked.map(({ notes, ...entry }) => entry);
+    ScribeStore.write(older, ROOM, ScribeStore.Kind.Live, { ...saved, notes: [], seen: null, checked });
+    const legacy = rig({}, older);
+    await legacy.live.reply(at(41));
+    assert.equal(legacy.model.calls.length, 0);
+    assert.deepEqual(notesOf(older), []);
+    assert.deepEqual(statuses(legacy.live), findings);
+    for (const junk of [null, 'many', { 0: 1 }, 7]) {
+        const odd = new FakeStorage();
+        const broken = saved.checked.map((entry) => ({ ...entry, notes: junk }));
+        ScribeStore.write(odd, ROOM, ScribeStore.Kind.Live, { ...saved, notes: [], seen: null, checked: broken });
+        const tolerant = rig({}, odd);
+        await tolerant.live.reply(at(41));
+        assert.equal(tolerant.model.calls.length, 0, JSON.stringify(junk));
+        assert.deepEqual(notesOf(odd), [], JSON.stringify(junk));
+    }
+});
+
+test('a hundred notes are kept, and junk notes in storage are dropped one by one', async () => {
+    const seeded = Array.from({ length: 100 }, (unused, index) => ({
+        name: `Seed${index}`,
+        kind: 'Wearing',
+        text: 'a coat',
+        message: `OLD-${index}`,
+        fingerprint: 'f',
+        position: index - 99,
+    }));
+    const storage = new FakeStorage();
+    ScribeStore.write(storage, ROOM, ScribeStore.Kind.Live, { ...BARE, notes: seeded });
+    const { model, live } = rig({}, storage);
+    model.pedant = nowOf('Halvard | wearing | a cloak');
+    await live.reply(at(41));
+    const kept = notesOf(storage);
+    assert.equal(kept.length, 100);
+    assert.equal(kept.some((note) => note.name === 'Seed0'), false);
+    assert.equal(kept.some((note) => note.name === 'Seed1'), true);
+    assert.equal(kept.some((note) => note.name === 'Halvard'), true);
+
+    const junk = [
+        null,
+        7,
+        'note',
+        [seeded[3]],
+        { ...seeded[3], kind: 'Hair' },
+        { ...seeded[3], kind: 'wearing' },
+        { ...seeded[3], position: undefined },
+        { ...seeded[3], position: 1.5 },
+        { ...seeded[3], name: 5 },
+        { ...seeded[3], name: '' },
+        { ...seeded[3], text: '' },
+        { ...seeded[3], text: null },
+        { ...seeded[3], message: 3 },
+        { ...seeded[3], fingerprint: 3 },
+        { ...seeded[3], fingerprint: undefined },
+    ];
+    const mixed = new FakeStorage();
+    ScribeStore.write(mixed, ROOM, ScribeStore.Kind.Live, { ...BARE, notes: [...junk, seeded[5]] });
+    const other = rig({}, mixed);
+    other.model.pedant = '';
+    await other.live.reply(at(41));
+    assert.deepEqual(notesOf(mixed), [seeded[5]]);
+
+    for (const value of [undefined, null, 'notes', 5, { 0: seeded[0] }]) {
+        const plainStorage = new FakeStorage();
+        ScribeStore.write(plainStorage, ROOM, ScribeStore.Kind.Live, { ...BARE, notes: value });
+        const bare = rig({}, plainStorage);
+        bare.model.pedant = '';
+        await bare.live.reply(at(41));
+        assert.deepEqual(notesOf(plainStorage), [], String(value));
+    }
+});
+
+test('a new edition keeps the notes', async () => {
+    const { keeper, storage, model, live } = rig();
+    model.pedant = nowOf('Halvard | wearing | a cloak', 'Halvard | looks | silver hair');
+    await live.reply(at(41));
+    const before = notesOf(storage);
+    assert.equal(before.length, 2);
+    keeper.change({ edition: 2 });
+    live.view();
+    assert.equal(ScribeStore.read(storage, ROOM, ScribeStore.Kind.Live).edition, 2);
+    assert.deepEqual(notesOf(storage), before);
+});

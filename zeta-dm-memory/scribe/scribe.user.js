@@ -12408,11 +12408,17 @@ const ScribePedant = Object.freeze({
         Situation: 'Situation',
     }),
 
+    Note: Object.freeze({
+        Wearing: 'Wearing',
+        Looks: 'Looks',
+    }),
+
     Block: Object.freeze({
         Contradictions: 'CONTRADICTIONS',
         Leaks: 'LEAKS',
         Misspellings: 'MISSPELLINGS',
         Situation: 'SITUATION',
+        Now: 'NOW',
     }),
 
     Settings: Object.freeze({
@@ -12458,7 +12464,7 @@ const ScribePedant = Object.freeze({
         DressPasses: 4,
         DressMarkers: Object.freeze(['**', '__']),
         Pair: 2,
-        EdgeWidth: 3,
+        EdgeWidth: 4,
         NormalForm: 'NFC',
         NotFound: -1,
         ShortestNameWord: 4,
@@ -12476,6 +12482,13 @@ const ScribePedant = Object.freeze({
         SpeakerField: 1,
         WordsStart: 2,
         NumberGroup: 1,
+        NoteWords: Object.freeze({ wearing: 'Wearing', looks: 'Looks' }),
+        NoteFields: 3,
+        NoteNameField: 0,
+        NoteKindField: 1,
+        NoteStart: 2,
+        MostNotes: 12,
+        LongestNote: 120,
         Finding: Object.freeze({
             kind: null,
             message: null,
@@ -12524,6 +12537,27 @@ const ScribePedant = Object.freeze({
          */
         get NonLetters() {
             return /[^\p{L}]/gu;
+        },
+
+        /**
+         * @return {RegExp}
+         */
+        get Letter() {
+            return /\p{L}/u;
+        },
+
+        /**
+         * @return {RegExp}
+         */
+        get TrailingColons() {
+            return /:+$/u;
+        },
+
+        /**
+         * @return {RegExp}
+         */
+        get NoteForbidden() {
+            return /[\[\]@\p{Zl}\p{Zp}\p{Cc}]/u;
         },
 
         /**
@@ -12687,12 +12721,46 @@ const ScribePedant = Object.freeze({
             return /^(?:[\p{L}\p{N}\p{M}]|['’]\p{L})/u;
         },
 
+        /**
+         * @return {RegExp}
+         */
+        get NameAfter() {
+            return /^(?:[\p{L}\p{N}\p{M}]|['’](?!(?:s|ll|d|re|ve|m)(?![\p{L}\p{N}\p{M}]))\p{L})/u;
+        },
+
+        /**
+         * @return {RegExp}
+         */
+        get Content() {
+            return /[\p{L}\p{N}]/u;
+        },
+
+        /**
+         * @return {RegExp}
+         */
+        get TrailingStops() {
+            return /\.+$/u;
+        },
+
+        NoteFillers: Object.freeze([
+            'not stated',
+            'unknown',
+            'unclear',
+            'none',
+            '(none)',
+            'n/a',
+            'not mentioned',
+            'not described',
+            'same',
+            'unchanged',
+        ]),
+
         PromptLines: Object.freeze([
             'You are the Pedant: a proofreader for an ongoing adult fiction roleplay between consenting adult characters. You never write story.',
             'You receive PLAYER CHARACTER, a LEDGER of established facts (each with an id like F12, its subject, its category and its text), a list of what certain speakers DO NOT KNOW, the RECENT MESSAGES before them, the messages SINCE THE BOOK WAS LAST READ, one REPLY from the storyteller, and NAME CANDIDATES: words in the REPLY that look like known names, each line giving the name, the word of that name it looks like, and the word in the REPLY.',
-            'Find where the REPLY disagrees with the LEDGER, where a speaker uses something they do not know, which NAME CANDIDATES are misspellings, and where the REPLY does not fit what the messages above establish.',
+            'Find where the REPLY disagrees with the LEDGER, where a speaker uses something they do not know, which NAME CANDIDATES are misspellings, where the REPLY does not fit what the messages above establish, and what the characters wear and look like now.',
             '',
-            'Answer with these four blocks, each starting with its === line. Leave a block out if it has nothing. Write nothing else.',
+            'Answer with these five blocks, each starting with its === line. Leave a block out if it has nothing. Write nothing else.',
             '',
             '=== CONTRADICTIONS',
             'F12 | Label | category | the words of the reply that say otherwise',
@@ -12703,6 +12771,9 @@ const ScribePedant = Object.freeze({
             'N22',
             '=== SITUATION',
             "the reply's own words | the earlier words they clash with",
+            '=== NOW',
+            'Name | wearing | what they wear now',
+            'Name | looks | how they look',
             '',
             'Rules.',
             "1. A contradiction is a statement in the REPLY, about the LEDGER fact's own subject, that cannot be true together with that fact: another age, number, colour, name, place or description of the same thing. Give the fact's id, its subject's label and its category exactly as the LEDGER shows them, and copy the reply's own words for the other value. Never report a fact marked (hidden) as contradicted.",
@@ -12712,6 +12783,7 @@ const ScribePedant = Object.freeze({
             '5. Report only what the REPLY itself shows. Never guess. When in doubt, leave it out.',
             '6. A misspelling is a word in the REPLY that is meant as the listed known name but is written another way. An ordinary word, a word at the start of a sentence that is not meant as the name, and a different or new name are not misspellings. Report only numbers from NAME CANDIDATES. In the MISSPELLINGS block write only the numbers of the misspellings, one per line, nothing else on the line.',
             "7. A situation clash is a statement in the REPLY that cannot be true given what the messages above establish: where the characters are, who is present, what they are doing or holding, the time, or what was just agreed or planned. Copy the reply's own words exactly, then the earlier words that establish the situation, exactly as a message above has them; each quote at most 40 words, from one sentence. Something the REPLY or a message above plainly changes (they walk to the table, the plan changes) is not a clash. Not style, not taste, not something you would have written differently. When in doubt, leave it out.",
+            '8. NOW: for each character present in the REPLY whose clothing the REPLY or the messages above state, write one wearing line with what they wear now; for any character whose looks the REPLY or the messages above state, write one looks line. Only what is stated; never guess. At most 12 lines. Write each name as the messages write it.',
         ]),
     }),
 
@@ -13156,16 +13228,17 @@ const ScribePedant = Object.freeze({
     /**
      * @param {string} place
      * @param {string} sought
+     * @param {RegExp} [following]
      * @return {boolean}
      */
-    holds(place, sought) {
+    holds(place, sought, following = ScribePedant.Settings.WordAfter) {
         const settings = ScribePedant.Settings;
         let start = place.indexOf(sought);
         while (start !== settings.NotFound) {
             const end = start + sought.length;
             const before = place.slice(Math.max(0, start - settings.EdgeWidth), start);
             const after = place.slice(end, end + settings.EdgeWidth);
-            if (!settings.WordBefore.test(before) && !settings.WordAfter.test(after)) {
+            if (!settings.WordBefore.test(before) && !following.test(after)) {
                 return true;
             }
             const next = place.indexOf(sought, start + 1);
@@ -13358,7 +13431,8 @@ const ScribePedant = Object.freeze({
      *     contradictions: readonly object[],
      *     leaks: readonly object[],
      *     misspellings: readonly number[],
-     *     situations: readonly object[]
+     *     situations: readonly object[],
+     *     now: readonly object[]
      * }>}
      */
     parse(text) {
@@ -13369,6 +13443,7 @@ const ScribePedant = Object.freeze({
         const leaks = [];
         const misspellings = [];
         const situations = [];
+        const now = [];
         let block = null;
         for (const raw of typeof text === 'string' ? text.split(answer.LineBreak) : []) {
             const line = raw
@@ -13466,6 +13541,20 @@ const ScribePedant = Object.freeze({
                 }
                 continue;
             }
+            if (block === blocks.Now) {
+                if (!settings.NoneOnly.test(unedged) && fields.length >= settings.NoteFields) {
+                    now.push(
+                        Object.freeze({
+                            name: ScribePedant.undress(fields[settings.NoteNameField]),
+                            kind: ScribePedant.undress(fields[settings.NoteKindField])
+                                .toLowerCase()
+                                .replace(settings.TrailingColons, settings.Nothing),
+                            text: ScribePedant.undress(fields.slice(settings.NoteStart).join(settings.Joiner)),
+                        }),
+                    );
+                }
+                continue;
+            }
             if (settings.NoneLine.test(line)) {
                 continue;
             }
@@ -13499,6 +13588,7 @@ const ScribePedant = Object.freeze({
             leaks: Object.freeze(leaks),
             misspellings: Object.freeze(misspellings),
             situations: Object.freeze(situations),
+            now: Object.freeze(now),
         });
     },
 
@@ -13573,6 +13663,66 @@ const ScribePedant = Object.freeze({
             }
             repeats.add(ScribeReplay.wording(said));
             kept.push(ScribePedant.finding(message, { kind: ScribePedant.Kind.Situation, said, book: earlier }));
+        }
+        return Object.freeze(kept);
+    },
+
+    /**
+     * @param {object} message
+     * @param {readonly object[]} lines
+     * @param {readonly object[]} shown
+     * @return {readonly object[]}
+     */
+    noted(message, lines, shown) {
+        const settings = ScribePedant.Settings;
+        const suffix = ScribeIntake.Settings.PlayerSuffix;
+        const places = [message, ...shown].flatMap(
+            /**
+             * @param {{ blocks: ReadonlyArray<{ text: string, speaker: string }> }} item
+             * @return {string[]}
+             */
+            (item) =>
+                item.blocks.flatMap(
+                    /**
+                     * @param {{ text: string, speaker: ?string }} block
+                     * @return {string[]}
+                     */
+                    (block) =>
+                        typeof block.speaker === 'string'
+                            ? [ScribePedant.folded(block.text), ScribePedant.folded(block.speaker)]
+                            : [ScribePedant.folded(block.text)],
+                ),
+        );
+        const seen = new Set();
+        const kept = [];
+        for (const line of lines) {
+            if (kept.length >= settings.MostNotes) {
+                break;
+            }
+            const written = line.name.endsWith(suffix) ? line.name.slice(0, -suffix.length).trim() : line.name;
+            const name = ScribePedant.folded(written);
+            const said = ScribePedant.folded(line.text).replace(settings.TrailingStops, settings.Nothing);
+            const key = JSON.stringify([ScribeText.normaliseName(written), line.kind]);
+            const usable =
+                Object.hasOwn(settings.NoteWords, line.kind) &&
+                settings.Letter.test(written) &&
+                !settings.NoteForbidden.test(written) &&
+                settings.Content.test(said) &&
+                !settings.NoteFillers.includes(said) &&
+                Array.from(line.text).length <= settings.LongestNote &&
+                !settings.NoteForbidden.test(line.text) &&
+                !seen.has(key) &&
+                places.some(
+                    /**
+                     * @param {string} place
+                     * @return {boolean}
+                     */
+                    (place) => ScribePedant.holds(place, name, settings.NameAfter),
+                );
+            if (usable) {
+                seen.add(key);
+                kept.push(Object.freeze({ name: written, kind: settings.NoteWords[line.kind], text: line.text }));
+            }
         }
         return Object.freeze(kept);
     },
@@ -13696,12 +13846,12 @@ const ScribePedant = Object.freeze({
 
     /**
      * @param {{ state: object, player: string, message: object, unread: readonly object[], messages: *, ask: function(string, string): Promise<{ text: string }> }} request
-     * @return {Promise<readonly object[]>}
+     * @return {Promise<Readonly<{ findings: readonly object[], notes: readonly object[] }>>}
      * @throws {Error}
      */
     async review({ state, player, message, unread, messages, ask }) {
         if (message.fromPlayer) {
-            return Object.freeze([]);
+            return Object.freeze({ findings: Object.freeze([]), notes: Object.freeze([]) });
         }
         const candidates = ScribePedant.spellings(state, message).slice(0, ScribePedant.Settings.MostCandidates);
         const survey = ScribePedant.survey(state, player, message, unread);
@@ -13710,11 +13860,14 @@ const ScribePedant = Object.freeze({
         const { text } = await ask(ScribePedant.Prompt, input);
         const parsed = ScribePedant.parse(text);
         const confirmed = ScribePedant.confirm(state, player, message, parsed, unread);
-        return Object.freeze([
-            ...confirmed,
-            ...ScribePedant.misspelt(candidates, parsed.misspellings),
-            ...ScribePedant.situated(message, parsed.situations, shown),
-        ]);
+        return Object.freeze({
+            findings: Object.freeze([
+                ...confirmed,
+                ...ScribePedant.misspelt(candidates, parsed.misspellings),
+                ...ScribePedant.situated(message, parsed.situations, shown),
+            ]),
+            notes: ScribePedant.noted(message, parsed.now, shown),
+        });
     },
 
     /**
@@ -14657,6 +14810,7 @@ const ScribeLive = Object.freeze({
         FindingsKept: 200,
         DismissedKept: 500,
         CheckedKept: 8,
+        NotesKept: 100,
         AnswersKept: 16,
         FirstMost: 5,
         FirstFinding: 0,
@@ -14880,6 +15034,137 @@ const ScribeLive = Object.freeze({
 
     /**
      * @param {*} value
+     * @return {object|null}
+     */
+    note(value) {
+        const settings = ScribeLive.Settings;
+        const sound =
+            ScribeLive.isObject(value) &&
+            ScribeLive.isText(value.name) &&
+            value.name !== settings.Nothing &&
+            Object.values(ScribePedant.Note).includes(value.kind) &&
+            ScribeLive.isText(value.text) &&
+            value.text !== settings.Nothing &&
+            ScribeLive.isText(value.message) &&
+            ScribeLive.isText(value.fingerprint) &&
+            Number.isSafeInteger(value.position);
+        return sound
+            ? {
+                  name: value.name,
+                  kind: value.kind,
+                  text: value.text,
+                  message: value.message,
+                  fingerprint: value.fingerprint,
+                  position: value.position,
+              }
+            : null;
+    },
+
+    /**
+     * @param {*} value
+     * @return {object[]}
+     */
+    notes(value) {
+        if (!Array.isArray(value)) {
+            return [];
+        }
+        const kept = [];
+        for (const item of value) {
+            const note = ScribeLive.note(item);
+            if (note !== null) {
+                kept.push(note);
+            }
+        }
+        return kept;
+    },
+
+    /**
+     * @param {readonly object[]} given
+     * @param {object} message
+     * @return {object[]}
+     */
+    stamped(given, message) {
+        return given.map(
+            /**
+             * @param {{ name: string, kind: string, text: string }} note
+             * @return {object}
+             */
+            (note) => ({
+                name: note.name,
+                kind: note.kind,
+                text: note.text,
+                message: message.id,
+                fingerprint: message.fingerprint,
+                position: message.position,
+            }),
+        );
+    },
+
+    /**
+     * @param {readonly object[]} notes
+     * @param {readonly object[]} given
+     * @param {object} message
+     * @return {object[]}
+     */
+    noted(notes, given, message) {
+        const settings = ScribeLive.Settings;
+        const keyOf =
+            /**
+             * @param {{ name: string, kind: string }} note
+             * @return {string}
+             */
+            (note) => JSON.stringify([ScribeText.normaliseName(note.name), note.kind]);
+        const standing = new Map();
+        for (const note of notes) {
+            if (note.message !== message.id) {
+                standing.set(keyOf(note), note);
+            }
+        }
+        for (const note of ScribeLive.stamped(given, message)) {
+            const key = keyOf(note);
+            const older = standing.get(key);
+            if (older === undefined || older.position <= note.position) {
+                standing.set(key, note);
+            }
+        }
+        const all = [...standing.values()];
+        const youngest = [...all]
+            .sort(
+                /**
+                 * @param {{ position: number }} first
+                 * @param {{ position: number }} second
+                 * @return {number}
+                 */
+                (first, second) => second.position - first.position,
+            )
+            .slice(settings.FirstFinding, settings.NotesKept);
+        return all.filter(
+            /**
+             * @param {object} note
+             * @return {boolean}
+             */
+            (note) => youngest.includes(note),
+        );
+    },
+
+    /**
+     * @param {readonly object[]} notes
+     * @param {Readonly<object>} keeperView
+     * @return {object[]}
+     */
+    standing(notes, keeperView) {
+        const read = keeperView.lastRead;
+        return ScribeLive.pruned(notes, keeperView.messages).filter(
+            /**
+             * @param {{ kind: string, position: number }} note
+             * @return {boolean}
+             */
+            (note) => note.kind !== ScribePedant.Note.Looks || read === null || note.position > read.position,
+        );
+    },
+
+    /**
+     * @param {*} value
      * @return {string|null}
      */
     edited(value) {
@@ -14985,6 +15270,7 @@ const ScribeLive = Object.freeze({
             forced: false,
             sends: settings.NoSends,
             findings: [],
+            notes: [],
             dismissed: [],
             suggestion: null,
             seen: null,
@@ -15018,6 +15304,7 @@ const ScribeLive = Object.freeze({
         record.forced = saved.forced === true;
         record.sends = Number.isSafeInteger(saved.sends) && saved.sends >= settings.NoSends ? saved.sends : settings.NoSends;
         record.findings = ScribeLive.findings(saved.findings);
+        record.notes = ScribeLive.notes(saved.notes);
         const dismissed = ScribeLive.isTexts(saved.dismissed) ? [...saved.dismissed] : [];
         for (const finding of [...record.findings].reverse()) {
             if (finding.status === ScribeLive.Status.Dismissed && !dismissed.includes(finding.fault)) {
@@ -15058,6 +15345,7 @@ const ScribeLive = Object.freeze({
                         revision: entry.revision,
                         now: entry.now,
                         findings: ScribeLive.findings(entry.findings),
+                        notes: ScribeLive.notes(entry.notes),
                     });
                 }
             }
@@ -15155,8 +15443,10 @@ const ScribeLive = Object.freeze({
         }
         try {
             const kept = ScribeLive.pruned(record.findings, view.messages);
-            if (kept.length !== record.findings.length) {
+            const notes = ScribeLive.standing(record.notes, view);
+            if (kept.length !== record.findings.length || notes.length !== record.notes.length) {
                 record.findings = kept;
+                record.notes = notes;
                 ScribeLive.save(live);
             }
         } catch (error) {
@@ -15465,6 +15755,7 @@ const ScribeLive = Object.freeze({
         };
         let found = null;
         let raised = null;
+        let notes = null;
         if (remembered === undefined) {
             const sceneNoted = { failure: null };
             try {
@@ -15484,7 +15775,7 @@ const ScribeLive = Object.freeze({
             }
             const pedantNoted = { failure: null };
             try {
-                raised = await ScribePedant.review({
+                const reviewed = await ScribePedant.review({
                     state: view.state,
                     player: view.player,
                     message,
@@ -15492,6 +15783,8 @@ const ScribeLive = Object.freeze({
                     messages: view.messages,
                     ask: ScribeLive.asker(live, roles.Pedant, pedantNoted),
                 });
+                raised = reviewed.findings;
+                notes = reviewed.notes;
             } catch (error) {
                 live.problem = ScribeLive.words(error);
             }
@@ -15509,6 +15802,7 @@ const ScribeLive = Object.freeze({
         } else {
             found = remembered.now;
             raised = remembered.findings;
+            notes = remembered.notes;
         }
         const now = found === null ? previous : found;
         const draft = ScribeLive.merged(
@@ -15550,6 +15844,9 @@ const ScribeLive = Object.freeze({
             message,
             remembered !== undefined,
         );
+        if (notes !== null) {
+            record.notes = ScribeLive.noted(ScribeLive.standing(record.notes, latest), notes, message);
+        }
         if (remembered === undefined && found !== null && raised !== null) {
             const entry = {
                 id: message.id,
@@ -15569,6 +15866,7 @@ const ScribeLive = Object.freeze({
                         status: statuses.Open,
                     }),
                 ),
+                notes: ScribeLive.stamped(notes, message),
             };
             record.checked = [
                 entry,

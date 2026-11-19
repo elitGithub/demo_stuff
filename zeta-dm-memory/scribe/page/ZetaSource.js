@@ -24,14 +24,12 @@ const ZetaSource = Object.freeze({
         RoomsPath: '/v1/rooms/',
         MessagesPath: '/messages',
         PlotsPath: '/v1/plots/',
-        ProfilePath: '/user-plot-chat-profiles/me',
+        RoomsSegment: '/rooms/',
+        PersonaPath: '/user-personas/selected',
+        NotFound: 404,
+        NameSeparator: ': ',
         PlotIdPaths: Object.freeze([Object.freeze(['plotId']), Object.freeze(['plot', 'id'])]),
-        ProfileTextPaths: Object.freeze([
-            Object.freeze(['description']),
-            Object.freeze(['content']),
-            Object.freeze(['profile']),
-            Object.freeze(['profile', 'description']),
-        ]),
+        PlotField: 'plot',
         CharactersField: 'characters',
         NameField: 'name',
         DescriptionField: 'description',
@@ -79,13 +77,13 @@ const ZetaSource = Object.freeze({
         Messages: Object.freeze({
             HttpPrefix: 'Zeta answered HTTP ',
             Shape: 'Zeta answered in an unexpected shape',
+            NoPersona: 'Zeta answered the chat profile in an unexpected shape',
             Unreachable: 'Zeta could not be reached',
             Timeout: 'Zeta did not answer in time',
             NoPause: 'Could not pause between requests',
             NoLogin: 'No login seen yet',
             NoRoom: 'No chat is open',
             NoPlot: 'Zeta named no story for this chat',
-            NoProfile: 'Zeta gave no profile text for this chat',
         }),
     }),
 
@@ -720,7 +718,7 @@ const ZetaSource = Object.freeze({
 
     /**
      * @param {{ fetch: Function, token: string|null, roomId: string|null, pause: Function }} request
-     * @return {Promise<Readonly<{ characters: ReadonlyArray<Readonly<{ name: string, description: string }>> }>>}
+     * @return {Promise<Readonly<{ characters: ReadonlyArray<Readonly<{ name: string, description: string }>>, plotId: string }>>}
      * @throws {Error}
      */
     async story(request) {
@@ -738,16 +736,9 @@ const ZetaSource = Object.freeze({
         if (plot === null) {
             throw ZetaSource.failure(words.NoPlot, room.status, false);
         }
-        const read = await ZetaSource.retried(
-            request,
-            /**
-             * @return {Promise<{ status: number, body: * }>}
-             */
-            () => ZetaSource.get(request, settings.PlotsPath + encodeURIComponent(plot)),
-        );
-        const listed = ZetaSource.at(read.body, [settings.CharactersField]);
+        const listed = ZetaSource.at(room.body, [settings.PlotField, settings.CharactersField]);
         if (!Array.isArray(listed)) {
-            throw ZetaSource.failure(words.Shape, read.status, false);
+            throw Object.assign(ZetaSource.failure(words.Shape, room.status, false), { plotId: plot });
         }
         const characters = [];
         for (const item of listed) {
@@ -762,36 +753,55 @@ const ZetaSource = Object.freeze({
                 }),
             );
         }
-        return Object.freeze({ characters: Object.freeze(characters) });
+        return Object.freeze({ characters: Object.freeze(characters), plotId: plot });
     },
 
     /**
      * @param {{ fetch: Function, token: string|null, roomId: string|null, pause: Function }} request
-     * @return {Promise<string>}
+     * @param {string|null} plotId
+     * @return {Promise<string|null>}
      * @throws {Error}
      */
-    async profile(request) {
+    async profile(request, plotId = null) {
         const settings = ZetaSource.Settings;
         ZetaSource.ready(request);
-        const read = await ZetaSource.retried(
-            request,
-            /**
-             * @return {Promise<{ status: number, body: * }>}
-             */
-            () =>
-                ZetaSource.get(
-                    request,
-                    settings.RoomsPath + encodeURIComponent(request.roomId) + settings.ProfilePath,
-                ),
-        );
-        for (const path of settings.ProfileTextPaths) {
-            const value = ZetaSource.at(read.body, path);
-            const text = typeof value === settings.StringType ? value.trim() : settings.Nothing;
-            if (text !== settings.Nothing) {
-                return Array.from(text).slice(0, settings.LongestProfile).join(settings.Nothing);
-            }
+        if (!ZetaSource.filled(plotId)) {
+            return null;
         }
-        throw ZetaSource.failure(settings.Messages.NoProfile, read.status, false);
+        const path =
+            settings.PlotsPath +
+            encodeURIComponent(plotId) +
+            settings.RoomsSegment +
+            encodeURIComponent(request.roomId) +
+            settings.PersonaPath;
+        let read = null;
+        try {
+            read = await ZetaSource.retried(
+                request,
+                /**
+                 * @return {Promise<{ status: number, body: * }>}
+                 */
+                () => ZetaSource.get(request, path),
+            );
+        } catch (error) {
+            if (error.status === settings.NotFound) {
+                return null;
+            }
+            throw error;
+        }
+        const description = ZetaSource.isObject(read.body) ? read.body[settings.DescriptionField] : undefined;
+        const empty = description === null || description === undefined;
+        if (!ZetaSource.isObject(read.body) || (!empty && typeof description !== settings.StringType)) {
+            throw ZetaSource.failure(settings.Messages.NoPersona, read.status, false);
+        }
+        const detail = empty ? settings.Nothing : description.trim();
+        if (detail === settings.Nothing) {
+            return null;
+        }
+        const name = ZetaSource.at(read.body, [settings.NameField]);
+        const title = typeof name === settings.StringType ? name.trim() : settings.Nothing;
+        const text = title === settings.Nothing ? detail : `${title}${settings.NameSeparator}${detail}`;
+        return Array.from(text).slice(0, settings.LongestProfile).join(settings.Nothing);
     },
 
     /**

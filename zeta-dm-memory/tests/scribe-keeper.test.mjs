@@ -300,6 +300,9 @@ async function opened(chat, model, extra = {}) {
     if (extra.claim !== undefined) {
         options.claim = extra.claim;
     }
+    if (extra.lease !== undefined) {
+        options.lease = extra.lease;
+    }
     if (extra.profile !== undefined) {
         options.profile = extra.profile;
     }
@@ -4022,4 +4025,166 @@ test('a routine poll says Looking and never Pulling', async () => {
     release();
     await ticking;
     assert.equal(keeper.view().busy, null);
+});
+
+test('a lease that is not held keeps the keeper watching, even with the claim', async () => {
+    for (const injected of [false, true]) {
+        const chat = new FakeChat(100);
+        const storage = new FakeStorage();
+        let leading = false;
+        const extra = {
+            storage,
+            /**
+             * @return {boolean}
+             */
+            lease: () => leading,
+        };
+        if (injected) {
+            /**
+             * @return {boolean}
+             */
+            extra.claim = () => true;
+        }
+        const { keeper } = await opened(chat, analyst(), extra);
+        assert.equal(keeper.view().phase, 'Watching', String(injected));
+        assert.equal(keeper.view().reader, false);
+        assert.equal(chat.count('tab-1', 'history'), 0);
+        for (let tick = 0; tick < 3; tick++) {
+            await keeper.tick();
+        }
+        assert.equal(chat.count('tab-1', 'history'), 0);
+        assert.equal(keeper.view().adoptBlock, WATCHING);
+        await assert.rejects(keeper.adopt({}), { message: WATCHING });
+        const claims = [...storage.values.keys()].filter((name) => name.startsWith('scribe:claim:'));
+        assert.deepEqual(claims, injected ? [] : ['scribe:claim:harbour']);
+        leading = true;
+        await keeper.tick();
+        assert.equal(keeper.view().reader, true);
+        assert.equal(keeper.view().phase, 'NoBook');
+        assert.equal(chat.count('tab-1', 'history'), 1);
+        leading = false;
+        await keeper.tick();
+        assert.equal(keeper.view().reader, false);
+        assert.equal(keeper.view().phase, 'Watching');
+        keeper.close();
+        assert.equal([...storage.values.keys()].some((name) => name.startsWith('scribe:claim:')), false);
+    }
+});
+
+test('a lease lost mid-reading loses the reader role at the next step', async () => {
+    const chat = new FakeChat(100);
+    const storage = new FakeStorage();
+    let leading = true;
+    const opening = gate();
+    let calls = 0;
+    const model = analyst({
+        /**
+         * @return {Promise<void>|null}
+         */
+        hold: () => {
+            calls++;
+            return calls === 2 ? opening.promise : null;
+        },
+    });
+    const { keeper } = await opened(chat, model, {
+        storage,
+        /**
+         * @return {boolean}
+         */
+        lease: () => leading,
+    });
+    const adopting = keeper.adopt({});
+    await until(() => calls === 2);
+    leading = false;
+    await keeper.tick();
+    assert.equal(keeper.view().reader, false);
+    assert.equal(keeper.view().phase, 'Watching');
+    opening.release();
+    await adopting.catch(() => null);
+    await settle();
+    assert.equal(savedReads(storage), 40);
+    assert.equal(model.calls.length, 2);
+    assert.equal(keeper.view().phase, 'Watching');
+});
+
+test('the others spending counts toward the budget', async () => {
+    const chat = new FakeChat(100);
+    const storage = new FakeStorage();
+    const clock = clockAt();
+    ScribeStore.setOthers(storage, ROOM, DAY, 0.03);
+    const model = analyst({ cost: 0.04 });
+    const { keeper } = await opened(chat, model, { storage, clock });
+    assert.equal(cents(keeper.view().spentToday), 3);
+    await keeper.adopt({ budget: 0.05 });
+    assert.equal(model.calls.length, 1);
+    assert.equal(keeper.view().stop.reason, 'Budget');
+    assert.equal(cents(keeper.view().spentToday), 7);
+    assert.equal(cents(ScribeStore.spent(storage, ROOM, DAY)), 4);
+    const full = new FakeStorage();
+    ScribeStore.setOthers(full, ROOM, DAY, 0.05);
+    const spent = analyst({ cost: 0.04 });
+    const stopped = await opened(new FakeChat(100), spent, { storage: full, clock: clockAt() });
+    await stopped.keeper.adopt({ budget: 0.05 });
+    assert.equal(spent.calls.length, 0);
+    assert.equal(stopped.keeper.view().stop.reason, 'Budget');
+    assert.equal(cents(stopped.keeper.view().spentToday), 5);
+    assert.equal(ScribeStore.spent(full, ROOM, DAY), 0);
+    stopped.clock.day = NEXT_DAY;
+    assert.equal(cents(stopped.keeper.view().spentToday), 0);
+});
+
+test('a lease that is not a function is refused', async () => {
+    const chat = new FakeChat(100);
+    for (const lease of ['yes', 1, true, {}]) {
+        await assert.rejects(
+            ScribeKeeper.open({
+                storage: new FakeStorage(),
+                roomId: ROOM,
+                tabId: 'tab-9',
+                zeta: chat.zeta('tab-9'),
+                ask: analyst().ask,
+                clock: clockAt(),
+                /**
+                 * @return {void}
+                 */
+                notify: () => {},
+                lease,
+            }),
+            { message: 'The argument is not valid: claim' },
+        );
+    }
+});
+
+test('a saved key clears a failed reading and the next tick reads at once', async () => {
+    const chat = new FakeChat(100);
+    const storage = new FakeStorage();
+    const model = analyst({
+        /**
+         * @param {{ marks: number[] }} call
+         * @return {boolean}
+         */
+        unreadable: (call) => call.marks[0] === 41,
+    });
+    const { keeper } = await opened(chat, model, { storage });
+    await keeper.adopt({});
+    assert.equal(keeper.view().stop.reason, 'Failed');
+    assert.equal(savedStop(storage).reason, 'Failed');
+    await keeper.tick();
+    assert.equal(keeper.view().phase, 'Stopped');
+    assert.equal(model.calls.length, 2);
+    model.unreadable = null;
+    keeper.rekey();
+    assert.equal(keeper.view().stop, null);
+    assert.equal(savedStop(storage), null);
+    assert.notEqual(keeper.view().phase, 'Stopped');
+    await keeper.tick();
+    assert.equal(keeper.view().phase, 'Idle');
+    assert.equal(keeper.view().read, 99);
+
+    const paused = await opened(new FakeChat(100), analyst(), { tabId: 'tab-2' });
+    await paused.keeper.adopt({});
+    paused.keeper.pause();
+    const before = paused.keeper.view().stop;
+    paused.keeper.rekey();
+    assert.deepEqual(plain(paused.keeper.view().stop), plain(before));
 });

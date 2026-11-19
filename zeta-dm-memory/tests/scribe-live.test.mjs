@@ -73,6 +73,9 @@ const COLLECTOR = 'Brandt comes to collect his debt.';
 const RIDER = 'A rider arrives.';
 const GULL = 'A gull cries over the mill.';
 const CLOCK = Object.freeze({ now: () => 0 });
+const TALE = 'Orla came to the mill for work.';
+const TOLD = `[Scribe] The story so far: ${TALE}`;
+const CROWDED = `${TALE} `.repeat(83).trim();
 
 const scripted = {
     41: [['Narrator', 'Halvard, forty winters old, hums by the fire.']],
@@ -370,6 +373,7 @@ function modelOf() {
         scene: MILL,
         pedant: PEDANT,
         line: `LINE: ${COURIER}`,
+        story: TALE,
         understood: answer({ FACTS: ['Mirelle | hair | black | #40'] }),
         failing: new Set(),
         held: null,
@@ -392,7 +396,8 @@ function modelOf() {
             throw new Error(`${role} is offline`);
         }
         if (model.refusals.has(system)) {
-            throw new Error(model.refusals.get(system));
+            const refused = model.refusals.get(system);
+            throw typeof refused === 'function' ? refused() : Object.assign(new Error(refused), { retryable: true });
         }
         let text = '';
         if (system === ScribeScene.Prompt) {
@@ -403,6 +408,8 @@ function modelOf() {
             text = model.line;
         } else if (system === ScribeAnalyzer.NotesPrompt) {
             text = model.understood;
+        } else if (system === ScribeReminder.StoryPrompt) {
+            text = model.story;
         }
         return { text, cost: 0.001 };
     };
@@ -484,6 +491,7 @@ function castOf() {
         storyFailures: [],
         profileFailures: [],
         gate: null,
+        plots: [],
     };
     cast.story = async () => {
         cast.reads.story++;
@@ -494,10 +502,11 @@ function castOf() {
         if (cast.gate !== null) {
             await cast.gate;
         }
-        return { characters: cast.characters };
+        return { characters: cast.characters, plotId: 'plot-harbour' };
     };
-    cast.profile = async () => {
+    cast.profile = async (plotId) => {
         cast.reads.profile++;
+        cast.plots.push(plotId);
         const failure = cast.profileFailures.length > 0 ? cast.profileFailures.shift() : null;
         if (failure !== null) {
             throw failure;
@@ -653,8 +662,22 @@ const BIG = Object.freeze([
  * @return {number}
  */
 function chooses(model) {
-    const known = [ScribeScene.Prompt, ScribePedant.Prompt, ScribeMuse.SuggestPrompt, ScribeAnalyzer.NotesPrompt];
+    const known = [
+        ScribeScene.Prompt,
+        ScribePedant.Prompt,
+        ScribeMuse.SuggestPrompt,
+        ScribeAnalyzer.NotesPrompt,
+        ScribeReminder.StoryPrompt,
+    ];
     return model.calls.filter((call) => !known.includes(call.system)).length;
+}
+
+/**
+ * @param {object} model
+ * @return {number}
+ */
+function tellings(model) {
+    return model.calls.filter((call) => call.system === ScribeReminder.StoryPrompt).length;
 }
 
 test('a reply gives a scene and findings', async () => {
@@ -1002,16 +1025,28 @@ test('the size guard never cuts the player', async () => {
     for (const player of ['x'.repeat(size), 'é'.repeat(Math.floor(size / 2)) + 'x'.repeat(size % 2)]) {
         assert.equal(bytes(player), size);
         for (const [lineSize, withReady] of [
-            [50, true],
-            [51, false],
-            [room, false],
+            [50, 'whole'],
+            [51, 'trimmed'],
+            [room, 'none'],
         ]) {
             const suggestion = suggestionOf(lineSize);
             assert.equal(bytes(lineOf(suggestion)), lineSize);
             live.use(suggestion);
             const result = live.outgoing(player);
-            const expected = player + (withReady ? lineOf(ready) : '') + lineOf(suggestion);
-            assert.ok(result === expected, `stage ${lineSize}`);
+            assert.ok(result.startsWith(player), `stage ${lineSize}`);
+            assert.ok(result.endsWith(lineOf(suggestion)), `stage ${lineSize}`);
+            const carried = result.slice(player.length, result.length - lineOf(suggestion).length);
+            if (withReady === 'whole') {
+                assert.equal(carried, lineOf(ready));
+            } else if (withReady === 'trimmed') {
+                assert.equal(carried.startsWith(lineOf(TOLD)), true, carried);
+                assert.equal(ready.startsWith(carried.slice(lineOf('').length)), true);
+                assert.equal(carried.length < lineOf(ready).length, true);
+                assert.equal(carried.endsWith('.'), true, carried);
+            } else {
+                assert.equal(carried, '');
+                assert.equal(live.view().held, 'No reminder: your message leaves no room for it.');
+            }
             assert.ok(bytes(result) <= LIMIT);
         }
         live.use(suggestionOf(room + 1));
@@ -1222,7 +1257,7 @@ test('a closed live part is silent', async () => {
     const release = model.hold('Scribe');
     const pending = live.reply(at(43));
     await ticks();
-    assert.deepEqual(plain(model.roles()), ['Scribe', 'Pedant', 'Scribe']);
+    assert.deepEqual(plain(model.roles()), ['Scribe', 'Pedant', 'Scribe', 'Scribe']);
     live.close();
     const calls = model.calls.length;
     const saves = storage.count('set');
@@ -1311,7 +1346,7 @@ test('what is kept survives a reload', async () => {
     await waiting.live.force();
     assert.deepEqual(ledOf(waiting.storage), [AGE]);
     waiting.live.close();
-    const reopened = rig({}, waiting.storage);
+    const reopened = rig({ messages: story.slice(0, 41), unread: story.slice(40, 41) }, waiting.storage);
     reopened.live.outgoing('Hello.');
     reopened.live.sent();
     assert.equal(statusOf(reopened.live, keyOf(reopened.live, 'Contradiction', 'MESSAGE-41')), 'Reminded');
@@ -1590,7 +1625,7 @@ test('a contradicted fact goes first', async () => {
     await live.reply(variant(45, MANY_REPLIES[1], null));
     assert.deepEqual(ledOf(storage), [MANY_IDS.halvardEyes, MANY_IDS.halvardAge]);
     const led = live.view().ready;
-    assert.ok(led.startsWith('[Scribe] Halvard has grey eyes. Halvard is aged 34. '), led);
+    assert.ok(led.startsWith(`${TOLD} Halvard has grey eyes. Halvard is aged 34. `), led);
     assert.equal(led.includes('scarred'), false, led);
 
     live.dismiss(keyOf(live, 'Contradiction', 'MESSAGE-45'));
@@ -1675,6 +1710,7 @@ test('a contradicted fact goes first', async () => {
 test('reminded when it went out', async () => {
     const { storage, model, live } = rig({ state: long });
     model.pedant = PEDANT_LONG;
+    model.story = CROWDED;
     await live.force();
     await live.reply(variant(41, [['Narrator', 'Halvard is broad as a barn tonight.']], null));
     const halvard = keyOf(live, 'Contradiction', 'MESSAGE-41');
@@ -2998,6 +3034,7 @@ test('a reminder is made with no model call of its own', async () => {
     await live.force();
     assert.notEqual(live.view().ready, null);
     assert.equal(chooses(model), 0);
+    assert.equal(tellings(model), 2);
     assert.deepEqual(plain([...new Set(model.calls.map((call) => call.role))]), ['Scribe', 'Pedant']);
     assert.equal(Object.hasOwn(ScribeReminder, 'ChoosePrompt'), false);
     assert.equal(Object.hasOwn(ScribeLive.Settings, 'AnswersKept'), false);
@@ -3018,7 +3055,9 @@ test('a spent budget is said', async () => {
     await ticks();
     assert.equal(model.calls.length, calls);
     assert.equal(live.view().problem, BUDGET_WORDS);
-    assert.equal(live.outgoing('Hello.'), `Hello.${lineOf(ready)}`);
+    assert.equal(live.outgoing('Hello.'), 'Hello.');
+    assert.equal(live.view().ready, null);
+    assert.equal(live.view().held, 'No reminder: the scene was last read at #41; the latest reply is #43.');
     await assert.rejects(live.suggest(), /^Error: The day's budget is spent: /);
     assert.equal(model.calls.length, calls);
     keeper.change({ spentToday: 2.5 });
@@ -3288,10 +3327,10 @@ test('went marks only what went', async () => {
     assert.equal(away.notices.count, awayTold);
 
     const kept = new FakeStorage();
-    const basis = { revision: state.revision, first: [AGE], notes: ScribeLive.marked([]) };
+    const basis = { revision: state.revision, first: [AGE], notes: ScribeLive.marked([]), story: 'abcd1234' };
     ScribeStore.write(kept, ROOM, ScribeStore.Kind.Live, {
         now: null,
-        ready: null,
+        ready: `${TOLD} Halvard is aged 34.`,
         led: [],
         basis,
         sends: 0,
@@ -3366,7 +3405,7 @@ test('a contradiction makes nothing go early, leads at the count, and is marked 
     assert.equal(live.view().sends, 2);
     await live.reply(at(45));
     const ready = live.view().ready;
-    assert.ok(ready.startsWith('[Scribe] Halvard is aged 34. '), ready);
+    assert.ok(ready.startsWith(`${TOLD} Halvard is aged 34. `), ready);
     assert.deepEqual(ledOf(storage), [AGE]);
     assert.equal(statusOf(live, age), 'Open');
     assert.equal(live.outgoing('Three.'), `Three.${lineOf(ready)}`);
@@ -3478,8 +3517,17 @@ test('an edited reminder is what goes, and nothing replaces it until it is sent 
     assert.equal(live.lines().ready, edit);
     assert.equal(ScribeStore.read(storage, ROOM, ScribeStore.Kind.Live).edited, edit);
     await live.reply(at(43));
+    assert.notEqual(live.view().ready, edit);
+    assert.notEqual(live.lines().ready, edit);
+    assert.equal(live.view().edited, false);
+    assert.equal(live.view().held, 'Your edit was written before the latest reply; Save it again to send it.');
+    assert.equal(live.view().draft, edit);
+    live.edit(edit);
     assert.equal(live.view().ready, edit);
+    assert.equal(live.view().held, null);
     await live.reply(variant(43, [['Narrator', 'Halvard, thirty winters old, hums a sad tune.']], 'OTHER-43'));
+    assert.notEqual(live.view().ready, edit);
+    live.edit(edit);
     assert.equal(live.view().ready, edit);
     keeper.change({ state: revised(big) });
     live.view();
@@ -3492,7 +3540,7 @@ test('an edited reminder is what goes, and nothing replaces it until it is sent 
     assert.equal(chooses(model), 0);
 
     live.close();
-    const reopened = rig({ state: big, settings: { refresh: 1 } }, storage);
+    const reopened = rig({ state: big, settings: { refresh: 1 }, messages: keeper.current.messages }, storage);
     assert.equal(reopened.live.view().ready, edit);
     assert.equal(reopened.live.view().forced, true);
     reopened.keeper.change({ edition: 2 });
@@ -3750,35 +3798,35 @@ test('an emptied box clears the reminder and keeps the suggestion', async () => 
     }
 });
 
-test('an edit over 2,000 bytes is refused and the last accepted text stays', async () => {
+test('an edit over 3,000 characters is refused and the last accepted text stays', async () => {
     const { storage, live } = rig();
-    const padded = (size) => `[Scribe] ${'x'.repeat(size - bytes('[Scribe] '))}`;
-    const refused = /^Error: A reminder may be at most 2,000 bytes; nothing was saved\.$/;
-    live.edit(padded(2000));
-    assert.equal(bytes(live.view().ready), 2000);
-    assert.throws(() => live.edit(padded(2001)), refused);
-    assert.equal(live.view().ready, padded(2000));
-    assert.equal(ScribeStore.read(storage, ROOM, ScribeStore.Kind.Live).edited, padded(2000));
-    const edge = `[Scribe] ${'x'.repeat(1989)}é`;
-    assert.equal(bytes(edge), 2000);
+    const padded = (size) => `[Scribe] ${'x'.repeat(size - '[Scribe] '.length)}`;
+    const refused = /^Error: A reminder may be at most 3,000 characters; nothing was saved\.$/;
+    live.edit(padded(3000));
+    assert.equal(live.view().ready.length, 3000);
+    assert.throws(() => live.edit(padded(3001)), refused);
+    assert.equal(live.view().ready, padded(3000));
+    assert.equal(ScribeStore.read(storage, ROOM, ScribeStore.Kind.Live).edited, padded(3000));
+    const deseret = String.fromCodePoint(0x10400);
+    const edge = `[Scribe] ${deseret.repeat(2991)}`;
+    assert.equal(Array.from(edge).length, 3000);
+    assert.equal(bytes(edge) > 3000, true);
     live.edit(edge);
     assert.equal(live.view().ready, edge);
-    const over = `[Scribe] ${'x'.repeat(1990)}é`;
-    assert.equal(bytes(over), 2001);
+    const over = `[Scribe] ${deseret.repeat(2992)}`;
     assert.throws(() => live.edit(over), refused);
-    assert.equal(live.view().ready, edge);
-    assert.throws(() => live.edit(`[Scribe] ${'é'.repeat(1000)}`), refused);
     assert.equal(live.view().ready, edge);
 });
 
 test('a clear or a send while a reminder is being made keeps what that check makes out', async () => {
     const big = bookState(BIG);
+    const went = [];
     for (const [name, act] of [
         ['clear', (live) => live.clear()],
         [
             'send',
             (live) => {
-                live.outgoing('Go.');
+                went.push(live.outgoing('Go.'));
                 live.sent();
             },
         ],
@@ -3798,12 +3846,18 @@ test('a clear or a send while a reminder is being made keeps what that check mak
         await pending;
         await ticks();
         const view = live.view();
-        assert.equal(view.ready, null, name);
-        assert.equal(ScribeStore.read(storage, ROOM, ScribeStore.Kind.Live).ready, null, name);
-        assert.equal(view.forced, false, name);
         assert.equal(view.now.place, 'The tent', name);
         assert.equal(cast.reads.story, 4, name);
         assert.equal(chooses(model), 0, name);
+        if (name === 'clear') {
+            assert.equal(view.ready, null, name);
+            assert.equal(ScribeStore.read(storage, ROOM, ScribeStore.Kind.Live).ready, null, name);
+            assert.equal(view.forced, false, name);
+        } else {
+            assert.deepEqual(went, ['Go.']);
+            assert.equal(view.forced, true, name);
+            assert.equal(reminds(view.ready, 'The story so far: '), true, view.ready);
+        }
     }
 });
 
@@ -3833,21 +3887,28 @@ test('a record saved before the edit and the flag loads without them, and bad on
         [{ edited: '[Scribe]x' }, false],
         [{ edited: '[Scribe] ' }, false],
         [{ edited: '[Scribe]' }, false],
-        [{ edited: `[Scribe] ${'x'.repeat(1992)}` }, false],
+        [{ edited: `[Scribe] ${'x'.repeat(2992)}` }, false],
         [{ edited: '@: [Scribe] ok' }, false],
         [{ edited: '@:[Scribe] ok' }, false],
         [{ edited: '@: @: [Scribe] ok' }, false],
         [{ edited: '[Scribe]  ok' }, false],
         [{ edited: '[Scribe] ok' }, true],
-        [{ edited: `[Scribe] ${'x'.repeat(1991)}` }, true],
+        [{ edited: `[Scribe] ${'x'.repeat(2991)}` }, true],
     ];
     for (const [fields, kept] of stored) {
         const storage = new FakeStorage();
-        ScribeStore.write(storage, ROOM, ScribeStore.Kind.Live, { ...base, ...fields });
+        const editedFor = { id: at(59).id, fingerprint: at(59).fingerprint };
+        ScribeStore.write(storage, ROOM, ScribeStore.Kind.Live, { ...base, ...fields, editedFor });
         const view = rig({}, storage).live.view();
         assert.equal(view.edited, kept, JSON.stringify(fields).slice(0, 40));
         assert.equal(view.ready, kept ? fields.edited : null, JSON.stringify(fields).slice(0, 40));
     }
+    const unplaced = new FakeStorage();
+    ScribeStore.write(unplaced, ROOM, ScribeStore.Kind.Live, { ...base, edited: '[Scribe] ok' });
+    const unplacedView = rig({}, unplaced).live.view();
+    assert.equal(unplacedView.ready, null);
+    assert.equal(unplacedView.stale, true);
+    assert.equal(unplacedView.draft, '[Scribe] ok');
     for (const [forced, kept] of [
         [true, true],
         ['yes', false],
@@ -4394,16 +4455,17 @@ test('the story and the profile are read once, for many preparations and for two
     const release = cast.hold();
     const replying = live.reply(at(41));
     await ticks();
-    assert.deepEqual(plain(cast.reads), { story: 1, profile: 1 });
+    assert.deepEqual(plain(cast.reads), { story: 1, profile: 0 });
     assert.equal(model.calls.length, 0);
     const asked = raw.profile();
     const forcing = live.force();
     await ticks();
-    assert.deepEqual(plain(cast.reads), { story: 1, profile: 1 });
+    assert.deepEqual(plain(cast.reads), { story: 1, profile: 0 });
     release();
     await replying;
     await forcing;
     assert.equal(await asked, cast.text);
+    assert.deepEqual(plain(cast.plots), ['plot-harbour']);
     await live.force();
     await live.reply(at(47));
     keeper.change({ state: revised(state) });
@@ -4439,6 +4501,7 @@ test('a failed read makes everyone custom with a notice, leaves the profile out 
     assert.equal(live.view().ready.includes('Mirelle: brown eyes.'), true, live.view().ready);
     await live.reply(at(47));
     assert.deepEqual(plain(cast.reads), { story: 1, profile: 1 });
+    assert.deepEqual(plain(cast.plots), [null]);
     assert.equal(await raw.profile(), null);
     for (const system of [ScribeScene.Prompt, ScribePedant.Prompt]) {
         for (const input of inputsOf(model, system)) {
@@ -4519,7 +4582,7 @@ test("a reply's notes reach the reminder it prepares, and a note change rebuilds
 });
 
 test('an edited reminder is not replaced by a note, a story answer or a reading', async () => {
-    const { live, model, keeper, cast } = rig();
+    const { live, model, keeper, cast } = rig({ messages: story.slice(0, 41), unread: story.slice(40, 41) });
     cast.characters = [{ name: 'Mirelle', description: 'brown eyes' }];
     live.edit('[Scribe] Mine.');
     const release = cast.hold();
@@ -4532,6 +4595,10 @@ test('an edited reminder is not replaced by a note, a story answer or a reading'
     await live.force();
     model.pedant = nowOf('Halvard | wearing | a travel cloak');
     await live.reply(at(47));
+    assert.notEqual(live.view().ready, '[Scribe] Mine.');
+    assert.equal(live.view().stale, true);
+    assert.equal(live.view().draft, '[Scribe] Mine.');
+    live.edit('[Scribe] Mine.');
     assert.equal(live.view().ready, '[Scribe] Mine.');
     keeper.change({ state: revised(state), lastRead: { id: 'MESSAGE-47', position: 47 } });
     live.view();
@@ -4546,6 +4613,7 @@ test('a reminder saved before notes were part of its basis is rebuilt before it 
     const orla = state.subjects.find((subject) => subject.label === 'Orla').id;
     const mill = {
         message: 'MESSAGE-41',
+        fingerprint: at(41).fingerprint,
         position: 41,
         day: 1,
         place: 'The mill',
@@ -4569,7 +4637,7 @@ test('a reminder saved before notes were part of its basis is rebuilt before it 
         forced: true,
         edition: 1,
     });
-    const { live, model } = rig({}, storage);
+    const { live, model } = rig({ messages: story.slice(0, 42), unread: story.slice(40, 42) }, storage);
     assert.equal(live.lines().ready, null);
     assert.equal(live.outgoing('Go.'), 'Go.');
     live.view();
@@ -4578,5 +4646,687 @@ test('a reminder saved before notes were part of its basis is rebuilt before it 
     assert.notEqual(rebuilt, old);
     assert.ok(reminds(rebuilt, 'Halvard'), rebuilt);
     assert.equal(ScribeStore.read(storage, ROOM, ScribeStore.Kind.Live).basis.notes, ScribeLive.marked([]));
+    assert.equal(chooses(model), 0);
+    assert.equal(tellings(model), 1);
+    assert.equal(model.calls.length, 1);
+});
+
+/**
+ * @param {object} fields
+ * @param {Function|null} ask
+ * @return {object}
+ */
+function timed(fields = {}, ask = null) {
+    const moment = { value: 0 };
+    const keeper = keeperOf(fields);
+    const model = modelOf();
+    const cast = castOf();
+    const storage = new FakeStorage();
+    const raw = ScribeLive.open({
+        keeper,
+        storage,
+        roomId: ROOM,
+        ask: ask ?? model.ask,
+        clock: { now: () => moment.value },
+        notify: () => {},
+        story: cast.story,
+        profile: cast.profile,
+    });
+    return { keeper, model, storage, moment, raw, live: following(keeper, raw) };
+}
+
+/**
+ * @param {object} live
+ * @param {object} moment
+ * @param {number} value
+ * @return {Promise<void>}
+ */
+async function moveTo(live, moment, value) {
+    moment.value = value;
+    live.view();
+    await ticks();
+}
+
+/**
+ * @param {object} model
+ * @param {string} system
+ * @return {number}
+ */
+function countOf(model, system) {
+    return model.calls.filter((call) => call.system === system).length;
+}
+
+test('a scene one reply behind attaches nothing and says why; a current one attaches', async () => {
+    const { model, live } = rig();
+    await live.reply(at(41));
+    await live.force();
+    assert.equal(reminds(live.view().ready, TALE), true, live.view().ready);
+    assert.equal(live.view().held, null);
+    model.refusals.set(ScribeScene.Prompt, 'scene offline');
+    await live.reply(at(43));
+    assert.equal(live.view().now.message, 'MESSAGE-41');
+    assert.equal(live.view().ready, null);
+    assert.equal(live.view().held, 'No reminder: the scene was last read at #41; the latest reply is #43.');
+    assert.equal(live.outgoing('Go.'), 'Go.');
+    live.sent();
+    await live.force();
+    assert.equal(live.view().forced, true);
+    assert.equal(live.view().ready, null);
+    model.refusals.delete(ScribeScene.Prompt);
+    await live.reply(at(45));
+    assert.equal(live.view().now.message, 'MESSAGE-45');
+    assert.equal(live.view().held, null);
+    const ready = live.view().ready;
+    assert.equal(ready.startsWith(TOLD), true, ready);
+    assert.equal(live.outgoing('Go.'), `Go.${lineOf(ready)}`);
+    live.sent();
+
+    const typed = rig();
+    await typed.live.reply(at(41));
+    typed.model.refusals.set(ScribeScene.Prompt, 'scene offline');
+    await typed.live.reply(at(43));
+    typed.live.edit('[Scribe] My own words.');
+    assert.equal(typed.live.view().held, null);
+    assert.equal(typed.live.outgoing('Go.'), `Go.${lineOf('[Scribe] My own words.')}`);
+});
+
+test("the operator's room shape, scene at #157 and the latest reply at #225, attaches nothing", async () => {
+    const builder = new CampaignBuilder('Orla');
+    for (let number = 1; number <= 225; number++) {
+        builder.narrator(`The tale goes on, line ${number}.`);
+    }
+    const long = ScribeIntake.read(builder.messages).messages;
+    const scene = {
+        message: 'MESSAGE-157',
+        fingerprint: long[156].fingerprint,
+        position: 157,
+        day: 2,
+        place: 'The ruins',
+        reach: 'Private',
+        present: [
+            { subject: HALVARD, label: 'Halvard' },
+            { subject: null, label: 'The grey lich' },
+        ],
+        summary: 'Halvard taunts the lich',
+        changed: false,
+    };
+    const latest = long.at(-1);
+    const storage = new FakeStorage();
+    ScribeStore.write(storage, ROOM, ScribeStore.Kind.Live, {
+        ...BARE,
+        now: scene,
+        reminded: scene,
+        ready: '[Scribe] The story so far: The lich waits. The grey lich is here.',
+        basis: { revision: state.revision, first: [], notes: ScribeLive.marked([]) },
+        sends: 6,
+        seen: { id: latest.id, fingerprint: latest.fingerprint, position: 225, before: scene },
+        edition: 1,
+    });
+    const { live, model } = rig({ messages: long, unread: long.slice(40) }, storage);
+    assert.equal(live.lines().ready, null);
+    assert.equal(live.outgoing('Go.'), 'Go.');
+    assert.equal(live.view().ready, null);
+    assert.equal(live.view().held, 'No reminder: the scene was last read at #157; the latest reply is #225.');
+    await live.force();
+    await ticks();
+    assert.equal(live.view().forced, true);
+    assert.equal(live.view().ready, null);
     assert.equal(model.calls.length, 0);
+});
+
+test('a failed check is retried at 15 s, 60 s and 300 s, never a fourth time, and the header says so', async () => {
+    const { model, moment, live } = timed();
+    model.refusals.set(ScribePedant.Prompt, 'Pedant is offline');
+    await live.reply(at(41));
+    assert.equal(countOf(model, ScribePedant.Prompt), 1);
+    assert.deepEqual(plain(live.view().failing), []);
+    for (const [before, due, count] of [
+        [14999, 15000, 2],
+        [74999, 75000, 3],
+        [374999, 375000, 4],
+    ]) {
+        await moveTo(live, moment, before);
+        assert.equal(countOf(model, ScribePedant.Prompt), count - 1, String(before));
+        await moveTo(live, moment, due);
+        assert.equal(countOf(model, ScribePedant.Prompt), count, String(due));
+    }
+    assert.deepEqual(plain(live.view().failing), ['Checks failing: Pedant is offline']);
+    await moveTo(live, moment, 10000000);
+    assert.equal(countOf(model, ScribePedant.Prompt), 4);
+    assert.equal(countOf(model, ScribeScene.Prompt), 1);
+    model.refusals.delete(ScribePedant.Prompt);
+    await live.reply(at(43));
+    assert.equal(countOf(model, ScribePedant.Prompt), 5);
+    assert.deepEqual(plain(live.view().failing), []);
+});
+
+test('a later reply is checked while an earlier one waits for its retry, and the retry finds what it missed', async () => {
+    const { model, moment, live } = timed();
+    model.refusals.set(ScribePedant.Prompt, 'Pedant is offline');
+    await live.reply(at(41));
+    assert.deepEqual(statuses(live), []);
+    model.refusals.delete(ScribePedant.Prompt);
+    await live.reply(at(43));
+    assert.deepEqual(asked(model).filter((entry) => entry.startsWith('Pedant')), ['Pedant:41', 'Pedant:43']);
+    assert.equal(statuses(live).some(([, message]) => message === 'MESSAGE-41'), false);
+    await moveTo(live, moment, 15000);
+    assert.deepEqual(asked(model).filter((entry) => entry.startsWith('Pedant')), ['Pedant:41', 'Pedant:43', 'Pedant:41']);
+    assert.equal(statuses(live).some(([, message]) => message === 'MESSAGE-41'), true);
+    assert.equal(live.view().now.message, 'MESSAGE-43');
+    await moveTo(live, moment, 1000000);
+    assert.equal(countOf(model, ScribePedant.Prompt), 3);
+});
+
+test('a failed scene is retried until it is current, a forced reminder waits for it, and failing goes on success', async () => {
+    const { model, moment, live } = timed();
+    await live.reply(at(41));
+    model.refusals.set(ScribeScene.Prompt, 'scene offline');
+    await live.reply(at(43));
+    await live.force();
+    assert.equal(live.view().ready, null);
+    assert.equal(live.view().forced, true);
+    for (const value of [15000, 75000, 375000]) {
+        await moveTo(live, moment, value);
+    }
+    assert.equal(countOf(model, ScribeScene.Prompt), 5);
+    assert.deepEqual(plain(live.view().failing), ['Scene failing: scene offline']);
+    assert.equal(countOf(model, ScribePedant.Prompt), 2);
+    model.refusals.delete(ScribeScene.Prompt);
+    await live.reply(at(45));
+    assert.deepEqual(plain(live.view().failing), []);
+    assert.equal(live.view().now.message, 'MESSAGE-45');
+    assert.equal(live.view().ready.startsWith(TOLD), true, live.view().ready);
+
+    const recovered = timed();
+    await recovered.live.reply(at(41));
+    recovered.model.refusals.set(ScribeScene.Prompt, 'scene offline');
+    await recovered.live.reply(at(43));
+    await recovered.live.force();
+    recovered.model.refusals.delete(ScribeScene.Prompt);
+    await moveTo(recovered.live, recovered.moment, 15000);
+    assert.equal(recovered.live.view().now.message, 'MESSAGE-43');
+    assert.equal(recovered.live.view().ready.startsWith(TOLD), true, recovered.live.view().ready);
+    assert.equal(countOf(recovered.model, ScribePedant.Prompt), 2);
+});
+
+test('live calls are listed with their tokens and finish, and a cut-off answer keeps its first 2,000 characters', async () => {
+    const cut = Object.assign(new Error('answer was cut off; status 200; finish length'), {
+        finish: 'length',
+        answer: 'w'.repeat(2000),
+        tokensIn: 900,
+        tokensOut: 4000,
+        reasoningTokens: 3100,
+    });
+    const ask = async (role, system) => {
+        if (system === ScribePedant.Prompt) {
+            throw cut;
+        }
+        const text = system === ScribeScene.Prompt ? MILL : '';
+        return { text, cost: 0, tokensIn: 10, tokensOut: 20, reasoningTokens: null, finish: 'stop' };
+    };
+    const { live } = timed({}, ask);
+    await live.reply(at(41));
+    assert.deepEqual(plain(live.view().calls), [
+        {
+            role: 'Pedant',
+            tokensIn: 900,
+            tokensOut: 4000,
+            reasoningTokens: 3100,
+            finish: 'length',
+            answer: 'w'.repeat(2000),
+            problem: 'answer was cut off; status 200; finish length',
+        },
+        {
+            role: 'Scribe',
+            tokensIn: 10,
+            tokensOut: 20,
+            reasoningTokens: null,
+            finish: 'stop',
+            answer: null,
+            problem: null,
+        },
+    ]);
+    assert.deepEqual(statuses(live), []);
+    for (let reply = 43; reply <= 59; reply += 2) {
+        await live.reply(at(reply));
+    }
+    assert.equal(live.view().calls.length, 20);
+});
+
+test('the story so far leads the reminder, is reused while the timeline and the scene stand, and is asked again on a change', async () => {
+    const { model, live } = rig();
+    await live.reply(at(41));
+    await live.force();
+    const ready = live.view().ready;
+    assert.equal(ready.startsWith(`${TOLD} Halvard is aged 34.`), true, ready);
+    assert.equal(tellings(model), 1);
+    const [input] = inputsOf(model, ScribeReminder.StoryPrompt);
+    assert.equal(input.startsWith('TIMELINE:\nDay 1 | The mill | They talk\n\nOPEN THREADS:\n- the debt to Brandt\n'), true, input);
+    assert.equal(input.endsWith('\n\nNOW:\nThey talk'), true, input);
+    live.outgoing('Go.');
+    live.sent();
+    await live.reply(at(43));
+    await live.force();
+    assert.equal(tellings(model), 1);
+    assert.equal(live.view().ready.startsWith(TOLD), true);
+    live.outgoing('Go.');
+    live.sent();
+    model.scene = TENT;
+    model.story = 'Orla came to the mill, then pitched a tent.';
+    await live.reply(at(45));
+    await live.force();
+    assert.equal(tellings(model), 2);
+    assert.equal(live.view().ready.startsWith('[Scribe] The story so far: Orla came to the mill, then pitched a tent. '), true);
+});
+
+test('no story so far, no reminder: the failure is said, retried on the schedule, and the reminder follows', async () => {
+    const { model, moment, live } = timed();
+    model.refusals.set(ScribeReminder.StoryPrompt, 'story offline');
+    await live.reply(at(41));
+    await live.force();
+    assert.equal(live.view().ready, null);
+    assert.equal(live.view().held, 'No reminder: the story so far could not be written: story offline');
+    assert.equal(live.outgoing('Go.'), 'Go.');
+    await moveTo(live, moment, 14999);
+    assert.equal(tellings(model), 1);
+    await moveTo(live, moment, 15000);
+    assert.equal(tellings(model), 2);
+    model.refusals.delete(ScribeReminder.StoryPrompt);
+    await moveTo(live, moment, 75000);
+    assert.equal(tellings(model), 3);
+    assert.equal(live.view().held, null);
+    assert.equal(live.view().ready.startsWith(TOLD), true);
+
+    const empty = timed();
+    empty.model.story = '  [ ] @ ';
+    await empty.live.reply(at(41));
+    await empty.live.force();
+    assert.equal(empty.live.view().ready, null);
+    assert.equal(empty.live.view().held, 'No reminder: the story so far could not be written: the answer held no story');
+    assert.deepEqual(plain(empty.live.view().failing), ['Story failing: the answer held no story']);
+    for (const value of [15000, 75000, 375000, 5000000]) {
+        await moveTo(empty.live, empty.moment, value);
+    }
+    assert.equal(tellings(empty.model), 1);
+});
+
+/**
+ * @return {Error}
+ */
+function cutOff() {
+    return Object.assign(new Error('answer was cut off; status 200; finish length'), {
+        retryable: false,
+        finish: 'length',
+        answer: 'w'.repeat(2000),
+    });
+}
+
+test('a cut-off answer is not retried: one paid call, and the header says so at once', async () => {
+    const checks = timed();
+    checks.model.refusals.set(ScribePedant.Prompt, cutOff);
+    await checks.live.reply(at(41));
+    assert.deepEqual(plain(checks.live.view().failing), ['Checks failing: answer was cut off; status 200; finish length']);
+    for (const value of [15000, 75000, 375000, 10000000]) {
+        await moveTo(checks.live, checks.moment, value);
+    }
+    assert.equal(countOf(checks.model, ScribePedant.Prompt), 1);
+
+    const scenes = timed();
+    scenes.model.refusals.set(ScribeScene.Prompt, cutOff);
+    await scenes.live.reply(at(41));
+    assert.deepEqual(plain(scenes.live.view().failing), ['Scene failing: answer was cut off; status 200; finish length']);
+    for (const value of [15000, 75000, 375000]) {
+        await moveTo(scenes.live, scenes.moment, value);
+    }
+    assert.equal(countOf(scenes.model, ScribeScene.Prompt), 1);
+
+    const told = timed();
+    told.model.refusals.set(ScribeReminder.StoryPrompt, cutOff);
+    await told.live.reply(at(41));
+    await told.live.force();
+    assert.deepEqual(plain(told.live.view().failing), ['Story failing: answer was cut off; status 200; finish length']);
+    for (const value of [15000, 75000, 375000, 10000000]) {
+        await moveTo(told.live, told.moment, value);
+    }
+    assert.equal(tellings(told.model), 1);
+    assert.equal(told.live.view().ready, null);
+    await told.live.force();
+    assert.equal(tellings(told.model), 1);
+});
+
+test('an edited latest reply makes the scene not current until it is read again', async () => {
+    const edited = variant(41, [['Narrator', 'Halvard falls dead at the mill door; Mirelle runs.']], null);
+    assert.equal(edited.id, at(41).id);
+    const reread = timed();
+    await reread.live.reply(at(41));
+    await reread.live.force();
+    const prepared = reread.live.view().ready;
+    assert.equal(prepared.includes('Halvard'), true, prepared);
+    const release = reread.model.holdSystem(ScribeScene.Prompt);
+    reread.model.scene = 'Day 1 | The mill | private | present: Mirelle, Orla | Halvard lies dead\nCHANGED: yes';
+    const pending = reread.live.reply(edited);
+    await ticks();
+    assert.equal(reread.live.lines().ready, null);
+    assert.equal(reread.live.outgoing('Go.'), 'Go.');
+    assert.equal(reread.live.view().held, 'No reminder: the latest reply #41 changed and is being read again.');
+    release();
+    await pending;
+    await ticks();
+    assert.equal(reread.live.view().now.fingerprint, edited.fingerprint);
+
+    const second = timed();
+    await second.live.reply(at(41));
+    await second.live.force();
+    const gate = second.model.holdSystem(ScribePedant.Prompt);
+    second.model.scene = 'Day 1 | The mill | private | present: Mirelle, Orla | Halvard lies dead\nCHANGED: yes';
+    const waiting = second.live.reply(edited);
+    await ticks();
+    assert.equal(second.live.lines().ready, null);
+    gate();
+    await waiting;
+    await ticks();
+    assert.equal(second.live.view().held, null);
+    const after = second.live.view().ready;
+    assert.equal(after === null || !after.includes('Halvard has'), true, after);
+});
+
+test('saving a key clears what failed and runs the failed calls at once', async () => {
+    const recovered = timed();
+    recovered.model.refusals.set(ScribeScene.Prompt, 'HTTP 401: User not found.');
+    await recovered.live.reply(at(41));
+    for (const value of [15000, 75000, 375000]) {
+        await moveTo(recovered.live, recovered.moment, value);
+    }
+    assert.equal(countOf(recovered.model, ScribeScene.Prompt), 4);
+    assert.deepEqual(plain(recovered.live.view().failing), ['Scene failing: HTTP 401: User not found.']);
+    await recovered.live.force();
+    recovered.model.refusals.delete(ScribeScene.Prompt);
+    await moveTo(recovered.live, recovered.moment, 400000);
+    assert.equal(countOf(recovered.model, ScribeScene.Prompt), 4);
+    recovered.live.rekey();
+    await ticks();
+    assert.equal(countOf(recovered.model, ScribeScene.Prompt), 5);
+    assert.deepEqual(plain(recovered.live.view().failing), []);
+    assert.equal(recovered.live.view().held, null);
+    assert.equal(recovered.live.outgoing('Go.').includes(TOLD), true);
+
+    const silent = timed();
+    silent.model.refusals.set(ScribeReminder.StoryPrompt, cutOff);
+    silent.model.refusals.set(ScribePedant.Prompt, cutOff);
+    await silent.live.reply(at(41));
+    await silent.live.force();
+    silent.model.refusals.clear();
+    silent.live.rekey();
+    await ticks();
+    assert.equal(countOf(silent.model, ScribePedant.Prompt), 2);
+    assert.equal(tellings(silent.model), 2);
+    assert.deepEqual(plain(silent.live.view().failing), []);
+    assert.equal(silent.live.view().ready.startsWith(TOLD), true);
+});
+
+test('fifty waiting retries are kept, none is pushed out, and a full list says the role is failing', async () => {
+    const { model, storage, live } = timed();
+    model.refusals.set(ScribePedant.Prompt, 'Pedant is offline');
+    const replies = story.filter((message) => message.fromPlayer !== true);
+    assert.equal(replies.length, 50);
+    for (const message of replies) {
+        await live.reply(message);
+    }
+    /**
+     * @return {object[]}
+     */
+    const kept = () => ScribeStore.read(storage, ROOM, ScribeStore.Kind.Live).retries;
+    assert.equal(kept().length, 50);
+    assert.deepEqual(plain(live.view().failing), []);
+    await live.reply(variant(59, [['Narrator', 'A fifty-first reply.']], 'OTHER-59'));
+    assert.equal(kept().length, 50);
+    assert.equal(kept().some((entry) => entry.id === 'MESSAGE-1'), true);
+    assert.deepEqual(plain(live.view().failing), ['Checks failing: Pedant is offline']);
+});
+
+test('the scene is current when it belongs to the latest Zeta reply, whatever player messages follow', () => {
+    const now = { message: at(41).id, fingerprint: at(41).fingerprint, position: 41 };
+    const twice = { messages: [...story.slice(0, 42), { ...at(42), id: 'MESSAGE-42-B', position: 43 }] };
+    assert.equal(ScribeLive.behind(now, twice), null);
+    const atPlayer = { message: 'MESSAGE-42-B', fingerprint: at(42).fingerprint, position: 43 };
+    assert.equal(ScribeLive.behind(atPlayer, twice), null);
+    const older = { message: at(39).id, fingerprint: at(39).fingerprint, position: 39 };
+    assert.equal(
+        ScribeLive.behind(older, twice),
+        'No reminder: the scene was last read at #39; the latest reply is #41.',
+    );
+    assert.equal(ScribeLive.behind(null, twice), 'No reminder: the scene has not been read yet; the latest reply is #41.');
+});
+
+test('one story call per key at a time', async () => {
+    const race = timed();
+    await race.live.reply(at(41));
+    race.live.outgoing('Go.');
+    race.live.sent();
+    const release = race.model.holdSystem(ScribeReminder.StoryPrompt);
+    const forcing = race.raw.force();
+    await ticks();
+    const arriving = race.live.reply(at(43));
+    await ticks();
+    release();
+    await forcing;
+    await arriving;
+    await ticks();
+    assert.equal(tellings(race.model), 1);
+    assert.equal(race.live.view().ready.startsWith(TOLD), true);
+});
+
+test('a room without its characters still gives the plot id, so the profile is read and only the story notice shows', async () => {
+    const { live, cast } = rig();
+    cast.storyFailures.push(
+        Object.assign(new Error('Zeta answered in an unexpected shape'), { status: 200, plotId: 'plot-9' }),
+    );
+    await live.reply(at(41));
+    assert.deepEqual(plain(cast.plots), ['plot-9']);
+    assert.equal(
+        live.view().notice,
+        "The story's characters could not be read, so every character counts as custom: Zeta answered in an unexpected shape",
+    );
+});
+
+test('a trimmed reminder marks as reminded only what it carried, on both paths', async () => {
+    const { model, live } = rig();
+    model.story = CROWDED;
+    await live.reply(at(41));
+    await live.force();
+    const ready = live.view().ready;
+    assert.equal(ready.includes('Halvard is aged 34.'), true, ready);
+    const story = `[Scribe] The story so far: ${CROWDED}`;
+    const player = 'x'.repeat(LIMIT - bytes(lineOf(story)) - 5);
+    const sent = live.outgoing(player);
+    assert.equal(sent, player + lineOf(story));
+    live.sent();
+    assert.equal(statuses(live).some(([, , status]) => status === 'Reminded'), false);
+
+    const framed = rig();
+    framed.model.story = CROWDED;
+    await framed.live.reply(at(41));
+    await framed.live.force();
+    const offered = framed.live.lines();
+    assert.equal(offered.ends.length > 0, true);
+    framed.live.went({ ready: offered.ready, suggestion: null, carried: story, crowded: false });
+    assert.equal(statuses(framed.live).some(([, , status]) => status === 'Reminded'), false);
+
+    const crowded = rig();
+    await crowded.live.reply(at(41));
+    await crowded.live.force();
+    crowded.live.went({ ready: null, suggestion: null, carried: null, crowded: true });
+    assert.equal(crowded.live.view().held, 'No reminder: your message leaves no room for it.');
+    const whole = crowded.live.lines();
+    crowded.live.went({ ready: whole.ready, suggestion: null, carried: whole.ready, crowded: false });
+    assert.equal(crowded.live.view().held, null);
+    assert.equal(statuses(crowded.live).some(([, , status]) => status === 'Reminded'), true);
+});
+
+test('a key save reruns only the scene, the story and the latest check, once', async () => {
+    const { model, live } = timed();
+    model.refusals.set(ScribePedant.Prompt, () => Object.assign(new Error('HTTP 402'), { retryable: false, status: 402 }));
+    for (const position of [41, 43, 45, 47, 49]) {
+        await live.reply(at(position));
+    }
+    assert.equal(countOf(model, ScribePedant.Prompt), 5);
+    assert.deepEqual(plain(live.view().failing), ['Checks failing: HTTP 402']);
+    live.rekey();
+    live.rekey();
+    await ticks();
+    assert.equal(countOf(model, ScribePedant.Prompt), 6);
+    assert.deepEqual(asked(model).filter((entry) => entry.startsWith('Pedant')).at(-1), 'Pedant:49');
+    assert.deepEqual(plain(live.view().failing), ['Checks failing: HTTP 402']);
+    model.refusals.delete(ScribePedant.Prompt);
+    live.rekey();
+    await ticks();
+    assert.equal(countOf(model, ScribePedant.Prompt), 7);
+    assert.deepEqual(plain(live.view().failing), []);
+    live.rekey();
+    await ticks();
+    assert.equal(countOf(model, ScribePedant.Prompt), 7);
+});
+
+test('only a failure with no answer is retried on the schedule; an unusable answer is parked at once', async () => {
+    const paid = timed();
+    paid.model.refusals.set(ScribePedant.Prompt, () =>
+        Object.assign(new Error('answer has no usable content; status 200; finish stop'), { retryable: true, status: 200 }),
+    );
+    await paid.live.reply(at(41));
+    for (const value of [15000, 75000, 375000]) {
+        await moveTo(paid.live, paid.moment, value);
+    }
+    assert.equal(countOf(paid.model, ScribePedant.Prompt), 1);
+    assert.deepEqual(plain(paid.live.view().failing), [
+        'Checks failing: answer has no usable content; status 200; finish stop',
+    ]);
+    const unpaid = timed();
+    unpaid.model.refusals.set(ScribePedant.Prompt, () =>
+        Object.assign(new Error('unexpected HTTP status; status 503'), { retryable: true, status: 503 }),
+    );
+    await unpaid.live.reply(at(41));
+    await moveTo(unpaid.live, unpaid.moment, 15000);
+    assert.equal(countOf(unpaid.model, ScribePedant.Prompt), 2);
+});
+
+test('an edit saved after the latest reply changed under the open box waits as a draft; prepared reminders still go', async () => {
+    const { model, live } = rig();
+    await live.reply(at(41));
+    await live.force();
+    const opened = live.view().latest;
+    assert.equal(opened.id, at(41).id);
+    model.scene = 'Day 1 | The mill | private | present: Mirelle, Orla | Halvard lies dead\nCHANGED: yes';
+    await live.reply(variant(41, [['Narrator', 'Halvard falls dead at the mill door.']], null));
+    live.edit('[Scribe] Halvard waits at the mill, alive.', true, opened);
+    assert.equal(live.view().edited, false);
+    assert.equal(live.view().draft, '[Scribe] Halvard waits at the mill, alive.');
+    assert.equal(live.view().held, 'Your edit was written before the latest reply; Save it again to send it.');
+    assert.equal(live.lines().ready === '[Scribe] Halvard waits at the mill, alive.', false);
+    await live.force();
+    assert.equal(live.view().forced, true);
+    const going = live.lines().ready;
+    assert.equal(typeof going === 'string' && going.startsWith(TOLD), true, going);
+    assert.equal(live.outgoing('Go.'), `Go.${lineOf(going)}`);
+    live.sent();
+    assert.equal(live.view().forced, false);
+    assert.equal(live.view().draft, '[Scribe] Halvard waits at the mill, alive.');
+    live.edit('[Scribe] Halvard waits at the mill, alive.', true, live.view().latest);
+    assert.equal(live.lines().ready, '[Scribe] Halvard waits at the mill, alive.');
+    assert.equal(live.view().draft, null);
+});
+
+test('a stored scene with no fingerprint is read again once, and then a reminder can go', async () => {
+    const halvard = state.subjects.find((subject) => subject.label === 'Halvard').id;
+    const old = {
+        message: 'MESSAGE-41',
+        position: 41,
+        day: 1,
+        place: 'The mill',
+        reach: 'Private',
+        present: [{ subject: halvard, label: 'Halvard' }],
+        summary: 'They talk',
+        changed: false,
+    };
+    const latest = at(41);
+    const storage = new FakeStorage();
+    ScribeStore.write(storage, ROOM, ScribeStore.Kind.Live, {
+        ...BARE,
+        now: old,
+        reminded: old,
+        forced: true,
+        seen: { id: latest.id, fingerprint: latest.fingerprint, position: 41, before: null },
+        edition: 1,
+    });
+    const { live, model } = rig({ messages: story.slice(0, 42), unread: story.slice(40, 42) }, storage);
+    live.view();
+    await ticks();
+    live.view();
+    await ticks();
+    assert.equal(countOf(model, ScribeScene.Prompt), 1);
+    assert.equal(countOf(model, ScribePedant.Prompt), 0);
+    assert.equal(live.view().now.fingerprint, at(42).fingerprint);
+    assert.equal(live.view().held, null);
+    assert.equal(live.view().ready.startsWith(TOLD), true);
+});
+
+test('a newer failed scene replaces the older scene retry, so one chain runs', async () => {
+    const { model, moment, live } = timed();
+    model.refusals.set(ScribeScene.Prompt, 'scene offline');
+    for (const position of [41, 43, 45, 47, 49]) {
+        await live.reply(at(position));
+    }
+    assert.equal(countOf(model, ScribeScene.Prompt), 5);
+    for (const value of [15000, 75000, 375000, 5000000]) {
+        await moveTo(live, moment, value);
+    }
+    assert.equal(countOf(model, ScribeScene.Prompt), 8);
+    assert.deepEqual(plain(live.view().failing), ['Scene failing: scene offline']);
+});
+
+test('a reminder or an edit saved by an older build is never sent: the reminder is made again, the edit waits', async () => {
+    const halvard = state.subjects.find((subject) => subject.label === 'Halvard').id;
+    const current = {
+        message: at(41).id,
+        fingerprint: at(41).fingerprint,
+        position: 41,
+        day: 4,
+        place: 'Guild Inn room',
+        reach: 'Private',
+        present: [{ subject: halvard, label: 'Halvard' }],
+        summary: 'They talk',
+        changed: false,
+    };
+    const old = '[Scribe] Day 4, "Guild Inn room", private. Present: Halvard. Of those here only Mirelle knows this.';
+    const storage = new FakeStorage();
+    ScribeStore.write(storage, ROOM, ScribeStore.Kind.Live, {
+        ...BARE,
+        now: current,
+        reminded: current,
+        ready: old,
+        led: [AGE],
+        basis: { revision: state.revision, first: [AGE], notes: ScribeLive.marked([]) },
+        sends: 6,
+        seen: { id: at(41).id, fingerprint: at(41).fingerprint, position: 41, before: null },
+        edition: 1,
+    });
+    const { live, model } = rig({ messages: story.slice(0, 41), unread: story.slice(40, 41) }, storage);
+    assert.equal(live.lines().ready, null);
+    assert.equal(live.outgoing('Go.'), 'Go.');
+    live.view();
+    await ticks();
+    const remade = live.view().ready;
+    assert.equal(remade.startsWith('[Scribe] The story so far: '), true, remade);
+    assert.equal(live.outgoing('Go.'), `Go.${lineOf(remade)}`);
+    assert.equal(tellings(model), 1);
+    const stored = ScribeStore.read(storage, ROOM, ScribeStore.Kind.Live);
+    assert.equal(typeof stored.basis.story, 'string');
+
+    const edits = new FakeStorage();
+    ScribeStore.write(edits, ROOM, ScribeStore.Kind.Live, { ...BARE, edited: old, edition: 1 });
+    const loaded = rig({ messages: story.slice(0, 41), unread: story.slice(40, 41) }, edits).live;
+    assert.equal(loaded.lines().ready, null);
+    assert.equal(loaded.view().edited, false);
+    assert.equal(loaded.view().draft, old);
+    assert.equal(loaded.view().held, 'Your edit was written before the latest reply; Save it again to send it.');
+    assert.equal(loaded.outgoing('Go.'), 'Go.');
 });

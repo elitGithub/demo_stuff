@@ -23,6 +23,7 @@ const ScribeSender = Object.freeze({
         FunctionType: 'function',
         Newline: '\n',
         NarratorLead: '@: ',
+        NoLength: 0,
         Box: 'textarea[name="message"]',
         SendButton: 'button[aria-label="Send"]',
         Modifiers: Object.freeze(['Shift', 'Control', 'Alt', 'Meta']),
@@ -38,38 +39,54 @@ const ScribeSender = Object.freeze({
 
     /**
      * @param {string} text
-     * @param {{ ready: string|null, suggestion: string|null }} lines
+     * @param {{ ready: string|null, suggestion: string|null, ends?: readonly number[] }} lines
      * @param {number} limit
-     * @return {Readonly<{ text: string, ready: boolean, suggestion: boolean }>}
+     * @return {Readonly<{ text: string, ready: boolean, suggestion: boolean, carried: string|null, crowded: boolean }>}
      */
     compose(text, lines, limit) {
         const settings = ScribeSender.Settings;
+        const ready = lines.ready;
         if (settings.Blank.test(text)) {
-            return Object.freeze({ text, ready: false, suggestion: false });
+            return Object.freeze({ text, ready: false, suggestion: false, carried: null, crowded: false });
         }
-        const chosen = { ready: lines.ready, suggestion: lines.suggestion };
+        const ends = ready !== null && Array.isArray(lines.ends) ? lines.ends : [];
+        const versions = ready === null ? [] : [ready];
+        for (const end of [...ends].reverse()) {
+            if (Number.isSafeInteger(end) && end > settings.NoLength && end < ready.length) {
+                versions.push(ready.slice(settings.NoLength, end));
+            }
+        }
         /**
+         * @param {string|null} carried
+         * @param {string|null} suggestion
          * @return {string}
          */
-        const whole = () => {
+        const whole = (carried, suggestion) => {
             let joined = text;
-            for (const line of [chosen.ready, chosen.suggestion]) {
+            for (const line of [carried, suggestion]) {
                 if (line !== null) {
                     joined += settings.Newline + settings.NarratorLead + line;
                 }
             }
             return joined;
         };
-        while (ScribeText.bytes(whole()) > limit) {
-            if (chosen.ready !== null) {
-                chosen.ready = null;
-            } else if (chosen.suggestion !== null) {
-                chosen.suggestion = null;
-            } else {
-                break;
+        let suggestion = lines.suggestion;
+        let carried = null;
+        for (const version of versions) {
+            if (carried === null && ScribeText.bytes(whole(version, suggestion)) <= limit) {
+                carried = version;
             }
         }
-        return Object.freeze({ text: whole(), ready: chosen.ready !== null, suggestion: chosen.suggestion !== null });
+        if (carried === null && suggestion !== null && ScribeText.bytes(whole(null, suggestion)) > limit) {
+            suggestion = null;
+        }
+        return Object.freeze({
+            text: whole(carried, suggestion),
+            ready: carried !== null,
+            suggestion: suggestion !== null,
+            carried,
+            crowded: ready !== null && carried === null,
+        });
     },
 
     /**

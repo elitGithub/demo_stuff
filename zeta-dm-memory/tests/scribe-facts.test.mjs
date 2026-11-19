@@ -1127,7 +1127,7 @@ test('threads open and close', () => {
         pick(4, 5),
     );
     assert.deepEqual(plain(second.state.threads.map((thread) => [thread.id, thread.closed])), [
-        ['T1', { how: 'the ledger was found', cite: 'MESSAGE-5' }],
+        ['T1', { how: 'the ledger was found', cite: 'MESSAGE-5', position: 5 }],
         ['T2', null],
     ]);
     const third = apply(
@@ -1143,9 +1143,15 @@ test('threads open and close', () => {
             text: 'the missing ledger',
             cite: 'MESSAGE-3',
             position: 3,
-            closed: { how: 'the ledger was found', cite: 'MESSAGE-5' },
+            closed: { how: 'the ledger was found', cite: 'MESSAGE-5', position: 5 },
         },
-        { id: 'T2', text: 'the broken seal', cite: 'MESSAGE-4', position: 4, closed: { how: '', cite: 'MESSAGE-6' } },
+        {
+            id: 'T2',
+            text: 'the broken seal',
+            cite: 'MESSAGE-4',
+            position: 4,
+            closed: { how: '', cite: 'MESSAGE-6', position: 6 },
+        },
     ]);
 });
 
@@ -1910,7 +1916,7 @@ test('threads keep story order and a close always counts', () => {
             text: 'the missing ledger',
             cite: 'MESSAGE-9',
             position: 9,
-            closed: { how: 'found', cite: 'MESSAGE-4' },
+            closed: { how: 'found', cite: 'MESSAGE-4', position: 4 },
         },
     ]);
 });
@@ -2293,4 +2299,123 @@ test('a relation to oneself is linked to oneself', () => {
     assert.equal(factSaying(second.state, 'doubts herself').status, 'Replaced');
     assert.equal(factSaying(second.state, 'trusts herself').target, kira.id);
     assert.deepEqual(plain(second.state.stale), []);
+});
+
+/**
+ * @param {string} line
+ * @param {*} earlierCite
+ * @return {object}
+ */
+function contradiction(line, earlierCite = undefined) {
+    const [operation] = ScribeAnswer.parse(answer({ CONTRADICTIONS: [line] })).operations;
+    return earlierCite === undefined ? operation : { ...operation, earlierCite };
+}
+
+test('a contradiction is filed only with its earlier message named', () => {
+    const log = ScribeLog.create();
+    const kept = contradiction('#12 "the gate stood open" | #3 "the gate was barred" | open or barred', 'MESSAGE-3');
+    const operations = [
+        kept,
+        contradiction('#12 "the gate stood open" | #4 "the bar was down" | open or down'),
+        contradiction('#12 "the gate stood open" | #4 "the bar was down" | open or down', 4),
+        contradiction('#12 "the gate stood open" | #4 "the bar was down" | open or down', null),
+        contradiction('#13 "the gate stood open" | #4 "the bar was down" | not in the stretch', 'MESSAGE-4'),
+    ];
+    const result = ScribeLog.append(log, ScribeReplay.run(log, storyOrder), operations, {
+        messages: pick(10, 11, 12),
+        origin: 'Story',
+    });
+    assert.deepEqual(
+        plain(result.refused),
+        operations.slice(1).map((operation) => ({ operation: plain(operation), reason: 'Citation' })),
+    );
+    assert.deepEqual(plain(result.entry.operations), [
+        {
+            type: 'Contradiction',
+            cite: 'MESSAGE-12',
+            position: 12,
+            earlier: 'MESSAGE-3',
+            earlierPosition: 3,
+            said: 'the gate stood open',
+            before: 'the gate was barred',
+            why: 'open or barred',
+        },
+    ]);
+    assert.deepEqual(plain(result.entry.messageIds), ['MESSAGE-10', 'MESSAGE-11', 'MESSAGE-12']);
+});
+
+test('contradictions replay in story order, once each, with the current numbers', () => {
+    const log = ScribeLog.create();
+    const gate = contradiction('#20 "the gate stood open" | #3 "the gate was barred" | open or barred', 'MESSAGE-3');
+    const bell = contradiction('#20 "the bell was silent" | #2 "the bell rang" | rang or silent', 'MESSAGE-2');
+    const boat = contradiction('#25 "the boat sank" | #9 "the boat sailed" | sank or sailed', 'MESSAGE-9');
+    for (const [operations, messages] of [
+        [[boat], pick(25)],
+        [[gate, bell, gate], pick(20)],
+    ]) {
+        const stretch = { messages, origin: 'Story' };
+        const result = ScribeLog.append(log, ScribeReplay.run(log, storyOrder), operations, stretch);
+        assert.deepEqual(plain(result.refused), []);
+    }
+    /**
+     * @param {string[]} order
+     * @return {Array<[string, number, string, number, string, boolean]>}
+     */
+    const listed = (order) =>
+        plain(
+            ScribeReplay.run(log, order).contradictions.map((item) => [
+                item.cite,
+                item.position,
+                item.earlier,
+                item.earlierPosition,
+                item.said,
+                item.dismissed,
+            ]),
+        );
+    assert.deepEqual(listed(storyOrder), [
+        ['MESSAGE-20', 20, 'MESSAGE-2', 2, 'the bell was silent', false],
+        ['MESSAGE-20', 20, 'MESSAGE-3', 3, 'the gate stood open', false],
+        ['MESSAGE-25', 25, 'MESSAGE-9', 9, 'the boat sank', false],
+    ]);
+    assert.deepEqual(listed(storyOrder.filter((id) => id !== 'MESSAGE-1')), [
+        ['MESSAGE-20', 19, 'MESSAGE-2', 1, 'the bell was silent', false],
+        ['MESSAGE-20', 19, 'MESSAGE-3', 2, 'the gate stood open', false],
+        ['MESSAGE-25', 24, 'MESSAGE-9', 8, 'the boat sank', false],
+    ]);
+    assert.deepEqual(listed(storyOrder.filter((id) => id !== 'MESSAGE-3')), [
+        ['MESSAGE-20', 19, 'MESSAGE-2', 2, 'the bell was silent', false],
+        ['MESSAGE-20', 19, 'MESSAGE-3', 3, 'the gate stood open', false],
+        ['MESSAGE-25', 24, 'MESSAGE-9', 8, 'the boat sank', false],
+    ]);
+    assert.deepEqual(listed(storyOrder.filter((id) => id !== 'MESSAGE-25')), [
+        ['MESSAGE-20', 20, 'MESSAGE-2', 2, 'the bell was silent', false],
+        ['MESSAGE-20', 20, 'MESSAGE-3', 3, 'the gate stood open', false],
+    ]);
+    const state = ScribeReplay.run(log, storyOrder);
+    assert.deepEqual(
+        plain(state.contradictions.map((item) => item.id)),
+        [
+            ['MESSAGE-20', 'MESSAGE-2', 'the bell was silent', 'the bell rang'],
+            ['MESSAGE-20', 'MESSAGE-3', 'the gate stood open', 'the gate was barred'],
+            ['MESSAGE-25', 'MESSAGE-9', 'the boat sank', 'the boat sailed'],
+        ].map((parts) => JSON.stringify(parts)),
+    );
+    assert.equal(state.contradictions[2].why, 'sank or sailed');
+    assertFrozenDeep(state.contradictions, 'contradictions');
+    assertJsonSafe(state.contradictions, 'contradictions');
+    const gateId = state.contradictions[1].id;
+    const ruling = ScribeLog.rule(log, state, { type: 'DismissContradiction', contradiction: gateId });
+    assert.deepEqual(plain(listed(storyOrder).map((row) => row[5])), [false, true, false]);
+    assert.deepEqual(plain(listed(storyOrder.filter((id) => id !== 'MESSAGE-1')).map((row) => row[5])), [
+        false,
+        true,
+        false,
+    ]);
+    assert.equal(ScribeLog.revoke(log, ruling.sequence), ruling);
+    assert.deepEqual(plain(listed(storyOrder).map((row) => row[5])), [false, false, false]);
+    const stale = ScribeReplay.run(log, storyOrder);
+    ScribeLog.rule(log, stale, { type: 'DismissContradiction', contradiction: gateId });
+    assert.throws(() => ScribeLog.rule(log, stale, { type: 'DismissContradiction', contradiction: gateId }), {
+        message: 'StaleState',
+    });
 });

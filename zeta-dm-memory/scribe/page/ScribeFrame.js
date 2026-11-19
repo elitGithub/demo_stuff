@@ -29,12 +29,14 @@ const ScribeFrame = Object.freeze({
         ShortestToken: 16,
         LongestToken: 200,
         Nearest: 0,
+        NoLength: 0,
         ObjectType: 'object',
         StringType: 'string',
         BooleanType: 'boolean',
         NothingOffered: Object.freeze({
             ready: null,
             suggestion: null,
+            ends: Object.freeze([]),
         }),
     }),
 
@@ -105,7 +107,22 @@ const ScribeFrame = Object.freeze({
         if (!ScribeFrame.counted(seq) || !keyed || !lines) {
             return null;
         }
-        return Object.freeze({ [bridge.TagName]: bridge.Tag, kind: bridge.Kind.Arm, seq, token, ready, suggestion });
+        const given = Array.isArray(data.ends) && ready !== null ? data.ends : [];
+        const ordered = given.every(
+            /**
+             * @param {*} end
+             * @param {number} index
+             * @return {boolean}
+             */
+            (end, index) =>
+                Number.isSafeInteger(end) &&
+                end > settings.NoLength &&
+                end < ready.length &&
+                (index === settings.NoLength || end > given[index - 1]),
+        );
+        const ends = Object.freeze(ordered ? [...given] : []);
+        const kind = bridge.Kind.Arm;
+        return Object.freeze({ [bridge.TagName]: bridge.Tag, kind, seq, token, ready, suggestion, ends });
     },
 
     /**
@@ -132,7 +149,17 @@ const ScribeFrame = Object.freeze({
         if (!ScribeFrame.counted(seq) || !flags) {
             return null;
         }
-        return Object.freeze({ [bridge.TagName]: bridge.Tag, kind: bridge.Kind.Sent, seq, ready, suggestion });
+        const cut = ready && Number.isSafeInteger(data.cut) && data.cut > settings.NoLength ? data.cut : null;
+        const crowded = !ready && data.crowded === true;
+        return Object.freeze({
+            [bridge.TagName]: bridge.Tag,
+            kind: bridge.Kind.Sent,
+            seq,
+            ready,
+            suggestion,
+            cut,
+            crowded,
+        });
     },
 
     /**
@@ -175,7 +202,7 @@ const ScribeFrame = Object.freeze({
                 return;
             }
             frame.seq = arm.seq;
-            frame.offer = Object.freeze({ ready: arm.ready, suggestion: arm.suggestion });
+            frame.offer = Object.freeze({ ready: arm.ready, suggestion: arm.suggestion, ends: arm.ends });
             window.clearInterval(frame.repeat);
             frame.repeat = null;
         };
@@ -193,6 +220,8 @@ const ScribeFrame = Object.freeze({
                 seq: frame.seq,
                 ready: made.ready ? offer.ready : null,
                 suggestion: made.suggestion ? offer.suggestion : null,
+                cut: made.carried === null || made.carried === offer.ready ? null : made.carried.length,
+                crowded: made.crowded,
             });
             return made.text;
         };
@@ -210,11 +239,15 @@ const ScribeFrame = Object.freeze({
                 seq: went.seq,
                 ready: went.ready !== null,
                 suggestion: went.suggestion !== null,
+                cut: went.cut,
+                crowded: went.crowded,
             });
             const offer = frame.offer;
+            const kept = offer.ready === went.ready ? null : offer.ready;
             frame.offer = Object.freeze({
-                ready: offer.ready === went.ready ? null : offer.ready,
+                ready: kept,
                 suggestion: offer.suggestion === went.suggestion ? null : offer.suggestion,
+                ends: kept === null ? Object.freeze([]) : offer.ends,
             });
         };
         const hook = ScribeSender.attach({ document, window, outgoing, sent, ignore: null });

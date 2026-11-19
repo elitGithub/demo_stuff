@@ -34,11 +34,13 @@ const ScribeBoot = Object.freeze({
             Pedant: 'pedant',
         }),
         Budget: 'budget',
+        NotesOpen: '\n\nOPERATOR NOTES:\n',
         Parts: Object.freeze([
             Object.freeze({ name: 'sender', ending: 'detach' }),
             Object.freeze({ name: 'panel', ending: 'unmount' }),
             Object.freeze({ name: 'live', ending: 'close' }),
             Object.freeze({ name: 'keeper', ending: 'close' }),
+            Object.freeze({ name: 'cloud', ending: 'close' }),
         ]),
         IfAvailable: Object.freeze({ ifAvailable: true }),
         Once: Object.freeze({ once: true }),
@@ -53,7 +55,7 @@ const ScribeBoot = Object.freeze({
         SentWindowMs: 10000,
         TokenShortest: 16,
         TokenLongest: 200,
-        NothingOffered: Object.freeze({ ready: null, suggestion: null }),
+        NothingOffered: Object.freeze({ ready: null, suggestion: null, ends: Object.freeze([]) }),
         Capture: true,
         Hidden: 'hidden',
         ResponseType: 'text',
@@ -107,6 +109,7 @@ const ScribeBoot = Object.freeze({
             NoBridge: 'The bridge to the chat frame could not be keyed: ',
             NoToken: 'no usable token was made',
             NoStore: 'the token could not be read, made or saved',
+            NotSynced: 'The book could not be synced: ',
         }),
     }),
 
@@ -373,7 +376,7 @@ const ScribeBoot = Object.freeze({
      * @param {string} system
      * @param {string} user
      * @param {{ amount: number, settled: boolean }} bill
-     * @return {Promise<string>}
+     * @return {Promise<{ text: string, tokensIn: number, tokensOut: number, reasoningTokens: number|null, finish: string }>}
      * @throws {Error}
      */
     async call(session, role, system, user, bill) {
@@ -476,6 +479,9 @@ const ScribeBoot = Object.freeze({
                 },
             );
         };
+        const notes = session.cloud === null ? null : session.cloud.notes();
+        const noted = typeof notes === settings.StringType && notes !== settings.Nothing;
+        const told = noted ? `${user}${settings.NotesOpen}${notes}` : user;
         const answer = await ScribeGateway.retry(
             /**
              * @return {Promise<object>}
@@ -486,14 +492,14 @@ const ScribeBoot = Object.freeze({
                     key,
                     model,
                     system,
-                    user,
+                    user: told,
                     maxTokens: settings.MaxTokens[role],
                     sleep: pause,
                     timeoutMs,
                 }),
             { attempts: settings.Attempts, pauseMs: settings.PauseMs, sleep: pause },
         );
-        return answer.text;
+        return answer;
     },
 
     /**
@@ -508,9 +514,9 @@ const ScribeBoot = Object.freeze({
         const bill = { amount: ScribeBoot.Settings.NoSpending, settled: false };
         ScribeBoot.solvent(session);
         try {
-            const text = await ScribeBoot.call(session, role, system, user, bill);
+            const answer = await ScribeBoot.call(session, role, system, user, bill);
             bill.settled = true;
-            return { text, cost: bill.amount };
+            return { text: answer.text, cost: bill.amount };
         } catch (error) {
             bill.settled = true;
             ScribeBoot.charge(session, bill.amount);
@@ -523,7 +529,7 @@ const ScribeBoot = Object.freeze({
      * @param {string} role
      * @param {string} system
      * @param {string} user
-     * @return {Promise<{ text: string, cost: number }>}
+     * @return {Promise<{ text: string, cost: number, tokensIn: number, tokensOut: number, reasoningTokens: number|null, finish: string }>}
      * @throws {Error}
      */
     async counted(session, role, system, user) {
@@ -531,13 +537,24 @@ const ScribeBoot = Object.freeze({
         const environment = session.boot.environment;
         ScribeBoot.solvent(session);
         const budget = ScribeBoot.setting(session, settings.Budget);
-        if (ScribeStore.spent(environment.storage, session.roomId, environment.clock.today()) >= budget) {
+        const today = environment.clock.today();
+        const spent =
+            ScribeStore.spent(environment.storage, session.roomId, today) +
+            ScribeStore.others(environment.storage, session.roomId, today);
+        if (spent >= budget) {
             throw new Error(settings.Messages.Spent);
         }
         const bill = { amount: settings.NoSpending, settled: false };
         try {
-            const text = await ScribeBoot.call(session, role, system, user, bill);
-            return { text, cost: bill.amount };
+            const answer = await ScribeBoot.call(session, role, system, user, bill);
+            return {
+                text: answer.text,
+                cost: bill.amount,
+                tokensIn: answer.tokensIn,
+                tokensOut: answer.tokensOut,
+                reasoningTokens: answer.reasoningTokens,
+                finish: answer.finish,
+            };
         } finally {
             bill.settled = true;
             ScribeBoot.charge(session, bill.amount);
@@ -847,7 +864,12 @@ const ScribeBoot = Object.freeze({
         }
         session.live.view();
         const lines = session.live.lines();
-        return Object.freeze({ ready: ScribeBoot.fit(lines.ready), suggestion: ScribeBoot.fit(lines.suggestion) });
+        const ready = ScribeBoot.fit(lines.ready);
+        return Object.freeze({
+            ready,
+            suggestion: ScribeBoot.fit(lines.suggestion),
+            ends: ready === null ? ScribeBoot.Settings.NothingOffered.ends : lines.ends,
+        });
     },
 
     /**
@@ -867,6 +889,7 @@ const ScribeBoot = Object.freeze({
             token: boot.bridge,
             ready: lines.ready,
             suggestion: lines.suggestion,
+            ends: [...lines.ends],
         };
         const clone = boot.environment.clone;
         try {
@@ -938,7 +961,13 @@ const ScribeBoot = Object.freeze({
         );
         const live = session.live;
         if (kept !== undefined && kept.session === session && live !== null) {
-            const lines = Object.freeze({ ready: report.ready ? kept.ready : null, suggestion: report.suggestion ? kept.suggestion : null });
+            const ready = report.ready ? kept.ready : null;
+            const lines = Object.freeze({
+                ready,
+                suggestion: report.suggestion ? kept.suggestion : null,
+                carried: ready !== null && report.cut !== null ? ready.slice(0, report.cut) : ready,
+                crowded: report.crowded,
+            });
             ScribeBoot.attempt(
                 boot,
                 ScribeBoot.Settings.Messages.NotTold,
@@ -1051,6 +1080,15 @@ const ScribeBoot = Object.freeze({
         );
         ScribeBoot.contest(session);
         ScribeBoot.arm(session.boot, []);
+        const cloud = session.cloud;
+        ScribeBoot.attempt(
+            session.boot,
+            ScribeBoot.Settings.Messages.NotSynced,
+            /**
+             * @return {Promise<void>}
+             */
+            () => cloud.tick(),
+        );
         ScribeBoot.attempt(
             session.boot,
             ScribeBoot.Settings.Messages.NotChecked,
@@ -1059,6 +1097,40 @@ const ScribeBoot = Object.freeze({
              */
             () => keeper.tick(),
         );
+    },
+
+    /**
+     * @param {object} session
+     * @return {void}
+     */
+    sync(session) {
+        const cloud = session.cloud;
+        if (cloud === null || session.closed) {
+            return;
+        }
+        ScribeBoot.attempt(
+            session.boot,
+            ScribeBoot.Settings.Messages.NotSynced,
+            /**
+             * @return {Promise<void>}
+             */
+            () => cloud.stir(),
+        );
+    },
+
+    /**
+     * @param {object} session
+     * @return {boolean}
+     * @throws {Error}
+     */
+    chosen(session) {
+        if (session.locking) {
+            return session.reader;
+        }
+        const storage = session.boot.environment.storage;
+        const name = ScribeStore.name(ScribeStore.Settings.Types.Claim, ScribeStore.room(session.roomId));
+        const held = ScribeStore.claimOf(ScribeStore.fetch(storage, name));
+        return held !== null && held.tabId === session.boot.environment.tabId;
     },
 
     /**
@@ -1461,6 +1533,62 @@ const ScribeBoot = Object.freeze({
              * @return {Promise<void>}
              */
             const pause = (milliseconds) => ScribeBoot.pause(session, milliseconds);
+            session.cloud = ScribeCloud.open({
+                storage: environment.storage,
+                roomId: session.roomId,
+                notesRoom: environment.pageWindow.location.pathname,
+                xmlHttpRequest: environment.xmlHttpRequest,
+                clock: environment.clock,
+                random: environment.random,
+
+                /**
+                 * @param {number} milliseconds
+                 * @param {Function} action
+                 * @return {void}
+                 */
+                later: (milliseconds, action) => {
+                    ScribeBoot.later(session, milliseconds, action, null);
+                },
+
+                /**
+                 * @return {boolean}
+                 */
+                chosen: () => ScribeBoot.chosen(session),
+
+                /**
+                 * @return {boolean}
+                 */
+                reader: () => session.keeper !== null && session.keeper.view().reader === true,
+
+                /**
+                 * @return {boolean}
+                 */
+                busy: () => session.keeper !== null && (session.keeper.view().busy ?? null) !== null,
+
+                /**
+                 * @return {boolean}
+                 */
+                reading: () => ScribeBoot.reading(session),
+
+                /**
+                 * @return {void}
+                 */
+                notify: () => {
+                    const keeper = session.keeper;
+                    if (session.closed || keeper === null) {
+                        return;
+                    }
+                    ScribeBoot.redraw(session);
+                    ScribeBoot.attempt(
+                        boot,
+                        messages.NotChecked,
+                        /**
+                         * @return {Promise<void>}
+                         */
+                        () => keeper.tick(),
+                    );
+                },
+            });
             const options = {
                 storage: environment.storage,
                 roomId: session.roomId,
@@ -1518,10 +1646,16 @@ const ScribeBoot = Object.freeze({
                     }
                     ScribeBoot.redraw(session);
                     ScribeBoot.arm(boot, []);
+                    ScribeBoot.sync(session);
                     if (session.wanted) {
                         ScribeBoot.contest(session);
                     }
                 },
+
+                /**
+                 * @return {boolean}
+                 */
+                lease: () => session.cloud !== null && session.cloud.leads(),
             };
             if (session.locking) {
                 /**
@@ -1562,10 +1696,11 @@ const ScribeBoot = Object.freeze({
                 story: () => ZetaSource.story({ fetch, token: ScribeBoot.token(boot), roomId: session.roomId, pause }),
 
                 /**
-                 * @return {Promise<string>}
+                 * @param {string|null} plotId
+                 * @return {Promise<string|null>}
                  */
-                profile: () =>
-                    ZetaSource.profile({ fetch, token: ScribeBoot.token(boot), roomId: session.roomId, pause }),
+                profile: (plotId) =>
+                    ZetaSource.profile({ fetch, token: ScribeBoot.token(boot), roomId: session.roomId, pause }, plotId),
 
                 /**
                  * @return {void}
@@ -1573,6 +1708,7 @@ const ScribeBoot = Object.freeze({
                 notify: () => {
                     ScribeBoot.redraw(session);
                     ScribeBoot.arm(boot, []);
+                    ScribeBoot.sync(session);
                 },
             });
             session.live = live;
@@ -1592,6 +1728,7 @@ const ScribeBoot = Object.freeze({
                 document: environment.document,
                 keeper,
                 live,
+                cloud: session.cloud,
                 storage: environment.storage,
                 confirm: environment.confirm,
                 download: environment.download,
@@ -1625,6 +1762,15 @@ const ScribeBoot = Object.freeze({
             );
             session.ticking = true;
             ScribeBoot.arm(boot, ScribeBoot.targets(boot));
+            const cloud = session.cloud;
+            ScribeBoot.attempt(
+                boot,
+                messages.NotSynced,
+                /**
+                 * @return {Promise<void>}
+                 */
+                () => cloud.tick(),
+            );
         } catch (error) {
             const abandoned = session.closed;
             ScribeBoot.close(session);
@@ -1695,6 +1841,7 @@ const ScribeBoot = Object.freeze({
                     resting: false,
                     warned: false,
                     wanted: false,
+                    cloud: null,
                     keeper: null,
                     live: null,
                     panel: null,
@@ -1731,7 +1878,7 @@ const ScribeBoot = Object.freeze({
     },
 
     /**
-     * @param {{ pageWindow: object, document: object, storage: object, xmlHttpRequest: Function, exporter: Function|null, clone: Function|null, timers: { setTimeout: Function, clearTimeout: Function, setInterval: Function, clearInterval: Function }, clock: { now: () => number, today: () => string }, tabId: string, locks: object|null, confirm: (text: string) => boolean, download: (name: string, text: string) => void, log: (text: string) => void }} environment
+     * @param {{ pageWindow: object, document: object, storage: object, xmlHttpRequest: Function, exporter: Function|null, clone: Function|null, timers: { setTimeout: Function, clearTimeout: Function, setInterval: Function, clearInterval: Function }, clock: { now: () => number, today: () => string }, tabId: string, locks: object|null, confirm: (text: string) => boolean, download: (name: string, text: string) => void, log: (text: string) => void, random: () => string, menu: (label: string, action: Function) => void, prompt: (text: string) => string|null, alert: (text: string) => void }} environment
      * @return {Readonly<{ stop: () => void }>}
      */
     start(environment) {
@@ -1809,6 +1956,40 @@ const ScribeBoot = Object.freeze({
         environment.document.addEventListener(settings.VisibilityEvent, visibility);
         boot.visibility = visibility;
         ScribeBoot.keyed(boot);
+        const cloudWords = ScribeCloud.Settings;
+        environment.menu(
+            cloudWords.Menu,
+            /**
+             * @return {void}
+             */
+            () => {
+                ScribeBoot.attempt(
+                    boot,
+                    messages.NotSynced,
+                    /**
+                     * @return {void}
+                     * @throws {Error}
+                     */
+                    () => {
+                        const key = environment.prompt(cloudWords.Prompt);
+                        if (key === null || key === undefined) {
+                            return;
+                        }
+                        if (!ScribeCloud.validKey(key)) {
+                            environment.alert(cloudWords.BadKey);
+                            return;
+                        }
+                        if (key === ScribeStore.cloudKey(environment.storage)) {
+                            return;
+                        }
+                        ScribeStore.setCloudKey(environment.storage, key);
+                        if (boot.session !== null && !boot.session.closed) {
+                            ScribeBoot.askTick(boot.session);
+                        }
+                    },
+                );
+            },
+        );
         boot.request = ScribeBoot.request(environment.xmlHttpRequest);
         if (boot.watcher !== null) {
             boot.watcher.onTraffic(

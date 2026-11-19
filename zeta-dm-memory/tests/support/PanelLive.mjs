@@ -92,6 +92,13 @@ export default class PanelLive {
     }
 
     /**
+     * @return {void}
+     */
+    rekey() {
+        this.note('rekey', []);
+    }
+
+    /**
      * @param {string} text
      * @param {boolean|null} shown
      * @return {void}

@@ -27,8 +27,12 @@ export default class WholeTab {
 
     static Inputs = Object.freeze(['search', 'scene', 'note']);
 
+    static WorkerOrigin = 'https://zeta-dm-memory.elit1989.workers.dev';
+
+    static Callbacks = Object.freeze(['onload', 'onerror', 'ontimeout', 'onabort']);
+
     /**
-     * @param {{ name: string, tabId: string, packed: string, clock: import('./FakeTimers.mjs').default, storage: import('./FakeStorage.mjs').default, site: WholeSite, model: import('./WholeModel.mjs').default, locks: import('./FakeLocks.mjs').default|null, path: string, width?: number, query?: boolean, layout?: string, origin?: string, posts: object[] }} options
+     * @param {{ name: string, tabId: string, packed: string, clock: import('./FakeTimers.mjs').default, storage: import('./FakeStorage.mjs').default, site: WholeSite, model: import('./WholeModel.mjs').default, worker?: import('./FakeScribeWorker.mjs').default|null, locks: import('./FakeLocks.mjs').default|null, path: string, width?: number, query?: boolean, layout?: string, origin?: string, posts: object[] }} options
      */
     constructor(options) {
         this.name = options.name;
@@ -38,6 +42,13 @@ export default class WholeTab {
         this.storage = options.storage;
         this.site = options.site;
         this.model = options.model;
+        this.worker = options.worker ?? null;
+        this.cut = false;
+        this.unanswered = 0;
+        this.menus = [];
+        this.typed = [];
+        this.prompts = [];
+        this.alerts = [];
         this.locks = options.locks;
         this.posts = options.posts;
         this.layout = options.layout ?? 'frame';
@@ -294,6 +305,40 @@ export default class WholeTab {
     }
 
     /**
+     * @param {object} details
+     * @return {{ abort: () => void }}
+     */
+    route(details) {
+        if (this.worker === null || !String(details.url).startsWith(`${WholeTab.WorkerOrigin}/`)) {
+            return this.model.request(this, details);
+        }
+        if (this.cut) {
+            this.unanswered++;
+            return { abort: () => undefined };
+        }
+        const living = { ...details };
+        for (const name of WholeTab.Callbacks) {
+            living[name] = (response) => {
+                if (!this.dead) {
+                    details[name](response);
+                }
+            };
+        }
+        return this.worker.request(living);
+    }
+
+    /**
+     * @param {string} key
+     * @return {void}
+     */
+    setDmKey(key) {
+        this.typed.push(key);
+        for (const menu of this.menus.filter((entry) => entry.label === 'Set DM API key')) {
+            menu.action();
+        }
+    }
+
+    /**
      * @param {boolean} shown
      * @return {void}
      */
@@ -336,8 +381,12 @@ export default class WholeTab {
             }),
             GM_listValues: WholeTab.counted(calls, 'GM_listValues', () => storage.list()),
             GM_xmlhttpRequest: WholeTab.counted(calls, 'GM_xmlhttpRequest', (details) =>
-                top ? this.model.request(this, details) : { abort: () => undefined },
+                top ? this.route(details) : { abort: () => undefined },
             ),
+            GM_registerMenuCommand: WholeTab.counted(calls, 'GM_registerMenuCommand', (label, action) => {
+                this.menus.push({ label, action });
+                return this.menus.length;
+            }),
             setTimeout: (callback, delay) => timers.setTimeout(callback, delay),
             clearTimeout: (id) => {
                 timers.clearTimeout(id);
@@ -353,6 +402,13 @@ export default class WholeTab {
                 confirm: (text) => {
                     this.questions.push(String(text));
                     return this.confirming;
+                },
+                prompt: (text) => {
+                    this.prompts.push(String(text));
+                    return this.typed.length > 0 ? this.typed.shift() : null;
+                },
+                alert: (text) => {
+                    this.alerts.push(String(text));
                 },
             },
             Date: this.dates(),

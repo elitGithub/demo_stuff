@@ -21,7 +21,7 @@ function load(core, page) {
     return loaded;
 }
 
-const { ScribeText, ScribeIntake, ScribeAnswer, ScribeLog, ScribeReplay, ScribeKnowledge, ScribeReminder } = load(
+const { ScribeText, ScribeIntake, ScribeAnswer, ScribeLog, ScribeReplay, ScribeKnowledge, ScribeReminder, ScribeSender } = load(
     [
         'ScribeText',
         'ScribeCategory',
@@ -32,7 +32,7 @@ const { ScribeText, ScribeIntake, ScribeAnswer, ScribeLog, ScribeReplay, ScribeK
         'ScribeKnowledge',
         'ScribeAnalyzer',
     ],
-    ['ScribePedant', 'ScribeReminder'],
+    ['ScribePedant', 'ScribeReminder', 'ScribeSender'],
 );
 
 const builder = new CampaignBuilder('Halvard');
@@ -298,7 +298,7 @@ function assertFramed(text) {
     assert.equal(ScribeIntake.own(text), true, text);
     assert.equal(/[\r\n\u2028\u2029]/.test(text), false, text);
     assert.equal(/[\[\]@]/.test(text.slice(LEAD.length).normalize('NFKC')), false, text);
-    assert.equal(ScribeText.bytes(text) <= 1000, true, text);
+    assert.equal(Array.from(text).length <= 3000, true, text);
 }
 
 /**
@@ -720,20 +720,23 @@ test('the cap drops places, the job, looks last first, filed facts, secrets, wea
     assert.deepEqual(plain(whole.led), [age]);
     const gone = [];
     let longest = 0;
-    for (let pad = 0; pad <= 198; pad++) {
-        const text = `30${deseret.repeat(pad)}`;
-        const facts = state.facts.map((fact) => (fact.id === age ? { ...fact, text } : fact));
-        const result = composed({ ...state, facts }, room, { notes, first: [age] });
+    const opening = '[Scribe] The story so far: ';
+    const correction = ' Mirelle is aged 30.';
+    const widest = 3000 - Array.from(opening).length - Array.from(correction).length;
+    const narrowest = 3000 - Array.from(whole.text).length - Array.from(opening).length;
+    for (let size = narrowest; size <= widest; size++) {
+        const story = `${deseret.repeat(size - 1)}.`;
+        const result = composed(state, room, { notes, first: [age], story });
         assertFramed(result.text);
-        assert.deepEqual(plain(result.led), [age], String(pad));
-        assert.equal(result.text.startsWith(`[Scribe] Mirelle is aged 30${deseret.repeat(pad)}. `), true, String(pad));
-        longest = Math.max(longest, ScribeText.bytes(result.text));
+        assert.deepEqual(plain(result.led), [age], String(size));
+        assert.equal(result.text.startsWith(`${opening}${story}${correction}`), true, String(size));
+        longest = Math.max(longest, Array.from(result.text).length);
         for (const marker of order) {
             const here = result.text.includes(marker);
             if (!here && !gone.includes(marker)) {
                 gone.push(marker);
             }
-            assert.equal(here, !gone.includes(marker), `${marker} came back at ${pad}`);
+            assert.equal(here, !gone.includes(marker), `${marker} came back at ${size}`);
         }
         for (const person of ['Mirelle', 'Isolde', 'Brandt']) {
             const marker = `look${person.slice(0, 3).toLowerCase()}`;
@@ -743,15 +746,19 @@ test('the cap drops places, the job, looks last first, filed facts, secrets, wea
             }
         }
     }
-    assert.deepEqual(gone, order.slice(0, 10));
-    assert.equal(longest > 990, true, String(longest));
+    assert.deepEqual(gone, order);
+    assert.equal(longest, 3000);
+    const crowded = `${deseret.repeat(widest)}.`;
+    const storyOnly = composed(state, room, { notes, first: [age], story: crowded });
+    assert.equal(storyOnly.text, `${opening}${crowded}`);
+    assert.deepEqual(plain(storyOnly.led), []);
     const again = composed(state, room, { notes, first: [age] });
     assert.deepEqual(plain(again), plain(whole));
     const over = state.facts.map((fact) => (fact.id === age ? { ...fact, text: `30${deseret.repeat(199)}` } : fact));
     assert.deepEqual(plain(composed({ ...state, facts: over }, room, { notes, first: [age] }).led), []);
 });
 
-test('the cap is exact at 1,000 bytes, multi-byte characters included', () => {
+test('the cap is exact at 3,000 characters, an astral character counted once', () => {
     const job = deseret.repeat(200);
     const state = book(
         {
@@ -761,15 +768,17 @@ test('the cap is exact at 1,000 bytes, multi-byte characters included', () => {
         },
         10,
     );
-    const wearing = (text) => said(state, ['Halvard'], { notes: [wears('Halvard', text)] });
-    const exact = wearing('x'.repeat(163));
-    assert.equal(ScribeText.bytes(exact), 1000);
-    assert.equal(exact.endsWith(`The party: ${job}.`), true);
-    assert.equal(wearing('x'.repeat(164)), `[Scribe] Halvard wears ${'x'.repeat(164)}.`);
-    const accented = wearing(`${'x'.repeat(161)}é`);
-    assert.equal(ScribeText.bytes(accented), 1000);
-    assert.equal(accented.includes('The party: '), true);
-    assert.equal(wearing(`${'x'.repeat(162)}é`), `[Scribe] Halvard wears ${'x'.repeat(162)}é.`);
+    const opening = '[Scribe] The story so far: ';
+    const tail = ` Halvard wears ${'x'.repeat(100)}. The party: ${job}.`;
+    const fill = 3000 - Array.from(opening).length - Array.from(tail).length;
+    const wearing = (story) => said(state, ['Halvard'], { notes: [wears('Halvard', 'x'.repeat(100))], story });
+    const fitting = `${deseret.repeat(fill - 1)}.`;
+    const exact = wearing(fitting);
+    assert.equal(Array.from(exact).length, 3000);
+    assert.equal(exact, `${opening}${fitting}${tail}`);
+    const longer = `${deseret.repeat(fill)}.`;
+    assert.equal(wearing(longer), `${opening}${longer} Halvard wears ${'x'.repeat(100)}.`);
+    assert.equal(said(state, ['Halvard'], { notes: [wears('Halvard', 'x'.repeat(164))] }).includes('The party: '), true);
     const lone = book(
         {
             SUBJECTS: ['Halvard | character', `${deseret.repeat(4)} | character`],
@@ -1655,4 +1664,163 @@ test('the main character is found by a name that begins his, or that his begins,
         20,
     );
     assert.deepEqual(plain(ScribeReminder.namesakes(both, 'Frost')), [idOf(both, 'Frost')]);
+});
+
+test('the story so far reads every scene in order, the open threads and the current scene', () => {
+    const log = ScribeLog.create();
+    apply(
+        log,
+        {
+            SUBJECTS: ['Halvard | character'],
+            SCENES: [
+                'Day 1 | #1-#5 | The door | private | present: Halvard | Three elves ask Halvard for a mage',
+                'Day 1 | #6-#10 | The road | public | present: Halvard | They ride north',
+            ],
+            THREADS: ['OPEN | find the lost mage | #3', 'OPEN | repay the ferryman | #8'],
+        },
+        stretch(1, 10),
+    );
+    const state = apply(
+        log,
+        {
+            SCENES: ['Day 2 | #11-#20 | The ford | public | present: Halvard | They cross the river'],
+            THREADS: ['CLOSE T2 | paid in silver | #15'],
+        },
+        stretch(11, 20),
+    );
+    assert.equal(
+        ScribeReminder.storyInput(state, scene(state, ['Halvard'])),
+        [
+            'TIMELINE:',
+            'Day 1 | The door | Three elves ask Halvard for a mage',
+            'Day 1 | The road | They ride north',
+            'Day 2 | The ford | They cross the river',
+            '',
+            'OPEN THREADS:',
+            '- find the lost mage',
+            '',
+            'NOW:',
+            'They talk by the wheel',
+        ].join('\n'),
+    );
+    assert.equal(ScribeReminder.storyInput(state, null).endsWith('NOW:\n(none)'), true);
+    assert.equal(
+        ScribeReminder.storyInput(book({ SUBJECTS: ['Halvard | character'] }, 2), null),
+        'TIMELINE:\n(none)\n\nOPEN THREADS:\n(none)\n\nNOW:\n(none)',
+    );
+    assert.equal(ScribeReminder.StoryPrompt.includes('No name, place, object or event that they do not hold.'), true);
+    assert.equal(ScribeReminder.StoryPrompt.includes('Past tense for what happened'), true);
+});
+
+test('a long timeline keeps the first five scenes and the newest that fit in 12,000 characters', () => {
+    const scenes = [];
+    for (let number = 1; number <= 20; number++) {
+        scenes.push(
+            `Day 1 | #${number}-#${number} | Place ${number} | private | present: Halvard | Scene ${number} ${'far '.repeat(250).trim()}`,
+        );
+    }
+    const state = book({ SUBJECTS: ['Halvard | character'], SCENES: scenes }, 20);
+    const timeline = ScribeReminder.storyInput(state, null).split('\n\n')[0].split('\n').slice(1);
+    const places = timeline.map((line) => line.split(' | ')[1]);
+    assert.deepEqual(
+        places,
+        [1, 2, 3, 4, 5, 15, 16, 17, 18, 19, 20].map((number) => `Place ${number}`),
+    );
+    assert.equal(Array.from(timeline.join('\n')).length <= 12000, true);
+    const added = `Day 1 | Place 14 | Scene 14 ${'far '.repeat(250).trim()}`;
+    assert.equal(Array.from([...timeline, added].join('\n')).length > 12000, true);
+    const fewer = book({ SUBJECTS: ['Halvard | character'], SCENES: scenes.slice(0, 11) }, 20);
+    const all = ScribeReminder.storyInput(fewer, null).split('\n\n')[0].split('\n').slice(1);
+    assert.equal(all.length, 11);
+});
+
+test('a story so far alone over 3,000 characters is cut at a sentence end, and the specifics go first', () => {
+    const state = book(
+        {
+            SUBJECTS: ['Halvard | character'],
+            THREADS: ['OPEN | find the lost mage | #3'],
+            SCENES: ['Day 1 | #1-#10 | The hall | public | present: Halvard | He waits'],
+        },
+        10,
+    );
+    const told = 'Halvard rode on through the rain. '.repeat(120).trim();
+    const result = said(state, ['Halvard'], { story: told });
+    assertFramed(result);
+    assert.equal(result.startsWith('[Scribe] The story so far: Halvard rode on'), true);
+    assert.equal(result.endsWith('through the rain.'), true);
+    assert.equal(result.includes('The party: '), false);
+    assert.equal(told.startsWith(result.slice('[Scribe] The story so far: '.length)), true);
+    const wordy = said(state, ['Halvard'], { story: 'word '.repeat(700).trim() });
+    assert.equal(wordy.endsWith(' word'), true);
+    assertFramed(wordy);
+    assert.equal(ScribeReminder.cut('Halvard paid 3.5 crowns. Then more', 22), 'Halvard paid 3.5');
+    assert.equal(ScribeReminder.cut('Halvard paid. Then more', 22), 'Halvard paid.');
+    assert.equal(ScribeReminder.cut('Halvard', 3), 'Hal');
+    assert.equal(ScribeReminder.cut('short', 3000), 'short');
+    const brief = said(state, ['Halvard'], { story: 'Halvard came to the hall.' });
+    assert.equal(brief, '[Scribe] The story so far: Halvard came to the hall. The party: find the lost mage.');
+});
+
+test('the story so far is one clean line that cannot break the frame', () => {
+    assert.equal(
+        ScribeReminder.told('The story so far: Halvard [came] to @Mira\nand  left.​'),
+        'Halvard came to Mira and left.',
+    );
+    assert.equal(ScribeReminder.told(' \n '), null);
+    assert.equal(ScribeReminder.told('@[]'), null);
+    assert.equal(ScribeReminder.told(`He bowed ${String.fromCodePoint(0xff20)}Isolde`), 'He bowed Isolde');
+    for (const echoed of [
+        '**The story so far:** Halvard rode on.',
+        '# The story so far\nHalvard rode on.',
+        '> The Story So Far: Halvard rode on.',
+        'Story so far: Halvard rode on.',
+        '"The story so far:" Halvard rode on.',
+        '*THE STORY SO FAR*: Halvard rode on.',
+    ]) {
+        assert.equal(ScribeReminder.told(echoed), 'Halvard rode on.', echoed);
+    }
+    for (const echoed of [
+        '**Story So Far:**\n\n> Halvard rode on.',
+        'So far: Halvard rode on.',
+        'Story so far — Halvard rode on.',
+        'The story so far - Halvard rode on.',
+    ]) {
+        assert.equal(ScribeReminder.told(echoed), 'Halvard rode on.', echoed);
+    }
+    for (const kept of [
+        'The story so far is short: Halvard rode on.',
+        'The story so far\nwas never told to Halvard.',
+        'So far the road had been quiet.',
+        'So far-reaching was the flood that Halvard rode on.',
+    ]) {
+        assert.equal(ScribeReminder.told(kept), ScribeIntake.collapse(kept.replace('\n', ' ')), kept);
+    }
+});
+
+test('the reminder is trimmed to the room a message leaves, the specifics first, then the story at a sentence end', () => {
+    const text = '[Scribe] The story so far: Halvard came. He waited. Mirelle: brown eyes. The party: find the mage.';
+    const ends = [...ScribeReminder.ends(text)];
+    assert.deepEqual(
+        ends.map((end) => text.slice(0, end)),
+        [
+            '[Scribe] The story so far: Halvard came.',
+            '[Scribe] The story so far: Halvard came. He waited.',
+            '[Scribe] The story so far: Halvard came. He waited. Mirelle: brown eyes.',
+        ],
+    );
+    /**
+     * @param {number} room
+     * @return {string|null}
+     */
+    const sent = (room) => {
+        const limit = Buffer.byteLength('Go.\n@: ') + room;
+        return ScribeSender.compose('Go.', { ready: text, suggestion: null, ends }, limit).carried;
+    };
+    assert.equal(sent(1000), text);
+    assert.equal(sent(Buffer.byteLength(text) - 1), text.slice(0, ends[2]));
+    assert.equal(sent(52), text.slice(0, ends[1]));
+    assert.equal(sent(40), text.slice(0, ends[0]));
+    assert.equal(sent(39), null);
+    const wide = `[Scribe] The story so far: ${'é'.repeat(10)}. More.`;
+    assert.deepEqual([...ScribeReminder.ends(wide)], [wide.length - ' More.'.length]);
 });

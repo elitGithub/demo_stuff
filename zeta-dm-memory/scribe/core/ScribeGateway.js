@@ -24,6 +24,7 @@ const ScribeGateway = Object.freeze({
         FirstServerError: 500,
         MaxReasonLength: 300,
         MaxFinishLength: 40,
+        MaxKeptAnswer: 2000,
         TimeoutMs: 180000,
         PauseMs: 10000,
         MillisecondsPerSecond: 1000,
@@ -158,6 +159,39 @@ const ScribeGateway = Object.freeze({
     },
 
     /**
+     * @param {*} usage
+     * @return {{ tokensIn: number, tokensOut: number, reasoningTokens: number|null }}
+     */
+    counted(usage) {
+        const given = ScribeGateway.isObject(usage) ? usage : {};
+        const details = ScribeGateway.isObject(given.completion_tokens_details) ? given.completion_tokens_details : {};
+        const reasoning = details.reasoning_tokens;
+        return {
+            tokensIn: Number.isSafeInteger(given.prompt_tokens) && given.prompt_tokens >= 0 ? given.prompt_tokens : 0,
+            tokensOut:
+                Number.isSafeInteger(given.completion_tokens) && given.completion_tokens >= 0
+                    ? given.completion_tokens
+                    : 0,
+            reasoningTokens: Number.isSafeInteger(reasoning) && reasoning >= 0 ? reasoning : null,
+        };
+    },
+
+    /**
+     * @param {*} parsed
+     * @param {string} raw
+     * @return {string|null}
+     */
+    refusal(parsed, raw) {
+        const settings = ScribeGateway.Settings;
+        const provider = ScribeGateway.isObject(parsed) ? ScribeGateway.reported(parsed.error) : null;
+        if (provider !== null && ScribeGateway.filled(provider.reason)) {
+            return provider.reason;
+        }
+        const body = raw.trim();
+        return body === settings.Nothing ? null : body;
+    },
+
+    /**
      * @param {string|null} key
      * @param {string} what
      * @param {{ retryable: boolean, status: number|null, finish: string|null, reason: string|null }} detail
@@ -168,20 +202,22 @@ const ScribeGateway = Object.freeze({
         const status = detail.status === null ? settings.NoStatus : String(detail.status);
         const finish = detail.finish === null ? settings.NoFinish : detail.finish;
         let message = `${what}; status ${status}; finish ${finish}`;
+        let reason = null;
         if (detail.reason !== null) {
-            const masked = ScribeGateway.mask(key, detail.reason);
-            message += `; reason: ${masked.slice(0, settings.MaxReasonLength)}`;
+            reason = ScribeGateway.mask(key, detail.reason).slice(0, settings.MaxReasonLength);
+            message += `; reason: ${reason}`;
         }
         const error = new Error(ScribeGateway.mask(key, message).replace(settings.Whitespace, settings.Space));
         error.retryable = detail.retryable;
         error.status = detail.status;
         error.finish = detail.finish === null ? null : ScribeGateway.mask(key, detail.finish);
+        error.reason = reason === null ? null : ScribeGateway.mask(key, reason);
         return error;
     },
 
     /**
      * @param {{ fetch: Function, sleep: Function, key: string, model: string, system: string, user: string, maxTokens: number, timeoutMs?: number, signal?: object }} request
-     * @return {Promise<{ text: string, tokensIn: number, tokensOut: number, cost: number|null }>}
+     * @return {Promise<{ text: string, tokensIn: number, tokensOut: number, reasoningTokens: number|null, finish: string, cost: number|null }>}
      */
     async call(request) {
         const settings = ScribeGateway.Settings;
@@ -286,20 +322,22 @@ const ScribeGateway = Object.freeze({
             });
         }
         const status = outcome.status;
+        const received = typeof outcome.raw === settings.StringType ? outcome.raw : String(outcome.raw);
+        const marked = received.startsWith(settings.ByteOrderMark);
+        const raw = marked ? received.slice(settings.ByteOrderMark.length) : received;
+        let parsed = null;
+        try {
+            parsed = JSON.parse(raw);
+        } catch {
+            parsed = null;
+        }
         if (status < settings.FirstSuccess || status > settings.LastSuccess) {
             throw ScribeGateway.failure(key, settings.Messages.BadStatus, {
                 retryable: ScribeGateway.transient(status),
                 status,
                 finish: null,
-                reason: null,
+                reason: ScribeGateway.refusal(parsed, raw),
             });
-        }
-        let parsed = null;
-        try {
-            const text = outcome.raw.startsWith(settings.ByteOrderMark) ? outcome.raw.slice(settings.ByteOrderMark.length) : outcome.raw;
-            parsed = JSON.parse(text);
-        } catch {
-            parsed = null;
         }
         if (!ScribeGateway.isObject(parsed)) {
             throw ScribeGateway.failure(key, settings.Messages.NotObject, {
@@ -311,10 +349,14 @@ const ScribeGateway = Object.freeze({
         }
         const choice = Array.isArray(parsed.choices) && ScribeGateway.isObject(parsed.choices[0]) ? parsed.choices[0] : null;
         const finish = ScribeGateway.finishOf(key, choice?.finish_reason);
+        const counts = ScribeGateway.counted(parsed.usage);
+        const content = choice?.message?.content;
+        const written = typeof content === settings.StringType ? content : settings.Nothing;
+        let failed = null;
         for (const candidate of [parsed.error, choice?.error]) {
             const provider = ScribeGateway.reported(candidate);
-            if (provider !== null) {
-                throw ScribeGateway.failure(key, settings.Messages.ProviderError, {
+            if (provider !== null && failed === null) {
+                failed = ScribeGateway.failure(key, settings.Messages.ProviderError, {
                     retryable: provider.code !== null && ScribeGateway.transient(provider.code),
                     status,
                     finish,
@@ -322,24 +364,26 @@ const ScribeGateway = Object.freeze({
                 });
             }
         }
-        if (finish === settings.Finish.Length) {
-            throw ScribeGateway.failure(key, settings.Messages.Cut, { retryable: false, status, finish, reason: null });
+        const fatal = { retryable: false, status, finish, reason: null };
+        const passing = { retryable: true, status, finish, reason: null };
+        if (failed === null && finish === settings.Finish.Length) {
+            failed = ScribeGateway.failure(key, settings.Messages.Cut, fatal);
+            failed.answer = ScribeGateway.mask(key, written).slice(0, settings.MaxKeptAnswer);
+        } else if (failed === null && finish === settings.Finish.Error) {
+            failed = ScribeGateway.failure(key, settings.Messages.Errored, passing);
+        } else if (failed === null && finish !== settings.Finish.Stop) {
+            failed = ScribeGateway.failure(key, settings.Messages.WrongFinish, fatal);
+        } else if (failed === null && written.trim() === settings.Nothing) {
+            failed = ScribeGateway.failure(key, settings.Messages.Empty, passing);
         }
-        if (finish === settings.Finish.Error) {
-            throw ScribeGateway.failure(key, settings.Messages.Errored, { retryable: true, status, finish, reason: null });
-        }
-        if (finish !== settings.Finish.Stop) {
-            throw ScribeGateway.failure(key, settings.Messages.WrongFinish, { retryable: false, status, finish, reason: null });
-        }
-        const content = choice.message?.content;
-        if (typeof content !== settings.StringType || content.trim() === settings.Nothing) {
-            throw ScribeGateway.failure(key, settings.Messages.Empty, { retryable: true, status, finish, reason: null });
+        if (failed !== null) {
+            throw Object.assign(failed, counts);
         }
         const usage = ScribeGateway.isObject(parsed.usage) ? parsed.usage : {};
         return {
             text: content,
-            tokensIn: Number.isSafeInteger(usage.prompt_tokens) && usage.prompt_tokens >= 0 ? usage.prompt_tokens : 0,
-            tokensOut: Number.isSafeInteger(usage.completion_tokens) && usage.completion_tokens >= 0 ? usage.completion_tokens : 0,
+            ...counts,
+            finish,
             cost: Number.isFinite(usage.cost) && usage.cost >= 0 ? usage.cost : null,
         };
     },

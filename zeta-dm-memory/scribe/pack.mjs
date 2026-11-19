@@ -49,6 +49,7 @@ export const ScribePack = Object.freeze({
         'scribe/bench/BenchView.js',
         'scribe/page/ZetaSource.js',
         'scribe/page/ScribeStore.js',
+        'scribe/page/ScribeCloud.js',
         'scribe/page/ScribeKeeper.js',
         'scribe/page/ScribeScene.js',
         'scribe/page/ScribeReminder.js',

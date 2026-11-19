@@ -829,8 +829,8 @@ test('ended facts leave the book', () => {
         pick(30),
     );
     assert.deepEqual(plain(ended.state.facts.map((fact) => [fact.id, fact.status, fact.ended])), [
-        ['F1', 'Ended', { reason: '', cite: 'MESSAGE-30' }],
-        ['F2', 'Ended', { reason: 'gave it to Kira', cite: 'MESSAGE-30' }],
+        ['F1', 'Ended', { reason: '', cite: 'MESSAGE-30', position: 30 }],
+        ['F2', 'Ended', { reason: 'gave it to Kira', cite: 'MESSAGE-30', position: 30 }],
     ]);
     const twice = apply(
         log,
@@ -863,7 +863,7 @@ test('ending follows a fuller wording', () => {
     assert.deepEqual(plain(ended.state.facts.map((fact) => [fact.id, fact.status, fact.replacedBy, fact.ended])), [
         ['F1', 'Replaced', 'F2', null],
         ['F2', 'Replaced', 'F3', null],
-        ['F3', 'Ended', null, { reason: 'lost an eye', cite: 'MESSAGE-4' }],
+        ['F3', 'Ended', null, { reason: 'lost an eye', cite: 'MESSAGE-4', position: 4 }],
     ]);
     const moving = ScribeLog.create();
     apply(

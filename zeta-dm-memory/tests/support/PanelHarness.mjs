@@ -2,6 +2,7 @@ import { existsSync, readFileSync } from 'node:fs';
 import vm from 'node:vm';
 import FakeClock from './FakeClock.mjs';
 import FakeStorage from './FakeStorage.mjs';
+import PanelCloud from './PanelCloud.mjs';
 import PanelDocument from './PanelDocument.mjs';
 import PanelKeeper from './PanelKeeper.mjs';
 import PanelLive from './PanelLive.mjs';
@@ -21,6 +22,7 @@ export default class PanelHarness {
         'page/ZetaSource',
         'bench/BenchView',
         'page/ScribeStore',
+        'page/ScribeCloud',
     ]);
 
     static StandIns = Object.freeze({
@@ -108,7 +110,7 @@ export default class PanelHarness {
 
     /**
      * @param {Object<string, object>} scripts
-     * @param {{ keeper: object, live: object, width?: number, storage?: FakeStorage }} options
+     * @param {{ keeper: object, live: object, cloud?: object, width?: number, storage?: FakeStorage }} options
      */
     constructor(scripts, options) {
         this.scripts = scripts;
@@ -116,6 +118,7 @@ export default class PanelHarness {
         this.storage = options.storage ?? new FakeStorage();
         this.keeper = new PanelKeeper(options.keeper);
         this.live = new PanelLive(options.live);
+        this.cloud = new PanelCloud(options.cloud ?? PanelCloud.Local);
         this.clock = new FakeClock(PanelHarness.StartTime);
         this.document.defaultView.setInterval = (callback, delay) => this.clock.setInterval(callback, delay);
         this.document.defaultView.clearInterval = (id) => this.clock.clearInterval(id);
@@ -133,6 +136,7 @@ export default class PanelHarness {
             document: this.document,
             keeper: this.keeper,
             live: this.live,
+            cloud: this.cloud,
             storage: this.storage,
             /**
              * @param {string} text

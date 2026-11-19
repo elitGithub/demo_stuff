@@ -58,11 +58,18 @@ const ScribePanel = Object.freeze({
             Findings: 'findings',
             Lines: 'lines',
             Calls: 'calls',
+            Contradictions: 'contradictions',
+            LiveCalls: 'liveCalls',
         }),
         Ids: Object.freeze({
             Host: 'scribe-host',
             Panel: 'scribe-panel',
             Headline: 'scribe-headline',
+            Choice: 'scribe-choice',
+            ChoiceCounts: 'scribe-choice-counts',
+            UseCloud: 'scribe-use-cloud',
+            KeepHere: 'scribe-keep-here',
+            ChoiceOutcome: 'scribe-choice-outcome',
             Next: 'scribe-next',
             NextOutcome: 'scribe-next-outcome',
             Activity: 'scribe-activity',
@@ -102,6 +109,7 @@ const ScribePanel = Object.freeze({
             EditSave: 'scribe-edit-save',
             Force: 'scribe-force',
             ForceReason: 'scribe-force-reason',
+            Held: 'scribe-held',
             ForceOutcome: 'scribe-force-outcome',
             ReminderOutcome: 'scribe-reminder-outcome',
             Story: 'scribe-story',
@@ -112,6 +120,8 @@ const ScribePanel = Object.freeze({
             Work: 'scribe-tell-work',
             TellOutcome: 'scribe-tell-outcome',
             Understood: 'scribe-understood',
+            CloudState: 'scribe-cloud-state',
+            Notes: 'scribe-notes',
             KeyState: 'scribe-key-state',
             Key: 'scribe-key',
             SaveKey: 'scribe-save-key',
@@ -155,6 +165,12 @@ const ScribePanel = Object.freeze({
             Next: 'next',
             Offer: 'offer',
             Tell: 'tell',
+            Choice: 'choice',
+        }),
+        HeaderOutlets: Object.freeze(['next', 'choice']),
+        Choices: Object.freeze({
+            UseCloud: 'useCloud',
+            KeepHere: 'keep',
         }),
         Setup: Object.freeze([
             Object.freeze({ name: 'analyzer', label: 'Reading model', mode: 'text' }),
@@ -191,6 +207,8 @@ const ScribePanel = Object.freeze({
             Findings: 'findings',
             Lines: 'lines',
             Calls: 'calls',
+            Contradictions: 'contradictions',
+            LiveCalls: 'liveCalls',
         }),
         Acts: Object.freeze({
             Open: 'open',
@@ -281,6 +299,7 @@ const ScribePanel = Object.freeze({
             Activity: 'activity',
             Meter: 'meter',
             Hollow: 'hollow',
+            Choice: 'choice',
         }),
         Attributes: Object.freeze({
             Max: 'max',
@@ -469,6 +488,22 @@ const ScribePanel = Object.freeze({
                 Told: 'Marked as told',
                 Reminded: "The book's value went out in a reminder.",
             }),
+            UseCloud: "Use the cloud's",
+            KeepHere: "Keep this PC's book",
+            ChoiceHere: 'This PC: ',
+            ChoiceThere: ' Your Worker: ',
+            ReadOne: ' message read.',
+            ReadMany: ' messages read.',
+            NoBookThere: 'no book.',
+            CloudLocal:
+                'No DM API key: the book stays on this PC. ' +
+                'Set DM API key from the Tampermonkey menu to keep it in your Worker.',
+            CloudKept: 'The book is kept in your Worker and shared by every PC with the DM API key.',
+            NoNotes: 'No operator notes for this chat in your Worker.',
+            NotesGoOne: ' character of the operator notes goes to the models.',
+            NotesGoMany: ' characters of the operator notes go to the models.',
+            NotesCutOpen: ' They were cut from ',
+            NotesCutClose: ' characters.',
             KeySaved: 'A key is saved',
             NoKey: 'No key yet',
             KeyUnreadable: 'The key could not be read',
@@ -501,6 +536,13 @@ const ScribePanel = Object.freeze({
             UnreadClose: ' could not be read',
             LinesHeading: 'Readings',
             CallsHeading: 'Last calls',
+            LiveCallsHeading: 'Last live calls',
+            TokensIn: ': in ',
+            TokensOut: ', out ',
+            Reasoning: ', reasoning ',
+            FinishOpen: ', finish ',
+            CutAnswer: 'The start of the cut answer',
+            ContradictionsHeading: 'Contradictions the Analyzer read',
             Refused: 'Refused lines',
             CallOpen: 'Call ',
             Unreadable: 'Unreadable answer',
@@ -558,7 +600,7 @@ const ScribePanel = Object.freeze({
     }),
 
     /**
-     * @param {{ document: object, keeper: object, live: object, storage: object, confirm: (text: string) => boolean, download: (name: string, text: string) => void, clock: { now: () => number } }} environment
+     * @param {{ document: object, keeper: object, live: object, cloud: object, storage: object, confirm: (text: string) => boolean, download: (name: string, text: string) => void, clock: { now: () => number } }} environment
      * @return {Readonly<{ redraw: () => void, unmount: () => void, host: object }>}
      */
     mount(environment) {
@@ -582,6 +624,7 @@ const ScribePanel = Object.freeze({
             document,
             keeper: environment.keeper,
             live: environment.live,
+            cloud: environment.cloud,
             storage: environment.storage,
             confirm: environment.confirm,
             download: environment.download,
@@ -641,6 +684,8 @@ const ScribePanel = Object.freeze({
             composing: false,
             editing: false,
             editShown: false,
+            editStale: false,
+            editAgainst: undefined,
             editFrom: settings.Nothing,
             heldDraw: false,
             workedOut: null,
@@ -1411,12 +1456,56 @@ const ScribePanel = Object.freeze({
             ScribePanel.own(panel, 'Clock', ScribePanel.make(panel, tags.Paragraph, settings.Nothing)),
             ScribePanel.own(panel, 'Finished', ScribePanel.make(panel, tags.Paragraph, settings.Nothing)),
         );
+        const choice = ScribePanel.own(
+            panel,
+            'Choice',
+            ScribePanel.make(panel, tags.Block, settings.Nothing, classes.Choice),
+        );
+        choice.hidden = true;
+        const choosing = ScribePanel.make(panel, tags.Block, settings.Nothing, classes.Actions);
+        choosing.append(
+            ScribePanel.own(
+                panel,
+                'UseCloud',
+                ScribePanel.button(
+                    panel,
+                    words.UseCloud,
+                    /**
+                     * @return {Promise<boolean>}
+                     */
+                    () => ScribePanel.choose(panel, settings.Choices.UseCloud),
+                    settings.Guard.Free,
+                    settings.Ids.UseCloud,
+                ),
+            ),
+            ScribePanel.own(
+                panel,
+                'KeepHere',
+                ScribePanel.button(
+                    panel,
+                    words.KeepHere,
+                    /**
+                     * @return {Promise<boolean>}
+                     */
+                    () => ScribePanel.choose(panel, settings.Choices.KeepHere),
+                    settings.Guard.Free,
+                    settings.Ids.KeepHere,
+                    classes.Primary,
+                ),
+            ),
+        );
+        choice.append(
+            ScribePanel.own(panel, 'ChoiceCounts', ScribePanel.make(panel, tags.Paragraph, settings.Nothing)),
+            choosing,
+            ScribePanel.outlet(panel, 'ChoiceOutcome', settings.Outlets.Choice),
+        );
         header.append(
             ScribePanel.own(
                 panel,
                 'Headline',
                 ScribePanel.make(panel, tags.Paragraph, settings.Nothing, classes.Headline),
             ),
+            choice,
             ScribePanel.own(panel, 'Next', next),
             ScribePanel.outlet(panel, 'NextOutcome', settings.Outlets.Next),
             activity,
@@ -1770,6 +1859,11 @@ const ScribePanel = Object.freeze({
             ScribePanel.pager(panel, lists.Likes, ScribePanel.group(panel, section, words.LikesHeading));
             ScribePanel.pager(panel, lists.Scenes, ScribePanel.group(panel, section, words.ScenesHeading));
             ScribePanel.pager(panel, lists.Questions, ScribePanel.group(panel, section, words.QuestionsHeading));
+            ScribePanel.pager(
+                panel,
+                lists.Contradictions,
+                ScribePanel.group(panel, section, words.ContradictionsHeading),
+            );
             ScribePanel.pager(panel, lists.Aliases, ScribePanel.group(panel, section, words.AliasesHeading));
             ScribePanel.pager(panel, lists.Refinements, ScribePanel.group(panel, section, words.RefinementsHeading));
             ScribePanel.pager(panel, lists.Made, ScribePanel.group(panel, section, words.MadeHeading));
@@ -1901,6 +1995,15 @@ const ScribePanel = Object.freeze({
                     ScribePanel.own(
                         panel,
                         'ForceReason',
+                        ScribePanel.make(panel, settings.Tags.Paragraph, settings.Nothing, settings.Classes.Meta),
+                    ),
+                    true,
+                ),
+                ScribePanel.stale(
+                    panel,
+                    ScribePanel.own(
+                        panel,
+                        'Held',
                         ScribePanel.make(panel, settings.Tags.Paragraph, settings.Nothing, settings.Classes.Meta),
                     ),
                     true,
@@ -2063,6 +2166,11 @@ const ScribePanel = Object.freeze({
             section.append(controls, ScribePanel.outlet(panel, 'ControlsOutcome', outlets.Controls), story, pulled);
             ScribePanel.pager(panel, settings.Lists.Lines, ScribePanel.group(panel, section, words.LinesHeading));
             ScribePanel.pager(panel, settings.Lists.Calls, ScribePanel.group(panel, section, words.CallsHeading));
+            ScribePanel.pager(
+                panel,
+                settings.Lists.LiveCalls,
+                ScribePanel.group(panel, section, words.LiveCallsHeading),
+            );
         },
 
         /**
@@ -2079,7 +2187,11 @@ const ScribePanel = Object.freeze({
             const ids = settings.Ids;
             const guards = settings.Guard;
             const outlets = settings.Outlets;
+            const notes = ScribePanel.own(panel, 'Notes', ScribePanel.make(panel, tags.Paragraph, settings.Nothing));
+            notes.hidden = true;
             section.append(
+                ScribePanel.own(panel, 'CloudState', ScribePanel.make(panel, tags.Paragraph, settings.Nothing)),
+                notes,
                 ScribePanel.own(panel, 'KeyState', ScribePanel.make(panel, tags.Paragraph, settings.Nothing)),
             );
             const key = ScribePanel.field(panel, settings.InputTypes.Password, words.KeyLabel, ids.Key, false, false);
@@ -2181,6 +2293,8 @@ const ScribePanel = Object.freeze({
         panel.parts.EditCancel.disabled = true;
         panel.parts.EditSave.disabled = true;
         panel.parts.Force.disabled = true;
+        panel.parts.UseCloud.disabled = true;
+        panel.parts.KeepHere.disabled = true;
     },
 
     /**
@@ -2210,9 +2324,18 @@ const ScribePanel = Object.freeze({
         panel.shown = new Set();
         let view = null;
         let live = null;
+        let cloud = null;
         try {
             const kept = panel.keeper.view();
             const heard = panel.live.view();
+            const synced = panel.cloud.view();
+            cloud = {
+                ...synced,
+                keyed: synced.keyed === true,
+                conflict: synced.conflict ?? null,
+                notes: synced.notes ?? null,
+                problem: synced.problem ?? null,
+            };
             view = {
                 ...kept,
                 made: kept.made ?? [],
@@ -2241,6 +2364,11 @@ const ScribePanel = Object.freeze({
                 forceBlock: heard.forceBlock ?? null,
                 suggestion: heard.suggestion ?? null,
                 notice: heard.notice ?? null,
+                held: heard.held ?? null,
+                draft: heard.draft ?? null,
+                stale: heard.stale ?? false,
+                failing: heard.failing ?? [],
+                calls: heard.calls ?? [],
             };
         } catch (error) {
             ScribePanel.lockAll(panel);
@@ -2249,13 +2377,14 @@ const ScribePanel = Object.freeze({
         }
         ScribePanel.clearFailures(panel, view);
         try {
-            ScribePanel.header(panel, view, live);
+            ScribePanel.header(panel, view, live, cloud);
         } catch (error) {
             for (const name of ['Headline', 'Badge', 'Spend']) {
                 ScribePanel.write(panel.parts[name], settings.Nothing);
             }
             panel.parts.Badge.hidden = true;
             panel.parts.Next.hidden = true;
+            panel.parts.Choice.hidden = true;
             panel.parts.Activity.hidden = true;
             ScribePanel.stopClock(panel);
             ScribePanel.fold(panel);
@@ -2265,7 +2394,7 @@ const ScribePanel = Object.freeze({
             return;
         }
         try {
-            ScribePanel.draw(panel, view, live);
+            ScribePanel.draw(panel, view, live, cloud);
         } catch (error) {
             ScribePanel.lockAll(panel);
             ScribePanel.alarm(panel, words.Trouble + ScribePanel.reason(error));
@@ -2273,17 +2402,43 @@ const ScribePanel = Object.freeze({
     },
 
     /**
+     * @param {number|null} count
+     * @return {string}
+     */
+    readCount(count) {
+        const words = ScribePanel.Settings.Words;
+        if (count === null) {
+            return words.NoBookThere;
+        }
+        return PanelView.number(count) + (count === ScribePanel.Settings.Single ? words.ReadOne : words.ReadMany);
+    },
+
+    /**
      * @param {object} panel
      * @param {object} view
      * @param {object} live
+     * @param {object} cloud
      * @return {void}
      */
-    header(panel, view, live) {
+    header(panel, view, live, cloud) {
         const settings = ScribePanel.Settings;
         const words = settings.Words;
         const parts = panel.parts;
         ScribePanel.fold(panel);
-        ScribePanel.write(parts.Headline, PanelView.headline(view, live));
+        ScribePanel.write(parts.Headline, PanelView.headline(view, live, cloud));
+        const choiceOutlet = settings.Outlets.Choice;
+        const conflict = cloud.phase === ScribeCloud.Phase.Conflict ? cloud.conflict : null;
+        parts.Choice.hidden = conflict === null;
+        if (conflict !== null) {
+            const here = words.ChoiceHere + ScribePanel.readCount(conflict.here ?? null);
+            const there = words.ChoiceThere + ScribePanel.readCount(conflict.there ?? null);
+            ScribePanel.write(parts.ChoiceCounts, here + there);
+            panel.shown.add(choiceOutlet);
+        }
+        const choosing = panel.pending.has(choiceOutlet);
+        parts.UseCloud.disabled = choosing;
+        parts.KeepHere.disabled = choosing;
+        ScribePanel.write(parts.ChoiceOutcome, panel.outcomes.get(choiceOutlet) ?? settings.Nothing);
         const step = PanelView.next(view);
         ScribePanel.fill(panel, view);
         panel.step = step;
@@ -2372,9 +2527,10 @@ const ScribePanel = Object.freeze({
      * @param {object} panel
      * @param {object} view
      * @param {object} live
+     * @param {object} cloud
      * @return {void}
      */
-    draw(panel, view, live) {
+    draw(panel, view, live, cloud) {
         const settings = ScribePanel.Settings;
         const words = settings.Words;
         const focused = ScribePanel.remember(panel);
@@ -2393,7 +2549,7 @@ const ScribePanel = Object.freeze({
         }
         const failure = panel.failures[panel.tab];
         try {
-            ScribePanel.Drawers[panel.tab](panel, view, live);
+            ScribePanel.Drawers[panel.tab](panel, view, live, cloud);
             ScribePanel.write(failure, settings.Nothing);
             failure.hidden = true;
         } catch (error) {
@@ -2408,7 +2564,7 @@ const ScribePanel = Object.freeze({
             failure.hidden = false;
         }
         for (const [key, outlet] of panel.outlets) {
-            if (key === settings.Outlets.Next) {
+            if (settings.HeaderOutlets.includes(key)) {
                 continue;
             }
             ScribePanel.write(outlet, panel.outcomes.get(key) ?? settings.Nothing);
@@ -2670,6 +2826,26 @@ const ScribePanel = Object.freeze({
 
     /**
      * @param {object} panel
+     * @param {string} method
+     * @return {Promise<boolean>}
+     */
+    choose(panel, method) {
+        const settings = ScribePanel.Settings;
+        return ScribePanel.perform(panel, {
+            outlet: settings.Outlets.Choice,
+            /**
+             * @return {Promise<void>}
+             */
+            call: () => panel.cloud[method](),
+            question: null,
+            done: settings.Nothing,
+            pending: settings.Words.Working,
+            book: false,
+        });
+    },
+
+    /**
+     * @param {object} panel
      * @param {string} outlet
      * @param {string} key
      * @param {string} problem
@@ -2711,9 +2887,12 @@ const ScribePanel = Object.freeze({
      */
     openEdit(panel) {
         const settings = ScribePanel.Settings;
-        const shown = panel.live.view().ready ?? settings.Nothing;
+        const view = panel.live.view();
+        const shown = (view.stale === true ? view.draft : view.ready) ?? settings.Nothing;
         panel.editing = true;
         panel.editShown = shown !== settings.Nothing;
+        panel.editStale = view.stale === true;
+        panel.editAgainst = view.latest;
         panel.editFrom = shown;
         panel.parts.Reminder.value = shown;
         ScribePanel.say(panel, settings.Outlets.Reminder, settings.Nothing);
@@ -2729,9 +2908,10 @@ const ScribePanel = Object.freeze({
     closeEdit(panel, save) {
         const settings = ScribePanel.Settings;
         const outlet = settings.Outlets.Reminder;
-        if (save && ScribeLive.line(panel.parts.Reminder.value) !== ScribeLive.line(panel.editFrom)) {
+        const changed = ScribeLive.line(panel.parts.Reminder.value) !== ScribeLive.line(panel.editFrom);
+        if (save && (changed || panel.editStale)) {
             try {
-                panel.live.edit(panel.parts.Reminder.value, panel.editShown);
+                panel.live.edit(panel.parts.Reminder.value, panel.editShown, panel.editAgainst);
             } catch (error) {
                 ScribePanel.fail(panel, outlet, ScribePanel.refusal(error));
                 ScribePanel.redraw(panel);
@@ -3072,6 +3252,8 @@ const ScribePanel = Object.freeze({
             ScribeStore.setKey(panel.storage, typed);
             panel.last.set(settings.Ids.SaveKey, panel.clock.now());
             panel.trouble = settings.Nothing;
+            panel.keeper.rekey();
+            panel.live.rekey();
         } catch (error) {
             outcome = ScribePanel.reason(error);
         }
@@ -3518,6 +3700,21 @@ const ScribePanel = Object.freeze({
             );
             ScribePanel.paged(
                 panel,
+                lists.Contradictions,
+                PanelView.contradictions(view.state),
+                /**
+                 * @param {object} contradiction
+                 * @return {object}
+                 */
+                (contradiction) => rows.contradiction(panel, contradiction),
+                /**
+                 * @param {{ id: string }} contradiction
+                 * @return {string}
+                 */
+                (contradiction) => ScribePanel.key(sections.Contradictions, contradiction.id),
+            );
+            ScribePanel.paged(
+                panel,
                 lists.Aliases,
                 rulings.aliases,
                 /**
@@ -3580,11 +3777,13 @@ const ScribePanel = Object.freeze({
             const blocked = live.forceBlock !== null;
             const editing = panel.editing;
             if (!editing) {
-                parts.Reminder.value = live.ready ?? settings.Nothing;
+                parts.Reminder.value = live.ready ?? (live.stale ? live.draft : null) ?? settings.Nothing;
             }
             parts.Reminder.readOnly = !editing;
             let placeholder = words.NothingWaiting;
-            if (live.ready === null && live.edited) {
+            if (live.ready === null && live.held !== null && !blocked) {
+                placeholder = live.held;
+            } else if (live.ready === null && live.edited) {
                 placeholder = words.EditHeld;
             } else if (live.ready === null && blocked && (live.forced || (live.due && live.prepared))) {
                 placeholder = words.HeldReady;
@@ -3603,6 +3802,9 @@ const ScribePanel = Object.freeze({
             ScribePanel.wait(panel, settings.Outlets.Force, parts.Force);
             parts.ForceReason.hidden = !blocked;
             ScribePanel.write(parts.ForceReason, blocked ? live.forceBlock : settings.Nothing);
+            const held = blocked ? null : live.held;
+            parts.Held.hidden = held === null;
+            ScribePanel.write(parts.Held, held ?? settings.Nothing);
             const forceOutcome = panel.outcomes.get(settings.Outlets.Force);
             if ([words.Forced, words.PreparedLater].includes(forceOutcome)) {
                 const going = live.ready !== null || live.edited || (blocked && live.prepared);
@@ -3794,15 +3996,42 @@ const ScribePanel = Object.freeze({
                 (record) => ScribePanel.Rows.call(panel, record),
                 null,
             );
+            ScribePanel.paged(
+                panel,
+                settings.Lists.LiveCalls,
+                PanelView.each(live.calls, whole),
+                /**
+                 * @param {object} record
+                 * @return {object}
+                 */
+                (record) => ScribePanel.Rows.liveCall(panel, record),
+                null,
+            );
         },
 
         /**
          * @param {object} panel
+         * @param {object} view
+         * @param {object} live
+         * @param {{ keyed: boolean, notes: { length: number, cut: number|null }|null }} cloud
          * @return {void}
          */
-        Settings(panel) {
+        Settings(panel, view, live, cloud) {
             const settings = ScribePanel.Settings;
             const words = settings.Words;
+            const parts = panel.parts;
+            ScribePanel.write(parts.CloudState, cloud.keyed ? words.CloudKept : words.CloudLocal);
+            parts.Notes.hidden = !cloud.keyed;
+            const notes = cloud.notes;
+            let told = words.NoNotes;
+            if (notes !== null && notes.length > settings.NoCount) {
+                const going = notes.length === settings.Single ? words.NotesGoOne : words.NotesGoMany;
+                told = PanelView.number(notes.length) + going;
+                if (notes.cut !== null) {
+                    told += words.NotesCutOpen + PanelView.number(notes.cut) + words.NotesCutClose;
+                }
+            }
+            ScribePanel.write(parts.Notes, told);
             let keyState = words.KeyUnreadable;
             try {
                 keyState = ScribeStore.key(panel.storage) === settings.Nothing ? words.NoKey : words.KeySaved;
@@ -4423,6 +4652,47 @@ const ScribePanel = Object.freeze({
 
         /**
          * @param {object} panel
+         * @param {{ id: string, text: string, why: string }} contradiction
+         * @return {object}
+         */
+        contradiction(panel, contradiction) {
+            const settings = ScribePanel.Settings;
+            const section = settings.Sections.Contradictions;
+            const outlet = ScribePanel.key(section, contradiction.id);
+            const { item, outcome, actions } = ScribePanel.Rows.frame(panel, outlet);
+            actions.append(
+                ScribePanel.wait(
+                    panel,
+                    outlet,
+                    ScribePanel.button(
+                        panel,
+                        settings.Words.Dismiss,
+                        /**
+                         * @return {Promise<boolean>}
+                         */
+                        () =>
+                            ScribePanel.rule(
+                                panel,
+                                outlet,
+                                { type: ScribeLog.Ruling.DismissContradiction, contradiction: contradiction.id },
+                                null,
+                            ),
+                        settings.Guard.Book,
+                        ScribePanel.key(section, contradiction.id, settings.Acts.Dismiss),
+                    ),
+                ),
+            );
+            item.append(
+                ScribePanel.make(panel, settings.Tags.Paragraph, contradiction.text),
+                ScribePanel.make(panel, settings.Tags.Paragraph, contradiction.why, settings.Classes.Meta),
+                actions,
+                outcome,
+            );
+            return item;
+        },
+
+        /**
+         * @param {object} panel
          * @param {{ subject: string, label: string, name: string }} alias
          * @return {object}
          */
@@ -4702,6 +4972,7 @@ const ScribePanel = Object.freeze({
                             operation.name,
                             operation.category,
                             operation.text,
+                            ...PanelView.sides(operation),
                         ];
                         const text = parts
                             .filter(
@@ -4776,6 +5047,44 @@ const ScribePanel = Object.freeze({
                     ScribePanel.make(panel, tags.Preformatted, answer, settings.Classes.Message),
                 ),
             );
+            return item;
+        },
+
+        /**
+         * @param {object} panel
+         * @param {{ role: *, tokensIn: *, tokensOut: *, reasoningTokens: *, finish: *, answer: *, problem: * }} record
+         * @return {object}
+         */
+        liveCall(panel, record) {
+            const settings = ScribePanel.Settings;
+            const words = settings.Words;
+            const tags = settings.Tags;
+            const item = ScribePanel.make(panel, tags.Item, settings.Nothing, settings.Classes.Row);
+            let line =
+                PanelView.said(record.role) +
+                words.TokensIn +
+                PanelView.said(record.tokensIn) +
+                words.TokensOut +
+                PanelView.said(record.tokensOut);
+            if (typeof record.reasoningTokens === settings.NumberType) {
+                line += words.Reasoning + PanelView.said(record.reasoningTokens);
+            }
+            line += words.FinishOpen + PanelView.said(record.finish);
+            item.append(ScribePanel.make(panel, tags.Paragraph, line));
+            if (typeof record.problem === settings.StringType) {
+                item.append(ScribePanel.make(panel, tags.Paragraph, record.problem, settings.Classes.Meta));
+            }
+            if (typeof record.answer === settings.StringType) {
+                item.append(
+                    ScribePanel.Rows.opening(
+                        panel,
+                        record,
+                        words.CutAnswer,
+                        ScribePanel.key(settings.Sections.LiveCalls, record.role, record.answer.length),
+                        ScribePanel.make(panel, tags.Preformatted, record.answer, settings.Classes.Message),
+                    ),
+                );
+            }
             return item;
         },
 

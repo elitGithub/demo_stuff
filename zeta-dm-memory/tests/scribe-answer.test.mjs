@@ -170,7 +170,7 @@ test('enumerations carry their own names', () => {
         }
     }
     assert.deepEqual(plain(Object.keys(ScribeAnswer.Reason)), ['Shape', 'Category', 'Citation', 'Name']);
-    assert.equal(Object.keys(ScribeAnswer.Type).length, 12);
+    assert.equal(Object.keys(ScribeAnswer.Type).length, 13);
     assert.deepEqual(plain(Object.keys(ScribeAnswer.Reach)), ['Public', 'Private']);
     assert.deepEqual(plain(ScribeAnswer.Blocks), [
         'SUBJECTS',
@@ -182,6 +182,7 @@ test('enumerations carry their own names', () => {
         'NIGHTS',
         'THREADS',
         'QUESTIONS',
+        'CONTRADICTIONS',
     ]);
 });
 
@@ -1229,11 +1230,116 @@ test('other hostile lines stay fast', () => {
         `${'a'.repeat(size)} | trait | proud | #1`,
         `${'a'.repeat(size)}:`,
     ];
-    for (const block of ['SUBJECTS', 'FACTS', 'CHANGES', 'NIGHTS', 'QUESTIONS', 'THREADS']) {
+    for (const block of ['SUBJECTS', 'FACTS', 'CHANGES', 'NIGHTS', 'QUESTIONS', 'THREADS', 'CONTRADICTIONS']) {
         for (const line of lines) {
             const started = performance.now();
             ScribeAnswer.parse(`=== ${block}\n${line}`);
             assert.ok(performance.now() - started < 500, `${block} ${line.slice(0, 20)}`);
         }
+    }
+});
+
+test('a contradiction line is read', () => {
+    assert.deepEqual(
+        only('CONTRADICTIONS', '#2 "guarded the Staff of Tides" | #1 "held the Staff of Tides" | Two keepers for one staff'),
+        {
+            type: 'Contradiction',
+            position: 2,
+            said: 'guarded the Staff of Tides',
+            earlier: 1,
+            before: 'held the Staff of Tides',
+            entry: null,
+            why: 'Two keepers for one staff',
+        },
+    );
+    assert.deepEqual(only('CONTRADICTIONS', '#9 "guarded the Staff of Tides" | f67 | Two keepers for one staff'), {
+        type: 'Contradiction',
+        position: 9,
+        said: 'guarded the Staff of Tides',
+        earlier: null,
+        before: null,
+        entry: 'F67',
+        why: 'Two keepers for one staff',
+    });
+    assert.equal(only('CONTRADICTIONS', '#9 "guarded the staff" | T8 | A promise broken').entry, 'T8');
+    for (const written of ['F1 (#5)', '"F1"', 'F1.', '#5 F1', '“f1”', 'F1 ( #5 )']) {
+        assert.equal(only('CONTRADICTIONS', `#9 "guarded the staff" | ${written} | Two keepers`).entry, 'F1', written);
+    }
+    for (const bad of ['#9 "guarded" | F67 x | why', '#9 "guarded" | G67 | why', '#9 "guarded" | F | why']) {
+        assert.deepEqual(plain(ScribeAnswer.parse(`=== CONTRADICTIONS\n${bad}`).refused).length, 1, bad);
+    }
+    const cases = [
+        ['#12 “the gate” | #3 ”the bar“ | open or barred', ['the gate', 'the bar']],
+        ['#12"the gate" | #3"the bar" | open or barred', ['the gate', 'the bar']],
+        ['#12 "  the gate  " | #3 "the bar " | open or barred', ['the gate', 'the bar']],
+        ['#12 "she said "no" twice" | #3 "she said yes" | yes or no', ['she said "no" twice', 'she said yes']],
+        ['- **#012 "the gate" | #3 "the bar" | open or barred**', ['the gate', 'the bar']],
+    ];
+    for (const [line, quotes] of cases) {
+        const operation = only('CONTRADICTIONS', line);
+        assert.deepEqual([operation.said, operation.before], quotes, line);
+        assert.deepEqual([operation.position, operation.earlier], [12, 3], line);
+    }
+    const lines = [
+        '=== QUESTIONS',
+        'Who holds the staff? | #2',
+        '=== CONTRADICTIONS',
+        '#2 "the staff" | #1 "an oar" | which',
+    ];
+    const result = ScribeAnswer.parse(lines.join('\n'));
+    assert.deepEqual(plain(result.operations.map((operation) => operation.type)), ['Question', 'Contradiction']);
+    assertFrozenDeep(result, 'result');
+});
+
+test('a contradiction line of the wrong shape or numbers is refused', () => {
+    const shapes = [
+        '#2 "the gate stood open" | #1 "the gate was barred"',
+        '#2 "the gate stood open" | #1 "the gate was barred" | open or barred | #2',
+        '#2 the gate stood open | #1 "the gate was barred" | open or barred',
+        "#2 'the gate stood open' | #1 \"the gate was barred\" | open or barred",
+        '#2 "the gate stood open | #1 "the gate was barred" | open or barred',
+        '#2 "" | #1 "the gate was barred" | open or barred',
+        '#2 "..." | #1 "the gate was barred" | open or barred',
+        '#2 "the gate stood open" | #1 " " | open or barred',
+        '#2 "the gate stood open" | #1 "the gate was barred" |',
+        '#2 "the gate stood open" | #1 "the gate was barred" | ...',
+        '#2 "the gate stood open" #1 "the gate was barred" | open | barred',
+    ];
+    for (const line of shapes) {
+        assertRefused('CONTRADICTIONS', line, 'Shape');
+    }
+    const citations = [
+        '#0 "the gate stood open" | #1 "the gate was barred" | open or barred',
+        '#2 "the gate stood open" | #0 "the gate was barred" | open or barred',
+        '#2 "the gate stood open" | #2 "the gate was barred" | open or barred',
+        '#2 "the gate stood open" | #3 "the gate was barred" | open or barred',
+        '"the gate stood open" | #1 "the gate was barred" | open or barred',
+        '#x "the gate stood open" | #1 "the gate was barred" | open or barred',
+        '#2 "the gate stood open" | 1 "the gate was barred" | open or barred',
+        '[#2] "the gate stood open" | #1 "the gate was barred" | open or barred',
+        '#-2 "the gate stood open" | #1 "the gate was barred" | open or barred',
+        '#99999999999999999999 "the gate stood open" | #1 "the gate was barred" | open or barred',
+        '#2-#4 "the gate stood open" | #1 "the gate was barred" | open or barred',
+    ];
+    for (const line of citations) {
+        assertRefused('CONTRADICTIONS', line, 'Citation');
+    }
+    assertRefused('QUESTIONS', '#2 "the gate stood open" | #1 "the gate was barred" | open or barred', 'Shape');
+});
+
+test('a hostile contradiction line stays fast', () => {
+    const size = 100000;
+    const lines = [
+        `#2 "${'a'.repeat(size)} | #1 "b c" | why`,
+        `#2 ${'"'.repeat(size)} | #1 "b c" | why`,
+        `#2 "${'" '.repeat(size / 2)}x | #1 "b c" | why`,
+        `${'#'.repeat(size)} "a b" | #1 "b c" | why`,
+        `#2${' '.repeat(size)}x"a b" | #1 "b c" | why`,
+        `#2 "a b" | #1 "b c" | ${'"'.repeat(size)}`,
+    ];
+    for (const line of lines) {
+        const started = performance.now();
+        ScribeAnswer.parse(`=== CONTRADICTIONS\n${line}`);
+        assert.ok(performance.now() - started < 500, line.slice(0, 20));
     }
 });

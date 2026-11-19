@@ -11,6 +11,8 @@
 // @grant        GM_deleteValue
 // @grant        GM_listValues
 // @grant        GM_xmlhttpRequest
+// @grant        GM_registerMenuCommand
 // @grant        unsafeWindow
 // @connect      openrouter.ai
+// @connect      zeta-dm-memory.elit1989.workers.dev
 // ==/UserScript==

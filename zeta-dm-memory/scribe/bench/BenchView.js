@@ -52,6 +52,9 @@ const BenchView = Object.freeze({
             Unalias: 'Unalias ',
             Answer: 'Answer ',
             Dismiss: 'Dismiss ',
+            DismissContradiction: 'Dismiss the contradiction "',
+            Against: '" against "',
+            QuoteClose: '"',
         }),
         Random: Object.freeze({
             Increment: 0x6d2b79f5,
@@ -589,6 +592,15 @@ const BenchView = Object.freeze({
         Dismiss(operation) {
             const settings = BenchView.Settings;
             return settings.Words.Dismiss + operation.question + settings.Colon + operation.questionText;
+        },
+
+        /**
+         * @param {{ said: string, before: string }} operation
+         * @return {string}
+         */
+        DismissContradiction(operation) {
+            const words = BenchView.Settings.Words;
+            return words.DismissContradiction + operation.said + words.Against + operation.before + words.QuoteClose;
         },
     }),
 

@@ -1593,25 +1593,29 @@ function storyOf(fetch, extra = {}) {
  * @param {object} extra
  * @return {Promise<string>}
  */
-function profileOf(fetch, extra = {}) {
-    return ZetaSource.profile({ fetch, token: TOKEN, roomId: FakeZeta.Room, pause: rest, ...extra });
+function profileOf(fetch, extra = {}, plotId = 'p1') {
+    return ZetaSource.profile({ fetch, token: TOKEN, roomId: FakeZeta.Room, pause: rest, ...extra }, plotId);
 }
 
-test('the story is read from the room and then from its plot, with the token and encoded ids', async () => {
+test('the story is read from the room alone, with the token and encoded id', async () => {
     const read = FakeZeta.scripted([
-        json({ id: 'a b/c', plotId: 'p q/r' }),
         json({
-            characters: [
-                { name: 'Mavan the Gray', description: 'An old wizard with long grey hair.' },
-                { name: 'Thessaly' },
-                { name: '', description: 'nameless' },
-                { description: 'no name at all' },
-                'Selene',
-                null,
-                { name: 7, description: 'a number for a name' },
-                { name: 'Veyra', description: 42 },
-            ],
+            id: 'a b/c',
+            plot: {
+                id: 'p q/r',
+                characters: [
+                    { name: 'Mavan the Gray', description: 'An old wizard with long grey hair.' },
+                    { name: 'Thessaly' },
+                    { name: '', description: 'nameless' },
+                    { description: 'no name at all' },
+                    'Selene',
+                    null,
+                    { name: 7, description: 'a number for a name' },
+                    { name: 'Veyra', description: 42 },
+                ],
+            },
         }),
+        json({ characters: [{ name: 'Never read' }] }),
     ]);
     const story = await storyOf(read.fetch, { roomId: 'a b/c' });
     assert.deepEqual(plain(story), {
@@ -1620,13 +1624,14 @@ test('the story is read from the room and then from its plot, with the token and
             { name: 'Thessaly', description: '' },
             { name: 'Veyra', description: '' },
         ],
+        plotId: 'p q/r',
     });
     assert.equal(Object.isFrozen(story), true);
     assert.equal(Object.isFrozen(story.characters), true);
     assert.equal(Object.isFrozen(story.characters[0]), true);
     assert.deepEqual(
         read.requests.map((request) => request.url),
-        [`${API}/v1/rooms/a%20b%2Fc`, `${API}/v1/plots/p%20q%2Fr`],
+        [`${API}/v1/rooms/a%20b%2Fc`],
     );
     for (const request of read.requests) {
         assert.equal(request.options.headers.Authorization, TOKEN);
@@ -1634,19 +1639,44 @@ test('the story is read from the room and then from its plot, with the token and
     }
 });
 
+test('the story takes the characters from the room body as Zeta sends it, with no plot request', async () => {
+    const zeta = new FakeZeta([]);
+    zeta.characters = [
+        { name: 'Mavan the Gray', description: 'An old wizard.' },
+        { name: 'Thessaly', description: 'A harbour guard.' },
+    ];
+    const story = await storyOf(zeta.fetch);
+    assert.deepEqual(plain(story), { characters: zeta.characters, plotId: FakeZeta.Plot });
+    assert.deepEqual(
+        zeta.requests.map((request) => request.url),
+        [`${API}/v1/rooms/${FakeZeta.Room}`],
+    );
+    assert.equal(
+        zeta.requests.some((request) => request.url.includes('/v1/plots/') && !request.url.includes('/rooms/')),
+        false,
+    );
+    const body = zeta.roomBody();
+    assert.equal(Object.hasOwn(body, 'plotId'), false);
+    assert.equal(body.plot.characters[0].plotId, FakeZeta.Plot);
+    const bare = FakeZeta.scripted([json({ id: 'abc', title: 'No plot here', isActive: true })]);
+    const error = await failureOf(storyOf(bare.fetch));
+    assert.equal(error.message, 'Zeta named no story for this chat');
+    assert.equal(bare.requests.length, 1);
+});
+
 test('the plot id may be a number or sit under plot', async () => {
     for (const [room, plot] of [
-        [{ plotId: 12 }, '12'],
-        [{ plotId: 0 }, '0'],
-        [{ plot: { id: 'p9' } }, 'p9'],
-        [{ plotId: '', plot: { id: 'p8' } }, 'p8'],
-        [{ plotId: null, plot: { id: 4.5 } }, '4.5'],
-        [{ plotId: 'first', plot: { id: 'second' } }, 'first'],
+        [{ plotId: 12, plot: { characters: [] } }, '12'],
+        [{ plotId: 0, plot: { characters: [] } }, '0'],
+        [{ plot: { id: 'p9', characters: [] } }, 'p9'],
+        [{ plotId: '', plot: { id: 'p8', characters: [] } }, 'p8'],
+        [{ plotId: null, plot: { id: 4.5, characters: [] } }, '4.5'],
+        [{ plotId: 'first', plot: { id: 'second', characters: [] } }, 'first'],
     ]) {
         const read = FakeZeta.scripted([json(room), json({ characters: [] })]);
         const story = await storyOf(read.fetch);
-        assert.deepEqual(plain(story), { characters: [] }, JSON.stringify(room));
-        assert.equal(read.requests[1].url, `${API}/v1/plots/${plot}`, JSON.stringify(room));
+        assert.deepEqual(plain(story), { characters: [], plotId: plot }, JSON.stringify(room));
+        assert.equal(read.requests.length, 1, JSON.stringify(room));
     }
     assert.equal(ZetaSource.plotOf({ plot: 'p1' }), null);
     assert.equal(ZetaSource.plotOf({ plotId: true }), null);
@@ -1664,12 +1694,12 @@ test('no plot id, or a plot without its characters, is a failure that is not ret
     }
     const garbled = FakeZeta.scripted([FakeZeta.reply(200, 'not json'), json({ characters: [] })]);
     assert.equal((await failureOf(storyOf(garbled.fetch))).message, 'Zeta named no story for this chat');
-    for (const plot of [{}, { characters: 'Mavan' }, { characters: { 0: 'Mavan' } }, null, []]) {
-        const read = FakeZeta.scripted([json({ plotId: 'p1' }), json(plot)]);
+    for (const plot of [{}, { characters: 'Mavan' }, { characters: { 0: 'Mavan' } }, { characters: null }, null, [], 'text']) {
+        const read = FakeZeta.scripted([json({ plotId: 'p1', plot }), json({ characters: [] })]);
         const error = await failureOf(storyOf(read.fetch));
         assert.equal(error.message, SHAPE, JSON.stringify(plot));
         assert.equal(error.retryable, false);
-        assert.equal(read.requests.length, 2);
+        assert.equal(read.requests.length, 1);
     }
 });
 
@@ -1696,17 +1726,13 @@ test('a story read gives up on 404 at once and retries 429 up to the limit', asy
     const patient = recorder();
     const recovered = FakeZeta.scripted([
         FakeZeta.reply(429, 'Slow down'),
-        json({ plotId: 'p1' }),
         FakeZeta.reply(503, 'Unavailable'),
-        json({ characters: [{ name: 'Mavan' }] }),
+        json({ plot: { id: 'p1', characters: [{ name: 'Mavan' }] } }),
     ]);
     const story = await storyOf(recovered.fetch, { pause: patient.pause });
-    assert.deepEqual(plain(story), { characters: [{ name: 'Mavan', description: '' }] });
-    assert.equal(recovered.requests.length, 4);
-    assert.deepEqual(patient.paused, [2000, 2000]);
-    const missing = FakeZeta.scripted([json({ plotId: 'p1' }), FakeZeta.reply(404, 'No such plot')]);
-    assert.equal((await failureOf(storyOf(missing.fetch))).message, 'Zeta answered HTTP 404');
-    assert.equal(missing.requests.length, 2);
+    assert.deepEqual(plain(story), { characters: [{ name: 'Mavan', description: '' }], plotId: 'p1' });
+    assert.equal(recovered.requests.length, 3);
+    assert.deepEqual(patient.paused, [2000, 4000]);
 });
 
 test('no token, no room or no pause means no request', async () => {
@@ -1726,57 +1752,124 @@ test('no token, no room or no pause means no request', async () => {
     }
 });
 
-test("the profile text is read from the room's own chat profile", async () => {
-    const read = FakeZeta.scripted([json({ id: 'x', description: '  Frost is a ranger of the north.\n  ' })]);
-    assert.equal(await profileOf(read.fetch, { roomId: 'a b/c' }), 'Frost is a ranger of the north.');
+test('the profile is the selected persona, read from the plot and room with the token and encoded ids', async () => {
+    const read = FakeZeta.scripted([json({ name: ' Frost ', profileImageUrl: null, description: '  A ranger.\n  ' })]);
+    assert.equal(await profileOf(read.fetch, { roomId: 'a b/c' }, 'p q/r'), 'Frost: A ranger.');
     assert.deepEqual(
         read.requests.map((request) => request.url),
-        [`${API}/v1/rooms/a%20b%2Fc/user-plot-chat-profiles/me`],
+        [`${API}/v1/plots/p%20q%2Fr/rooms/a%20b%2Fc/user-personas/selected`],
     );
     assert.equal(read.requests[0].options.headers.Authorization, TOKEN);
-    for (const [body, text] of [
-        [{ content: 'From content.' }, 'From content.'],
-        [{ profile: 'From profile.' }, 'From profile.'],
-        [{ profile: { description: 'Nested.' } }, 'Nested.'],
-        [{ description: '   ', content: 'The next field.' }, 'The next field.'],
-        [{ description: 5, profile: { description: 'Past a number.' } }, 'Past a number.'],
-    ]) {
-        const answered = FakeZeta.scripted([json(body)]);
-        assert.equal(await profileOf(answered.fetch), text, JSON.stringify(body));
-    }
     const deseret = String.fromCodePoint(0x10400);
-    const long = FakeZeta.scripted([json({ description: `${deseret.repeat(1999)}xyz` })]);
+    const long = FakeZeta.scripted([json({ name: 'N', description: `${deseret.repeat(1999)}xyz` })]);
     const capped = await profileOf(long.fetch);
     assert.equal(Array.from(capped).length, 2000);
-    assert.equal(capped, `${deseret.repeat(1999)}x`);
+    assert.equal(capped, `N: ${deseret.repeat(1997)}`);
     const exact = FakeZeta.scripted([json({ description: 'y'.repeat(2000) })]);
     assert.equal(await profileOf(exact.fetch), 'y'.repeat(2000));
-    for (const body of [{}, { description: '' }, { description: '  \n ' }, { profile: {} }, [], 'text']) {
-        const empty = FakeZeta.scripted([json(body)]);
-        const error = await failureOf(profileOf(empty.fetch));
-        assert.equal(error.message, 'Zeta gave no profile text for this chat', JSON.stringify(body));
-        assert.equal(error.retryable, false);
-        assert.equal(empty.requests.length, 1);
-    }
-    const gone = FakeZeta.scripted([FakeZeta.reply(404, 'No profile'), json({ description: 'late' })]);
-    assert.equal((await failureOf(profileOf(gone.fetch))).message, 'Zeta answered HTTP 404');
-    assert.equal(gone.requests.length, 1);
-    const paused = recorder();
-    const slow = FakeZeta.scripted([FakeZeta.reply(429, 'Slow down'), json({ description: 'At last.' })]);
-    assert.equal(await profileOf(slow.fetch, { pause: paused.pause }), 'At last.');
-    assert.deepEqual(paused.paused, [2000]);
 });
 
-test('the fake site serves the room, the plot and the profile', async () => {
+test('a persona with an empty or missing name gives just its description', async () => {
+    for (const body of [
+        { name: '', description: 'Alone.' },
+        { name: '   ', description: 'Alone.' },
+        { description: 'Alone.' },
+        { name: 5, description: 'Alone.' },
+        { name: null, description: 'Alone.' },
+    ]) {
+        const read = FakeZeta.scripted([json(body)]);
+        assert.equal(await profileOf(read.fetch), 'Alone.', JSON.stringify(body));
+    }
+});
+
+test('a persona with an empty description is null; one with no usable description says so; neither is retried', async () => {
+    for (const body of [
+        { name: 'Frost', description: '' },
+        { name: 'Frost', description: '  \n ' },
+        { name: 'Frost', description: null },
+        { name: 'Frost' },
+        {},
+        { data: { description: 'x' } },
+    ]) {
+        const read = FakeZeta.scripted([json(body), json({ name: 'Late', description: 'late' })]);
+        assert.equal(await profileOf(read.fetch), null, JSON.stringify(body));
+        assert.equal(read.requests.length, 1);
+    }
+    for (const body of [null, [], 'text', 7, { name: 'Frost', description: 7 }]) {
+        const read = FakeZeta.scripted([json(body), json({ name: 'Late', description: 'late' })]);
+        const error = await failureOf(profileOf(read.fetch));
+        const shaped = error.message.startsWith('Zeta answered the chat profile in an unexpected shape');
+        assert.equal(shaped, true, JSON.stringify(body));
+        assert.equal(read.requests.length, 1);
+    }
+    const garbled = FakeZeta.scripted([FakeZeta.reply(200, '<html>not json</html>')]);
+    const odd = await failureOf(profileOf(garbled.fetch));
+    assert.equal(typeof odd.message, 'string');
+    assert.notEqual(odd.message, '');
+});
+
+test('a room without the plot characters still gives the plot id, so the profile can be read', async () => {
+    const roomed = FakeZeta.scripted([json({ id: 'harbour', plot: { id: 'plot-7', name: 'A tale' } })]);
+    const error = await failureOf(storyOf(roomed.fetch));
+    assert.equal(error.message.startsWith('Zeta answered in an unexpected shape'), true, error.message);
+    assert.equal(error.plotId, 'plot-7');
+});
+
+test('a persona 404 is null at once, any other failure throws, and 429 is retried', async () => {
+    const paused = recorder();
+    const gone = FakeZeta.scripted([FakeZeta.reply(404, 'No persona'), json({ description: 'late' })]);
+    assert.equal(await profileOf(gone.fetch, { pause: paused.pause }), null);
+    assert.equal(gone.requests.length, 1);
+    assert.deepEqual(paused.paused, []);
+    const broken = FakeZeta.scripted([
+        FakeZeta.reply(500, 'Broken'),
+        FakeZeta.reply(500, 'Broken'),
+        FakeZeta.reply(500, 'Broken'),
+        json({ description: 'late' }),
+    ]);
+    const error = await failureOf(profileOf(broken.fetch));
+    assert.equal(error.message, 'Zeta answered HTTP 500');
+    assert.equal(broken.requests.length, 3);
+    const refused = FakeZeta.scripted([FakeZeta.reply(401, 'No'), json({ description: 'late' })]);
+    assert.equal((await failureOf(profileOf(refused.fetch))).message, 'Zeta answered HTTP 401');
+    assert.equal(refused.requests.length, 1);
+    const slow = recorder();
+    const crowded = FakeZeta.scripted([FakeZeta.reply(429, 'Slow down'), json({ description: 'At last.' })]);
+    assert.equal(await profileOf(crowded.fetch, { pause: slow.pause }), 'At last.');
+    assert.deepEqual(slow.paused, [2000]);
+});
+
+test('no plot id means no persona request, and the old chat-profile route is never read', async () => {
+    for (const plotId of [null, '']) {
+        const read = FakeZeta.scripted([json({ name: 'Frost', description: 'A ranger.' })]);
+        assert.equal(await profileOf(read.fetch, {}, plotId), null);
+        assert.equal(read.requests.length, 0);
+    }
+    const zeta = new FakeZeta([]);
+    assert.equal(await profileOf(zeta.fetch, {}, FakeZeta.Plot), `Orla: ${FakeZeta.Profile}`);
+    assert.equal(await ZetaSource.profile({ fetch: zeta.fetch, token: TOKEN, roomId: FakeZeta.Room, pause: rest }), null);
+    assert.equal(zeta.requests.length, 1);
+    assert.equal(
+        zeta.requests.some((request) => request.url.includes('user-plot-chat-profiles')),
+        false,
+    );
+});
+
+test('the fake site serves the room, the plot and the persona', async () => {
     const zeta = new FakeZeta([]);
     zeta.characters = [{ name: 'Mavan the Gray', description: 'An old wizard.' }];
     const story = await storyOf(zeta.fetch);
-    assert.deepEqual(plain(story), { characters: [{ name: 'Mavan the Gray', description: 'An old wizard.' }] });
-    assert.equal(await profileOf(zeta.fetch), FakeZeta.Profile);
+    assert.deepEqual(plain(story), {
+        characters: [{ name: 'Mavan the Gray', description: 'An old wizard.' }],
+        plotId: FakeZeta.Plot,
+    });
+    assert.equal(await profileOf(zeta.fetch, {}, story.plotId), `Orla: ${FakeZeta.Profile}`);
+    zeta.persona = '';
+    assert.equal(await profileOf(zeta.fetch, {}, story.plotId), FakeZeta.Profile);
     zeta.plot = null;
     zeta.profile = null;
     assert.equal((await failureOf(storyOf(zeta.fetch))).message, 'Zeta answered HTTP 404');
-    assert.equal((await failureOf(profileOf(zeta.fetch))).message, 'Zeta answered HTTP 404');
+    assert.equal(await profileOf(zeta.fetch), null);
     const stranger = await failureOf(storyOf(zeta.fetch, { token: bearer('stranger') }));
     assert.equal(stranger.message, 'Zeta answered HTTP 401');
 });

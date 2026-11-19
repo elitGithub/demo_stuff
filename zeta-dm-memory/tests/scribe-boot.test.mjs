@@ -49,6 +49,20 @@ function realSender() {
 }
 
 const RealSender = realSender();
+
+/**
+ * @return {object}
+ */
+function realCloud() {
+    const separate = vm.createContext({ TextEncoder, URL, URLSearchParams });
+    for (const path of ['../scribe/page/ScribeStore.js', '../scribe/page/ScribeCloud.js']) {
+        const url = new URL(path, import.meta.url);
+        vm.runInContext(readFileSync(url, 'utf8'), separate, { filename: url.pathname });
+    }
+    return vm.runInContext('ScribeCloud', separate);
+}
+
+const RealCloud = realCloud();
 const START_SOURCE = readFileSync(new URL('../scribe/page/ScribeStart.js', import.meta.url), 'utf8');
 const ZETA = 'https://zeta-ai.io';
 const PINGPONG = 'https://frame.pingpong.ai';
@@ -290,6 +304,68 @@ function standIns(timers) {
         hostless: false,
         appended: null,
         offerAtOpen: null,
+        clouds: [],
+        notes: null,
+        leads: true,
+    };
+    context.ScribeCloud = {
+        Settings: RealCloud.Settings,
+
+        /**
+         * @param {*} value
+         * @return {boolean}
+         */
+        validKey: (value) => RealCloud.validKey(value),
+
+        /**
+         * @param {object} options
+         * @return {object}
+         */
+        open(options) {
+            const record = { roomId: options.roomId, options, keepersAtOpen: world.keepers.length, ticks: [], stirs: 0, closes: 0, handle: null };
+            world.clouds.push(record);
+            record.handle = {
+                /**
+                 * @return {object}
+                 */
+                view: () => ({ phase: 'Off', keyed: false, conflict: null, notes: null, unsent: 0, problem: null }),
+
+                /**
+                 * @return {Promise<void>}
+                 */
+                tick: () => {
+                    const keeper = world.keepers.find((entry) => entry.roomId === record.roomId && entry.options.lease !== undefined);
+                    record.ticks.push(keeper === undefined ? null : keeper.ticks.length);
+                    return Promise.resolve();
+                },
+
+                /**
+                 * @return {Promise<void>}
+                 */
+                stir: () => {
+                    record.stirs++;
+                    return Promise.resolve();
+                },
+
+                /**
+                 * @return {boolean}
+                 */
+                leads: () => world.leads,
+
+                /**
+                 * @return {string|null}
+                 */
+                notes: () => world.notes,
+
+                /**
+                 * @return {void}
+                 */
+                close: () => {
+                    record.closes++;
+                },
+            };
+            return record.handle;
+        },
     };
     context.ScribeKeeper = {
         Defaults: DEFAULTS,
@@ -385,11 +461,11 @@ function standIns(timers) {
                 },
 
                 /**
-                 * @return {{ ready: string|null, suggestion: string|null }}
+                 * @return {{ ready: string|null, suggestion: string|null, ends: number[] }}
                  */
                 lines: () => {
                     record.reads.push('lines');
-                    return { ready: record.ready, suggestion: record.suggestion };
+                    return { ready: record.ready, suggestion: record.suggestion, ends: [] };
                 },
 
                 /**
@@ -717,6 +793,9 @@ function harness(choices = {}) {
         environment: null,
         boot: null,
         made: 0,
+        menus: [],
+        asked: [],
+        typed: [],
     };
     run.clock = {
         day: DAY,
@@ -753,6 +832,16 @@ function harness(choices = {}) {
         download: () => undefined,
         log: (text) => {
             run.lines.push(text);
+        },
+        menu: (label, action) => {
+            run.menus.push({ label, action });
+        },
+        prompt: (text) => {
+            run.asked.push(`prompt ${text}`);
+            return run.typed.length > 0 ? run.typed.shift() : null;
+        },
+        alert: (text) => {
+            run.asked.push(`alert ${text}`);
         },
     };
     return run;
@@ -1084,9 +1173,19 @@ test('the story and the profile are read through the page fetch, a cloned init a
     await settle();
     await run.page.fetch(`${API}/v1/users/me`, { headers: { Authorization: TOKEN } });
     const served = new Map([
-        ['/v1/rooms/harbour', { id: 'harbour', plotId: 'p 1' }],
-        ['/v1/plots/p%201', { characters: [{ name: 'Mavan the Gray', description: 'An old wizard.' }, { name: '' }] }],
-        ['/v1/rooms/harbour/user-plot-chat-profiles/me', { description: 'Orla is a sellsword.' }],
+        [
+            '/v1/rooms/harbour',
+            {
+                id: 'harbour',
+                title: 'The harbour',
+                plot: {
+                    id: 'p 1',
+                    name: 'The harbour tale',
+                    characters: [{ name: 'Mavan the Gray', description: 'An old wizard.' }, { name: '' }],
+                },
+            },
+        ],
+        ['/v1/plots/p%201/rooms/harbour/user-personas/selected', { name: 'Orla', description: 'A sellsword.' }],
     ]);
     /**
      * @param {string} url
@@ -1103,11 +1202,12 @@ test('the story and the profile are read through the page fetch, a cloned init a
     const story = await options.story();
     assert.deepEqual(JSON.parse(JSON.stringify(story)), {
         characters: [{ name: 'Mavan the Gray', description: 'An old wizard.' }],
+        plotId: 'p 1',
     });
     const storyReads = run.page.fetchCalls.slice(before);
     assert.deepEqual(
         storyReads.map((call) => call.values[0]),
-        [`${API}/v1/rooms/harbour`, `${API}/v1/plots/p%201`],
+        [`${API}/v1/rooms/harbour`],
     );
     for (const call of storyReads) {
         assert.equal(call.receiver === run.page, true);
@@ -1117,10 +1217,10 @@ test('the story and the profile are read through the page fetch, a cloned init a
     const renewed = 'Bearer RENEWEDRENEWEDRENEWED';
     await run.page.fetch(`${API}/v1/users/me`, { headers: { Authorization: renewed } });
     const after = run.page.fetchCalls.length;
-    assert.equal(await options.profile(), 'Orla is a sellsword.');
+    assert.equal(await options.profile('p 1'), 'Orla: A sellsword.');
     const profileReads = run.page.fetchCalls.slice(after);
     assert.equal(profileReads.length, 1);
-    assert.equal(profileReads[0].values[0], `${API}/v1/rooms/harbour/user-plot-chat-profiles/me`);
+    assert.equal(profileReads[0].values[0], `${API}/v1/plots/p%201/rooms/harbour/user-personas/selected`);
     assert.equal(profileReads[0].receiver === run.page, true);
     assert.equal(cloned.includes(profileReads[0].values[1]), true);
     assert.equal(profileReads[0].values[1].headers.Authorization, renewed);
@@ -1128,7 +1228,10 @@ test('the story and the profile are read through the page fetch, a cloned init a
     const again = run.page.fetchCalls.length;
     await options.story();
     const tokens = run.page.fetchCalls.slice(again).map((call) => call.values[1].headers.Authorization);
-    assert.deepEqual(tokens, [TOKEN, TOKEN]);
+    assert.deepEqual(tokens, [TOKEN]);
+    const unplotted = run.page.fetchCalls.length;
+    assert.equal(await options.profile(null), null);
+    assert.equal(run.page.fetchCalls.length, unplotted);
     assert.equal(run.world.lives[0].profiles, 0);
     assert.equal(await keeperOptions.profile(), 'the profile held for harbour');
     assert.equal(run.world.lives[0].profiles, 1);
@@ -3330,4 +3433,198 @@ test('the day is the local date', () => {
     assert.equal(ScribeBoot.day(new Date(2026, 0, 5, 23, 59)), '2026-01-05');
     assert.equal(ScribeBoot.day(new Date(2026, 10, 15, 0, 1)), '2026-11-15');
     assert.equal(ScribeBoot.day(new Date(2026, 11, 31, 12, 0)), '2026-12-31');
+});
+
+const DM_KEY = 'Fictional-DM-Key-0123456789-ABCDEFGHIJKLMNOPQRSTUVWXYZ-abcdefghijkl';
+
+test('the DM API key is set from the menu, once per page', async () => {
+    const run = harness();
+    const menus = [];
+    run.environment.menu = (label, action) => {
+        menus.push({ label, action, written: run.storage.calls.filter((call) => call.operation === 'set').map((call) => call.name) });
+    };
+    start(run);
+    await settle();
+    assert.equal(menus.length, 1);
+    assert.equal(menus[0].label, 'Set DM API key');
+    assert.deepEqual(menus[0].written, [TOKEN_NAME]);
+    const action = menus[0].action;
+    const sets = () => run.storage.count('set');
+    const before = sets();
+    action();
+    await settle();
+    assert.deepEqual(run.asked, ['prompt Enter DM API key']);
+    assert.equal(sets(), before);
+    for (const typed of ['k'.repeat(59), 'k'.repeat(255), `${'k'.repeat(59)}é`, `${'k'.repeat(30)} ${'k'.repeat(30)}`, '']) {
+        run.asked = [];
+        run.typed.push(typed);
+        action();
+        await settle();
+        assert.deepEqual(run.asked, ['prompt Enter DM API key', 'alert Enter 60–254 visible ASCII characters.'], typed.slice(0, 5));
+        assert.equal(sets(), before);
+        assert.equal(ScribeStore.cloudKey(run.storage), '');
+    }
+    const cloud = run.world.clouds[0];
+    const keeper = run.world.keepers[0];
+    const ticks = cloud.ticks.length;
+    run.asked = [];
+    run.typed.push(DM_KEY);
+    action();
+    await settle();
+    assert.deepEqual(run.asked, ['prompt Enter DM API key']);
+    assert.equal(ScribeStore.cloudKey(run.storage), DM_KEY);
+    assert.equal(cloud.ticks.length, ticks + 1);
+    assert.equal(keeper.ticks.length, 1);
+    const saved = sets();
+    run.typed.push(DM_KEY);
+    action();
+    await settle();
+    assert.equal(sets(), saved);
+    run.storage.refuseSetsMatching(/^scribe:cloudkey$/);
+    run.typed.push(`${DM_KEY}-2`);
+    action();
+    await settle();
+    run.storage.allow();
+    assert.deepEqual(run.lines, ['The book could not be synced: The key could not be saved']);
+    assert.equal(run.lines.some((line) => line.includes(DM_KEY)), false);
+    const again = ScribeBoot.start(run.environment);
+    assert.equal(menus.length, 1);
+    again.stop();
+    run.boot.stop();
+});
+
+test('the cloud opens before the keeper, ticks before it and closes with the session', async () => {
+    const run = harness();
+    start(run);
+    await settle();
+    assert.equal(run.world.clouds.length, 1);
+    const cloud = run.world.clouds[0];
+    const keeper = run.world.keepers[0];
+    const live = run.world.lives[0];
+    const panel = run.world.panels[0];
+    assert.equal(cloud.keepersAtOpen, 0);
+    assert.equal(cloud.options.storage === run.storage, true);
+    assert.equal(cloud.options.roomId, 'harbour');
+    assert.equal(cloud.options.notesRoom, '/rooms/harbour');
+    assert.equal(cloud.options.xmlHttpRequest === run.environment.xmlHttpRequest, true);
+    assert.equal(cloud.options.clock === run.clock, true);
+    assert.equal(cloud.options.random === run.environment.random, true);
+    assert.equal(panel.options.cloud === cloud.handle, true);
+    assert.deepEqual(cloud.ticks, [0]);
+    await pass(run, 40000);
+    assert.deepEqual(keeper.ticks, [20000, 40000]);
+    assert.deepEqual(cloud.ticks, [0, 0, 1]);
+    assert.equal(keeper.options.lease(), true);
+    run.world.leads = false;
+    assert.equal(keeper.options.lease(), false);
+    const stirs = cloud.stirs;
+    keeper.options.notify({ kind: 'Changed' });
+    live.options.notify();
+    await settle();
+    assert.equal(cloud.stirs, stirs + 2);
+    const redraws = panel.redraws;
+    cloud.options.notify();
+    await settle();
+    assert.equal(panel.redraws, redraws + 1);
+    assert.equal(keeper.ticks.length, 3);
+    let fired = 0;
+    cloud.options.later(1000, () => {
+        fired++;
+    });
+    await pass(run, 999);
+    assert.equal(fired, 0);
+    await pass(run, 1);
+    assert.equal(fired, 1);
+    assert.equal(cloud.options.chosen(), false);
+    ScribeStore.claim(run.storage, 'harbour', 'tab-one', run.timers.now());
+    assert.equal(cloud.options.chosen(), true);
+    ScribeStore.claim(run.storage, 'harbour', 'tab-two', run.timers.now() + 100000);
+    assert.equal(cloud.options.chosen(), false);
+    assert.equal(cloud.options.reader(), true);
+    keeper.reader = false;
+    assert.equal(cloud.options.reader(), false);
+    assert.equal(cloud.options.busy(), false);
+    assert.equal(cloud.options.reading(), false);
+    keeper.phase = 'Reading';
+    assert.equal(cloud.options.reading(), true);
+    go(run, '/rooms/quay');
+    await pass(run, 1000);
+    assert.equal(cloud.closes, 1);
+    assert.equal(keeper.closes, 1);
+    assert.equal(run.world.clouds.length, 2);
+    assert.equal(run.world.clouds[1].roomId, 'quay');
+    assert.equal(run.world.clouds[1].options.notesRoom, '/rooms/quay');
+    const ticked = cloud.ticks.length;
+    await pass(run, 40000);
+    assert.equal(cloud.ticks.length, ticked);
+    run.boot.stop();
+    assert.equal(run.world.clouds[1].closes, 1);
+    const locked = harness({ locks: lockManager(true, []) });
+    start(locked);
+    await pass(locked, 3000);
+    assert.equal(locked.world.clouds[0].options.chosen(), true);
+    locked.boot.stop();
+});
+
+test('a model call carries the operator notes only when the cloud has some, and the DM key never goes out', async () => {
+    const run = harness();
+    start(run);
+    await settle();
+    ScribeStore.setKey(run.storage, KEY);
+    ScribeStore.setCloudKey(run.storage, DM_KEY);
+    const ask = run.world.keepers[0].options.ask;
+    const live = run.world.lives[0].options.ask;
+    const users = [];
+    for (const notes of [null, '', 'The ferry stops at dusk.\nNobody crosses at night.']) {
+        run.world.notes = notes;
+        for (const asking of [ask, live]) {
+            const pending = asking(ScribeBoot.Role.Scribe, SYSTEM, USER);
+            await settle();
+            const call = run.sent.calls.at(-1);
+            users.push(JSON.parse(call.details.data).messages[1].content);
+            answer(call, 200, completion('An answer.', 0.01));
+            await pending;
+        }
+    }
+    const told = `${USER}\n\nOPERATOR NOTES:\nThe ferry stops at dusk.\nNobody crosses at night.`;
+    assert.deepEqual(users, [USER, USER, USER, USER, told, told]);
+    for (const call of run.sent.calls) {
+        assert.equal(JSON.stringify(call.details).includes(DM_KEY), false);
+        assert.equal(call.details.url, ENDPOINT);
+    }
+    const failing = failureOf(ask(ScribeBoot.Role.Scribe, SYSTEM, USER));
+    await settle();
+    answer(run.sent.calls.at(-1), 401, `{"error":"bad key ${DM_KEY}"}`);
+    await failing;
+    assert.equal(run.lines.some((line) => line.includes(DM_KEY) || line.includes(KEY)), false);
+    run.boot.stop();
+});
+
+test('the budget counts what the other PCs spent', async () => {
+    const run = harness();
+    start(run);
+    await settle();
+    ScribeStore.setKey(run.storage, KEY);
+    const live = run.world.lives[0].options.ask;
+    ScribeStore.spend(run.storage, 'harbour', DAY, 1);
+    ScribeStore.setOthers(run.storage, 'harbour', DAY, 2);
+    const refused = failureOf(live(ScribeBoot.Role.Scribe, SYSTEM, USER));
+    await settle();
+    assert.equal((await refused).message, "The day's budget is spent");
+    assert.equal(run.sent.calls.length, 0);
+    ScribeStore.setOthers(run.storage, 'harbour', DAY, 1.99);
+    const allowed = live(ScribeBoot.Role.Scribe, SYSTEM, USER);
+    await settle();
+    assert.equal(run.sent.calls.length, 1);
+    answer(run.sent.calls[0], 200, completion('Under the line.', 0.5));
+    await allowed;
+    assert.equal(ScribeStore.spent(run.storage, 'harbour', DAY), 1.5);
+    assert.equal(ScribeStore.others(run.storage, 'harbour', DAY), 1.99);
+    ScribeStore.setOthers(run.storage, 'harbour', NEXT_DAY, 5);
+    const elsewhere = live(ScribeBoot.Role.Scribe, SYSTEM, USER);
+    await settle();
+    assert.equal(run.sent.calls.length, 2);
+    answer(run.sent.calls[1], 200, completion('Another day counts apart.', 0.1));
+    await elsewhere;
+    run.boot.stop();
 });

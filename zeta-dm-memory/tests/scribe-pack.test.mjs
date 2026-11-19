@@ -242,6 +242,7 @@ function stage(output, choices = {}) {
     const original = () => 'the page fetch';
     const added = [];
     const removed = [];
+    const menus = [];
     let next = 0;
     const record = (name) => (...values) => {
         timers.push([name, values.length]);
@@ -319,6 +320,11 @@ function stage(output, choices = {}) {
             requests.push(details);
             return { abort: () => undefined };
         },
+        GM_registerMenuCommand: (label, action) => {
+            calls.push('GM_registerMenuCommand');
+            menus.push([label, action]);
+            return menus.length;
+        },
         setTimeout: record('setTimeout'),
         clearTimeout: record('clearTimeout'),
         setInterval: record('setInterval'),
@@ -330,7 +336,7 @@ function stage(output, choices = {}) {
             warn: (...values) => logs.push(String(values[0]).slice(0, 120)),
             error: (...values) => logs.push(String(values[0]).slice(0, 120)),
         },
-        window: { confirm: () => true },
+        window: { confirm: () => true, prompt: () => null, alert: () => undefined },
         Date: choices.date ?? Date,
         URL,
         URLSearchParams,
@@ -338,7 +344,7 @@ function stage(output, choices = {}) {
         Blob,
         ...(choices.extras ?? {}),
     });
-    return { page, original, requests, timers, logs, added, seen, calls, reads, writes, listeners, store, posted, queries, marks, documentAdded, documentRemoved, context, run: () => vm.runInContext(output, context) };
+    return { page, original, requests, timers, logs, added, seen, calls, reads, writes, listeners, store, posted, queries, marks, documentAdded, documentRemoved, menus, context, run: () => vm.runInContext(output, context) };
 }
 
 /**
@@ -389,6 +395,8 @@ test('the packed script boots once', () => {
         chat.logs.every((line) => line.startsWith('[Scribe] ')),
         true,
     );
+    assert.deepEqual(chat.menus.map(([label]) => label), ['Set DM API key']);
+    assert.equal(chat.calls.indexOf('GM_registerMenuCommand') > chat.calls.indexOf('GM_setValue'), true);
     const plain = stage(output, { path: '/', body: { kind: 'body' } });
     assert.doesNotThrow(plain.run);
     assert.equal(plain.page.fetch === plain.original, false);
@@ -483,6 +491,7 @@ test('the list is the list', () => {
     for (const name of [
         'ZetaSource',
         'ScribeStore',
+        'ScribeCloud',
         'ScribeKeeper',
         'ScribeScene',
         'ScribeReminder',
@@ -499,9 +508,10 @@ test('the list is the list', () => {
     ]) {
         wanted.push(`scribe/page/${name}.js`);
     }
-    assert.equal(wanted.length, 26);
-    assert.equal(ScribePack.Files.length, 26);
+    assert.equal(wanted.length, 27);
+    assert.equal(ScribePack.Files.length, 27);
     assert.equal(wanted.indexOf('scribe/page/ScribeFrame.js'), wanted.indexOf('scribe/page/ScribeSender.js') + 1);
+    assert.equal(wanted.indexOf('scribe/page/ScribeCloud.js'), wanted.indexOf('scribe/page/ScribeStore.js') + 1);
     assert.equal(wanted.at(-1), 'scribe/page/ScribeStart.js');
     assert.deepEqual([...ScribePack.Files], wanted);
 });
@@ -565,8 +575,9 @@ function headerProblems(header, body) {
         }
     }
     const host = new URL(/ModelOrigin: '([^']+)'/.exec(body)[1]).host;
+    const worker = new URL(/const ScribeCloud = [\s\S]*?Origin: '([^']+)'/.exec(body)[1]).host;
     const wanted = [
-        ['connect', lines.filter((line) => line.startsWith('// @connect ')).map((line) => line.slice('// @connect '.length).trim()), [host]],
+        ['connect', lines.filter((line) => line.startsWith('// @connect ')).map((line) => line.slice('// @connect '.length).trim()), [host, worker]],
         ['match', lines.filter((line) => line.startsWith('// @match ')).map((line) => line.slice('// @match '.length).trim()), ['https://zeta-ai.io/*', 'https://frame.pingpong.ai/*']],
         ['run-at', lines.filter((line) => line.startsWith('// @run-at ')).map((line) => line.slice('// @run-at '.length).trim()), ['document-start']],
         ['noframes', lines.filter((line) => line.startsWith('// @noframes')), []],
@@ -592,8 +603,10 @@ test('the header grants what the script uses', () => {
         '// @grant GM_deleteValue',
         '// @grant GM_listValues',
         '// @grant GM_xmlhttpRequest',
+        '// @grant GM_registerMenuCommand',
         '// @grant unsafeWindow',
-        '// @connect',
+        '// @connect openrouter.ai',
+        '// @connect zeta-dm-memory.elit1989.workers.dev',
         '// @match https://zeta-ai.io',
         '// @match https://frame.pingpong.ai',
         '// @run-at',
@@ -608,6 +621,8 @@ test('the header grants what the script uses', () => {
         ['// @match        https://zeta-ai.io/*', '// @match        https://example.org/*'],
         ['// @match        https://frame.pingpong.ai/*', '// @match        https://frame.pingpong.ai/*\n// @match        https://example.org/*'],
         ['// @connect      openrouter.ai', '// @connect      openrouter.example'],
+        ['// @connect      zeta-dm-memory.elit1989.workers.dev', '// @connect      workers.example'],
+        ['// @connect      openrouter.ai\n// @connect      zeta-dm-memory.elit1989.workers.dev', '// @connect      zeta-dm-memory.elit1989.workers.dev\n// @connect      openrouter.ai'],
         ['// @run-at       document-start', '// @run-at       document-start\n// @noframes'],
         ['// @grant        unsafeWindow', '// @grant        unsafeWindow\n// @grant        GM_download'],
     ];
@@ -696,6 +711,23 @@ test('the start hands the boot what the page has', () => {
     logging.environment.log('a line');
     assert.deepEqual(logging.world.logs, ['[Scribe] a line']);
     assert.equal(logging.environment.pageWindow === logging.world.page, true);
+    const menuing = environmentOf(output);
+    const action = () => 'the action';
+    assert.deepEqual(menuing.world.menus, []);
+    assert.equal(menuing.environment.menu('A label', action), 1);
+    assert.equal(menuing.world.menus.length === 1 && menuing.world.menus[0][1] === action, true);
+    assert.equal(menuing.world.menus[0][0], 'A label');
+    const asked = [];
+    menuing.world.context.window.prompt = (text) => {
+        asked.push(`prompt ${text}`);
+        return 'typed';
+    };
+    menuing.world.context.window.alert = (text) => {
+        asked.push(`alert ${text}`);
+    };
+    assert.equal(menuing.environment.prompt('Enter it'), 'typed');
+    assert.equal(menuing.environment.alert('Too short'), undefined);
+    assert.deepEqual(asked, ['prompt Enter it', 'alert Too short']);
 });
 
 test('a byte-order mark is stripped', () => {

@@ -1267,52 +1267,79 @@ test('only the chat box is the chat box', () => {
 test('compose adds, drops and reports', () => {
     const lines = Object.freeze({ ready: '[Scribe] Day 1, the mill.', suggestion: 'Ask the miller.' });
     const blanks = ['', '   ', String.fromCodePoint(0xa0, 0x200b), String.fromCodePoint(0x200b), ' \n\t'];
+    /**
+     * @param {Readonly<object>} made
+     * @return {object}
+     */
+    const shown = (made) => ({ text: made.text, ready: made.ready, suggestion: made.suggestion });
     for (const blank of blanks) {
         const made = ScribeSender.compose(blank, lines, 4500);
         assert.equal(Object.isFrozen(made), true);
-        assert.deepEqual({ ...made }, { text: blank, ready: false, suggestion: false });
+        assert.deepEqual({ ...made }, { text: blank, ready: false, suggestion: false, carried: null, crowded: false });
     }
     const both = ScribeSender.compose('Hello', lines, 4500);
     const whole = 'Hello\n@: [Scribe] Day 1, the mill.\n@: Ask the miller.';
     assert.equal(Object.isFrozen(both), true);
-    assert.deepEqual({ ...both }, { text: whole, ready: true, suggestion: true });
+    assert.deepEqual({ ...both }, { text: whole, ready: true, suggestion: true, carried: lines.ready, crowded: false });
     assert.deepEqual({ ...ScribeSender.compose('Hello', lines, Buffer.byteLength(whole)) }, { ...both });
 
     const suggested = 'Hello\n@: Ask the miller.';
-    assert.deepEqual(
-        { ...ScribeSender.compose('Hello', lines, Buffer.byteLength(whole) - 1) },
-        { text: suggested, ready: false, suggestion: true },
-    );
-    assert.deepEqual(
-        { ...ScribeSender.compose('Hello', lines, Buffer.byteLength(suggested)) },
-        { text: suggested, ready: false, suggestion: true },
-    );
-    assert.deepEqual(
-        { ...ScribeSender.compose('Hello', lines, Buffer.byteLength(suggested) - 1) },
-        { text: 'Hello', ready: false, suggestion: false },
-    );
-    assert.deepEqual({ ...ScribeSender.compose('Hello', lines, 2) }, { text: 'Hello', ready: false, suggestion: false });
+    const crowded = ScribeSender.compose('Hello', lines, Buffer.byteLength(whole) - 1);
+    assert.deepEqual(shown(crowded), { text: suggested, ready: false, suggestion: true });
+    assert.deepEqual([crowded.carried, crowded.crowded], [null, true]);
+    assert.deepEqual(shown(ScribeSender.compose('Hello', lines, Buffer.byteLength(suggested))), {
+        text: suggested,
+        ready: false,
+        suggestion: true,
+    });
+    assert.deepEqual(shown(ScribeSender.compose('Hello', lines, Buffer.byteLength(suggested) - 1)), {
+        text: 'Hello',
+        ready: false,
+        suggestion: false,
+    });
+    const tiny = ScribeSender.compose('Hello', lines, 2);
+    assert.deepEqual(shown(tiny), { text: 'Hello', ready: false, suggestion: false });
 
-    assert.deepEqual(
-        { ...ScribeSender.compose('Hello', { ready: lines.ready, suggestion: null }, 4500) },
-        { text: 'Hello\n@: [Scribe] Day 1, the mill.', ready: true, suggestion: false },
-    );
-    assert.deepEqual(
-        { ...ScribeSender.compose('Hello', { ready: null, suggestion: lines.suggestion }, 4500) },
-        { text: suggested, ready: false, suggestion: true },
-    );
-    assert.deepEqual(
-        { ...ScribeSender.compose('Hello', { ready: null, suggestion: null }, 4500) },
-        { text: 'Hello', ready: false, suggestion: false },
-    );
+    assert.deepEqual(shown(ScribeSender.compose('Hello', { ready: lines.ready, suggestion: null }, 4500)), {
+        text: 'Hello\n@: [Scribe] Day 1, the mill.',
+        ready: true,
+        suggestion: false,
+    });
+    assert.deepEqual(shown(ScribeSender.compose('Hello', { ready: null, suggestion: lines.suggestion }, 4500)), {
+        text: suggested,
+        ready: false,
+        suggestion: true,
+    });
+    const none = ScribeSender.compose('Hello', { ready: null, suggestion: null }, 4500);
+    assert.deepEqual({ ...none }, { text: 'Hello', ready: false, suggestion: false, carried: null, crowded: false });
+
+    const told = '[Scribe] The story so far: Halvard came. He waited. Mirelle: brown eyes.';
+    const ends = [40, 51];
+    const room = Buffer.byteLength(`Hello\n@: ${told}`) - 1;
+    const trimmed = ScribeSender.compose('Hello', { ready: told, suggestion: null, ends }, room);
+    assert.deepEqual({ ...trimmed }, {
+        text: `Hello\n@: ${told.slice(0, 51)}`,
+        ready: true,
+        suggestion: false,
+        carried: told.slice(0, 51),
+        crowded: false,
+    });
+    const shortest = ScribeSender.compose('Hello', { ready: told, suggestion: 'Ask.', ends }, 'Hello'.length + 50 + 10);
+    assert.equal(shortest.carried, told.slice(0, 40));
+    assert.equal(shortest.suggestion, true);
+    const nothing = ScribeSender.compose('Hello', { ready: told, suggestion: null, ends }, 'Hello'.length + 40);
+    assert.deepEqual([nothing.ready, nothing.carried, nothing.crowded], [false, null, true]);
+    const odd = ScribeSender.compose('Hello', { ready: told, suggestion: null, ends: [500, -3, 'x'] }, 60);
+    assert.equal(odd.ready, false);
 
     const spaced = `${String.fromCodePoint(0xa0)}Hello`;
     assert.equal(ScribeSender.compose(spaced, lines, 4500).text, `${spaced}\n@: [Scribe] Day 1, the mill.\n@: Ask the miller.`);
     const wide = Object.freeze({ ready: 'Ü'.repeat(10), suggestion: 'ß' });
     const wideWhole = 'Hello\n@: ' + 'Ü'.repeat(10) + '\n@: ß';
     assert.equal(Buffer.byteLength(wideWhole) > wideWhole.length, true);
-    assert.deepEqual(
-        { ...ScribeSender.compose('Hello', wide, wideWhole.length) },
-        { text: 'Hello\n@: ß', ready: false, suggestion: true },
-    );
+    assert.deepEqual(shown(ScribeSender.compose('Hello', wide, wideWhole.length)), {
+        text: 'Hello\n@: ß',
+        ready: false,
+        suggestion: true,
+    });
 });

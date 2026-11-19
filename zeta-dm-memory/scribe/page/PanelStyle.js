@@ -155,6 +155,20 @@ h4 {
     overflow-wrap: anywhere;
 }
 
+.choice {
+    flex: 1 1 100%;
+    min-width: 0;
+}
+
+.choice p {
+    margin: 0;
+    overflow-wrap: anywhere;
+}
+
+.panel.collapsed .choice {
+    display: none;
+}
+
 .badge {
     padding: 0 var(--scribe-gap-small);
     border-radius: var(--scribe-radius);

@@ -10,17 +10,23 @@ const ScribeStore = Object.freeze({
         Prefix: 'scribe',
         Separator: ':',
         Key: 'key',
+        CloudKey: 'cloudkey',
+        Browser: 'browser',
         Types: Object.freeze({
             Head: 'head',
             Part: 'part',
             Claim: 'claim',
             Spent: 'spent',
+            Synced: 'synced',
+            Others: 'others',
         }),
         Segments: Object.freeze({
             Head: Object.freeze([4]),
             Part: Object.freeze([6, 7, 8]),
             Claim: Object.freeze([3]),
             Spent: Object.freeze([3]),
+            Synced: Object.freeze([3]),
+            Others: Object.freeze([3]),
         }),
         Position: Object.freeze({
             Prefix: 0,
@@ -37,6 +43,7 @@ const ScribeStore = Object.freeze({
             Sized: 2,
         }),
         PartCharacters: 500000,
+        LeastPiece: 2,
         ClaimStaleMs: 90000,
         FirstGeneration: 1,
         NoGeneration: 0,
@@ -70,6 +77,13 @@ const ScribeStore = Object.freeze({
          */
         get DigestPattern() {
             return /^[0-9a-f]{8}$/;
+        },
+
+        /**
+         * @return {RegExp}
+         */
+        get BrowserPattern() {
+            return /^[0-9A-Za-z-]{16,64}$/;
         },
         Messages: Object.freeze({
             SaveFailed: 'The save failed',
@@ -358,7 +372,7 @@ const ScribeStore = Object.freeze({
      * @param {{ get: Function, list: Function }} storage
      * @param {string} room
      * @param {string} kind
-     * @return {{ value: Object, head: { generation: number, parts: number, characters: number, digest: string|null, form: number } }|null}
+     * @return {{ value: Object, head: { generation: number, parts: number, characters: number, digest: string|null, form: number }, text: string }|null}
      * @throws {Error}
      */
     load(storage, room, kind) {
@@ -396,7 +410,7 @@ const ScribeStore = Object.freeze({
                 if (value === null) {
                     throw ScribeStore.damaged(kind);
                 }
-                return { value, head };
+                return { value, head, text: joined };
             } catch (error) {
                 if (error?.damaged !== true || attempt >= settings.Attempts) {
                     throw error;
@@ -425,6 +439,39 @@ const ScribeStore = Object.freeze({
     },
 
     /**
+     * @param {{ get: Function, list: Function }} storage
+     * @param {string} roomId
+     * @param {string} kind
+     * @return {{ text: string, generation: number }|null}
+     * @throws {Error}
+     */
+    snapshot(storage, roomId, kind) {
+        const room = ScribeStore.room(roomId);
+        ScribeStore.checkKind(kind);
+        const loaded = ScribeStore.load(storage, room, kind);
+        return loaded === null ? null : { text: loaded.text, generation: loaded.head.generation };
+    },
+
+    /**
+     * @param {{ get: Function }} storage
+     * @param {string} roomId
+     * @param {string} kind
+     * @return {number|null}
+     * @throws {Error}
+     */
+    generation(storage, roomId, kind) {
+        const settings = ScribeStore.Settings;
+        const room = ScribeStore.room(roomId);
+        ScribeStore.checkKind(kind);
+        const text = ScribeStore.fetch(storage, ScribeStore.name(settings.Types.Head, room, kind));
+        if (text === null) {
+            return settings.NoGeneration;
+        }
+        const head = ScribeStore.headOf(text);
+        return head === null ? null : head.generation;
+    },
+
+    /**
      * @param {{ get: Function, set: Function, remove: Function, list: Function }} storage
      * @param {string} roomId
      * @param {string} kind
@@ -433,21 +480,28 @@ const ScribeStore = Object.freeze({
      * @throws {Error}
      */
     write(storage, roomId, kind, value) {
-        const settings = ScribeStore.Settings;
-        const messages = settings.Messages;
-        const types = settings.Types;
-        const room = ScribeStore.room(roomId);
-        ScribeStore.checkKind(kind);
         let text = null;
         try {
             text = JSON.stringify(value);
         } catch {
             text = null;
         }
-        ScribeStore.check(typeof text === settings.StringType && ScribeStore.decode(text) !== null, 'value');
+        return ScribeStore.writeText(storage, roomId, kind, text);
+    },
+
+    /**
+     * @param {string} text
+     * @param {number} size
+     * @return {string[]}
+     * @throws {Error}
+     */
+    pieces(text, size) {
+        const settings = ScribeStore.Settings;
+        ScribeStore.check(typeof text === settings.StringType, 'text');
+        ScribeStore.check(Number.isSafeInteger(size) && size >= settings.LeastPiece, 'size');
         const pieces = [];
         for (let start = settings.NoCharacters; start < text.length; ) {
-            let end = Math.min(start + settings.PartCharacters, text.length);
+            let end = Math.min(start + size, text.length);
             const last = text.charCodeAt(end - 1);
             if (end < text.length && last >= settings.FirstHighSurrogate && last <= settings.LastHighSurrogate) {
                 end--;
@@ -455,6 +509,25 @@ const ScribeStore = Object.freeze({
             pieces.push(text.slice(start, end));
             start = end;
         }
+        return pieces;
+    },
+
+    /**
+     * @param {{ get: Function, set: Function, remove: Function, list: Function }} storage
+     * @param {string} roomId
+     * @param {string} kind
+     * @param {*} text
+     * @return {number}
+     * @throws {Error}
+     */
+    writeText(storage, roomId, kind, text) {
+        const settings = ScribeStore.Settings;
+        const messages = settings.Messages;
+        const types = settings.Types;
+        const room = ScribeStore.room(roomId);
+        ScribeStore.checkKind(kind);
+        ScribeStore.check(typeof text === settings.StringType && ScribeStore.decode(text) !== null, 'value');
+        const pieces = ScribeStore.pieces(text, settings.PartCharacters);
         const headName = ScribeStore.name(types.Head, room, kind);
         const written = new Map();
         const superseded = [];
@@ -692,6 +765,58 @@ const ScribeStore = Object.freeze({
     },
 
     /**
+     * @param {{ get: Function }} storage
+     * @return {string}
+     * @throws {Error}
+     */
+    cloudKey(storage) {
+        const settings = ScribeStore.Settings;
+        const stored = ScribeStore.fetch(storage, ScribeStore.name(settings.CloudKey));
+        return typeof stored === settings.StringType ? stored : settings.Nothing;
+    },
+
+    /**
+     * @param {{ set: Function, remove: Function }} storage
+     * @param {string} key
+     * @return {void}
+     * @throws {Error}
+     */
+    setCloudKey(storage, key) {
+        const settings = ScribeStore.Settings;
+        ScribeStore.check(typeof key === settings.StringType, 'key');
+        const trimmed = key.trim();
+        const name = ScribeStore.name(settings.CloudKey);
+        try {
+            if (trimmed === settings.Nothing) {
+                storage.remove(name);
+            } else {
+                storage.set(name, trimmed);
+            }
+        } catch {
+            throw new Error(settings.Messages.KeyFailed);
+        }
+    },
+
+    /**
+     * @param {{ get: Function, set: Function }} storage
+     * @param {() => string} random
+     * @return {string}
+     * @throws {Error}
+     */
+    browserId(storage, random) {
+        const settings = ScribeStore.Settings;
+        const name = ScribeStore.name(settings.Browser);
+        const stored = ScribeStore.fetch(storage, name);
+        if (typeof stored === settings.StringType && settings.BrowserPattern.test(stored)) {
+            return stored;
+        }
+        const made = random();
+        ScribeStore.check(typeof made === settings.StringType && settings.BrowserPattern.test(made), 'browser');
+        storage.set(name, made);
+        return made;
+    },
+
+    /**
      * @param {{ get: Function, set: Function }} storage
      * @param {string} roomId
      * @param {string} tabId
@@ -769,6 +894,91 @@ const ScribeStore = Object.freeze({
         const sum = total + amount;
         storage.set(ScribeStore.name(settings.Types.Spent, ScribeStore.room(roomId)), JSON.stringify({ day, amount: sum }));
         return sum;
+    },
+
+    /**
+     * @param {*} value
+     * @return {boolean}
+     */
+    whole(value) {
+        return Number.isSafeInteger(value) && value >= ScribeStore.Settings.NoGeneration;
+    },
+
+    /**
+     * @param {{ get: Function }} storage
+     * @param {string} roomId
+     * @return {Object<string, { revision: number, generation: number }>}
+     * @throws {Error}
+     */
+    synced(storage, roomId) {
+        const name = ScribeStore.name(ScribeStore.Settings.Types.Synced, ScribeStore.room(roomId));
+        const record = ScribeStore.decode(ScribeStore.fetch(storage, name));
+        const kept = {};
+        if (record === null) {
+            return kept;
+        }
+        for (const kind of Object.values(ScribeStore.Kind)) {
+            const entry = Object.hasOwn(record, kind) ? record[kind] : null;
+            if (entry !== null && ScribeStore.whole(entry.revision) && ScribeStore.whole(entry.generation)) {
+                kept[kind] = { revision: entry.revision, generation: entry.generation };
+            }
+        }
+        return kept;
+    },
+
+    /**
+     * @param {{ get: Function, set: Function }} storage
+     * @param {string} roomId
+     * @param {string} kind
+     * @param {*} revision
+     * @param {*} generation
+     * @return {void}
+     * @throws {Error}
+     */
+    setSynced(storage, roomId, kind, revision, generation) {
+        const room = ScribeStore.room(roomId);
+        ScribeStore.checkKind(kind);
+        ScribeStore.check(ScribeStore.whole(revision), 'revision');
+        ScribeStore.check(ScribeStore.whole(generation), 'generation');
+        const record = ScribeStore.synced(storage, roomId);
+        record[kind] = { revision, generation };
+        storage.set(ScribeStore.name(ScribeStore.Settings.Types.Synced, room), JSON.stringify(record));
+    },
+
+    /**
+     * @param {{ get: Function }} storage
+     * @param {string} roomId
+     * @param {string} day
+     * @return {number}
+     * @throws {Error}
+     */
+    others(storage, roomId, day) {
+        const settings = ScribeStore.Settings;
+        const name = ScribeStore.name(settings.Types.Others, ScribeStore.room(roomId));
+        ScribeStore.check(typeof day === settings.StringType, 'day');
+        const record = ScribeStore.decode(ScribeStore.fetch(storage, name));
+        const sound =
+            record !== null &&
+            record.day === day &&
+            Number.isFinite(record.amount) &&
+            record.amount >= settings.NoSpending;
+        return sound ? record.amount : settings.NoSpending;
+    },
+
+    /**
+     * @param {{ set: Function }} storage
+     * @param {string} roomId
+     * @param {string} day
+     * @param {*} amount
+     * @return {void}
+     * @throws {Error}
+     */
+    setOthers(storage, roomId, day, amount) {
+        const settings = ScribeStore.Settings;
+        const name = ScribeStore.name(settings.Types.Others, ScribeStore.room(roomId));
+        ScribeStore.check(typeof day === settings.StringType, 'day');
+        ScribeStore.check(Number.isFinite(amount) && amount >= settings.NoSpending, 'amount');
+        storage.set(name, JSON.stringify({ day, amount }));
     },
 
     /**

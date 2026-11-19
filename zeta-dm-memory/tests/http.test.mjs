@@ -1640,3 +1640,38 @@ test('scribe_storage_failures_are_redacted', async (context) => {
         assert.equal(args.join(' ').includes(text), false);
     }
 });
+
+test('scribe_too_large_uses_scribe_wording', async (context) => {
+    CloudflareCrypto.install(context);
+    const untouched = new ScriptedD1();
+    const expected = { code: 'payload_too_large', message: 'Scribe request or part exceeds the size limit.' };
+    const valid = { browser: scribe.BrowserA, id: scribe.AskA, action: { name: 'Dismiss' } };
+    const requests = [
+        scribe.stage('a'.repeat(400001)),
+        scribe.stage(new Uint8Array(1200001).fill(97)),
+        scribe.post('/v1/scribe/commit', JSON.stringify({ browser: scribe.BrowserA, kinds: [], done: [] }).padEnd(16385, ' ')),
+        scribe.post('/v1/scribe/ask', { ...valid, action: { text: 'a'.repeat(8182) } }),
+    ];
+    for (const request of requests) {
+        const response = await fixtures.send(request, untouched);
+        assert.equal(response.status, 413);
+        assert.deepEqual(await scribe.errorOf(response), expected);
+    }
+    assert.equal(untouched.calls.length, 0);
+});
+
+test('notes_too_large_keeps_notes_wording', async (context) => {
+    CloudflareCrypto.install(context);
+    const untouched = new ScriptedD1();
+    const expected = { code: 'payload_too_large', message: 'Request or notes exceed the size limit.' };
+    const requests = [
+        fixtures.put(JSON.stringify({ notes: 'a'.repeat(65537), expectedRevision: 0 })),
+        fixtures.put(JSON.stringify({ notes: 'a', expectedRevision: 0 }).padEnd(524289, ' ')),
+    ];
+    for (const request of requests) {
+        const response = await fixtures.send(request, untouched);
+        assert.equal(response.status, 413);
+        assert.deepEqual(await scribe.errorOf(response), expected);
+    }
+    assert.equal(untouched.calls.length, 0);
+});

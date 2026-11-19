@@ -719,7 +719,7 @@ const ScribeReplay = Object.freeze({
                 ScribeReplay.unsay(book, fact);
             }
             fact.status = status.Ended;
-            fact.ended = { reason: operation.reason, cite: operation.cite };
+            fact.ended = { reason: operation.reason, cite: operation.cite, position: item.position };
             ScribeReplay.mark(book, fact, item.position);
         },
 
@@ -837,6 +837,30 @@ const ScribeReplay = Object.freeze({
                 cite: operation.cite,
                 position: item.position,
                 answer: null,
+                dismissed: false,
+            });
+        },
+
+        /**
+         * @param {object} book
+         * @param {{ operation: object, position: number, origin: string }} item
+         * @return {void}
+         */
+        Contradiction(book, item) {
+            const operation = item.operation;
+            const id = JSON.stringify([operation.cite, operation.earlier, operation.said, operation.before]);
+            if (book.contradictions.has(id)) {
+                return;
+            }
+            book.contradictions.set(id, {
+                id,
+                cite: operation.cite,
+                position: item.position,
+                earlier: operation.earlier,
+                earlierPosition: book.positions.get(operation.earlier) ?? operation.earlierPosition,
+                said: operation.said,
+                before: operation.before,
+                why: operation.why,
                 dismissed: false,
             });
         },
@@ -1051,6 +1075,18 @@ const ScribeReplay = Object.freeze({
             book.dismissals.set(operation.question, ruling);
             book.dismissedTexts.set(ScribeReplay.wording(operation.questionText), ruling);
         },
+
+        /**
+         * @param {object} book
+         * @param {object} operation
+         * @return {void}
+         */
+        DismissContradiction(book, operation) {
+            const contradiction = book.contradictions.get(operation.contradiction);
+            if (contradiction !== undefined) {
+                contradiction.dismissed = true;
+            }
+        },
     }),
 
     /**
@@ -1070,7 +1106,7 @@ const ScribeReplay = Object.freeze({
     /**
      * @param {object} log
      * @param {string[]} order
-     * @return {Readonly<{ revision: number, subjects: readonly object[], facts: readonly object[], scenes: readonly object[], nights: readonly object[], threads: readonly object[], conflicts: readonly object[], lookAlikes: readonly object[], stale: readonly object[], refinements: readonly object[], aliases: readonly object[], questions: readonly object[], unaliased: readonly object[], distinct: readonly object[] }>}
+     * @return {Readonly<{ revision: number, subjects: readonly object[], facts: readonly object[], scenes: readonly object[], nights: readonly object[], threads: readonly object[], conflicts: readonly object[], lookAlikes: readonly object[], stale: readonly object[], refinements: readonly object[], aliases: readonly object[], questions: readonly object[], unaliased: readonly object[], distinct: readonly object[], contradictions: readonly object[] }>}
      */
     run(log, order) {
         const settings = ScribeReplay.Settings;
@@ -1122,6 +1158,7 @@ const ScribeReplay = Object.freeze({
             answeredTexts: new Map(),
             dismissals: new Map(),
             dismissedTexts: new Map(),
+            contradictions: new Map(),
         };
         const counted = [];
         const showings = [];
@@ -1201,7 +1238,11 @@ const ScribeReplay = Object.freeze({
         for (const operation of book.closes) {
             const thread = book.threads.get(operation.thread);
             if (thread !== undefined && thread.closed === null) {
-                thread.closed = { how: operation.how, cite: operation.cite };
+                thread.closed = {
+                    how: operation.how,
+                    cite: operation.cite,
+                    position: positions.get(operation.cite) ?? operation.position,
+                };
             }
         }
         for (const operation of rulings) {
@@ -1446,6 +1487,14 @@ const ScribeReplay = Object.freeze({
             }
             conflicts.get(slot).others.push(fact.id);
         }
+        const contradictions = [...book.contradictions.values()].sort(
+            /**
+             * @param {{ position: number, earlierPosition: number }} first
+             * @param {{ position: number, earlierPosition: number }} second
+             * @return {number}
+             */
+            (first, second) => first.position - second.position || first.earlierPosition - second.earlierPosition,
+        );
         return ScribeReplay.seal({
             revision: log.revision,
             subjects,
@@ -1461,6 +1510,7 @@ const ScribeReplay = Object.freeze({
             questions: book.questions,
             unaliased: book.unaliasings,
             distinct: book.distinctions,
+            contradictions,
         });
     },
 });

@@ -46,6 +46,131 @@ const ScribeAdoption = Object.freeze({
         NotFunction: ' is not a function.',
         SharedId: 'Two messages share the id ',
         FullStop: '.',
+        TextType: 'string',
+        ShortestContentWord: 4,
+        CommonWords: Object.freeze([
+            'about',
+            'after',
+            'again',
+            'also',
+            'been',
+            'before',
+            'being',
+            'come',
+            'could',
+            'does',
+            'each',
+            'even',
+            'ever',
+            'from',
+            'have',
+            'here',
+            'into',
+            'just',
+            'like',
+            'made',
+            'make',
+            'many',
+            'more',
+            'most',
+            'much',
+            'must',
+            'never',
+            'only',
+            'other',
+            'over',
+            'said',
+            'same',
+            'says',
+            'should',
+            'some',
+            'still',
+            'such',
+            'than',
+            'that',
+            'their',
+            'them',
+            'then',
+            'there',
+            'these',
+            'they',
+            'this',
+            'those',
+            'very',
+            'were',
+            'what',
+            'when',
+            'where',
+            'which',
+            'while',
+            'will',
+            'with',
+            'would',
+            'your',
+        ]),
+        Apostrophe: "'",
+        DoubleQuote: '"',
+        NormalForm: 'NFC',
+        Unwrapped: '$2',
+        Unquoted: '$1',
+        DressPasses: 4,
+        FewestQuoteWords: 2,
+
+        /**
+         * @return {RegExp}
+         */
+        get Format() {
+            return /\p{Cf}/gu;
+        },
+
+        /**
+         * @return {RegExp}
+         */
+        get Spacing() {
+            return /[\s\p{Cc}]+/gu;
+        },
+
+        /**
+         * @return {RegExp}
+         */
+        get Apostrophes() {
+            return /[’‘ʼ]/gu;
+        },
+
+        /**
+         * @return {RegExp}
+         */
+        get DoubleQuotes() {
+            return /["«»“”„‟⹂〝〞〟＂『』﹃﹄]/gu;
+        },
+
+        /**
+         * @return {RegExp}
+         */
+        get Wrapped() {
+            return /^(\*\*|\*|_|`)([\s\S]*)\1$/u;
+        },
+
+        /**
+         * @return {RegExp}
+         */
+        get Quoted() {
+            return /^["'“‘]([\s\S]*)["'”’]$/u;
+        },
+
+        /**
+         * @return {RegExp}
+         */
+        get LeadingEllipsis() {
+            return /^(?:\.\.\.|…)/u;
+        },
+
+        /**
+         * @return {RegExp}
+         */
+        get TrailingEllipsis() {
+            return /(?:\.\.\.|…)$/u;
+        },
     }),
 
     /**
@@ -83,6 +208,58 @@ const ScribeAdoption = Object.freeze({
      */
     amount(value) {
         return Number.isFinite(value) && value >= ScribeAdoption.Settings.LeastAmount;
+    },
+
+    /**
+     * @param {string} text
+     * @return {string}
+     */
+    clean(text) {
+        const settings = ScribeAdoption.Settings;
+        return text.replace(settings.Format, settings.Nothing).replace(settings.Spacing, settings.Space).trim();
+    },
+
+    /**
+     * @param {string} text
+     * @return {string}
+     */
+    folded(text) {
+        const settings = ScribeAdoption.Settings;
+        return ScribeAdoption.clean(text)
+            .replace(settings.Apostrophes, settings.Apostrophe)
+            .replace(settings.DoubleQuotes, settings.DoubleQuote)
+            .toLowerCase()
+            .normalize(settings.NormalForm);
+    },
+
+    /**
+     * @param {object} message
+     * @param {string} quote
+     * @return {boolean}
+     */
+    quoted(message, quote) {
+        const settings = ScribeAdoption.Settings;
+        let current = ScribeAdoption.clean(quote);
+        for (let pass = 0; pass < settings.DressPasses; pass++) {
+            const next = current
+                .replace(settings.Wrapped, settings.Unwrapped)
+                .trim()
+                .replace(settings.Quoted, settings.Unquoted)
+                .trim()
+                .replace(settings.LeadingEllipsis, settings.Nothing)
+                .trim()
+                .replace(settings.TrailingEllipsis, settings.Nothing)
+                .trim();
+            if (next === current) {
+                break;
+            }
+            current = next;
+        }
+        if (ScribeText.words(current).length < settings.FewestQuoteWords) {
+            return false;
+        }
+        const text = ScribeAdoption.folded(ScribeIntake.transcript([message]));
+        return ScribeAnalyzer.found(text, ScribeAnalyzer.index(text), ScribeAdoption.folded(current));
     },
 
     /**
@@ -142,6 +319,85 @@ const ScribeAdoption = Object.freeze({
             }
         }
         return null;
+    },
+
+    /**
+     * @param {object} state
+     * @param {string} id
+     * @return {{ text: string, cite: string, position: number, about: string[] }|null}
+     */
+    entry(state, id) {
+        const settings = ScribeAdoption.Settings;
+        const statuses = ScribeReplay.Status;
+        const fact = state.facts.find(
+            /**
+             * @param {{ id: string, status: string }} item
+             * @return {boolean}
+             */
+            (item) => item.id === id && (item.status === statuses.InForce || item.status === statuses.Ended),
+        );
+        if (fact !== undefined) {
+            const subject = state.subjects.find(
+                /**
+                 * @param {{ id: string }} item
+                 * @return {boolean}
+                 */
+                (item) => item.id === fact.subject,
+            );
+            const names = subject === undefined ? [] : [subject.label, subject.name, ...subject.aka];
+            if (typeof fact.cite !== settings.TextType) {
+                return null;
+            }
+            return { text: fact.text, cite: fact.cite, position: fact.position, about: [fact.text, ...names] };
+        }
+        const thread = state.threads.find(
+            /**
+             * @param {{ id: string }} item
+             * @return {boolean}
+             */
+            (item) => item.id === id,
+        );
+        if (thread === undefined) {
+            return null;
+        }
+        const closed = thread.closed;
+        const how = closed === null || closed.how.trim() === settings.Nothing ? null : closed.how;
+        const cite = closed === null ? thread.cite : closed.cite;
+        const position = closed === null ? thread.position : closed.position;
+        if (typeof cite !== settings.TextType || !Number.isSafeInteger(position)) {
+            return null;
+        }
+        return { text: how ?? thread.text, cite, position, about: [thread.text, how ?? settings.Nothing] };
+    },
+
+    /**
+     * @param {string} said
+     * @param {readonly string[]} about
+     * @return {boolean}
+     */
+    related(said, about) {
+        const settings = ScribeAdoption.Settings;
+        /**
+         * @param {string} text
+         * @return {string[]}
+         */
+        const content = (text) =>
+            ScribeText.words(text).filter(
+                /**
+                 * @param {string} word
+                 * @return {boolean}
+                 */
+                (word) =>
+                    Array.from(word).length >= settings.ShortestContentWord && !settings.CommonWords.includes(word),
+            );
+        const held = new Set(about.flatMap(content));
+        return content(said).some(
+            /**
+             * @param {string} word
+             * @return {boolean}
+             */
+            (word) => held.has(word),
+        );
     },
 
     /**
@@ -217,15 +473,60 @@ const ScribeAdoption = Object.freeze({
                     : settings.Stretch[step.pass] + step.first + settings.RangeTo + step.last;
             return ScribeAdoption.finish(job, stops.Failed, settings.Unreadable[step.pass] + range + settings.NoLine);
         }
+        const story = step.pass === ScribeAdoption.Pass.Story;
+        const operations = [];
+        const unquoted = [];
+        const shown = new Map();
+        for (const message of step.messages) {
+            shown.set(message.position, message);
+        }
+        for (const operation of parsed.operations) {
+            if (!story || operation.type !== ScribeAnswer.Type.Contradiction) {
+                operations.push(operation);
+                continue;
+            }
+            const said = shown.get(operation.position);
+            if (said === undefined) {
+                unquoted.push(Object.freeze({ operation, reason: ScribeLog.Reason.Citation }));
+                continue;
+            }
+            const saidFound = ScribeAdoption.quoted(said, operation.said);
+            if (operation.entry !== null) {
+                const entry = ScribeAdoption.entry(step.state, operation.entry);
+                if (entry === null || entry.position >= operation.position) {
+                    unquoted.push(Object.freeze({ operation, reason: ScribeLog.Reason.Reference }));
+                } else if (!saidFound) {
+                    unquoted.push(Object.freeze({ operation, reason: ScribeLog.Reason.Quote }));
+                } else if (!ScribeAdoption.related(operation.said, entry.about)) {
+                    unquoted.push(Object.freeze({ operation, reason: ScribeLog.Reason.Mismatch }));
+                } else {
+                    operations.push(
+                        Object.freeze({
+                            ...operation,
+                            earlier: entry.position,
+                            before: entry.text,
+                            earlierCite: entry.cite,
+                        }),
+                    );
+                }
+                continue;
+            }
+            const before = shown.get(operation.earlier);
+            if (saidFound && before !== undefined && ScribeAdoption.quoted(before, operation.before)) {
+                operations.push(Object.freeze({ ...operation, earlierCite: before.id }));
+            } else {
+                unquoted.push(Object.freeze({ operation, reason: ScribeLog.Reason.Quote }));
+            }
+        }
         const stretch = { messages: step.messages, origin: step.origin };
         let result = null;
         try {
-            result = ScribeLog.append(job.log, step.state, parsed.operations, stretch);
+            result = ScribeLog.append(job.log, step.state, operations, stretch);
         } catch (error) {
             if (error.message !== ScribeLog.Settings.StaleState) {
                 throw error;
             }
-            result = ScribeLog.append(job.log, ScribeReplay.run(job.log, job.order), parsed.operations, stretch);
+            result = ScribeLog.append(job.log, ScribeReplay.run(job.log, job.order), operations, stretch);
         }
         for (const note of step.notes) {
             job.log.notes.push(note.text);
@@ -238,7 +539,8 @@ const ScribeAdoption = Object.freeze({
         }
         await job.save(job.log);
         await job.record(Object.freeze({ sequence: result.entry.sequence, ...kept, readable: true }));
-        await ScribeAdoption.report(job, step, result.entry.operations.length, parsed.refused, result.refused);
+        const refused = Object.freeze([...result.refused, ...unquoted]);
+        await ScribeAdoption.report(job, step, result.entry.operations.length, parsed.refused, refused);
         return null;
     },
 

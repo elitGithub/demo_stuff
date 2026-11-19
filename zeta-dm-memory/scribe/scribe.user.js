@@ -11,8 +11,10 @@
 // @grant        GM_deleteValue
 // @grant        GM_listValues
 // @grant        GM_xmlhttpRequest
+// @grant        GM_registerMenuCommand
 // @grant        unsafeWindow
 // @connect      openrouter.ai
+// @connect      zeta-dm-memory.elit1989.workers.dev
 // ==/UserScript==
 
 (() => {
@@ -650,6 +652,7 @@ const ScribeAnswer = Object.freeze({
         ThreadOpen: 'ThreadOpen',
         ThreadClose: 'ThreadClose',
         Question: 'Question',
+        Contradiction: 'Contradiction',
     }),
 
     Reach: Object.freeze({
@@ -667,6 +670,7 @@ const ScribeAnswer = Object.freeze({
         'NIGHTS',
         'THREADS',
         'QUESTIONS',
+        'CONTRADICTIONS',
     ]),
 
     Settings: Object.freeze({
@@ -709,6 +713,7 @@ const ScribeAnswer = Object.freeze({
         ThreadFields: 3,
         CloseOnlyFields: 2,
         QuestionFields: 2,
+        ContradictionFields: 3,
 
         /**
          * @return {RegExp}
@@ -883,6 +888,27 @@ const ScribeAnswer = Object.freeze({
          */
         get CloseThread() {
             return /^close\s+(T\d+)$/i;
+        },
+
+        /**
+         * @return {RegExp}
+         */
+        get QuotedCitation() {
+            return /^([^\s"“”]*)\s*["“”]([\s\S]*)["“”]$/u;
+        },
+
+        /**
+         * @return {RegExp}
+         */
+        get CitedNumber() {
+            return /^#(\d+)$/;
+        },
+
+        /**
+         * @return {RegExp}
+         */
+        get EntryId() {
+            return /^(?:#\d+\s+)?["'“”‘’]?([FT]\d+)\.?["'“”‘’]?\.?(?:\s*\(\s*#\d+\s*\))?$/i;
         },
     }),
 
@@ -1398,6 +1424,55 @@ const ScribeAnswer = Object.freeze({
             }
             return Object.freeze({ type: ScribeAnswer.Type.Question, text, position: cited.first });
         },
+
+        /**
+         * @param {string[]} fields
+         * @return {object|string}
+         */
+        CONTRADICTIONS(fields) {
+            const settings = ScribeAnswer.Settings;
+            const reasons = ScribeAnswer.Reason;
+            if (fields.length !== settings.ContradictionFields) {
+                return reasons.Shape;
+            }
+            const [saidField, beforeField, whyField] = fields;
+            const saidMatch = saidField.match(settings.QuotedCitation);
+            const named = beforeField.match(settings.EntryId);
+            const entry = named === null ? null : named[1].toUpperCase();
+            const beforeMatch = entry === null ? beforeField.match(settings.QuotedCitation) : null;
+            const why = ScribeAnswer.text([whyField]);
+            if (saidMatch === null || (entry === null && beforeMatch === null) || why === null) {
+                return reasons.Shape;
+            }
+            const said = saidMatch[2].trim();
+            const before = beforeMatch === null ? null : beforeMatch[2].trim();
+            if (!settings.HasContent.test(said) || (before !== null && !settings.HasContent.test(before))) {
+                return reasons.Shape;
+            }
+            const saidNumber = saidMatch[1].match(settings.CitedNumber);
+            const position = saidNumber === null ? null : ScribeAnswer.positiveInteger(saidNumber[1]);
+            if (position === null) {
+                return reasons.Citation;
+            }
+            if (entry !== null) {
+                return Object.freeze({
+                    type: ScribeAnswer.Type.Contradiction,
+                    position,
+                    said,
+                    earlier: null,
+                    before: null,
+                    entry,
+                    why,
+                });
+            }
+            const beforeNumber = beforeMatch[1].match(settings.CitedNumber);
+            const earlier = beforeNumber === null ? null : ScribeAnswer.positiveInteger(beforeNumber[1]);
+            if (earlier === null || earlier >= position) {
+                return reasons.Citation;
+            }
+            const type = ScribeAnswer.Type.Contradiction;
+            return Object.freeze({ type, position, said, earlier, before, entry, why });
+        },
     }),
 
     /**
@@ -1485,6 +1560,7 @@ const ScribeLog = Object.freeze({
         Ambiguous: 'Ambiguous',
         Mismatch: 'Mismatch',
         Ruled: 'Ruled',
+        Quote: 'Quote',
     }),
 
     Kind: Object.freeze({
@@ -1511,6 +1587,7 @@ const ScribeLog = Object.freeze({
         Unalias: 'Unalias',
         Answer: 'Answer',
         Dismiss: 'Dismiss',
+        DismissContradiction: 'DismissContradiction',
     }),
 
     Settings: Object.freeze({
@@ -2270,6 +2347,30 @@ const ScribeLog = Object.freeze({
             };
             return null;
         },
+
+        /**
+         * @param {object} operation
+         * @param {object} context
+         * @param {{ subjects: object[], draft: object|null, checks: object[] }} outcome
+         * @return {string|null}
+         */
+        Contradiction(operation, context, outcome) {
+            const cite = context.cites.get(operation.position);
+            if (cite === undefined || typeof operation.earlierCite !== 'string') {
+                return ScribeLog.Reason.Citation;
+            }
+            outcome.draft = {
+                type: ScribeAnswer.Type.Contradiction,
+                cite,
+                position: operation.position,
+                earlier: operation.earlierCite,
+                earlierPosition: operation.earlier,
+                said: operation.said,
+                before: operation.before,
+                why: operation.why,
+            };
+            return null;
+        },
     }),
 
     Finishers: Object.freeze({
@@ -2675,6 +2776,25 @@ const ScribeLog = Object.freeze({
                 return ScribeLog.Reason.Reference;
             }
             outcome.stored = { type: operation.type, question, questionText: asked.text };
+            return null;
+        },
+
+        /**
+         * @param {object} operation
+         * @param {object} view
+         * @param {{ counters: object, stored: object|null }} outcome
+         * @return {string|null}
+         */
+        DismissContradiction(operation, view, outcome) {
+            const { contradiction } = operation;
+            if (typeof contradiction !== 'string') {
+                return ScribeLog.Settings.InvalidOperation;
+            }
+            const read = ScribeLog.lookup(view.state.contradictions, contradiction);
+            if (read === undefined) {
+                return ScribeLog.Reason.Reference;
+            }
+            outcome.stored = { type: operation.type, contradiction, said: read.said, before: read.before };
             return null;
         },
     }),
@@ -3678,7 +3798,7 @@ const ScribeReplay = Object.freeze({
                 ScribeReplay.unsay(book, fact);
             }
             fact.status = status.Ended;
-            fact.ended = { reason: operation.reason, cite: operation.cite };
+            fact.ended = { reason: operation.reason, cite: operation.cite, position: item.position };
             ScribeReplay.mark(book, fact, item.position);
         },
 
@@ -3796,6 +3916,30 @@ const ScribeReplay = Object.freeze({
                 cite: operation.cite,
                 position: item.position,
                 answer: null,
+                dismissed: false,
+            });
+        },
+
+        /**
+         * @param {object} book
+         * @param {{ operation: object, position: number, origin: string }} item
+         * @return {void}
+         */
+        Contradiction(book, item) {
+            const operation = item.operation;
+            const id = JSON.stringify([operation.cite, operation.earlier, operation.said, operation.before]);
+            if (book.contradictions.has(id)) {
+                return;
+            }
+            book.contradictions.set(id, {
+                id,
+                cite: operation.cite,
+                position: item.position,
+                earlier: operation.earlier,
+                earlierPosition: book.positions.get(operation.earlier) ?? operation.earlierPosition,
+                said: operation.said,
+                before: operation.before,
+                why: operation.why,
                 dismissed: false,
             });
         },
@@ -4010,6 +4154,18 @@ const ScribeReplay = Object.freeze({
             book.dismissals.set(operation.question, ruling);
             book.dismissedTexts.set(ScribeReplay.wording(operation.questionText), ruling);
         },
+
+        /**
+         * @param {object} book
+         * @param {object} operation
+         * @return {void}
+         */
+        DismissContradiction(book, operation) {
+            const contradiction = book.contradictions.get(operation.contradiction);
+            if (contradiction !== undefined) {
+                contradiction.dismissed = true;
+            }
+        },
     }),
 
     /**
@@ -4029,7 +4185,7 @@ const ScribeReplay = Object.freeze({
     /**
      * @param {object} log
      * @param {string[]} order
-     * @return {Readonly<{ revision: number, subjects: readonly object[], facts: readonly object[], scenes: readonly object[], nights: readonly object[], threads: readonly object[], conflicts: readonly object[], lookAlikes: readonly object[], stale: readonly object[], refinements: readonly object[], aliases: readonly object[], questions: readonly object[], unaliased: readonly object[], distinct: readonly object[] }>}
+     * @return {Readonly<{ revision: number, subjects: readonly object[], facts: readonly object[], scenes: readonly object[], nights: readonly object[], threads: readonly object[], conflicts: readonly object[], lookAlikes: readonly object[], stale: readonly object[], refinements: readonly object[], aliases: readonly object[], questions: readonly object[], unaliased: readonly object[], distinct: readonly object[], contradictions: readonly object[] }>}
      */
     run(log, order) {
         const settings = ScribeReplay.Settings;
@@ -4081,6 +4237,7 @@ const ScribeReplay = Object.freeze({
             answeredTexts: new Map(),
             dismissals: new Map(),
             dismissedTexts: new Map(),
+            contradictions: new Map(),
         };
         const counted = [];
         const showings = [];
@@ -4160,7 +4317,11 @@ const ScribeReplay = Object.freeze({
         for (const operation of book.closes) {
             const thread = book.threads.get(operation.thread);
             if (thread !== undefined && thread.closed === null) {
-                thread.closed = { how: operation.how, cite: operation.cite };
+                thread.closed = {
+                    how: operation.how,
+                    cite: operation.cite,
+                    position: positions.get(operation.cite) ?? operation.position,
+                };
             }
         }
         for (const operation of rulings) {
@@ -4405,6 +4566,14 @@ const ScribeReplay = Object.freeze({
             }
             conflicts.get(slot).others.push(fact.id);
         }
+        const contradictions = [...book.contradictions.values()].sort(
+            /**
+             * @param {{ position: number, earlierPosition: number }} first
+             * @param {{ position: number, earlierPosition: number }} second
+             * @return {number}
+             */
+            (first, second) => first.position - second.position || first.earlierPosition - second.earlierPosition,
+        );
         return ScribeReplay.seal({
             revision: log.revision,
             subjects,
@@ -4420,6 +4589,7 @@ const ScribeReplay = Object.freeze({
             questions: book.questions,
             unaliased: book.unaliasings,
             distinct: book.distinctions,
+            contradictions,
         });
     },
 });
@@ -4769,6 +4939,8 @@ const ScribeAnalyzer = Object.freeze({
             Scenes: 'LAST SCENES:',
             Nights: 'NIGHTS:',
             Threads: 'OPEN THREADS:',
+            Ended: 'ENDED FACTS:',
+            Closed: 'CLOSED THREADS:',
             Notes: 'PLAYER NOTES:',
             Answers: 'ANSWERED QUESTIONS:',
         }),
@@ -4788,6 +4960,8 @@ const ScribeAnalyzer = Object.freeze({
         Pinned: ' pinned',
         Hidden: ' hidden',
         Stale: ' (check: the other side has changed)',
+        EndedMark: ' ENDED',
+        ClosedMark: ' CLOSED',
         Joiner: ' | ',
         Day: 'Day ',
         Hash: '#',
@@ -4855,7 +5029,7 @@ const ScribeAnalyzer = Object.freeze({
             '',
             'The book is a list of single facts. Each has an id like F12, a subject, a category, a statement and the message number that established it. You never rewrite the book. You only add facts, and say when the story has changed or ended one.',
             '',
-            'You receive PLAYER CHARACTER, SUBJECTS (everyone and everything that has an entry), LEDGER (the facts now in force for the subjects named in the new messages), LAST SCENES, NIGHTS, OPEN THREADS and the NEW MESSAGES.',
+            'You receive PLAYER CHARACTER, SUBJECTS (everyone and everything that has an entry), LEDGER (the facts now in force for the subjects named in the new messages), LAST SCENES, NIGHTS, OPEN THREADS, ENDED FACTS (facts on those same subjects that the story has ended, each with why and the message that ended it), CLOSED THREADS (each with how it resolved and the message that closed it) and the NEW MESSAGES.',
             "PLAYER CHARACTER PROFILE is the player's own description of their character; trust it for that character.",
             'In the LEDGER each fact ends with (#n), the message that established it, or (owner) when the player added it by hand. After that it may be marked pinned, hidden, or (check: the other side has changed).',
             '',
@@ -4883,6 +5057,9 @@ const ScribeAnalyzer = Object.freeze({
             'CLOSE T3 | how it resolved | #n',
             '=== QUESTIONS',
             'A question for the player | #n',
+            '=== CONTRADICTIONS',
+            '#n "words copied from the new message" | #n "words copied from an earlier message in NEW MESSAGES" | one sentence on what disagrees',
+            '#n "words copied from the new message" | F12 | one sentence on what disagrees',
             '',
             'Categories. Use exactly these words.',
             'One value at a time:',
@@ -4928,6 +5105,7 @@ const ScribeAnalyzer = Object.freeze({
             '12. NIGHTS: only nights slept through and stated time skips. Conditions need no tidying: they expire at the next night by themselves.',
             '13. THREADS: something left hanging that the story could pick up later: a threat, a promise, a plan, a mystery, someone due back. A fact, a feeling or something already finished is not a thread. At most two new threads per stretch. Never repeat the open list.',
             '14. QUESTIONS. When the story leaves something unclear and a guess would matter (does she like him or love him; is this the same man as before), write no fact for it. Ask the player one short question instead. At most two questions per stretch.',
+            '15. CONTRADICTIONS. One line for each place where the NEW MESSAGES contradict the LEDGER, an ENDED FACT, a CLOSED THREAD or an earlier message, about any subject and in any category, objects and events included (who holds an item and since when, who did what). The first quote is copied exactly from the new message, its number before it. The second part is where the other version comes from: when it is an earlier message among the NEW MESSAGES, that message\'s number and words copied exactly from it; otherwise the id of the entry it contradicts, as shown in LEDGER, ENDED FACTS, OPEN THREADS or CLOSED THREADS (F12 or T3), with nothing else. The line ends with the sentence, not a number. A value that rule 6 files as a plain FACTS line is still filed there too. Nothing goes here when nothing disagrees.',
         ]),
 
         NotesPromptLines: Object.freeze([
@@ -5257,14 +5435,29 @@ const ScribeAnalyzer = Object.freeze({
     },
 
     /**
+     * @param {object} fact
+     * @param {Map<string, string>} labels
+     * @return {string}
+     */
+    statement(fact, labels) {
+        const settings = ScribeAnalyzer.Settings;
+        let category = fact.category;
+        if (category === ScribeCategory.Settings.RelationCategory) {
+            category = settings.RelationTo + (fact.target === null ? fact.targetText : labels.get(fact.target));
+        }
+        const owned = fact.origin === ScribeLog.Origin.Operator;
+        const source = owned ? settings.Owner : settings.CiteOpen + fact.position + settings.Closing;
+        return category + settings.Colon + fact.text + source;
+    },
+
+    /**
      * @param {object} state
      * @param {string} player
-     * @param {string} text
-     * @param {number} before
+     * @param {readonly string[]} chosen
      * @param {number} through
      * @return {readonly string[]}
      */
-    opening(state, player, text, before, through) {
+    opening(state, player, chosen, through) {
         const settings = ScribeAnalyzer.Settings;
         const headings = settings.Headings;
         const labels = ScribeAnalyzer.labels(state);
@@ -5283,7 +5476,7 @@ const ScribeAnalyzer = Object.freeze({
             stale.add(JSON.stringify([mark.subject, mark.target]));
         }
         const ledgers = new Map();
-        for (const id of ScribeAnalyzer.select(state, text, player, before)) {
+        for (const id of chosen) {
             ledgers.set(id, []);
         }
         for (const fact of state.facts) {
@@ -5291,16 +5484,7 @@ const ScribeAnalyzer = Object.freeze({
             if (lines === undefined || fact.status !== ScribeReplay.Status.InForce || fact.position > through) {
                 continue;
             }
-            let category = fact.category;
-            if (category === ScribeCategory.Settings.RelationCategory) {
-                category = settings.RelationTo + (fact.target === null ? fact.targetText : labels.get(fact.target));
-            }
-            let line = fact.id + settings.Space + category + settings.Colon + fact.text;
-            if (fact.origin === ScribeLog.Origin.Operator) {
-                line += settings.Owner;
-            } else {
-                line += settings.CiteOpen + fact.position + settings.Closing;
-            }
+            let line = fact.id + settings.Space + ScribeAnalyzer.statement(fact, labels);
             if (fact.pinned) {
                 line += settings.Pinned;
             }
@@ -5401,8 +5585,51 @@ const ScribeAnalyzer = Object.freeze({
                  */
                 (thread) => thread.id + settings.Colon + thread.text,
             );
+        const chosen = ScribeAnalyzer.select(state, transcript, player, first);
+        const selected = new Set(chosen);
+        const ended = [];
+        for (const fact of state.facts) {
+            if (!selected.has(fact.subject) || fact.status !== ScribeReplay.Status.Ended || fact.position > last) {
+                continue;
+            }
+            const why = fact.ended.reason;
+            const reason = why === settings.Nothing ? settings.Nothing : settings.Colon + why;
+            ended.push(
+                fact.id +
+                    settings.Space +
+                    labels.get(fact.subject) +
+                    settings.Space +
+                    ScribeAnalyzer.statement(fact, labels) +
+                    settings.EndedMark +
+                    reason +
+                    settings.CiteOpen +
+                    fact.ended.position +
+                    settings.Closing,
+            );
+        }
+        const closed = [];
+        for (const thread of state.threads) {
+            if (thread.closed === null || thread.position > last) {
+                continue;
+            }
+            const resolved = thread.closed.how;
+            const how = resolved === settings.Nothing ? settings.Nothing : settings.Colon + resolved;
+            closed.push(
+                thread.id +
+                    settings.Colon +
+                    thread.text +
+                    settings.CiteOpen +
+                    thread.position +
+                    settings.Closing +
+                    settings.ClosedMark +
+                    how +
+                    settings.CiteOpen +
+                    thread.closed.position +
+                    settings.Closing,
+            );
+        }
         const messages = settings.MessagesOpen + first + settings.MessagesTo + last + settings.MessagesClose;
-        const [named, ...known] = ScribeAnalyzer.opening(state, player, transcript, first, last);
+        const [named, ...known] = ScribeAnalyzer.opening(state, player, chosen, last);
         const profiled = profile === null ? [] : [ScribeAnalyzer.section(headings.Profile, [profile])];
         return [
             named,
@@ -5411,6 +5638,8 @@ const ScribeAnalyzer = Object.freeze({
             ScribeAnalyzer.section(headings.Scenes, scenes),
             ScribeAnalyzer.section(headings.Nights, nights),
             ScribeAnalyzer.section(headings.Threads, threads),
+            ScribeAnalyzer.section(headings.Ended, ended),
+            ScribeAnalyzer.section(headings.Closed, closed),
             ScribeAnalyzer.section(messages, [transcript]),
         ].join(settings.BlankLine);
     },
@@ -5439,8 +5668,9 @@ const ScribeAnalyzer = Object.freeze({
              */
             (note) => settings.NumberOpen + note.position + settings.NumberClose + note.text,
         );
+        const chosen = ScribeAnalyzer.select(state, text, player, settings.NoSceneBefore);
         return [
-            ...ScribeAnalyzer.opening(state, player, text, settings.NoSceneBefore, settings.NoLimit),
+            ...ScribeAnalyzer.opening(state, player, chosen, settings.NoLimit),
             ScribeAnalyzer.section(settings.Headings.Notes, lines),
         ].join(settings.BlankLine);
     },
@@ -5482,8 +5712,9 @@ const ScribeAnalyzer = Object.freeze({
                 settings.AnswerMarker +
                 question.answer,
         );
+        const chosen = ScribeAnalyzer.select(state, text, player, settings.NoSceneBefore);
         return [
-            ...ScribeAnalyzer.opening(state, player, text, settings.NoSceneBefore, settings.NoLimit),
+            ...ScribeAnalyzer.opening(state, player, chosen, settings.NoLimit),
             ScribeAnalyzer.section(settings.Headings.Answers, lines),
         ].join(settings.BlankLine);
     },
@@ -5515,6 +5746,7 @@ const ScribeGateway = Object.freeze({
         FirstServerError: 500,
         MaxReasonLength: 300,
         MaxFinishLength: 40,
+        MaxKeptAnswer: 2000,
         TimeoutMs: 180000,
         PauseMs: 10000,
         MillisecondsPerSecond: 1000,
@@ -5649,6 +5881,39 @@ const ScribeGateway = Object.freeze({
     },
 
     /**
+     * @param {*} usage
+     * @return {{ tokensIn: number, tokensOut: number, reasoningTokens: number|null }}
+     */
+    counted(usage) {
+        const given = ScribeGateway.isObject(usage) ? usage : {};
+        const details = ScribeGateway.isObject(given.completion_tokens_details) ? given.completion_tokens_details : {};
+        const reasoning = details.reasoning_tokens;
+        return {
+            tokensIn: Number.isSafeInteger(given.prompt_tokens) && given.prompt_tokens >= 0 ? given.prompt_tokens : 0,
+            tokensOut:
+                Number.isSafeInteger(given.completion_tokens) && given.completion_tokens >= 0
+                    ? given.completion_tokens
+                    : 0,
+            reasoningTokens: Number.isSafeInteger(reasoning) && reasoning >= 0 ? reasoning : null,
+        };
+    },
+
+    /**
+     * @param {*} parsed
+     * @param {string} raw
+     * @return {string|null}
+     */
+    refusal(parsed, raw) {
+        const settings = ScribeGateway.Settings;
+        const provider = ScribeGateway.isObject(parsed) ? ScribeGateway.reported(parsed.error) : null;
+        if (provider !== null && ScribeGateway.filled(provider.reason)) {
+            return provider.reason;
+        }
+        const body = raw.trim();
+        return body === settings.Nothing ? null : body;
+    },
+
+    /**
      * @param {string|null} key
      * @param {string} what
      * @param {{ retryable: boolean, status: number|null, finish: string|null, reason: string|null }} detail
@@ -5659,20 +5924,22 @@ const ScribeGateway = Object.freeze({
         const status = detail.status === null ? settings.NoStatus : String(detail.status);
         const finish = detail.finish === null ? settings.NoFinish : detail.finish;
         let message = `${what}; status ${status}; finish ${finish}`;
+        let reason = null;
         if (detail.reason !== null) {
-            const masked = ScribeGateway.mask(key, detail.reason);
-            message += `; reason: ${masked.slice(0, settings.MaxReasonLength)}`;
+            reason = ScribeGateway.mask(key, detail.reason).slice(0, settings.MaxReasonLength);
+            message += `; reason: ${reason}`;
         }
         const error = new Error(ScribeGateway.mask(key, message).replace(settings.Whitespace, settings.Space));
         error.retryable = detail.retryable;
         error.status = detail.status;
         error.finish = detail.finish === null ? null : ScribeGateway.mask(key, detail.finish);
+        error.reason = reason === null ? null : ScribeGateway.mask(key, reason);
         return error;
     },
 
     /**
      * @param {{ fetch: Function, sleep: Function, key: string, model: string, system: string, user: string, maxTokens: number, timeoutMs?: number, signal?: object }} request
-     * @return {Promise<{ text: string, tokensIn: number, tokensOut: number, cost: number|null }>}
+     * @return {Promise<{ text: string, tokensIn: number, tokensOut: number, reasoningTokens: number|null, finish: string, cost: number|null }>}
      */
     async call(request) {
         const settings = ScribeGateway.Settings;
@@ -5777,20 +6044,22 @@ const ScribeGateway = Object.freeze({
             });
         }
         const status = outcome.status;
+        const received = typeof outcome.raw === settings.StringType ? outcome.raw : String(outcome.raw);
+        const marked = received.startsWith(settings.ByteOrderMark);
+        const raw = marked ? received.slice(settings.ByteOrderMark.length) : received;
+        let parsed = null;
+        try {
+            parsed = JSON.parse(raw);
+        } catch {
+            parsed = null;
+        }
         if (status < settings.FirstSuccess || status > settings.LastSuccess) {
             throw ScribeGateway.failure(key, settings.Messages.BadStatus, {
                 retryable: ScribeGateway.transient(status),
                 status,
                 finish: null,
-                reason: null,
+                reason: ScribeGateway.refusal(parsed, raw),
             });
-        }
-        let parsed = null;
-        try {
-            const text = outcome.raw.startsWith(settings.ByteOrderMark) ? outcome.raw.slice(settings.ByteOrderMark.length) : outcome.raw;
-            parsed = JSON.parse(text);
-        } catch {
-            parsed = null;
         }
         if (!ScribeGateway.isObject(parsed)) {
             throw ScribeGateway.failure(key, settings.Messages.NotObject, {
@@ -5802,10 +6071,14 @@ const ScribeGateway = Object.freeze({
         }
         const choice = Array.isArray(parsed.choices) && ScribeGateway.isObject(parsed.choices[0]) ? parsed.choices[0] : null;
         const finish = ScribeGateway.finishOf(key, choice?.finish_reason);
+        const counts = ScribeGateway.counted(parsed.usage);
+        const content = choice?.message?.content;
+        const written = typeof content === settings.StringType ? content : settings.Nothing;
+        let failed = null;
         for (const candidate of [parsed.error, choice?.error]) {
             const provider = ScribeGateway.reported(candidate);
-            if (provider !== null) {
-                throw ScribeGateway.failure(key, settings.Messages.ProviderError, {
+            if (provider !== null && failed === null) {
+                failed = ScribeGateway.failure(key, settings.Messages.ProviderError, {
                     retryable: provider.code !== null && ScribeGateway.transient(provider.code),
                     status,
                     finish,
@@ -5813,24 +6086,26 @@ const ScribeGateway = Object.freeze({
                 });
             }
         }
-        if (finish === settings.Finish.Length) {
-            throw ScribeGateway.failure(key, settings.Messages.Cut, { retryable: false, status, finish, reason: null });
+        const fatal = { retryable: false, status, finish, reason: null };
+        const passing = { retryable: true, status, finish, reason: null };
+        if (failed === null && finish === settings.Finish.Length) {
+            failed = ScribeGateway.failure(key, settings.Messages.Cut, fatal);
+            failed.answer = ScribeGateway.mask(key, written).slice(0, settings.MaxKeptAnswer);
+        } else if (failed === null && finish === settings.Finish.Error) {
+            failed = ScribeGateway.failure(key, settings.Messages.Errored, passing);
+        } else if (failed === null && finish !== settings.Finish.Stop) {
+            failed = ScribeGateway.failure(key, settings.Messages.WrongFinish, fatal);
+        } else if (failed === null && written.trim() === settings.Nothing) {
+            failed = ScribeGateway.failure(key, settings.Messages.Empty, passing);
         }
-        if (finish === settings.Finish.Error) {
-            throw ScribeGateway.failure(key, settings.Messages.Errored, { retryable: true, status, finish, reason: null });
-        }
-        if (finish !== settings.Finish.Stop) {
-            throw ScribeGateway.failure(key, settings.Messages.WrongFinish, { retryable: false, status, finish, reason: null });
-        }
-        const content = choice.message?.content;
-        if (typeof content !== settings.StringType || content.trim() === settings.Nothing) {
-            throw ScribeGateway.failure(key, settings.Messages.Empty, { retryable: true, status, finish, reason: null });
+        if (failed !== null) {
+            throw Object.assign(failed, counts);
         }
         const usage = ScribeGateway.isObject(parsed.usage) ? parsed.usage : {};
         return {
             text: content,
-            tokensIn: Number.isSafeInteger(usage.prompt_tokens) && usage.prompt_tokens >= 0 ? usage.prompt_tokens : 0,
-            tokensOut: Number.isSafeInteger(usage.completion_tokens) && usage.completion_tokens >= 0 ? usage.completion_tokens : 0,
+            ...counts,
+            finish,
             cost: Number.isFinite(usage.cost) && usage.cost >= 0 ? usage.cost : null,
         };
     },
@@ -5916,6 +6191,131 @@ const ScribeAdoption = Object.freeze({
         NotFunction: ' is not a function.',
         SharedId: 'Two messages share the id ',
         FullStop: '.',
+        TextType: 'string',
+        ShortestContentWord: 4,
+        CommonWords: Object.freeze([
+            'about',
+            'after',
+            'again',
+            'also',
+            'been',
+            'before',
+            'being',
+            'come',
+            'could',
+            'does',
+            'each',
+            'even',
+            'ever',
+            'from',
+            'have',
+            'here',
+            'into',
+            'just',
+            'like',
+            'made',
+            'make',
+            'many',
+            'more',
+            'most',
+            'much',
+            'must',
+            'never',
+            'only',
+            'other',
+            'over',
+            'said',
+            'same',
+            'says',
+            'should',
+            'some',
+            'still',
+            'such',
+            'than',
+            'that',
+            'their',
+            'them',
+            'then',
+            'there',
+            'these',
+            'they',
+            'this',
+            'those',
+            'very',
+            'were',
+            'what',
+            'when',
+            'where',
+            'which',
+            'while',
+            'will',
+            'with',
+            'would',
+            'your',
+        ]),
+        Apostrophe: "'",
+        DoubleQuote: '"',
+        NormalForm: 'NFC',
+        Unwrapped: '$2',
+        Unquoted: '$1',
+        DressPasses: 4,
+        FewestQuoteWords: 2,
+
+        /**
+         * @return {RegExp}
+         */
+        get Format() {
+            return /\p{Cf}/gu;
+        },
+
+        /**
+         * @return {RegExp}
+         */
+        get Spacing() {
+            return /[\s\p{Cc}]+/gu;
+        },
+
+        /**
+         * @return {RegExp}
+         */
+        get Apostrophes() {
+            return /[’‘ʼ]/gu;
+        },
+
+        /**
+         * @return {RegExp}
+         */
+        get DoubleQuotes() {
+            return /["«»“”„‟⹂〝〞〟＂『』﹃﹄]/gu;
+        },
+
+        /**
+         * @return {RegExp}
+         */
+        get Wrapped() {
+            return /^(\*\*|\*|_|`)([\s\S]*)\1$/u;
+        },
+
+        /**
+         * @return {RegExp}
+         */
+        get Quoted() {
+            return /^["'“‘]([\s\S]*)["'”’]$/u;
+        },
+
+        /**
+         * @return {RegExp}
+         */
+        get LeadingEllipsis() {
+            return /^(?:\.\.\.|…)/u;
+        },
+
+        /**
+         * @return {RegExp}
+         */
+        get TrailingEllipsis() {
+            return /(?:\.\.\.|…)$/u;
+        },
     }),
 
     /**
@@ -5953,6 +6353,58 @@ const ScribeAdoption = Object.freeze({
      */
     amount(value) {
         return Number.isFinite(value) && value >= ScribeAdoption.Settings.LeastAmount;
+    },
+
+    /**
+     * @param {string} text
+     * @return {string}
+     */
+    clean(text) {
+        const settings = ScribeAdoption.Settings;
+        return text.replace(settings.Format, settings.Nothing).replace(settings.Spacing, settings.Space).trim();
+    },
+
+    /**
+     * @param {string} text
+     * @return {string}
+     */
+    folded(text) {
+        const settings = ScribeAdoption.Settings;
+        return ScribeAdoption.clean(text)
+            .replace(settings.Apostrophes, settings.Apostrophe)
+            .replace(settings.DoubleQuotes, settings.DoubleQuote)
+            .toLowerCase()
+            .normalize(settings.NormalForm);
+    },
+
+    /**
+     * @param {object} message
+     * @param {string} quote
+     * @return {boolean}
+     */
+    quoted(message, quote) {
+        const settings = ScribeAdoption.Settings;
+        let current = ScribeAdoption.clean(quote);
+        for (let pass = 0; pass < settings.DressPasses; pass++) {
+            const next = current
+                .replace(settings.Wrapped, settings.Unwrapped)
+                .trim()
+                .replace(settings.Quoted, settings.Unquoted)
+                .trim()
+                .replace(settings.LeadingEllipsis, settings.Nothing)
+                .trim()
+                .replace(settings.TrailingEllipsis, settings.Nothing)
+                .trim();
+            if (next === current) {
+                break;
+            }
+            current = next;
+        }
+        if (ScribeText.words(current).length < settings.FewestQuoteWords) {
+            return false;
+        }
+        const text = ScribeAdoption.folded(ScribeIntake.transcript([message]));
+        return ScribeAnalyzer.found(text, ScribeAnalyzer.index(text), ScribeAdoption.folded(current));
     },
 
     /**
@@ -6012,6 +6464,85 @@ const ScribeAdoption = Object.freeze({
             }
         }
         return null;
+    },
+
+    /**
+     * @param {object} state
+     * @param {string} id
+     * @return {{ text: string, cite: string, position: number, about: string[] }|null}
+     */
+    entry(state, id) {
+        const settings = ScribeAdoption.Settings;
+        const statuses = ScribeReplay.Status;
+        const fact = state.facts.find(
+            /**
+             * @param {{ id: string, status: string }} item
+             * @return {boolean}
+             */
+            (item) => item.id === id && (item.status === statuses.InForce || item.status === statuses.Ended),
+        );
+        if (fact !== undefined) {
+            const subject = state.subjects.find(
+                /**
+                 * @param {{ id: string }} item
+                 * @return {boolean}
+                 */
+                (item) => item.id === fact.subject,
+            );
+            const names = subject === undefined ? [] : [subject.label, subject.name, ...subject.aka];
+            if (typeof fact.cite !== settings.TextType) {
+                return null;
+            }
+            return { text: fact.text, cite: fact.cite, position: fact.position, about: [fact.text, ...names] };
+        }
+        const thread = state.threads.find(
+            /**
+             * @param {{ id: string }} item
+             * @return {boolean}
+             */
+            (item) => item.id === id,
+        );
+        if (thread === undefined) {
+            return null;
+        }
+        const closed = thread.closed;
+        const how = closed === null || closed.how.trim() === settings.Nothing ? null : closed.how;
+        const cite = closed === null ? thread.cite : closed.cite;
+        const position = closed === null ? thread.position : closed.position;
+        if (typeof cite !== settings.TextType || !Number.isSafeInteger(position)) {
+            return null;
+        }
+        return { text: how ?? thread.text, cite, position, about: [thread.text, how ?? settings.Nothing] };
+    },
+
+    /**
+     * @param {string} said
+     * @param {readonly string[]} about
+     * @return {boolean}
+     */
+    related(said, about) {
+        const settings = ScribeAdoption.Settings;
+        /**
+         * @param {string} text
+         * @return {string[]}
+         */
+        const content = (text) =>
+            ScribeText.words(text).filter(
+                /**
+                 * @param {string} word
+                 * @return {boolean}
+                 */
+                (word) =>
+                    Array.from(word).length >= settings.ShortestContentWord && !settings.CommonWords.includes(word),
+            );
+        const held = new Set(about.flatMap(content));
+        return content(said).some(
+            /**
+             * @param {string} word
+             * @return {boolean}
+             */
+            (word) => held.has(word),
+        );
     },
 
     /**
@@ -6087,15 +6618,60 @@ const ScribeAdoption = Object.freeze({
                     : settings.Stretch[step.pass] + step.first + settings.RangeTo + step.last;
             return ScribeAdoption.finish(job, stops.Failed, settings.Unreadable[step.pass] + range + settings.NoLine);
         }
+        const story = step.pass === ScribeAdoption.Pass.Story;
+        const operations = [];
+        const unquoted = [];
+        const shown = new Map();
+        for (const message of step.messages) {
+            shown.set(message.position, message);
+        }
+        for (const operation of parsed.operations) {
+            if (!story || operation.type !== ScribeAnswer.Type.Contradiction) {
+                operations.push(operation);
+                continue;
+            }
+            const said = shown.get(operation.position);
+            if (said === undefined) {
+                unquoted.push(Object.freeze({ operation, reason: ScribeLog.Reason.Citation }));
+                continue;
+            }
+            const saidFound = ScribeAdoption.quoted(said, operation.said);
+            if (operation.entry !== null) {
+                const entry = ScribeAdoption.entry(step.state, operation.entry);
+                if (entry === null || entry.position >= operation.position) {
+                    unquoted.push(Object.freeze({ operation, reason: ScribeLog.Reason.Reference }));
+                } else if (!saidFound) {
+                    unquoted.push(Object.freeze({ operation, reason: ScribeLog.Reason.Quote }));
+                } else if (!ScribeAdoption.related(operation.said, entry.about)) {
+                    unquoted.push(Object.freeze({ operation, reason: ScribeLog.Reason.Mismatch }));
+                } else {
+                    operations.push(
+                        Object.freeze({
+                            ...operation,
+                            earlier: entry.position,
+                            before: entry.text,
+                            earlierCite: entry.cite,
+                        }),
+                    );
+                }
+                continue;
+            }
+            const before = shown.get(operation.earlier);
+            if (saidFound && before !== undefined && ScribeAdoption.quoted(before, operation.before)) {
+                operations.push(Object.freeze({ ...operation, earlierCite: before.id }));
+            } else {
+                unquoted.push(Object.freeze({ operation, reason: ScribeLog.Reason.Quote }));
+            }
+        }
         const stretch = { messages: step.messages, origin: step.origin };
         let result = null;
         try {
-            result = ScribeLog.append(job.log, step.state, parsed.operations, stretch);
+            result = ScribeLog.append(job.log, step.state, operations, stretch);
         } catch (error) {
             if (error.message !== ScribeLog.Settings.StaleState) {
                 throw error;
             }
-            result = ScribeLog.append(job.log, ScribeReplay.run(job.log, job.order), parsed.operations, stretch);
+            result = ScribeLog.append(job.log, ScribeReplay.run(job.log, job.order), operations, stretch);
         }
         for (const note of step.notes) {
             job.log.notes.push(note.text);
@@ -6108,7 +6684,8 @@ const ScribeAdoption = Object.freeze({
         }
         await job.save(job.log);
         await job.record(Object.freeze({ sequence: result.entry.sequence, ...kept, readable: true }));
-        await ScribeAdoption.report(job, step, result.entry.operations.length, parsed.refused, result.refused);
+        const refused = Object.freeze([...result.refused, ...unquoted]);
+        await ScribeAdoption.report(job, step, result.entry.operations.length, parsed.refused, refused);
         return null;
     },
 
@@ -6310,6 +6887,9 @@ const BenchView = Object.freeze({
             Unalias: 'Unalias ',
             Answer: 'Answer ',
             Dismiss: 'Dismiss ',
+            DismissContradiction: 'Dismiss the contradiction "',
+            Against: '" against "',
+            QuoteClose: '"',
         }),
         Random: Object.freeze({
             Increment: 0x6d2b79f5,
@@ -6848,6 +7428,15 @@ const BenchView = Object.freeze({
             const settings = BenchView.Settings;
             return settings.Words.Dismiss + operation.question + settings.Colon + operation.questionText;
         },
+
+        /**
+         * @param {{ said: string, before: string }} operation
+         * @return {string}
+         */
+        DismissContradiction(operation) {
+            const words = BenchView.Settings.Words;
+            return words.DismissContradiction + operation.said + words.Against + operation.before + words.QuoteClose;
+        },
     }),
 
     /**
@@ -7045,14 +7634,12 @@ const ZetaSource = Object.freeze({
         RoomsPath: '/v1/rooms/',
         MessagesPath: '/messages',
         PlotsPath: '/v1/plots/',
-        ProfilePath: '/user-plot-chat-profiles/me',
+        RoomsSegment: '/rooms/',
+        PersonaPath: '/user-personas/selected',
+        NotFound: 404,
+        NameSeparator: ': ',
         PlotIdPaths: Object.freeze([Object.freeze(['plotId']), Object.freeze(['plot', 'id'])]),
-        ProfileTextPaths: Object.freeze([
-            Object.freeze(['description']),
-            Object.freeze(['content']),
-            Object.freeze(['profile']),
-            Object.freeze(['profile', 'description']),
-        ]),
+        PlotField: 'plot',
         CharactersField: 'characters',
         NameField: 'name',
         DescriptionField: 'description',
@@ -7100,13 +7687,13 @@ const ZetaSource = Object.freeze({
         Messages: Object.freeze({
             HttpPrefix: 'Zeta answered HTTP ',
             Shape: 'Zeta answered in an unexpected shape',
+            NoPersona: 'Zeta answered the chat profile in an unexpected shape',
             Unreachable: 'Zeta could not be reached',
             Timeout: 'Zeta did not answer in time',
             NoPause: 'Could not pause between requests',
             NoLogin: 'No login seen yet',
             NoRoom: 'No chat is open',
             NoPlot: 'Zeta named no story for this chat',
-            NoProfile: 'Zeta gave no profile text for this chat',
         }),
     }),
 
@@ -7741,7 +8328,7 @@ const ZetaSource = Object.freeze({
 
     /**
      * @param {{ fetch: Function, token: string|null, roomId: string|null, pause: Function }} request
-     * @return {Promise<Readonly<{ characters: ReadonlyArray<Readonly<{ name: string, description: string }>> }>>}
+     * @return {Promise<Readonly<{ characters: ReadonlyArray<Readonly<{ name: string, description: string }>>, plotId: string }>>}
      * @throws {Error}
      */
     async story(request) {
@@ -7759,16 +8346,9 @@ const ZetaSource = Object.freeze({
         if (plot === null) {
             throw ZetaSource.failure(words.NoPlot, room.status, false);
         }
-        const read = await ZetaSource.retried(
-            request,
-            /**
-             * @return {Promise<{ status: number, body: * }>}
-             */
-            () => ZetaSource.get(request, settings.PlotsPath + encodeURIComponent(plot)),
-        );
-        const listed = ZetaSource.at(read.body, [settings.CharactersField]);
+        const listed = ZetaSource.at(room.body, [settings.PlotField, settings.CharactersField]);
         if (!Array.isArray(listed)) {
-            throw ZetaSource.failure(words.Shape, read.status, false);
+            throw Object.assign(ZetaSource.failure(words.Shape, room.status, false), { plotId: plot });
         }
         const characters = [];
         for (const item of listed) {
@@ -7783,36 +8363,55 @@ const ZetaSource = Object.freeze({
                 }),
             );
         }
-        return Object.freeze({ characters: Object.freeze(characters) });
+        return Object.freeze({ characters: Object.freeze(characters), plotId: plot });
     },
 
     /**
      * @param {{ fetch: Function, token: string|null, roomId: string|null, pause: Function }} request
-     * @return {Promise<string>}
+     * @param {string|null} plotId
+     * @return {Promise<string|null>}
      * @throws {Error}
      */
-    async profile(request) {
+    async profile(request, plotId = null) {
         const settings = ZetaSource.Settings;
         ZetaSource.ready(request);
-        const read = await ZetaSource.retried(
-            request,
-            /**
-             * @return {Promise<{ status: number, body: * }>}
-             */
-            () =>
-                ZetaSource.get(
-                    request,
-                    settings.RoomsPath + encodeURIComponent(request.roomId) + settings.ProfilePath,
-                ),
-        );
-        for (const path of settings.ProfileTextPaths) {
-            const value = ZetaSource.at(read.body, path);
-            const text = typeof value === settings.StringType ? value.trim() : settings.Nothing;
-            if (text !== settings.Nothing) {
-                return Array.from(text).slice(0, settings.LongestProfile).join(settings.Nothing);
-            }
+        if (!ZetaSource.filled(plotId)) {
+            return null;
         }
-        throw ZetaSource.failure(settings.Messages.NoProfile, read.status, false);
+        const path =
+            settings.PlotsPath +
+            encodeURIComponent(plotId) +
+            settings.RoomsSegment +
+            encodeURIComponent(request.roomId) +
+            settings.PersonaPath;
+        let read = null;
+        try {
+            read = await ZetaSource.retried(
+                request,
+                /**
+                 * @return {Promise<{ status: number, body: * }>}
+                 */
+                () => ZetaSource.get(request, path),
+            );
+        } catch (error) {
+            if (error.status === settings.NotFound) {
+                return null;
+            }
+            throw error;
+        }
+        const description = ZetaSource.isObject(read.body) ? read.body[settings.DescriptionField] : undefined;
+        const empty = description === null || description === undefined;
+        if (!ZetaSource.isObject(read.body) || (!empty && typeof description !== settings.StringType)) {
+            throw ZetaSource.failure(settings.Messages.NoPersona, read.status, false);
+        }
+        const detail = empty ? settings.Nothing : description.trim();
+        if (detail === settings.Nothing) {
+            return null;
+        }
+        const name = ZetaSource.at(read.body, [settings.NameField]);
+        const title = typeof name === settings.StringType ? name.trim() : settings.Nothing;
+        const text = title === settings.Nothing ? detail : `${title}${settings.NameSeparator}${detail}`;
+        return Array.from(text).slice(0, settings.LongestProfile).join(settings.Nothing);
     },
 
     /**
@@ -7950,17 +8549,23 @@ const ScribeStore = Object.freeze({
         Prefix: 'scribe',
         Separator: ':',
         Key: 'key',
+        CloudKey: 'cloudkey',
+        Browser: 'browser',
         Types: Object.freeze({
             Head: 'head',
             Part: 'part',
             Claim: 'claim',
             Spent: 'spent',
+            Synced: 'synced',
+            Others: 'others',
         }),
         Segments: Object.freeze({
             Head: Object.freeze([4]),
             Part: Object.freeze([6, 7, 8]),
             Claim: Object.freeze([3]),
             Spent: Object.freeze([3]),
+            Synced: Object.freeze([3]),
+            Others: Object.freeze([3]),
         }),
         Position: Object.freeze({
             Prefix: 0,
@@ -7977,6 +8582,7 @@ const ScribeStore = Object.freeze({
             Sized: 2,
         }),
         PartCharacters: 500000,
+        LeastPiece: 2,
         ClaimStaleMs: 90000,
         FirstGeneration: 1,
         NoGeneration: 0,
@@ -8010,6 +8616,13 @@ const ScribeStore = Object.freeze({
          */
         get DigestPattern() {
             return /^[0-9a-f]{8}$/;
+        },
+
+        /**
+         * @return {RegExp}
+         */
+        get BrowserPattern() {
+            return /^[0-9A-Za-z-]{16,64}$/;
         },
         Messages: Object.freeze({
             SaveFailed: 'The save failed',
@@ -8298,7 +8911,7 @@ const ScribeStore = Object.freeze({
      * @param {{ get: Function, list: Function }} storage
      * @param {string} room
      * @param {string} kind
-     * @return {{ value: Object, head: { generation: number, parts: number, characters: number, digest: string|null, form: number } }|null}
+     * @return {{ value: Object, head: { generation: number, parts: number, characters: number, digest: string|null, form: number }, text: string }|null}
      * @throws {Error}
      */
     load(storage, room, kind) {
@@ -8336,7 +8949,7 @@ const ScribeStore = Object.freeze({
                 if (value === null) {
                     throw ScribeStore.damaged(kind);
                 }
-                return { value, head };
+                return { value, head, text: joined };
             } catch (error) {
                 if (error?.damaged !== true || attempt >= settings.Attempts) {
                     throw error;
@@ -8365,6 +8978,39 @@ const ScribeStore = Object.freeze({
     },
 
     /**
+     * @param {{ get: Function, list: Function }} storage
+     * @param {string} roomId
+     * @param {string} kind
+     * @return {{ text: string, generation: number }|null}
+     * @throws {Error}
+     */
+    snapshot(storage, roomId, kind) {
+        const room = ScribeStore.room(roomId);
+        ScribeStore.checkKind(kind);
+        const loaded = ScribeStore.load(storage, room, kind);
+        return loaded === null ? null : { text: loaded.text, generation: loaded.head.generation };
+    },
+
+    /**
+     * @param {{ get: Function }} storage
+     * @param {string} roomId
+     * @param {string} kind
+     * @return {number|null}
+     * @throws {Error}
+     */
+    generation(storage, roomId, kind) {
+        const settings = ScribeStore.Settings;
+        const room = ScribeStore.room(roomId);
+        ScribeStore.checkKind(kind);
+        const text = ScribeStore.fetch(storage, ScribeStore.name(settings.Types.Head, room, kind));
+        if (text === null) {
+            return settings.NoGeneration;
+        }
+        const head = ScribeStore.headOf(text);
+        return head === null ? null : head.generation;
+    },
+
+    /**
      * @param {{ get: Function, set: Function, remove: Function, list: Function }} storage
      * @param {string} roomId
      * @param {string} kind
@@ -8373,21 +9019,28 @@ const ScribeStore = Object.freeze({
      * @throws {Error}
      */
     write(storage, roomId, kind, value) {
-        const settings = ScribeStore.Settings;
-        const messages = settings.Messages;
-        const types = settings.Types;
-        const room = ScribeStore.room(roomId);
-        ScribeStore.checkKind(kind);
         let text = null;
         try {
             text = JSON.stringify(value);
         } catch {
             text = null;
         }
-        ScribeStore.check(typeof text === settings.StringType && ScribeStore.decode(text) !== null, 'value');
+        return ScribeStore.writeText(storage, roomId, kind, text);
+    },
+
+    /**
+     * @param {string} text
+     * @param {number} size
+     * @return {string[]}
+     * @throws {Error}
+     */
+    pieces(text, size) {
+        const settings = ScribeStore.Settings;
+        ScribeStore.check(typeof text === settings.StringType, 'text');
+        ScribeStore.check(Number.isSafeInteger(size) && size >= settings.LeastPiece, 'size');
         const pieces = [];
         for (let start = settings.NoCharacters; start < text.length; ) {
-            let end = Math.min(start + settings.PartCharacters, text.length);
+            let end = Math.min(start + size, text.length);
             const last = text.charCodeAt(end - 1);
             if (end < text.length && last >= settings.FirstHighSurrogate && last <= settings.LastHighSurrogate) {
                 end--;
@@ -8395,6 +9048,25 @@ const ScribeStore = Object.freeze({
             pieces.push(text.slice(start, end));
             start = end;
         }
+        return pieces;
+    },
+
+    /**
+     * @param {{ get: Function, set: Function, remove: Function, list: Function }} storage
+     * @param {string} roomId
+     * @param {string} kind
+     * @param {*} text
+     * @return {number}
+     * @throws {Error}
+     */
+    writeText(storage, roomId, kind, text) {
+        const settings = ScribeStore.Settings;
+        const messages = settings.Messages;
+        const types = settings.Types;
+        const room = ScribeStore.room(roomId);
+        ScribeStore.checkKind(kind);
+        ScribeStore.check(typeof text === settings.StringType && ScribeStore.decode(text) !== null, 'value');
+        const pieces = ScribeStore.pieces(text, settings.PartCharacters);
         const headName = ScribeStore.name(types.Head, room, kind);
         const written = new Map();
         const superseded = [];
@@ -8632,6 +9304,58 @@ const ScribeStore = Object.freeze({
     },
 
     /**
+     * @param {{ get: Function }} storage
+     * @return {string}
+     * @throws {Error}
+     */
+    cloudKey(storage) {
+        const settings = ScribeStore.Settings;
+        const stored = ScribeStore.fetch(storage, ScribeStore.name(settings.CloudKey));
+        return typeof stored === settings.StringType ? stored : settings.Nothing;
+    },
+
+    /**
+     * @param {{ set: Function, remove: Function }} storage
+     * @param {string} key
+     * @return {void}
+     * @throws {Error}
+     */
+    setCloudKey(storage, key) {
+        const settings = ScribeStore.Settings;
+        ScribeStore.check(typeof key === settings.StringType, 'key');
+        const trimmed = key.trim();
+        const name = ScribeStore.name(settings.CloudKey);
+        try {
+            if (trimmed === settings.Nothing) {
+                storage.remove(name);
+            } else {
+                storage.set(name, trimmed);
+            }
+        } catch {
+            throw new Error(settings.Messages.KeyFailed);
+        }
+    },
+
+    /**
+     * @param {{ get: Function, set: Function }} storage
+     * @param {() => string} random
+     * @return {string}
+     * @throws {Error}
+     */
+    browserId(storage, random) {
+        const settings = ScribeStore.Settings;
+        const name = ScribeStore.name(settings.Browser);
+        const stored = ScribeStore.fetch(storage, name);
+        if (typeof stored === settings.StringType && settings.BrowserPattern.test(stored)) {
+            return stored;
+        }
+        const made = random();
+        ScribeStore.check(typeof made === settings.StringType && settings.BrowserPattern.test(made), 'browser');
+        storage.set(name, made);
+        return made;
+    },
+
+    /**
      * @param {{ get: Function, set: Function }} storage
      * @param {string} roomId
      * @param {string} tabId
@@ -8712,6 +9436,91 @@ const ScribeStore = Object.freeze({
     },
 
     /**
+     * @param {*} value
+     * @return {boolean}
+     */
+    whole(value) {
+        return Number.isSafeInteger(value) && value >= ScribeStore.Settings.NoGeneration;
+    },
+
+    /**
+     * @param {{ get: Function }} storage
+     * @param {string} roomId
+     * @return {Object<string, { revision: number, generation: number }>}
+     * @throws {Error}
+     */
+    synced(storage, roomId) {
+        const name = ScribeStore.name(ScribeStore.Settings.Types.Synced, ScribeStore.room(roomId));
+        const record = ScribeStore.decode(ScribeStore.fetch(storage, name));
+        const kept = {};
+        if (record === null) {
+            return kept;
+        }
+        for (const kind of Object.values(ScribeStore.Kind)) {
+            const entry = Object.hasOwn(record, kind) ? record[kind] : null;
+            if (entry !== null && ScribeStore.whole(entry.revision) && ScribeStore.whole(entry.generation)) {
+                kept[kind] = { revision: entry.revision, generation: entry.generation };
+            }
+        }
+        return kept;
+    },
+
+    /**
+     * @param {{ get: Function, set: Function }} storage
+     * @param {string} roomId
+     * @param {string} kind
+     * @param {*} revision
+     * @param {*} generation
+     * @return {void}
+     * @throws {Error}
+     */
+    setSynced(storage, roomId, kind, revision, generation) {
+        const room = ScribeStore.room(roomId);
+        ScribeStore.checkKind(kind);
+        ScribeStore.check(ScribeStore.whole(revision), 'revision');
+        ScribeStore.check(ScribeStore.whole(generation), 'generation');
+        const record = ScribeStore.synced(storage, roomId);
+        record[kind] = { revision, generation };
+        storage.set(ScribeStore.name(ScribeStore.Settings.Types.Synced, room), JSON.stringify(record));
+    },
+
+    /**
+     * @param {{ get: Function }} storage
+     * @param {string} roomId
+     * @param {string} day
+     * @return {number}
+     * @throws {Error}
+     */
+    others(storage, roomId, day) {
+        const settings = ScribeStore.Settings;
+        const name = ScribeStore.name(settings.Types.Others, ScribeStore.room(roomId));
+        ScribeStore.check(typeof day === settings.StringType, 'day');
+        const record = ScribeStore.decode(ScribeStore.fetch(storage, name));
+        const sound =
+            record !== null &&
+            record.day === day &&
+            Number.isFinite(record.amount) &&
+            record.amount >= settings.NoSpending;
+        return sound ? record.amount : settings.NoSpending;
+    },
+
+    /**
+     * @param {{ set: Function }} storage
+     * @param {string} roomId
+     * @param {string} day
+     * @param {*} amount
+     * @return {void}
+     * @throws {Error}
+     */
+    setOthers(storage, roomId, day, amount) {
+        const settings = ScribeStore.Settings;
+        const name = ScribeStore.name(settings.Types.Others, ScribeStore.room(roomId));
+        ScribeStore.check(typeof day === settings.StringType, 'day');
+        ScribeStore.check(Number.isFinite(amount) && amount >= settings.NoSpending, 'amount');
+        storage.set(name, JSON.stringify({ day, amount }));
+    },
+
+    /**
      * @param {{ get: Function, list: Function }} storage
      * @param {string} roomId
      * @return {string}
@@ -8742,6 +9551,1795 @@ const ScribeStore = Object.freeze({
             bundle[kind] = loaded === null ? null : loaded.value;
         }
         return JSON.stringify(bundle);
+    },
+});
+/** @file scribe/page/ScribeCloud.js */
+const ScribeCloud = Object.freeze({
+    Phase: Object.freeze({
+        Off: 'Off',
+        Idle: 'Idle',
+        Loading: 'Loading',
+        Leading: 'Leading',
+        Watching: 'Watching',
+        Offline: 'Offline',
+        Refused: 'Refused',
+        Unusable: 'Unusable',
+        Conflict: 'Conflict',
+    }),
+
+    Answer: Object.freeze({
+        Keep: 'Keep',
+        Cloud: 'Cloud',
+    }),
+
+    Settings: Object.freeze({
+        Origin: 'https://zeta-dm-memory.elit1989.workers.dev',
+        Paths: Object.freeze({
+            Heads: '/v1/scribe',
+            Part: '/v1/scribe/part',
+            Commit: '/v1/scribe/commit',
+            Spend: '/v1/scribe/spend',
+            Lease: '/v1/scribe/lease',
+            Notes: '/v1/memory',
+        }),
+        RoomPrefix: '/rooms/',
+        Synced: Object.freeze([ScribeStore.Kind.Settings, ScribeStore.Kind.Book, ScribeStore.Kind.Live]),
+
+        /**
+         * @return {string[]}
+         */
+        get Leads() {
+            const phases = ScribeCloud.Phase;
+            return [phases.Off, phases.Leading, phases.Offline, phases.Refused, phases.Unusable];
+        },
+
+        /**
+         * @return {string[]}
+         */
+        get Renewing() {
+            const phases = ScribeCloud.Phase;
+            return [phases.Leading, phases.Watching, phases.Conflict];
+        },
+
+        /**
+         * @return {string[]}
+         */
+        get Reaching() {
+            const phases = ScribeCloud.Phase;
+            return [phases.Leading, phases.Watching, phases.Conflict, phases.Unusable];
+        },
+
+        /**
+         * @return {string[]}
+         */
+        get Settled() {
+            const phases = ScribeCloud.Phase;
+            return [phases.Offline, phases.Watching];
+        },
+
+        /**
+         * @return {string[]}
+         */
+        get Dropped() {
+            const phases = ScribeCloud.Phase;
+            return [phases.Leading, phases.Offline];
+        },
+
+        /**
+         * @return {string[]}
+         */
+        get Stepping() {
+            const phases = ScribeCloud.Phase;
+            return [phases.Loading, phases.Leading];
+        },
+        PartCharacters: 400000,
+        MostParts: 10,
+        RoomBytes: 512,
+        TimeoutMs: 15000,
+        PartTimeoutMs: 60000,
+        OpenMs: 15000,
+        QuietMs: 2000,
+        RenewMs: 20000,
+        LeaseMs: 90000,
+        LastTryMs: 1000,
+        BackoffMs: Object.freeze([1000, 2000, 4000, 8000, 16000]),
+        MostRetryMs: 60000,
+        NotesEveryMs: 300000,
+        NotesLongest: 4000,
+        MostSettles: 2,
+        KeyShortest: 60,
+        KeyLongest: 254,
+
+        /**
+         * @return {RegExp}
+         */
+        get KeyPattern() {
+            return /^[!-~]+$/;
+        },
+
+        /**
+         * @return {RegExp}
+         */
+        get RoomRefused() {
+            return /[\p{White_Space}\p{Cc}﻿\uD800-\uDFFF\\?#]/u;
+        },
+
+        /**
+         * @return {RegExp}
+         */
+        get RetryAfter() {
+            return /^retry-after:[ \t]*(\d+)[ \t]*\r?$/im;
+        },
+
+        /**
+         * @return {RegExp}
+         */
+        get PartStartRefused() {
+            return /^[\uDC00-\uDFFF﻿]$/;
+        },
+        Wants: Object.freeze({ None: 'None', Waiting: 'Waiting', Asked: 'Asked' }),
+        Codes: Object.freeze({
+            LeaseLost: 'lease_lost',
+            Conflict: 'revision_conflict',
+            PartsMissing: 'parts_missing',
+            NoNotes: 'memory_not_found',
+            Configuration: 'configuration_error',
+        }),
+        Transport: Object.freeze({ Network: 0, Rejected: -1, Cancelled: -2 }),
+        Statuses: Object.freeze({
+            Ok: 200,
+            Created: 201,
+            Redirect: 300,
+            Client: 400,
+            Unauthorized: 401,
+            NotFound: 404,
+            Conflict: 409,
+            Limited: 429,
+            Server: 500,
+        }),
+        Methods: Object.freeze({ Get: 'GET', Put: 'PUT', Post: 'POST' }),
+        ContentTypes: Object.freeze({ Json: 'application/json', Text: 'text/plain; charset=utf-8' }),
+        Headers: Object.freeze({ Authorization: 'Authorization', ContentType: 'Content-Type' }),
+        Bearer: 'Bearer ',
+        ResponseType: 'text',
+        Redirect: 'error',
+        Menu: 'Set DM API key',
+        Prompt: 'Enter DM API key',
+        BadKey: 'Enter 60–254 visible ASCII characters.',
+        Messages: Object.freeze({
+            BadRoom: "This chat's ID cannot be used as a room in your Worker",
+            TooLarge: 'The book is too large to keep in your Worker',
+            Unreadable: 'What your Worker holds for this chat could not be read',
+            Elsewhere: "Another PC is reading this chat; this PC's book is kept as soon as it lets go.",
+            NoChoice: 'There is nothing to choose.',
+            Busy: 'The last request of this kind has not finished yet',
+            Unreachable: 'Your Worker could not be reached; try again.',
+            Refused: 'Your Worker refused the request: ',
+            Rejected: 'An answer did not come straight from your Worker',
+        }),
+        LineBreak: '\n',
+        CarriageReturn: '\r',
+        SendingType: 'sending',
+        Forever: Number.POSITIVE_INFINITY,
+        Nothing: '',
+        FirstEpoch: 0,
+        FirstRound: 0,
+        FirstPart: 0,
+        NoRevision: 0,
+        NoGeneration: 0,
+        NoSpending: 0,
+        NoCount: 0,
+        NoDelay: 0,
+        Next: 1,
+        MillisecondsPerSecond: 1000,
+        StringType: 'string',
+        ObjectType: 'object',
+    }),
+
+    /**
+     * @param {*} value
+     * @return {boolean}
+     */
+    validKey(value) {
+        const settings = ScribeCloud.Settings;
+        return (
+            typeof value === settings.StringType &&
+            value.length >= settings.KeyShortest &&
+            value.length <= settings.KeyLongest &&
+            settings.KeyPattern.test(value)
+        );
+    },
+
+    /**
+     * @param {*} roomId
+     * @return {string|null}
+     */
+    room(roomId) {
+        const settings = ScribeCloud.Settings;
+        if (typeof roomId !== settings.StringType) {
+            return null;
+        }
+        const room = `${settings.RoomPrefix}${roomId}`;
+        if (settings.RoomRefused.test(room) || new TextEncoder().encode(room).length > settings.RoomBytes) {
+            return null;
+        }
+        return room;
+    },
+
+    /**
+     * @param {*} error
+     * @return {string}
+     */
+    words(error) {
+        const settings = ScribeCloud.Settings;
+        const described =
+            error !== null && typeof error === settings.ObjectType && typeof error.message === settings.StringType;
+        return described ? error.message : String(error);
+    },
+
+    /**
+     * @param {{ status: number }} result
+     * @return {boolean}
+     */
+    ok(result) {
+        const statuses = ScribeCloud.Settings.Statuses;
+        return result.status === statuses.Ok || result.status === statuses.Created;
+    },
+
+    /**
+     * @param {{ data: * }} result
+     * @return {string|null}
+     */
+    code(result) {
+        const code = result.data?.error?.code;
+        return typeof code === ScribeCloud.Settings.StringType ? code : null;
+    },
+
+    /**
+     * @param {object} cloud
+     * @param {string} method
+     * @param {string} path
+     * @param {Object<string, string|number>} query
+     * @param {string|object|null} body
+     * @param {number} timeoutMs
+     * @return {Promise<{ status: number, data: *, text: string, retryAfter: number }>}
+     */
+    request(cloud, method, path, query, body, timeoutMs) {
+        const settings = ScribeCloud.Settings;
+        const transport = settings.Transport;
+        const statuses = settings.Statuses;
+        const epoch = cloud.epoch;
+        const key = ScribeStore.cloudKey(cloud.storage);
+        const url = new URL(path, settings.Origin);
+        url.search = new URLSearchParams(query).toString();
+        return new Promise(
+            /**
+             * @param {Function} resolve
+             * @return {void}
+             */
+            (resolve) => {
+                if (!ScribeCloud.validKey(key)) {
+                    resolve({
+                        status: statuses.Unauthorized,
+                        data: null,
+                        text: settings.Nothing,
+                        retryAfter: settings.NoDelay,
+                    });
+                    return;
+                }
+                let finished = false;
+                let handle = null;
+
+                /**
+                 * @param {number} status
+                 * @param {*} data
+                 * @param {string} text
+                 * @param {number} retryAfter
+                 * @return {void}
+                 */
+                const finish = (status, data, text, retryAfter) => {
+                    if (finished) {
+                        return;
+                    }
+                    finished = true;
+                    resolve({ status, data, text, retryAfter });
+                };
+
+                /**
+                 * @param {number} status
+                 * @return {void}
+                 */
+                const fail = (status) => {
+                    finish(status, null, settings.Nothing, settings.NoDelay);
+                };
+                const headers = { [settings.Headers.Authorization]: `${settings.Bearer}${key}` };
+                const details = {
+                    method,
+                    url: url.href,
+                    headers,
+                    anonymous: true,
+                    redirect: settings.Redirect,
+                    responseType: settings.ResponseType,
+                    timeout: timeoutMs,
+
+                    /**
+                     * @param {{ status: number, finalUrl: *, responseHeaders: *, responseText: * }} response
+                     * @return {void}
+                     */
+                    onload: (response) => {
+                        if (cloud.epoch !== epoch) {
+                            fail(transport.Cancelled);
+                            return;
+                        }
+                        try {
+                            const status = response.status;
+                            if (
+                                new URL(response.finalUrl).href !== url.href ||
+                                (status >= statuses.Redirect && status < statuses.Client)
+                            ) {
+                                fail(transport.Rejected);
+                                return;
+                            }
+                            const received = String(response.responseHeaders ?? settings.Nothing);
+                            const retryHeader = settings.RetryAfter.exec(received);
+                            const asked =
+                                retryHeader === null
+                                    ? settings.NoDelay
+                                    : Number(retryHeader[1]) * settings.MillisecondsPerSecond;
+                            const retryAfter = Math.min(asked, settings.MostRetryMs);
+                            const text =
+                                typeof response.responseText === settings.StringType
+                                    ? response.responseText
+                                    : settings.Nothing;
+                            let data = null;
+                            try {
+                                data = JSON.parse(text);
+                            } catch {
+                                data = null;
+                            }
+                            finish(status, data, text, retryAfter);
+                        } catch {
+                            fail(transport.Rejected);
+                        }
+                    },
+
+                    /**
+                     * @return {void}
+                     */
+                    onerror: () => {
+                        fail(transport.Network);
+                    },
+
+                    /**
+                     * @return {void}
+                     */
+                    ontimeout: () => {
+                        fail(transport.Network);
+                    },
+
+                    /**
+                     * @return {void}
+                     */
+                    onabort: () => {
+                        fail(transport.Network);
+                    },
+                };
+                if (typeof body === settings.StringType) {
+                    headers[settings.Headers.ContentType] = settings.ContentTypes.Text;
+                    details.data = body;
+                } else if (body !== null) {
+                    headers[settings.Headers.ContentType] = settings.ContentTypes.Json;
+                    details.data = JSON.stringify(body);
+                }
+                cloud.later(
+                    timeoutMs,
+                    /**
+                     * @return {void}
+                     */
+                    () => {
+                        fail(transport.Network);
+                        try {
+                            handle?.abort?.();
+                        } catch {
+                            return;
+                        }
+                    },
+                );
+                try {
+                    handle = cloud.xmlHttpRequest(details);
+                } catch {
+                    fail(transport.Network);
+                }
+            },
+        );
+    },
+
+    /**
+     * @param {object} cloud
+     * @param {{ status: number, data: *, retryAfter: number }} result
+     * @return {void}
+     */
+    failed(cloud, result) {
+        const settings = ScribeCloud.Settings;
+        const statuses = settings.Statuses;
+        const transport = settings.Transport;
+        const phases = ScribeCloud.Phase;
+        const code = ScribeCloud.code(result);
+        if (result.status === transport.Cancelled) {
+            return;
+        }
+        const lapsed = ScribeCloud.lapsed(cloud, cloud.clock.now());
+        if (!lapsed && (result.status === statuses.Unauthorized || code === settings.Codes.Configuration)) {
+            cloud.phase = phases.Refused;
+            cloud.notify();
+            return;
+        }
+        const passing =
+            result.status === transport.Network ||
+            result.status === statuses.Limited ||
+            result.status >= statuses.Server;
+        if (!passing) {
+            const refused = `${settings.Messages.Refused}${code ?? result.status}`;
+            cloud.problem = result.status === transport.Rejected ? settings.Messages.Rejected : refused;
+            cloud.opening = false;
+        }
+        ScribeCloud.fallen(cloud, result.status === statuses.Limited ? result.retryAfter : settings.NoDelay);
+    },
+
+    /**
+     * @param {object} cloud
+     * @param {number} waited
+     * @return {void}
+     */
+    fallen(cloud, waited) {
+        const settings = ScribeCloud.Settings;
+        const phases = ScribeCloud.Phase;
+        if (ScribeCloud.lapsed(cloud, cloud.clock.now())) {
+            ScribeCloud.record(cloud, ScribeCloud.enter(cloud, waited));
+            return;
+        }
+        const opening = cloud.opening && cloud.phase === phases.Loading;
+        if (!opening || !cloud.owed || waited > settings.NoDelay) {
+            ScribeCloud.backOff(cloud, waited);
+        }
+        if (opening) {
+            ScribeCloud.record(cloud, ScribeCloud.resume(cloud));
+            return;
+        }
+        if (settings.Stepping.includes(cloud.phase)) {
+            cloud.phase = phases.Offline;
+            cloud.notify();
+        }
+    },
+
+    /**
+     * @param {object} cloud
+     * @param {Promise<void>} work
+     * @return {void}
+     */
+    record(cloud, work) {
+        work.catch(
+            /**
+             * @param {*} error
+             * @return {void}
+             */
+            (error) => {
+                cloud.problem = ScribeCloud.words(error);
+            },
+        );
+    },
+
+    /**
+     * @param {object} cloud
+     * @param {number} waited
+     * @return {void}
+     */
+    backOff(cloud, waited) {
+        const settings = ScribeCloud.Settings;
+        const backoff = settings.BackoffMs[cloud.retries] ?? settings.NoDelay;
+        const now = cloud.clock.now();
+        cloud.retries = Math.min(cloud.retries + settings.Next, settings.BackoffMs.length);
+        cloud.backedAt = now;
+        cloud.retryAt = now + Math.max(backoff, waited);
+        if (waited > settings.NoDelay) {
+            cloud.limitedUntil = now + waited;
+        }
+    },
+
+    /**
+     * @param {number} now
+     * @param {number} at
+     * @return {number}
+     */
+    elapsed(now, at) {
+        return now >= at ? now - at : ScribeCloud.Settings.Forever;
+    },
+
+    /**
+     * @param {object} cloud
+     * @param {number} now
+     * @return {boolean}
+     */
+    lapsed(cloud, now) {
+        const settings = ScribeCloud.Settings;
+        return cloud.phase === ScribeCloud.Phase.Leading && ScribeCloud.elapsed(now, cloud.heldAt) >= settings.LeaseMs;
+    },
+
+    /**
+     * @param {object} cloud
+     * @param {number} waited
+     * @return {Promise<void>}
+     * @throws {Error}
+     */
+    enter(cloud, waited) {
+        const settings = ScribeCloud.Settings;
+        cloud.renewal++;
+        cloud.renewing = false;
+        ScribeCloud.loading(cloud);
+        cloud.opening = true;
+        cloud.switchAt = cloud.clock.now() + settings.OpenMs;
+        cloud.retries = settings.NoCount;
+        cloud.retryAt = null;
+        if (waited > settings.NoDelay) {
+            ScribeCloud.backOff(cloud, waited);
+        }
+        return ScribeCloud.resume(cloud);
+    },
+
+    /**
+     * @param {object} cloud
+     * @return {Promise<void>}
+     * @throws {Error}
+     */
+    resume(cloud) {
+        const settings = ScribeCloud.Settings;
+        const now = cloud.clock.now();
+        if (!cloud.opening || cloud.phase !== ScribeCloud.Phase.Loading || now >= cloud.switchAt) {
+            return Promise.resolve();
+        }
+        if (cloud.flying) {
+            cloud.owed = true;
+            return Promise.resolve();
+        }
+        const first = settings.BackoffMs[settings.NoCount];
+        const cut = cloud.switchAt - settings.LastTryMs;
+        const spaced = cloud.backedAt === null || ScribeCloud.elapsed(now, cloud.backedAt) >= first;
+        const limited = cloud.limitedUntil !== null && now < cloud.limitedUntil && now >= cloud.backedAt;
+        if (spaced && !limited && (ScribeCloud.due(cloud, now) || now >= cut)) {
+            return ScribeCloud.begin(cloud);
+        }
+        const dueAt = cloud.retryAt === null ? now : cloud.retryAt;
+        const spacedAt = spaced ? now : cloud.backedAt + first;
+        const limitedAt = limited ? cloud.limitedUntil : now;
+        const at = Math.max(Math.min(dueAt, cut), spacedAt, limitedAt);
+        const epoch = cloud.epoch;
+        cloud.waits++;
+        const wait = cloud.waits;
+        cloud.later(
+            at - now,
+            /**
+             * @return {void}
+             */
+            () => {
+                if (cloud.epoch === epoch && cloud.waits === wait) {
+                    ScribeCloud.record(cloud, ScribeCloud.resume(cloud));
+                }
+            },
+        );
+        return Promise.resolve();
+    },
+
+    /**
+     * @param {object} cloud
+     * @return {boolean}
+     */
+    leads(cloud) {
+        return ScribeCloud.Settings.Leads.includes(cloud.phase) && !ScribeCloud.lapsed(cloud, cloud.clock.now());
+    },
+
+    /**
+     * @param {object} cloud
+     * @return {string[]}
+     * @throws {Error}
+     */
+    unsent(cloud) {
+        const synced = ScribeStore.synced(cloud.storage, cloud.roomId);
+        const noGeneration = ScribeCloud.Settings.NoGeneration;
+        return ScribeCloud.Settings.Synced.filter(
+            /**
+             * @param {string} kind
+             * @return {boolean}
+             */
+            (kind) => {
+                const generation = ScribeStore.generation(cloud.storage, cloud.roomId, kind);
+                const recorded = Object.hasOwn(synced, kind) ? synced[kind].generation : noGeneration;
+                return generation !== null && generation > noGeneration && generation !== recorded;
+            },
+        );
+    },
+
+    /**
+     * @param {object} cloud
+     * @return {string}
+     * @throws {Error}
+     */
+    sentName(cloud) {
+        return ScribeStore.name(ScribeCloud.Settings.SendingType, ScribeStore.room(cloud.roomId));
+    },
+
+    /**
+     * @param {object} cloud
+     * @param {string} key
+     * @return {void}
+     */
+    restart(cloud, key) {
+        const phases = ScribeCloud.Phase;
+        cloud.epoch++;
+        cloud.key = key;
+        cloud.phase = key === ScribeCloud.Settings.Nothing ? phases.Off : phases.Idle;
+        cloud.heads = new Map();
+        cloud.held = false;
+        cloud.heldAt = null;
+        cloud.renewal = ScribeCloud.Settings.NoCount;
+        cloud.opening = false;
+        cloud.switchAt = null;
+        cloud.owed = false;
+        cloud.waits = ScribeCloud.Settings.NoCount;
+        cloud.limitedUntil = null;
+        cloud.answered = false;
+        cloud.loads = ScribeCloud.Settings.NoCount;
+        cloud.garbled = false;
+        cloud.spoiled = new Map();
+        cloud.texts = new Map();
+        cloud.again = false;
+        cloud.timer = false;
+        cloud.flying = false;
+        cloud.renewing = false;
+        cloud.spending = false;
+        cloud.noting = false;
+        cloud.leaseAt = null;
+        cloud.retryAt = null;
+        cloud.backedAt = null;
+        cloud.retries = ScribeCloud.Settings.NoCount;
+        cloud.sent = null;
+        cloud.notes = null;
+        cloud.notesAt = null;
+        cloud.conflict = null;
+        cloud.problem = null;
+    },
+
+    /**
+     * @param {object} cloud
+     * @param {number} at
+     * @return {boolean}
+     */
+    due(cloud, at) {
+        return cloud.retryAt === null || at >= cloud.retryAt || at < cloud.backedAt;
+    },
+
+    /**
+     * @param {object} cloud
+     * @return {Promise<void>}
+     * @throws {Error}
+     */
+    tick(cloud) {
+        const phases = ScribeCloud.Phase;
+        const settings = ScribeCloud.Settings;
+        if (cloud.closed) {
+            return Promise.resolve();
+        }
+        const key = ScribeStore.cloudKey(cloud.storage);
+        if (key !== cloud.key) {
+            ScribeCloud.restart(cloud, key);
+        }
+        if (cloud.phase === phases.Off) {
+            return Promise.resolve();
+        }
+        if (!cloud.chosen()) {
+            if (cloud.phase !== phases.Idle) {
+                ScribeCloud.restart(cloud, key);
+            }
+            return Promise.resolve();
+        }
+        const now = cloud.clock.now();
+        const work = [];
+        if (cloud.phase === phases.Idle || ScribeCloud.lapsed(cloud, now)) {
+            work.push(ScribeCloud.enter(cloud, settings.NoDelay));
+        } else if (cloud.phase === phases.Offline && !cloud.flying && ScribeCloud.due(cloud, now)) {
+            work.push(ScribeCloud.begin(cloud));
+        } else if (cloud.again && !cloud.flying && !cloud.reader()) {
+            cloud.again = false;
+            work.push(ScribeCloud.reload(cloud));
+        } else if (settings.Renewing.includes(cloud.phase) && !cloud.renewing && ScribeCloud.due(cloud, now)) {
+            if (cloud.leaseAt === null || ScribeCloud.elapsed(now, cloud.leaseAt) >= settings.RenewMs) {
+                work.push(ScribeCloud.renew(cloud));
+            }
+        }
+        work.push(ScribeCloud.stir(cloud));
+        if (cloud.answered && settings.Reaching.includes(cloud.phase) && ScribeCloud.due(cloud, now)) {
+            work.push(ScribeCloud.spend(cloud));
+            work.push(ScribeCloud.readNotes(cloud));
+        }
+        return Promise.all(work).then(
+            /**
+             * @return {void}
+             */
+            () => undefined,
+        );
+    },
+
+    /**
+     * @param {object} cloud
+     * @return {Promise<void>}
+     * @throws {Error}
+     */
+    stir(cloud) {
+        const phases = ScribeCloud.Phase;
+        const settings = ScribeCloud.Settings;
+        if (cloud.closed || cloud.phase === phases.Off || cloud.phase === phases.Idle) {
+            return Promise.resolve();
+        }
+        const now = cloud.clock.now();
+        for (const kind of settings.Synced) {
+            const generation = ScribeStore.generation(cloud.storage, cloud.roomId, kind);
+            if (cloud.seen.has(kind) && cloud.seen.get(kind) !== generation) {
+                cloud.changedAt = now;
+            }
+            cloud.seen.set(kind, generation);
+        }
+        if (cloud.phase !== phases.Leading || cloud.timer || cloud.flying) {
+            return Promise.resolve();
+        }
+        if (ScribeCloud.unsent(cloud).length === settings.NoCount) {
+            return Promise.resolve();
+        }
+        const quiet = cloud.changedAt === null ? settings.QuietMs : ScribeCloud.elapsed(now, cloud.changedAt);
+        if (quiet >= settings.QuietMs) {
+            return ScribeCloud.push(cloud, false);
+        }
+        const epoch = cloud.epoch;
+        cloud.timer = true;
+        cloud.later(
+            settings.QuietMs - quiet,
+            /**
+             * @return {void}
+             */
+            () => {
+                if (cloud.epoch !== epoch) {
+                    return;
+                }
+                cloud.timer = false;
+                ScribeCloud.stir(cloud).catch(
+                    /**
+                     * @param {*} error
+                     * @return {void}
+                     */
+                    (error) => {
+                        cloud.problem = ScribeCloud.words(error);
+                    },
+                );
+            },
+        );
+        return Promise.resolve();
+    },
+
+    /**
+     * @param {object} cloud
+     * @param {() => Promise<void>} work
+     * @return {Promise<boolean>}
+     * @throws {Error}
+     */
+    async fly(cloud, work) {
+        if (cloud.flying) {
+            return false;
+        }
+        const epoch = cloud.epoch;
+        cloud.flying = true;
+        try {
+            await work();
+        } catch (error) {
+            if (cloud.epoch === epoch) {
+                cloud.problem = ScribeCloud.words(error);
+                ScribeCloud.fallen(cloud, ScribeCloud.Settings.NoDelay);
+            }
+            throw error;
+        } finally {
+            if (cloud.epoch === epoch) {
+                cloud.flying = false;
+                if (cloud.owed) {
+                    cloud.owed = false;
+                    ScribeCloud.record(cloud, ScribeCloud.resume(cloud));
+                }
+            }
+        }
+        return true;
+    },
+
+    /**
+     * @param {object} cloud
+     * @param {*} answer
+     * @param {number} askedAt
+     * @return {boolean}
+     */
+    leased(cloud, answer, askedAt) {
+        cloud.held = answer?.held === true;
+        cloud.leaseAt = cloud.clock.now();
+        if (cloud.held) {
+            cloud.heldAt = askedAt;
+        }
+        if (!cloud.garbled) {
+            cloud.retries = ScribeCloud.Settings.NoCount;
+            cloud.retryAt = null;
+            cloud.limitedUntil = null;
+            cloud.problem = null;
+        }
+        cloud.answered = true;
+        return cloud.held;
+    },
+
+    /**
+     * @param {object} cloud
+     * @return {Promise<{ status: number, data: *, text: string, retryAfter: number }>}
+     */
+    lease(cloud) {
+        const settings = ScribeCloud.Settings;
+        return ScribeCloud.request(
+            cloud,
+            settings.Methods.Post,
+            settings.Paths.Lease,
+            { roomId: cloud.room },
+            { browser: cloud.browser, want: settings.Wants.None },
+            settings.TimeoutMs,
+        );
+    },
+
+    /**
+     * @param {object} cloud
+     * @return {Promise<{ status: number, data: *, text: string, retryAfter: number }>}
+     */
+    heads(cloud) {
+        const settings = ScribeCloud.Settings;
+        return ScribeCloud.request(
+            cloud,
+            settings.Methods.Get,
+            settings.Paths.Heads,
+            { roomId: cloud.room, browser: cloud.browser, day: cloud.clock.today() },
+            null,
+            settings.TimeoutMs,
+        );
+    },
+
+    /**
+     * @param {object} cloud
+     * @return {void}
+     */
+    loading(cloud) {
+        const phases = ScribeCloud.Phase;
+        if (cloud.phase !== phases.Loading) {
+            const epoch = cloud.epoch;
+            cloud.loads++;
+            const load = cloud.loads;
+            cloud.phase = phases.Loading;
+            cloud.opening = false;
+            cloud.later(
+                ScribeCloud.Settings.OpenMs,
+                /**
+                 * @return {void}
+                 */
+                () => {
+                    if (cloud.epoch !== epoch || cloud.loads !== load || cloud.phase !== phases.Loading) {
+                        return;
+                    }
+                    cloud.opening = false;
+                    cloud.retries = ScribeCloud.Settings.NoCount;
+                    cloud.retryAt = cloud.limitedUntil;
+                    cloud.phase = phases.Offline;
+                    cloud.notify();
+                },
+            );
+        }
+        cloud.notify();
+    },
+
+    /**
+     * @param {object} cloud
+     * @return {Promise<void>}
+     * @throws {Error}
+     */
+    async begin(cloud) {
+        const settings = ScribeCloud.Settings;
+        const phases = ScribeCloud.Phase;
+        const epoch = cloud.epoch;
+        cloud.room = ScribeCloud.room(cloud.roomId);
+        if (cloud.room === null) {
+            cloud.phase = phases.Unusable;
+            cloud.problem = settings.Messages.BadRoom;
+            cloud.notify();
+            return;
+        }
+        try {
+            cloud.browser = ScribeStore.browserId(cloud.storage, cloud.random);
+        } catch (error) {
+            cloud.phase = phases.Offline;
+            cloud.problem = ScribeCloud.words(error);
+            ScribeCloud.backOff(cloud, settings.NoDelay);
+            cloud.notify();
+            return;
+        }
+        const flown = await ScribeCloud.fly(
+            cloud,
+            /**
+             * @return {Promise<void>}
+             */
+            async () => {
+                const askedAt = cloud.clock.now();
+                const lease = await ScribeCloud.lease(cloud);
+                if (cloud.epoch !== epoch) {
+                    return;
+                }
+                if (!ScribeCloud.ok(lease)) {
+                    ScribeCloud.failed(cloud, lease);
+                    return;
+                }
+                ScribeCloud.leased(cloud, lease.data, askedAt);
+                await ScribeCloud.refresh(cloud);
+            },
+        );
+        if (flown && cloud.epoch === epoch) {
+            await ScribeCloud.stir(cloud);
+        }
+        if (cloud.epoch === epoch && cloud.answered && settings.Reaching.includes(cloud.phase)) {
+            await Promise.all([ScribeCloud.spend(cloud), ScribeCloud.readNotes(cloud)]);
+        }
+    },
+
+    /**
+     * @param {object} cloud
+     * @return {Promise<void>}
+     * @throws {Error}
+     */
+    async refresh(cloud) {
+        const epoch = cloud.epoch;
+        const result = await ScribeCloud.heads(cloud);
+        if (cloud.epoch !== epoch) {
+            return;
+        }
+        if (!ScribeCloud.ok(result)) {
+            ScribeCloud.failed(cloud, result);
+            return;
+        }
+        await ScribeCloud.settle(cloud, result.data);
+    },
+
+    /**
+     * @param {object} cloud
+     * @return {Promise<void>}
+     * @throws {Error}
+     */
+    async reload(cloud) {
+        const epoch = cloud.epoch;
+        const flown = await ScribeCloud.fly(
+            cloud,
+            /**
+             * @return {Promise<void>}
+             */
+            () => ScribeCloud.refresh(cloud),
+        );
+        if (flown && cloud.epoch === epoch) {
+            await ScribeCloud.stir(cloud);
+        }
+    },
+
+    /**
+     * @param {object} cloud
+     * @param {*} spent
+     * @return {void}
+     * @throws {Error}
+     */
+    noteSpent(cloud, spent) {
+        const settings = ScribeCloud.Settings;
+        const sound =
+            typeof spent?.day === settings.StringType && Number.isFinite(spent.sum) && Number.isFinite(spent.mine);
+        if (sound) {
+            const others = Math.max(settings.NoSpending, spent.sum - spent.mine);
+            ScribeStore.setOthers(cloud.storage, cloud.roomId, spent.day, others);
+        }
+    },
+
+    /**
+     * @param {object} cloud
+     * @param {string} kind
+     * @param {{ revision: number, parts: number }} head
+     * @return {Promise<{ text: string|null, result: object|null }>}
+     */
+    async download(cloud, kind, head) {
+        const settings = ScribeCloud.Settings;
+        const epoch = cloud.epoch;
+        const held = cloud.texts.get(kind);
+        if (held !== undefined && held.revision === head.revision) {
+            return { text: held.text, result: null };
+        }
+        const pieces = [];
+        for (let part = settings.FirstPart; part < head.parts; part++) {
+            const query = { roomId: cloud.room, kind, revision: head.revision, part };
+            const result = await ScribeCloud.request(
+                cloud,
+                settings.Methods.Get,
+                settings.Paths.Part,
+                query,
+                null,
+                settings.PartTimeoutMs,
+            );
+            if (cloud.epoch !== epoch || result.status !== settings.Statuses.Ok) {
+                return { text: null, result };
+            }
+            pieces.push(result.text);
+        }
+        return { text: pieces.join(settings.Nothing), result: null };
+    },
+
+    /**
+     * @param {*} text
+     * @return {number|null}
+     */
+    readCount(text) {
+        const read = ScribeStore.decode(text)?.log?.read;
+        const settings = ScribeCloud.Settings;
+        return read !== null && typeof read === settings.ObjectType ? Object.keys(read).length : null;
+    },
+
+    /**
+     * @param {object} cloud
+     * @param {string} reason
+     * @return {void}
+     */
+    unreadable(cloud, reason) {
+        cloud.problem = reason;
+        cloud.garbled = true;
+        cloud.texts = new Map();
+        ScribeCloud.backOff(cloud, ScribeCloud.Settings.NoDelay);
+        cloud.phase = ScribeCloud.Phase.Offline;
+        cloud.notify();
+    },
+
+    /**
+     * @param {object} cloud
+     * @param {*} first
+     * @return {Promise<void>}
+     * @throws {Error}
+     */
+    async settle(cloud, first) {
+        const settings = ScribeCloud.Settings;
+        const phases = ScribeCloud.Phase;
+        const kinds = ScribeStore.Kind;
+        const storage = cloud.storage;
+        const roomId = cloud.roomId;
+        const epoch = cloud.epoch;
+        const answer = cloud.conflict === null ? null : cloud.conflict.answer;
+        const keeping = answer === ScribeCloud.Answer.Keep;
+        const taking = answer === ScribeCloud.Answer.Cloud;
+        const sentName = ScribeCloud.sentName(cloud);
+        let record = ScribeStore.decode(ScribeStore.fetch(storage, sentName));
+        let reply = first;
+        let sweeps = settings.FirstRound;
+        let stepped = false;
+        for (;;) {
+            let sound = reply !== null && typeof reply === settings.ObjectType && Array.isArray(reply.heads);
+            const heads = new Map();
+            if (sound) {
+                for (const head of reply.heads) {
+                    sound =
+                        settings.Synced.includes(head?.kind) &&
+                        Number.isSafeInteger(head.revision) &&
+                        head.revision > settings.NoRevision &&
+                        Number.isSafeInteger(head.parts) &&
+                        head.parts > settings.NoCount &&
+                        head.parts <= settings.MostParts;
+                    if (!sound) {
+                        break;
+                    }
+                    heads.set(head.kind, { revision: head.revision, parts: head.parts });
+                }
+            }
+            if (!sound) {
+                ScribeCloud.unreadable(cloud, settings.Messages.Unreadable);
+                return;
+            }
+            ScribeCloud.noteSpent(cloud, reply.spent);
+            cloud.heads = heads;
+            const synced = ScribeStore.synced(storage, roomId);
+            const fetched = new Map();
+            let swept = null;
+            for (const kind of settings.Synced) {
+                const head = heads.get(kind) ?? null;
+                const revision = head === null ? settings.NoRevision : head.revision;
+                const entry = synced[kind] ?? { revision: settings.NoRevision, generation: settings.NoGeneration };
+                let snapshot = null;
+                let damaged = false;
+                try {
+                    snapshot = ScribeStore.snapshot(storage, roomId, kind);
+                } catch (error) {
+                    if (error?.damaged !== true) {
+                        throw error;
+                    }
+                    damaged = true;
+                }
+                const clean = snapshot === null || snapshot.generation === entry.generation;
+                const moved = revision !== entry.revision;
+                if (revision === settings.NoRevision) {
+                    if (taking && snapshot !== null) {
+                        ScribeStore.setSynced(storage, roomId, kind, settings.NoRevision, snapshot.generation);
+                    } else if (moved && !damaged) {
+                        const generation = clean ? settings.NoGeneration : entry.generation;
+                        ScribeStore.setSynced(storage, roomId, kind, settings.NoRevision, generation);
+                    }
+                    continue;
+                }
+                if (!damaged && !moved && (clean || !taking)) {
+                    continue;
+                }
+                if (cloud.spoiled.get(kind) === revision) {
+                    ScribeCloud.unreadable(cloud, settings.Messages.Unreadable);
+                    return;
+                }
+                const loaded = await ScribeCloud.download(cloud, kind, head);
+                if (cloud.epoch !== epoch) {
+                    return;
+                }
+                if (loaded.result !== null && loaded.result.status === settings.Statuses.NotFound) {
+                    swept = { kind, revision };
+                    break;
+                }
+                if (loaded.result !== null) {
+                    ScribeCloud.failed(cloud, loaded.result);
+                    return;
+                }
+                if (ScribeStore.decode(loaded.text) === null) {
+                    cloud.spoiled.set(kind, revision);
+                    ScribeCloud.unreadable(cloud, settings.Messages.Unreadable);
+                    return;
+                }
+                cloud.texts.set(kind, { revision, text: loaded.text });
+                const adopt = damaged || snapshot === null || taking || (clean && !keeping);
+                fetched.set(kind, { revision, text: loaded.text, snapshot, adopt });
+            }
+            if (swept !== null) {
+                if (sweeps >= settings.MostSettles) {
+                    cloud.spoiled.set(swept.kind, swept.revision);
+                    ScribeCloud.unreadable(cloud, settings.Messages.Unreadable);
+                    return;
+                }
+                sweeps++;
+                const again = await ScribeCloud.heads(cloud);
+                if (cloud.epoch !== epoch) {
+                    return;
+                }
+                if (!ScribeCloud.ok(again)) {
+                    ScribeCloud.failed(cloud, again);
+                    return;
+                }
+                reply = again.data;
+                continue;
+            }
+            cloud.opening = false;
+            if (cloud.garbled) {
+                cloud.garbled = false;
+                cloud.retries = settings.NoCount;
+                cloud.retryAt = null;
+                cloud.problem = null;
+            }
+            const adopted = new Map();
+            const diverged = new Map();
+            for (const [kind, found] of fetched) {
+                if (found.adopt) {
+                    adopted.set(kind, found);
+                    continue;
+                }
+                const sending = record !== null && Object.hasOwn(record, kind) ? record[kind] : null;
+                const sent =
+                    sending !== null &&
+                    sending.revision === found.revision &&
+                    sending.characters === found.text.length &&
+                    sending.digest === ScribeStore.digest(found.text) &&
+                    ScribeStore.whole(sending.generation);
+                if (found.text === found.snapshot.text) {
+                    ScribeStore.setSynced(storage, roomId, kind, found.revision, found.snapshot.generation);
+                } else if (sent) {
+                    ScribeStore.setSynced(storage, roomId, kind, found.revision, sending.generation);
+                } else {
+                    diverged.set(kind, found);
+                }
+            }
+            if (record !== null) {
+                storage.remove(sentName);
+                record = null;
+            }
+            const asking =
+                diverged.size > settings.NoCount && (diverged.has(kinds.Book) || keeping) && !(keeping && cloud.held);
+            const writes = new Map();
+            const deferred = new Map();
+            for (const [kind, found] of adopted) {
+                if (asking && found.snapshot !== null) {
+                    deferred.set(kind, found);
+                } else {
+                    writes.set(kind, found);
+                }
+            }
+            if (!asking) {
+                for (const [kind, found] of diverged) {
+                    if (cloud.held) {
+                        ScribeStore.setSynced(storage, roomId, kind, found.revision, settings.NoGeneration);
+                    } else {
+                        writes.set(kind, found);
+                    }
+                }
+            }
+            if (writes.size > settings.NoCount && cloud.reader()) {
+                ScribeCloud.loading(cloud);
+                if (stepped || cloud.reader()) {
+                    cloud.again = true;
+                    return;
+                }
+                stepped = true;
+                continue;
+            }
+            for (const [kind, found] of writes) {
+                ScribeStore.writeText(storage, roomId, kind, found.text);
+                const generation = ScribeStore.generation(storage, roomId, kind);
+                ScribeStore.setSynced(storage, roomId, kind, found.revision, generation);
+                cloud.seen.set(kind, generation);
+            }
+            cloud.again = false;
+            cloud.texts = new Map();
+            if (asking) {
+                let here = null;
+                try {
+                    here = ScribeCloud.readCount(ScribeStore.snapshot(storage, roomId, kinds.Book)?.text);
+                } catch (error) {
+                    if (error?.damaged !== true) {
+                        throw error;
+                    }
+                }
+                const there = diverged.has(kinds.Book) ? ScribeCloud.readCount(diverged.get(kinds.Book).text) : here;
+                const texts = new Map();
+                for (const [kind, found] of [...diverged, ...deferred]) {
+                    texts.set(kind, { revision: found.revision, text: found.text });
+                }
+                cloud.conflict = { cloud: texts, here, there, answer: keeping ? ScribeCloud.Answer.Keep : null };
+                cloud.phase = phases.Conflict;
+                cloud.notify();
+                return;
+            }
+            if (taking || (keeping && diverged.size === settings.NoCount)) {
+                cloud.conflict = null;
+            }
+            const phase = cloud.held ? phases.Leading : phases.Watching;
+            const changed = phase !== cloud.phase || writes.size > settings.NoCount;
+            cloud.phase = phase;
+            if (changed) {
+                cloud.notify();
+            }
+            return;
+        }
+    },
+
+    /**
+     * @param {object} cloud
+     * @param {{ status: number, data: * }} result
+     * @return {Promise<void>}
+     * @throws {Error}
+     */
+    async refused(cloud, result) {
+        const settings = ScribeCloud.Settings;
+        const codes = settings.Codes;
+        const code = result.status === settings.Statuses.Conflict ? ScribeCloud.code(result) : null;
+        if (code === codes.LeaseLost) {
+            cloud.held = false;
+            cloud.phase = ScribeCloud.Phase.Watching;
+            cloud.notify();
+            await ScribeCloud.refresh(cloud);
+            return;
+        }
+        if (code === codes.Conflict) {
+            await ScribeCloud.refresh(cloud);
+            return;
+        }
+        if (code !== codes.PartsMissing) {
+            ScribeCloud.failed(cloud, result);
+        }
+    },
+
+    /**
+     * @param {object} cloud
+     * @param {boolean} force
+     * @return {Promise<void>}
+     * @throws {Error}
+     */
+    async push(cloud, force) {
+        const settings = ScribeCloud.Settings;
+        const phases = ScribeCloud.Phase;
+        const now = cloud.clock.now();
+        if (cloud.closed || cloud.phase !== phases.Leading || cloud.flying || ScribeCloud.lapsed(cloud, now)) {
+            return;
+        }
+        if (!force && !ScribeCloud.due(cloud, now)) {
+            return;
+        }
+        const unsent = ScribeCloud.unsent(cloud);
+        if (unsent.length === settings.NoCount) {
+            return;
+        }
+        if (!force && unsent.includes(ScribeStore.Kind.Book) && cloud.reading()) {
+            return;
+        }
+        if (!force && cloud.changedAt !== null && ScribeCloud.elapsed(now, cloud.changedAt) < settings.QuietMs) {
+            return;
+        }
+        await ScribeCloud.fly(
+            cloud,
+            /**
+             * @return {Promise<void>}
+             */
+            () => ScribeCloud.send(cloud, unsent),
+        );
+    },
+
+    /**
+     * @param {object} cloud
+     * @param {string[]} unsent
+     * @return {Promise<void>}
+     * @throws {Error}
+     */
+    async send(cloud, unsent) {
+        const settings = ScribeCloud.Settings;
+        const phases = ScribeCloud.Phase;
+        const epoch = cloud.epoch;
+        const synced = ScribeStore.synced(cloud.storage, cloud.roomId);
+        const ready = [];
+        for (const kind of unsent) {
+            const base = Object.hasOwn(synced, kind) ? synced[kind].revision : settings.NoRevision;
+            const cached = cloud.heads.has(kind) ? cloud.heads.get(kind).revision : settings.NoRevision;
+            if (base !== cached) {
+                await ScribeCloud.refresh(cloud);
+                return;
+            }
+            let snapshot = null;
+            try {
+                snapshot = ScribeStore.snapshot(cloud.storage, cloud.roomId, kind);
+            } catch (error) {
+                if (error?.damaged !== true) {
+                    throw error;
+                }
+                continue;
+            }
+            const text = snapshot.text;
+            const refusedStart = settings.PartStartRefused;
+            const pieces = [];
+            for (let start = settings.NoCount; start < text.length; ) {
+                let end = Math.min(start + settings.PartCharacters, text.length);
+                while (end < text.length && end > start + settings.Next && refusedStart.test(text[end])) {
+                    end--;
+                }
+                pieces.push(text.slice(start, end));
+                start = end;
+            }
+            if (pieces.length > settings.MostParts) {
+                cloud.phase = phases.Unusable;
+                cloud.problem = settings.Messages.TooLarge;
+                cloud.notify();
+                return;
+            }
+            ready.push({ kind, base, snapshot, pieces });
+        }
+        if (ready.length === settings.NoCount) {
+            return;
+        }
+        const changes = [];
+        for (const item of ready) {
+            const digests = [];
+            for (let part = settings.FirstPart; part < item.pieces.length; part++) {
+                const query = {
+                    roomId: cloud.room,
+                    kind: item.kind,
+                    revision: item.base + settings.Next,
+                    part,
+                    browser: cloud.browser,
+                };
+                const staged = await ScribeCloud.request(
+                    cloud,
+                    settings.Methods.Put,
+                    settings.Paths.Part,
+                    query,
+                    item.pieces[part],
+                    settings.PartTimeoutMs,
+                );
+                if (cloud.epoch !== epoch) {
+                    return;
+                }
+                if (!ScribeCloud.ok(staged)) {
+                    await ScribeCloud.refused(cloud, staged);
+                    return;
+                }
+                digests.push(staged.data?.digest);
+            }
+            changes.push({
+                kind: item.kind,
+                expectedRevision: item.base,
+                revision: item.base + settings.Next,
+                digests,
+            });
+        }
+        const committed = await ScribeCloud.request(
+            cloud,
+            settings.Methods.Post,
+            settings.Paths.Commit,
+            { roomId: cloud.room },
+            { browser: cloud.browser, kinds: changes, done: [] },
+            settings.TimeoutMs,
+        );
+        if (cloud.epoch !== epoch) {
+            return;
+        }
+        if (!ScribeCloud.ok(committed)) {
+            if (committed.status !== settings.Statuses.Conflict) {
+                const record = Object.fromEntries(
+                    ready.map(
+                        /**
+                         * @param {{ kind: string, base: number, snapshot: { text: string, generation: number } }} item
+                         * @return {Array<string|object>}
+                         */
+                        (item) => [
+                            item.kind,
+                            {
+                                revision: item.base + settings.Next,
+                                digest: ScribeStore.digest(item.snapshot.text),
+                                characters: item.snapshot.text.length,
+                                generation: item.snapshot.generation,
+                            },
+                        ],
+                    ),
+                );
+                cloud.storage.set(ScribeCloud.sentName(cloud), JSON.stringify(record));
+            }
+            await ScribeCloud.refused(cloud, committed);
+            return;
+        }
+        for (const item of ready) {
+            const revision = item.base + settings.Next;
+            ScribeStore.setSynced(cloud.storage, cloud.roomId, item.kind, revision, item.snapshot.generation);
+            cloud.heads.set(item.kind, { revision, parts: item.pieces.length });
+        }
+        cloud.retries = settings.NoCount;
+        cloud.retryAt = null;
+        cloud.problem = null;
+        if (cloud.conflict !== null && cloud.conflict.answer === ScribeCloud.Answer.Keep) {
+            cloud.conflict = null;
+            cloud.notify();
+        }
+    },
+
+    /**
+     * @param {object} cloud
+     * @return {Promise<void>}
+     * @throws {Error}
+     */
+    async renew(cloud) {
+        const settings = ScribeCloud.Settings;
+        const phases = ScribeCloud.Phase;
+        const epoch = cloud.epoch;
+        const renewal = cloud.renewal;
+        cloud.renewing = true;
+        const askedAt = cloud.clock.now();
+        let result = null;
+        try {
+            result = await ScribeCloud.lease(cloud);
+        } finally {
+            if (cloud.epoch === epoch && cloud.renewal === renewal) {
+                cloud.renewing = false;
+            }
+        }
+        if (cloud.epoch !== epoch || cloud.renewal !== renewal) {
+            return;
+        }
+        if (!ScribeCloud.ok(result)) {
+            ScribeCloud.failed(cloud, result);
+            return;
+        }
+        const held = ScribeCloud.leased(cloud, result.data, askedAt);
+        const keeping = cloud.conflict !== null && cloud.conflict.answer === ScribeCloud.Answer.Keep;
+        if (held && cloud.phase === phases.Conflict && keeping) {
+            await ScribeCloud.carry(cloud);
+            return;
+        }
+        if (held && settings.Settled.includes(cloud.phase)) {
+            await ScribeCloud.reload(cloud);
+            return;
+        }
+        if (!held && settings.Dropped.includes(cloud.phase)) {
+            cloud.phase = phases.Watching;
+            cloud.notify();
+            await ScribeCloud.reload(cloud);
+        }
+    },
+
+    /**
+     * @param {object} cloud
+     * @return {Promise<void>}
+     * @throws {Error}
+     */
+    async carry(cloud) {
+        const settings = ScribeCloud.Settings;
+        for (const kind of settings.Synced) {
+            const found = cloud.conflict.cloud.get(kind);
+            if (found !== undefined) {
+                ScribeStore.setSynced(cloud.storage, cloud.roomId, kind, found.revision, settings.NoGeneration);
+                continue;
+            }
+            const generation = ScribeStore.generation(cloud.storage, cloud.roomId, kind);
+            if (!cloud.heads.has(kind) && generation !== null && generation > settings.NoGeneration) {
+                ScribeStore.setSynced(cloud.storage, cloud.roomId, kind, settings.NoRevision, settings.NoGeneration);
+            }
+        }
+        cloud.phase = ScribeCloud.Phase.Leading;
+        cloud.notify();
+        await ScribeCloud.push(cloud, true);
+    },
+
+    /**
+     * @param {object} cloud
+     * @return {Promise<void>}
+     * @throws {Error}
+     */
+    async spend(cloud) {
+        const settings = ScribeCloud.Settings;
+        const today = cloud.clock.today();
+        const total = ScribeStore.spent(cloud.storage, cloud.roomId, today);
+        const sent = cloud.sent;
+        const due = sent !== null && sent.day === today ? total > sent.total : total > settings.NoSpending;
+        if (!due || cloud.spending) {
+            return;
+        }
+        const epoch = cloud.epoch;
+        cloud.spending = true;
+        let result = null;
+        try {
+            result = await ScribeCloud.request(
+                cloud,
+                settings.Methods.Post,
+                settings.Paths.Spend,
+                { roomId: cloud.room },
+                { browser: cloud.browser, day: today, total },
+                settings.TimeoutMs,
+            );
+        } finally {
+            if (cloud.epoch === epoch) {
+                cloud.spending = false;
+            }
+        }
+        if (cloud.epoch !== epoch) {
+            return;
+        }
+        if (!ScribeCloud.ok(result)) {
+            ScribeCloud.failed(cloud, result);
+            return;
+        }
+        ScribeCloud.noteSpent(cloud, result.data);
+        cloud.sent = { day: today, total };
+    },
+
+    /**
+     * @param {string} text
+     * @return {{ text: string, length: number, cut: number|null }}
+     */
+    trimmed(text) {
+        const settings = ScribeCloud.Settings;
+        const points = Array.from(text);
+        if (points.length <= settings.NotesLongest) {
+            return { text, length: points.length, cut: null };
+        }
+        const head = points.slice(settings.NoCount, settings.NotesLongest).join(settings.Nothing);
+        const end = head.lastIndexOf(settings.LineBreak);
+        const line = end > settings.NoCount ? head.slice(settings.NoCount, end) : head;
+        const bare = line.length - settings.Next;
+        const kept = line.endsWith(settings.CarriageReturn) ? line.slice(settings.NoCount, bare) : line;
+        return { text: kept, length: Array.from(kept).length, cut: points.length };
+    },
+
+    /**
+     * @param {object} cloud
+     * @return {Promise<void>}
+     */
+    async readNotes(cloud) {
+        const settings = ScribeCloud.Settings;
+        const statuses = settings.Statuses;
+        const now = cloud.clock.now();
+        const recent = cloud.notesAt !== null && ScribeCloud.elapsed(now, cloud.notesAt) < settings.NotesEveryMs;
+        if (cloud.noting || recent) {
+            return;
+        }
+        const epoch = cloud.epoch;
+        cloud.noting = true;
+        cloud.notesAt = now;
+        let result = null;
+        try {
+            result = await ScribeCloud.request(
+                cloud,
+                settings.Methods.Get,
+                settings.Paths.Notes,
+                { roomId: cloud.notesRoom },
+                null,
+                settings.TimeoutMs,
+            );
+        } finally {
+            if (cloud.epoch === epoch) {
+                cloud.noting = false;
+            }
+        }
+        if (cloud.epoch !== epoch) {
+            return;
+        }
+        const notes = result.data?.notes;
+        if (result.status === statuses.Ok && typeof notes === settings.StringType) {
+            cloud.notes = notes.trim() === settings.Nothing ? null : ScribeCloud.trimmed(notes);
+        } else if (result.status === statuses.NotFound && ScribeCloud.code(result) === settings.Codes.NoNotes) {
+            cloud.notes = null;
+        }
+    },
+
+    /**
+     * @param {object} cloud
+     * @return {Promise<void>}
+     * @throws {Error}
+     */
+    async keep(cloud) {
+        const messages = ScribeCloud.Settings.Messages;
+        if (cloud.phase !== ScribeCloud.Phase.Conflict || cloud.conflict === null) {
+            throw new Error(messages.NoChoice);
+        }
+        if (cloud.flying) {
+            throw new Error(messages.Busy);
+        }
+        cloud.conflict.answer = ScribeCloud.Answer.Keep;
+        if (!cloud.held) {
+            throw new Error(messages.Elsewhere);
+        }
+        await ScribeCloud.carry(cloud);
+    },
+
+    /**
+     * @param {object} cloud
+     * @return {Promise<void>}
+     * @throws {Error}
+     */
+    async useCloud(cloud) {
+        const messages = ScribeCloud.Settings.Messages;
+        if (cloud.phase !== ScribeCloud.Phase.Conflict || cloud.conflict === null) {
+            throw new Error(messages.NoChoice);
+        }
+        if (cloud.flying) {
+            throw new Error(messages.Busy);
+        }
+        const conflict = cloud.conflict;
+        const before = conflict.answer;
+        conflict.answer = ScribeCloud.Answer.Cloud;
+        await ScribeCloud.reload(cloud);
+        const waiting = cloud.phase === ScribeCloud.Phase.Loading && cloud.again;
+        if (cloud.conflict === conflict && !waiting) {
+            conflict.answer = before;
+            throw new Error(cloud.garbled ? messages.Unreadable : messages.Unreachable);
+        }
+    },
+
+    /**
+     * @param {object} cloud
+     * @return {string|null}
+     */
+    notes(cloud) {
+        return cloud.notes === null ? null : cloud.notes.text;
+    },
+
+    /**
+     * @param {object} cloud
+     * @return {Readonly<{ phase: string, keyed: boolean, conflict: Readonly<{ here: number|null, there: number|null }>|null, notes: Readonly<{ length: number, cut: number|null }>|null, unsent: number, problem: string|null }>}
+     * @throws {Error}
+     */
+    view(cloud) {
+        const phases = ScribeCloud.Phase;
+        const conflict = cloud.phase === phases.Conflict ? cloud.conflict : null;
+        const quiet = cloud.phase === phases.Off || cloud.phase === phases.Idle;
+        return Object.freeze({
+            phase: cloud.phase,
+            keyed: cloud.key !== ScribeCloud.Settings.Nothing,
+            conflict: conflict === null ? null : Object.freeze({ here: conflict.here, there: conflict.there }),
+            notes: cloud.notes === null ? null : Object.freeze({ length: cloud.notes.length, cut: cloud.notes.cut }),
+            unsent: quiet ? ScribeCloud.Settings.NoCount : ScribeCloud.unsent(cloud).length,
+            problem: cloud.problem,
+        });
+    },
+
+    /**
+     * @param {object} cloud
+     * @return {void}
+     */
+    close(cloud) {
+        cloud.epoch++;
+        cloud.closed = true;
+    },
+
+    /**
+     * @param {{ storage: object, roomId: string, notesRoom: string, xmlHttpRequest: Function, clock: { now: () => number, today: () => string }, random: () => string, later: (milliseconds: number, action: Function) => void, chosen: () => boolean, reader: () => boolean, busy: () => boolean, reading: () => boolean, notify: () => void }} options
+     * @return {Readonly<{ view: Function, tick: Function, stir: Function, leads: Function, notes: Function, keep: Function, useCloud: Function, close: Function }>}
+     */
+    open(options) {
+        const settings = ScribeCloud.Settings;
+        const cloud = {
+            storage: options.storage,
+            roomId: options.roomId,
+            notesRoom: options.notesRoom,
+            xmlHttpRequest: options.xmlHttpRequest,
+            clock: options.clock,
+            random: options.random,
+            later: options.later,
+            chosen: options.chosen,
+            reader: options.reader,
+            busy: options.busy,
+            reading: options.reading,
+            notify: options.notify,
+            phase: ScribeCloud.Phase.Off,
+            key: settings.Nothing,
+            browser: null,
+            room: null,
+            epoch: settings.FirstEpoch,
+            heads: new Map(),
+            seen: new Map(),
+            changedAt: null,
+            timer: false,
+            closed: false,
+        };
+        ScribeCloud.restart(cloud, ScribeStore.cloudKey(options.storage));
+        return Object.freeze({
+            /**
+             * @return {Readonly<object>}
+             */
+            view: () => ScribeCloud.view(cloud),
+
+            /**
+             * @return {Promise<void>}
+             */
+            tick: () => ScribeCloud.tick(cloud),
+
+            /**
+             * @return {Promise<void>}
+             */
+            stir: () => ScribeCloud.stir(cloud),
+
+            /**
+             * @return {boolean}
+             */
+            leads: () => ScribeCloud.leads(cloud),
+
+            /**
+             * @return {string|null}
+             */
+            notes: () => ScribeCloud.notes(cloud),
+
+            /**
+             * @return {Promise<void>}
+             */
+            keep: () => ScribeCloud.keep(cloud),
+
+            /**
+             * @return {Promise<void>}
+             */
+            useCloud: () => ScribeCloud.useCloud(cloud),
+
+            /**
+             * @return {void}
+             */
+            close: () => {
+                ScribeCloud.close(cloud);
+            },
+        });
     },
 });
 /** @file scribe/page/ScribeKeeper.js */
@@ -9385,8 +11983,11 @@ const ScribeKeeper = Object.freeze({
      * @return {string|null}
      */
     recount(keeper) {
+        const today = keeper.clock.today();
         try {
-            keeper.spentToday = ScribeStore.spent(keeper.storage, keeper.roomId, keeper.clock.today()) + ScribeKeeper.owedToday(keeper);
+            const spent = ScribeStore.spent(keeper.storage, keeper.roomId, today);
+            const others = ScribeStore.others(keeper.storage, keeper.roomId, today);
+            keeper.spentToday = spent + others + ScribeKeeper.owedToday(keeper);
         } catch (error) {
             return ScribeKeeper.words(error);
         }
@@ -9428,7 +12029,7 @@ const ScribeKeeper = Object.freeze({
         const day = keeper.clock.today();
         const total = ScribeKeeper.spend(keeper, day, amount);
         if (total !== null) {
-            keeper.spentToday = total + ScribeKeeper.owedToday(keeper);
+            ScribeKeeper.counted(keeper);
             return true;
         }
         const owed = keeper.owed.has(day) ? keeper.owed.get(day) : ScribeKeeper.Settings.NoSpending;
@@ -9492,10 +12093,11 @@ const ScribeKeeper = Object.freeze({
      * @throws {Error}
      */
     claimed(keeper) {
-        if (keeper.claim !== null) {
-            return keeper.claim() === true;
-        }
-        return ScribeStore.claim(keeper.storage, keeper.roomId, keeper.tabId, keeper.clock.now());
+        const held =
+            keeper.claim === null
+                ? ScribeStore.claim(keeper.storage, keeper.roomId, keeper.tabId, keeper.clock.now())
+                : keeper.claim() === true;
+        return held && (keeper.lease === null || keeper.lease() === true);
     },
 
     /**
@@ -9504,12 +12106,15 @@ const ScribeKeeper = Object.freeze({
      * @throws {Error}
      */
     still(keeper) {
-        if (keeper.claim !== null) {
-            return keeper.claim() === true;
+        let held = false;
+        if (keeper.claim === null) {
+            const name = ScribeStore.name(ScribeStore.Settings.Types.Claim, ScribeStore.room(keeper.roomId));
+            const stored = ScribeStore.claimOf(ScribeStore.fetch(keeper.storage, name));
+            held = stored !== null && stored.tabId === keeper.tabId;
+        } else {
+            held = keeper.claim() === true;
         }
-        const name = ScribeStore.name(ScribeStore.Settings.Types.Claim, ScribeStore.room(keeper.roomId));
-        const held = ScribeStore.claimOf(ScribeStore.fetch(keeper.storage, name));
-        return held !== null && held.tabId === keeper.tabId;
+        return held && (keeper.lease === null || keeper.lease() === true);
     },
 
     /**
@@ -10155,7 +12760,10 @@ const ScribeKeeper = Object.freeze({
         ScribeKeeper.tell(keeper, { kind: ScribeKeeper.Event.Changed });
         let result = null;
         try {
-            job.recorded = ScribeStore.spent(keeper.storage, keeper.roomId, keeper.clock.today());
+            const today = keeper.clock.today();
+            job.recorded =
+                ScribeStore.spent(keeper.storage, keeper.roomId, today) +
+                ScribeStore.others(keeper.storage, keeper.roomId, today);
             const profile = keeper.profile === null ? null : await keeper.profile();
             result = await ScribeAdoption.run({
                 messages: chosen,
@@ -10654,6 +13262,26 @@ const ScribeKeeper = Object.freeze({
     /**
      * @param {object} keeper
      * @return {void}
+     */
+    rekey(keeper) {
+        const stop = keeper.stop;
+        const failed = stop !== null && stop.reason === ScribeAdoption.Stop.Failed;
+        if (keeper.closed || !keeper.reader || !failed || keeper.busy === ScribeKeeper.Busy.Reading) {
+            return;
+        }
+        if (!ScribeKeeper.writable(keeper)) {
+            return;
+        }
+        ScribeKeeper.keepStop(keeper, null, false);
+        if (keeper.phase === ScribeKeeper.Phase.Stopped) {
+            keeper.phase = ScribeKeeper.resting(keeper);
+        }
+        ScribeKeeper.tell(keeper, { kind: ScribeKeeper.Event.Changed });
+    },
+
+    /**
+     * @param {object} keeper
+     * @return {void}
      * @throws {Error}
      */
     solvent(keeper) {
@@ -10856,7 +13484,7 @@ const ScribeKeeper = Object.freeze({
         keeper.busy = null;
         keeper.flight = null;
         keeper.kept = [];
-        if (keeper.reader && keeper.claim === null) {
+        if (keeper.claim === null && (keeper.reader || keeper.lease !== null)) {
             try {
                 ScribeStore.release(keeper.storage, keeper.roomId, keeper.tabId);
             } catch (error) {
@@ -10894,6 +13522,13 @@ const ScribeKeeper = Object.freeze({
              */
             pause: () => {
                 ScribeKeeper.pause(keeper);
+            },
+
+            /**
+             * @return {void}
+             */
+            rekey: () => {
+                ScribeKeeper.rekey(keeper);
             },
 
             /**
@@ -10990,7 +13625,7 @@ const ScribeKeeper = Object.freeze({
     },
 
     /**
-     * @param {{ storage: { get: Function, set: Function, remove: Function, list: Function }, roomId: string, tabId: string, zeta: { history: Function, newest: Function }, ask: Function, clock: { now: Function, today: Function }, notify: Function, claim?: () => boolean, profile?: () => Promise<string|null> }} options
+     * @param {{ storage: { get: Function, set: Function, remove: Function, list: Function }, roomId: string, tabId: string, zeta: { history: Function, newest: Function }, ask: Function, clock: { now: Function, today: Function }, notify: Function, claim?: () => boolean, lease?: () => boolean, profile?: () => Promise<string|null> }} options
      * @return {Promise<Readonly<object>>}
      * @throws {Error}
      */
@@ -10999,6 +13634,10 @@ const ScribeKeeper = Object.freeze({
         const settings = ScribeKeeper.Settings;
         const claim = options.claim === undefined || options.claim === null ? null : options.claim;
         if (claim !== null && typeof claim !== settings.FunctionType) {
+            throw new Error(settings.Messages.BadClaim);
+        }
+        const lease = options.lease === undefined || options.lease === null ? null : options.lease;
+        if (lease !== null && typeof lease !== settings.FunctionType) {
             throw new Error(settings.Messages.BadClaim);
         }
         const profile = options.profile === undefined || options.profile === null ? null : options.profile;
@@ -11014,6 +13653,7 @@ const ScribeKeeper = Object.freeze({
             clock,
             notify,
             claim,
+            lease,
             profile,
             phase: ScribeKeeper.Phase.Loading,
             reader: false,
@@ -11100,6 +13740,9 @@ const ScribeScene = Object.freeze({
         Closing: ')',
         Day: 'Day ',
         Present: 'present: ',
+        StatusCategory: 'status',
+        StatusOpen: ' STATUS: ',
+        StatusJoiner: '; ',
         SubjectPrefix: 'subject:',
         LabelPrefix: 'label:',
         BoldInner: '$1',
@@ -11192,6 +13835,7 @@ const ScribeScene = Object.freeze({
             '5. present lists everyone who is there at the last message, the player\'s character included, separated by commas. Use a label from SUBJECTS exactly when the person has one; otherwise the name the story uses. Someone who has left is not present. Write nobody when no one is there.',
             '6. CHANGED is yes when the place, the day, or who is present differs from LAST KNOWN SCENE, or when there is no LAST KNOWN SCENE. Otherwise no.',
             '7. Never invent. If the messages do not say where the characters are, keep the place of LAST KNOWN SCENE.',
+            "8. A SUBJECTS line may end with STATUS: the book's word on whether they live. Someone whose STATUS says they died, were destroyed or left the story is never present, unless the RECENT MESSAGES show them back.",
         ]),
     }),
 
@@ -11245,10 +13889,21 @@ const ScribeScene = Object.freeze({
         const headings = settings.Headings;
         const subjects = [];
         const labels = new Map();
+        const statuses = new Map();
+        for (const fact of state.facts) {
+            if (fact.category === settings.StatusCategory && fact.status === ScribeReplay.Status.InForce) {
+                statuses.set(fact.subject, [...(statuses.get(fact.subject) ?? []), fact.text]);
+            }
+        }
         for (const subject of state.subjects) {
             labels.set(subject.id, subject.label);
             if (subject.mergedInto === null) {
-                subjects.push(settings.ListMarker + subject.label + settings.Opening + subject.kind + settings.Closing);
+                const held = statuses.get(subject.id) ?? [];
+                const status =
+                    held.length === 0 ? settings.Nothing : settings.StatusOpen + held.join(settings.StatusJoiner);
+                subjects.push(
+                    settings.ListMarker + subject.label + settings.Opening + subject.kind + settings.Closing + status,
+                );
             }
         }
         const scenes = [];
@@ -11604,6 +14259,7 @@ const ScribeScene = Object.freeze({
         const newest = messages.at(ScribeScene.Settings.Last);
         const found = {
             message: newest.id,
+            fingerprint: newest.fingerprint,
             position: newest.position,
             day: parsed.day,
             place: parsed.place,
@@ -11641,7 +14297,32 @@ const ScribeReminder = Object.freeze({
     }),
 
     Settings: Object.freeze({
-        MaxBytes: 1000,
+        MaxCharacters: 3000,
+        StoryOpen: 'The story so far: ',
+        LongestTimeline: 12000,
+        FirstScenes: 5,
+        StoryHeadings: Object.freeze({
+            Timeline: 'TIMELINE:',
+            Threads: 'OPEN THREADS:',
+            Now: 'NOW:',
+        }),
+        None: '(none)',
+        ListMarker: '- ',
+        Joiner: ' | ',
+        Day: 'Day ',
+        Newline: '\n',
+        BlankLine: '\n\n',
+        StoryPromptLines: Object.freeze([
+            'You are the Scribe: you tell the story so far of an ongoing adult fiction roleplay between consenting adult characters.',
+            'You receive TIMELINE (every scene in story order: day, place, what happened), OPEN THREADS (what is left hanging) and NOW (what is happening at the last message).',
+            '',
+            'Write the story so far as plain prose in story order: how it began (who came to whom, and for what), what has been done since, where things stand now and what is needed next. Write as much as the story needs.',
+            '',
+            'Rules.',
+            '1. Only what those lines say. No name, place, object or event that they do not hold.',
+            '2. Past tense for what happened; present tense for where things stand now.',
+            '3. Write the prose and nothing else: no heading, no label, no list, no remarks.',
+        ]),
         LongestText: 200,
         MostPlaces: 2,
         LongestLabel: 60,
@@ -11917,6 +14598,41 @@ const ScribeReminder = Object.freeze({
         /**
          * @return {RegExp}
          */
+        get Frames() {
+            return /[\[\]@]/gu;
+        },
+
+        /**
+         * @return {RegExp}
+         */
+        get SentenceEnd() {
+            return /[.!?…]["'”’)\]]*(?=\s|$)/gu;
+        },
+
+        /**
+         * @return {RegExp}
+         */
+        get WordEnd() {
+            return /\S(?=\s)/gu;
+        },
+
+        /**
+         * @return {RegExp}
+         */
+        get EchoedLabel() {
+            return /^[\s>*_"'“”‘’`]*(?:the\s+)?(?:story\s+)?so\s+far[*_"'“”‘’`]*\s*(?::|[—–]|-\s)[\s>*_"'“”‘’`]*/iu;
+        },
+
+        /**
+         * @return {RegExp}
+         */
+        get HeadedLabel() {
+            return /^\s*(?:#+|\*\*|__|>)\s*(?:the\s+)?(?:story\s+)?so\s+far\s*(?:\*\*|__)?\s*\r?\n[\s>]*/iu;
+        },
+
+        /**
+         * @return {RegExp}
+         */
         get Backslashes() {
             return /\\/g;
         },
@@ -11998,6 +14714,134 @@ const ScribeReminder = Object.freeze({
             return /\p{L}{2}ing$/u;
         },
     }),
+
+    /**
+     * @return {string}
+     */
+    get StoryPrompt() {
+        return ScribeReminder.Settings.StoryPromptLines.join(ScribeReminder.Settings.Newline);
+    },
+
+    /**
+     * @param {string} text
+     * @return {number}
+     */
+    span(text) {
+        return Array.from(text).length;
+    },
+
+    /**
+     * @param {object} state
+     * @param {object|null} now
+     * @return {string}
+     */
+    storyInput(state, now) {
+        const settings = ScribeReminder.Settings;
+        const headings = settings.StoryHeadings;
+        const lines = state.scenes.map(
+            /**
+             * @param {{ day: number, place: string, summary: string }} scene
+             * @return {string}
+             */
+            (scene) => [settings.Day + scene.day, scene.place, scene.summary].join(settings.Joiner),
+        );
+        let scenes = lines;
+        if (ScribeReminder.span(lines.join(settings.Newline)) > settings.LongestTimeline) {
+            const first = lines.slice(0, settings.FirstScenes);
+            const newest = [];
+            let used = ScribeReminder.span(first.join(settings.Newline));
+            for (const line of lines.slice(settings.FirstScenes).reverse()) {
+                const after = used + ScribeReminder.span(settings.Newline + line);
+                if (after > settings.LongestTimeline) {
+                    break;
+                }
+                newest.unshift(line);
+                used = after;
+            }
+            scenes = [...first, ...newest];
+        }
+        const threads = [];
+        for (const thread of state.threads) {
+            if (thread.closed === null) {
+                threads.push(settings.ListMarker + thread.text);
+            }
+        }
+        const summary = now === null || now.summary.trim() === settings.Nothing ? settings.None : now.summary;
+        return [
+            [headings.Timeline, scenes.length === 0 ? settings.None : scenes.join(settings.Newline)],
+            [headings.Threads, threads.length === 0 ? settings.None : threads.join(settings.Newline)],
+            [headings.Now, summary],
+        ]
+            .map(
+                /**
+                 * @param {string[]} section
+                 * @return {string}
+                 */
+                (section) => section.join(settings.Newline),
+            )
+            .join(settings.BlankLine);
+    },
+
+    /**
+     * @param {string} text
+     * @return {string|null}
+     */
+    told(text) {
+        const settings = ScribeReminder.Settings;
+        const said = ScribeIntake.collapse(
+            ScribeReminder.clean(
+                text.replace(settings.HeadedLabel, settings.Nothing).replace(settings.EchoedLabel, settings.Nothing),
+                settings.NormalForm,
+            )
+                .replace(settings.Frames, settings.Nothing)
+                .replace(settings.Backslashes, settings.Slash),
+        );
+        return said === settings.Nothing ? null : said;
+    },
+
+    /**
+     * @param {string} text
+     * @return {number[]}
+     */
+    ends(text) {
+        const settings = ScribeReminder.Settings;
+        const opening = (ScribeIntake.Settings.OwnMarker + settings.Space + settings.StoryOpen).length;
+        const ends = [];
+        for (const match of text.matchAll(settings.SentenceEnd)) {
+            const end = match.index + match[0].length;
+            if (end > opening && end < text.length) {
+                ends.push(end);
+            }
+        }
+        return ends;
+    },
+
+    /**
+     * @param {string} text
+     * @param {number} limit
+     * @return {string}
+     */
+    cut(text, limit) {
+        const settings = ScribeReminder.Settings;
+        const characters = Array.from(text);
+        if (characters.length <= limit) {
+            return text;
+        }
+        const room = characters.slice(0, limit).join(settings.Nothing).length;
+        let end = 0;
+        for (const pattern of [settings.SentenceEnd, settings.WordEnd]) {
+            for (const match of text.matchAll(pattern)) {
+                const reach = match.index + match[0].length;
+                if (reach <= room) {
+                    end = reach;
+                }
+            }
+            if (end > 0) {
+                break;
+            }
+        }
+        return text.slice(0, end === 0 ? room : end).trim();
+    },
 
     /**
      * @param {string} text
@@ -12608,10 +15452,10 @@ const ScribeReminder = Object.freeze({
     },
 
     /**
-     * @param {{ state: object, now: ?object, player: string, unread: *, notes: *, characters: *, first: * }} request
+     * @param {{ state: object, now: ?object, player: string, unread: *, notes: *, characters: *, first: *, story?: string|null }} request
      * @return {Readonly<{ text: string, led: readonly string[] }>|null}
      */
-    compose({ state, now, player, unread, notes, characters, first }) {
+    compose({ state, now, player, unread, notes, characters, first, story = null }) {
         const settings = ScribeReminder.Settings;
         const parts = ScribeReminder.Part;
         const kinds = ScribePedant.Note;
@@ -13098,15 +15942,18 @@ const ScribeReminder = Object.freeze({
                     sentences.push(piece.person.own + settings.Colon + piece.text + settings.FullStop);
                 }
             }
-            return ScribeIntake.Settings.OwnMarker + settings.Space + sentences.join(settings.Space);
+            return [ScribeIntake.Settings.OwnMarker, ...told, ...sentences].join(settings.Space);
         };
+        const opening = ScribeIntake.Settings.OwnMarker + settings.Space + settings.StoryOpen;
+        const room = settings.MaxCharacters - ScribeReminder.span(opening);
+        const told = story === null ? [] : [settings.StoryOpen + ScribeReminder.cut(story, room)];
         const kept = [...pieces];
         let text = render(kept);
-        while (kept.length > 0 && ScribeText.bytes(text) > settings.MaxBytes) {
+        while (kept.length > 0 && ScribeReminder.span(text) > settings.MaxCharacters) {
             kept.pop();
             text = render(kept);
         }
-        if (kept.length === 0) {
+        if (kept.length === 0 && told.length === 0) {
             return null;
         }
         const led = kept
@@ -15550,7 +18397,19 @@ const ScribeLive = Object.freeze({
         FirstEpoch: 0,
         FirstDay: 1,
         NoSends: 0,
-        LongestEdit: 2000,
+        LongestEdit: 3000,
+        RetryMs: Object.freeze([15000, 60000, 300000]),
+        Retried: Object.freeze({
+            Scene: 'scene',
+            Check: 'check',
+        }),
+        FirstTry: 0,
+        RetriesKept: 50,
+        FirstAnswered: 200,
+        LastAnswered: 299,
+        NotFound: -1,
+        Removed: 1,
+        CallsKept: 20,
         OneSend: 1,
         NoCount: 0,
         Last: -1,
@@ -15583,7 +18442,22 @@ const ScribeLive = Object.freeze({
             Busy: 'The last request of this kind has not finished yet',
             NoBook: 'No book yet: adopt this chat first.',
             NotRead: 'The book has not finished its first reading.',
-            LongEdit: 'A reminder may be at most 2,000 bytes; nothing was saved.',
+            LongEdit: 'A reminder may be at most 3,000 characters; nothing was saved.',
+            BehindOpen: 'No reminder: the scene was last read at #',
+            BehindMiddle: '; the latest reply is #',
+            UnreadOpen: 'No reminder: the scene has not been read yet; the latest reply is #',
+            FullStop: '.',
+            SceneUnreadable: "the Scribe's answer about the scene could not be read",
+            StoryEmpty: 'the answer held no story',
+            Untold: 'No reminder: the story so far could not be written: ',
+            SceneFailing: 'Scene failing: ',
+            ChecksFailing: 'Checks failing: ',
+            StoryFailing: 'Story failing: ',
+            EditStale: 'Your edit was written before the latest reply; Save it again to send it.',
+            Crowded: 'No reminder: your message leaves no room for it.',
+            Unmarked: 'the scene was saved before replies were told apart by their text',
+            ChangedOpen: 'No reminder: the latest reply #',
+            ChangedClose: ' changed and is being read again.',
             StoryUnread: "The story's characters could not be read, so every character counts as custom: ",
             ProfileUnread: 'The chat profile could not be read, so it is left out of the calls: ',
             Budget: "The day's budget is spent: replies are not checked and no new reminder is made until tomorrow.",
@@ -15591,6 +18465,7 @@ const ScribeLive = Object.freeze({
         NothingAppended: Object.freeze({
             ready: null,
             suggestion: null,
+            ends: Object.freeze([]),
         }),
 
         /**
@@ -15654,6 +18529,7 @@ const ScribeLive = Object.freeze({
                 (name) => ScribeLive.isText(value[name]),
             ) &&
             value.place !== settings.Nothing &&
+            (value.fingerprint === undefined || ScribeLive.isText(value.fingerprint)) &&
             Number.isSafeInteger(value.position) &&
             Number.isSafeInteger(value.day) &&
             value.day >= settings.FirstDay &&
@@ -15911,8 +18787,52 @@ const ScribeLive = Object.freeze({
             ScribeLive.isText(value) &&
             ScribeLive.line(value) === value &&
             !ScribeLive.hollow(value) &&
-            ScribeText.bytes(value) <= settings.LongestEdit;
+            Array.from(value).length <= settings.LongestEdit;
         return sound ? value : null;
+    },
+
+    /**
+     * @param {*} value
+     * @return {object[]}
+     */
+    retries(value) {
+        const settings = ScribeLive.Settings;
+        if (!Array.isArray(value)) {
+            return [];
+        }
+        const kept = [];
+        for (const entry of value.slice(settings.FirstFinding, settings.RetriesKept)) {
+            const sound =
+                ScribeLive.isObject(entry) &&
+                ScribeLive.isText(entry.id) &&
+                ScribeLive.isText(entry.fingerprint) &&
+                Number.isSafeInteger(entry.position) &&
+                Object.values(settings.Retried).includes(entry.role) &&
+                ScribeLive.isText(entry.reason) &&
+                Number.isSafeInteger(entry.tries) &&
+                entry.tries >= settings.FirstTry &&
+                Number.isFinite(entry.at);
+            if (sound) {
+                kept.push({
+                    id: entry.id,
+                    fingerprint: entry.fingerprint,
+                    position: entry.position,
+                    role: entry.role,
+                    reason: entry.reason,
+                    tries: entry.tries,
+                    at: entry.at,
+                });
+            }
+        }
+        return kept;
+    },
+
+    /**
+     * @param {*} value
+     * @return {number|null}
+     */
+    count(value) {
+        return Number.isSafeInteger(value) ? value : null;
     },
 
     /**
@@ -16005,6 +18925,8 @@ const ScribeLive = Object.freeze({
             led: [],
             basis: null,
             edited: null,
+            editedFor: null,
+            draft: null,
             forced: false,
             sends: settings.NoSends,
             findings: [],
@@ -16015,6 +18937,10 @@ const ScribeLive = Object.freeze({
             reminded: null,
             edition: null,
             checked: [],
+            retries: [],
+            failing: { scene: null, check: null },
+            story: null,
+            untold: null,
         };
         live.problem = null;
         let saved = null;
@@ -16032,16 +18958,30 @@ const ScribeLive = Object.freeze({
         const record = live.record;
         record.now = ScribeLive.scene(saved.now);
         record.reminded = ScribeLive.scene(saved.reminded);
-        record.ready = ScribeLive.isText(saved.ready) ? saved.ready : null;
-        record.led = record.ready !== null && ScribeLive.isTexts(saved.led) ? [...saved.led] : [];
         const basis = saved.basis;
         const sound =
             ScribeLive.isObject(basis) &&
             Number.isSafeInteger(basis.revision) &&
             ScribeLive.isTexts(basis.first) &&
-            ScribeLive.isText(basis.notes);
-        record.basis = sound ? { revision: basis.revision, first: [...basis.first], notes: basis.notes } : null;
+            ScribeLive.isText(basis.notes) &&
+            ScribeLive.isText(basis.story);
+        const composed = sound && ScribeLive.isText(saved.ready);
+        live.owed = ScribeLive.isText(saved.ready) && !composed;
+        record.ready = composed ? saved.ready : null;
+        record.led = composed && ScribeLive.isTexts(saved.led) ? [...saved.led] : [];
+        record.basis = composed
+            ? { revision: basis.revision, first: [...basis.first], notes: basis.notes, story: basis.story }
+            : null;
         record.edited = ScribeLive.edited(saved.edited);
+        const written = saved.editedFor;
+        const against =
+            record.edited !== null &&
+            ScribeLive.isObject(written) &&
+            ScribeLive.isText(written.id) &&
+            ScribeLive.isText(written.fingerprint);
+        record.editedFor = against ? { id: written.id, fingerprint: written.fingerprint } : null;
+        record.draft = ScribeLive.edited(saved.draft) ?? (against ? null : record.edited);
+        record.edited = against ? record.edited : null;
         record.forced = saved.forced === true;
         record.sends = Number.isSafeInteger(saved.sends) && saved.sends >= settings.NoSends ? saved.sends : settings.NoSends;
         record.findings = ScribeLive.findings(saved.findings);
@@ -16069,6 +19009,27 @@ const ScribeLive = Object.freeze({
             };
         }
         record.edition = Number.isSafeInteger(saved.edition) ? saved.edition : null;
+        record.retries = ScribeLive.retries(saved.retries);
+        const failing = ScribeLive.isObject(saved.failing) ? saved.failing : {};
+        record.failing = {
+            scene: ScribeLive.isText(failing.scene) ? failing.scene : null,
+            check: ScribeLive.isText(failing.check) ? failing.check : null,
+        };
+        const story = saved.story;
+        if (ScribeLive.isObject(story) && ScribeLive.isText(story.key) && ScribeLive.isText(story.text)) {
+            record.story = { key: story.key, text: story.text };
+        }
+        const untold = saved.untold;
+        const owed =
+            ScribeLive.isObject(untold) &&
+            ScribeLive.isText(untold.key) &&
+            ScribeLive.isText(untold.reason) &&
+            Number.isSafeInteger(untold.tries) &&
+            untold.tries >= settings.FirstTry &&
+            Number.isFinite(untold.at);
+        if (owed) {
+            record.untold = { key: untold.key, reason: untold.reason, tries: untold.tries, at: untold.at };
+        }
         if (Array.isArray(saved.checked)) {
             for (const entry of saved.checked.slice(settings.FirstFinding, settings.CheckedKept)) {
                 const usable =
@@ -16077,6 +19038,7 @@ const ScribeLive = Object.freeze({
                     ScribeLive.isText(entry.fingerprint) &&
                     Number.isSafeInteger(entry.revision) &&
                     ScribeLive.scene(entry.now) !== null &&
+                    ScribeLive.isText(entry.now.fingerprint) &&
                     Array.isArray(entry.findings) &&
                     ScribeLive.findings(entry.findings).length === entry.findings.length;
                 if (usable) {
@@ -16174,7 +19136,12 @@ const ScribeLive = Object.freeze({
             record.seen = null;
             record.suggestion = null;
             record.checked = [];
+            record.retries = [];
+            record.failing = { scene: null, check: null };
+            record.story = null;
+            record.untold = null;
             record.edition = view.edition;
+            live.again = null;
             live.offer = null;
             live.excluded = [];
             live.understood = null;
@@ -16189,10 +19156,52 @@ const ScribeLive = Object.freeze({
                 record.notes = notes;
                 ScribeLive.save(live);
             }
+            ScribeLive.settled(live, view);
         } catch (error) {
             live.problem = ScribeLive.words(error);
         }
         return true;
+    },
+
+    /**
+     * @param {object} live
+     * @param {Readonly<object>} view
+     * @return {void}
+     */
+    settled(live, view) {
+        const settings = ScribeLive.Settings;
+        const record = live.record;
+        let moved = false;
+        if (record.edited !== null && !ScribeLive.written(record, view)) {
+            record.draft = record.edited;
+            record.edited = null;
+            record.editedFor = null;
+            moved = true;
+        }
+        const reply = ScribeLive.answered(view);
+        const unmarked = record.now !== null && record.now.fingerprint === undefined;
+        const scheduled = record.retries.some(
+            /**
+             * @param {{ role: string }} entry
+             * @return {boolean}
+             */
+            (entry) => entry.role === settings.Retried.Scene,
+        );
+        if (unmarked && reply !== undefined && !scheduled) {
+            record.retries.unshift({
+                id: reply.id,
+                fingerprint: reply.fingerprint,
+                position: reply.position,
+                role: settings.Retried.Scene,
+                reason: settings.Messages.Unmarked,
+                tries: settings.FirstTry,
+                at: settings.NoCount,
+            });
+            moved = true;
+        }
+        if (moved) {
+            ScribeLive.save(live);
+        }
     },
 
     /**
@@ -16238,7 +19247,7 @@ const ScribeLive = Object.freeze({
     /**
      * @param {object} live
      * @param {string} role
-     * @param {{ failure: string|null }} noted
+     * @param {{ failure: string|null, retryable?: boolean }} noted
      * @return {function(string, string): Promise<{ text: string, cost: * }>}
      */
     asker(live, role, noted) {
@@ -16254,13 +19263,46 @@ const ScribeLive = Object.freeze({
                 throw new Error(refused);
             }
             try {
-                return await live.ask(role, system, user);
+                const answer = await live.ask(role, system, user);
+                ScribeLive.called(live, role, answer, null);
+                return answer;
             } catch (error) {
                 noted.failure = ScribeLive.words(error);
+                const answered =
+                    ScribeLive.isObject(error) &&
+                    Number.isSafeInteger(error.status) &&
+                    error.status >= ScribeLive.Settings.FirstAnswered &&
+                    error.status <= ScribeLive.Settings.LastAnswered;
+                noted.retryable = ScribeLive.isObject(error) && error.retryable === true && !answered;
+                ScribeLive.called(live, role, error, noted.failure);
                 throw error;
             }
         };
         return ask;
+    },
+
+    /**
+     * @param {object} live
+     * @param {string} role
+     * @param {*} source
+     * @param {string|null} problem
+     * @return {void}
+     */
+    called(live, role, source, problem) {
+        const settings = ScribeLive.Settings;
+        const given = ScribeLive.isObject(source) ? source : {};
+        live.calls = [
+            Object.freeze({
+                role,
+                tokensIn: ScribeLive.count(given.tokensIn),
+                tokensOut: ScribeLive.count(given.tokensOut),
+                reasoningTokens: ScribeLive.count(given.reasoningTokens),
+                finish: ScribeLive.isText(given.finish) ? given.finish : null,
+                answer: ScribeLive.isText(given.answer) ? given.answer : null,
+                problem,
+            }),
+            ...live.calls,
+        ].slice(settings.FirstFinding, settings.CallsKept);
     },
 
     /**
@@ -16380,6 +19422,9 @@ const ScribeLive = Object.freeze({
         const record = live.record;
         return (
             record.ready !== null &&
+            record.story !== null &&
+            record.basis !== null &&
+            record.basis.story === record.story.key &&
             ScribeLive.holds(
                 record.basis,
                 record.reminded,
@@ -16401,6 +19446,55 @@ const ScribeLive = Object.freeze({
     },
 
     /**
+     * @param {Readonly<object>} keeperView
+     * @return {object|undefined}
+     */
+    answered(keeperView) {
+        const listed = Array.isArray(keeperView.messages) ? keeperView.messages : [];
+        return listed.findLast(
+            /**
+             * @param {{ fromPlayer: boolean }} message
+             * @return {boolean}
+             */
+            (message) => message.fromPlayer !== true,
+        );
+    },
+
+    /**
+     * @param {object|null} now
+     * @param {Readonly<object>} keeperView
+     * @return {string|null}
+     */
+    behind(now, keeperView) {
+        const settings = ScribeLive.Settings;
+        const messages = settings.Messages;
+        const reply = ScribeLive.answered(keeperView);
+        if (reply === undefined) {
+            return null;
+        }
+        const read =
+            now === null
+                ? undefined
+                : keeperView.messages.find(
+                      /**
+                       * @param {{ id: string }} message
+                       * @return {boolean}
+                       */
+                      (message) => message.id === now.message,
+                  );
+        if (read !== undefined && read.fingerprint === now.fingerprint && read.position >= reply.position) {
+            return null;
+        }
+        if (now === null) {
+            return messages.UnreadOpen + reply.position + messages.FullStop;
+        }
+        if (now.message === reply.id) {
+            return messages.ChangedOpen + reply.position + messages.ChangedClose;
+        }
+        return messages.BehindOpen + now.position + messages.BehindMiddle + reply.position + messages.FullStop;
+    },
+
+    /**
      * @param {object} live
      * @return {Promise<Readonly<{ characters: readonly object[]|null, profile: string|null, notice: string|null }>>}
      */
@@ -16413,14 +19507,31 @@ const ScribeLive = Object.freeze({
         if (live.casting !== null) {
             return live.casting;
         }
-        const reads = [live.story, live.profile].map(
-            /**
-             * @param {() => Promise<*>} read
-             * @return {Promise<*>}
-             */
-            async (read) => read(),
-        );
-        live.casting = Promise.allSettled(reads).then(
+        /**
+         * @param {() => Promise<*>} read
+         * @return {Promise<{ status: string, value?: *, reason?: * }>}
+         */
+        const settle = async (read) => {
+            const [result] = await Promise.allSettled([Promise.resolve().then(read)]);
+            return result;
+        };
+
+        /**
+         * @return {Promise<Array<{ status: string, value?: *, reason?: * }>>}
+         */
+        const reads = async () => {
+            const story = await settle(live.story);
+            const told = story.status === settings.Fulfilled ? story.value : story.reason;
+            const plotId = ScribeLive.isObject(told) && ScribeLive.isText(told.plotId) ? told.plotId : null;
+            const profile = await settle(
+                /**
+                 * @return {Promise<string|null>}
+                 */
+                () => live.profile(plotId),
+            );
+            return [story, profile];
+        };
+        live.casting = reads().then(
             /**
              * @param {Array<{ status: string, value?: *, reason?: * }>} settled
              * @return {Readonly<{ characters: readonly object[]|null, profile: string|null, notice: string|null }>}
@@ -16471,13 +19582,18 @@ const ScribeLive = Object.freeze({
      * @param {object|null} now
      * @param {readonly object[]} findings
      * @param {readonly object[]} notes
-     * @return {Promise<{ composed: Readonly<{ text: string, led: readonly string[] }>|null, basis: { revision: number, first: string[], notes: string } }>}
+     * @return {Promise<{ composed: Readonly<{ text: string, led: readonly string[] }>|null, basis: { revision: number, first: string[], notes: string, story?: string } }>}
      */
     async remind(live, view, now, findings, notes) {
         const first = ScribeLive.first(findings, view.state);
         const given = ScribeLive.standing(notes, view);
         const basis = { revision: view.state.revision, first, notes: ScribeLive.marked(given) };
         const cast = await ScribeLive.cast(live);
+        const story = await ScribeLive.recount(live, view, now);
+        if (story === null) {
+            return { composed: null, basis };
+        }
+        basis.story = live.record.story.key;
         const composed = ScribeReminder.compose({
             state: view.state,
             now,
@@ -16486,13 +19602,85 @@ const ScribeLive = Object.freeze({
             notes: given,
             characters: cast.characters,
             first: [...first],
+            story,
         });
         return { composed, basis };
     },
 
     /**
+     * @param {object} live
+     * @param {Readonly<object>} view
+     * @param {object|null} now
+     * @return {Promise<string|null>}
+     */
+    async recount(live, view, now) {
+        const settings = ScribeLive.Settings;
+        const epoch = live.epoch;
+        const record = live.record;
+        const scene =
+            now === null
+                ? null
+                : [now.day, ScribeText.normaliseName(now.place), now.reach, [...ScribeScene.identities(now)].sort()];
+        const key = ScribeText.fingerprint(JSON.stringify([ScribeReminder.storyInput(view.state, null), scene]));
+        if (record.story !== null && record.story.key === key) {
+            return record.story.text;
+        }
+        const untold = record.untold === null || record.untold.key !== key ? null : record.untold;
+        const resting =
+            untold !== null && (untold.tries >= settings.RetryMs.length || untold.at > live.clock.now());
+        if (resting) {
+            return null;
+        }
+        if (live.recounting !== null && live.recounting.key === key) {
+            return live.recounting.promise;
+        }
+
+        /**
+         * @return {Promise<string|null>}
+         */
+        const tell = async () => {
+            const noted = { failure: null, retryable: false };
+            let text = null;
+            try {
+                const ask = ScribeLive.asker(live, settings.Roles.Scribe, noted);
+                const answer = await ask(ScribeReminder.StoryPrompt, ScribeReminder.storyInput(view.state, now));
+                text = ScribeReminder.told(answer.text);
+            } catch (error) {
+                noted.failure = ScribeLive.words(error);
+            }
+            if (live.epoch !== epoch) {
+                return null;
+            }
+            if (text !== null) {
+                record.story = { key, text };
+                record.untold = null;
+                return text;
+            }
+            const tries = untold === null ? settings.FirstTry : untold.tries + 1;
+            const parked = !noted.retryable || tries >= settings.RetryMs.length;
+            const moment = live.clock.now();
+            record.untold = {
+                key,
+                reason: noted.failure ?? settings.Messages.StoryEmpty,
+                tries: parked ? settings.RetryMs.length : tries,
+                at: parked ? moment : moment + settings.RetryMs[tries],
+            };
+            return null;
+        };
+        const promise = tell();
+        live.recounting = { key, promise };
+        try {
+            return await promise;
+        } finally {
+            if (live.recounting !== null && live.recounting.promise === promise) {
+                live.recounting = null;
+            }
+        }
+    },
+
+    /**
      * @param {object} record
-     * @param {{ composed: Readonly<{ text: string, led: readonly string[] }>|null, basis: { revision: number, first: string[], notes: string } }|null} made
+     * @param {{ composed: Readonly<{ text: string, led: readonly string[] }>|null, basis: { revision: number, first: string[], notes: string, story?: string } }|null} made
      * @return {void}
      */
     keep(record, made) {
@@ -16514,9 +19702,10 @@ const ScribeLive = Object.freeze({
     /**
      * @param {object} live
      * @param {object} message
+     * @param {object|null} again
      * @return {Promise<void>}
      */
-    async consider(live, message) {
+    async consider(live, message, again = null) {
         const settings = ScribeLive.Settings;
         const roles = settings.Roles;
         const statuses = ScribeLive.Status;
@@ -16527,7 +19716,8 @@ const ScribeLive = Object.freeze({
         const view = live.keeper.view();
         const revision = view.state.revision;
         const seen = record.seen;
-        if (seen !== null && seen.id === message.id && seen.fingerprint === message.fingerprint) {
+        const repeated = seen !== null && seen.id === message.id && seen.fingerprint === message.fingerprint;
+        if (again === null && repeated) {
             return;
         }
         const epoch = live.epoch;
@@ -16535,61 +19725,89 @@ const ScribeLive = Object.freeze({
         live.problem = null;
         const replaced = seen !== null && seen.position === message.position;
         const previous = replaced ? seen.before : record.now;
-        const remembered = record.checked.find(
-            /**
-             * @param {{ id: string, fingerprint: string, revision: number }} entry
-             * @return {boolean}
-             */
-            (entry) => entry.id === message.id && entry.fingerprint === message.fingerprint && entry.revision === revision,
-        );
-        record.seen = {
-            id: message.id,
-            fingerprint: message.fingerprint,
-            position: message.position,
-            before: previous,
+        const remembered =
+            again !== null
+                ? undefined
+                : record.checked.find(
+                      /**
+                       * @param {{ id: string, fingerprint: string, revision: number }} entry
+                       * @return {boolean}
+                       */
+                      (entry) =>
+                          entry.id === message.id &&
+                          entry.fingerprint === message.fingerprint &&
+                          entry.revision === revision,
+                  );
+        if (again === null) {
+            record.seen = {
+                id: message.id,
+                fingerprint: message.fingerprint,
+                position: message.position,
+                before: previous,
+            };
+        }
+        const kinds = settings.Retried;
+        const asking = {
+            scene: again === null || again.role === kinds.Scene,
+            check: again === null || again.role === kinds.Check,
         };
+        const failed = { scene: null, check: null, sceneRetryable: false, checkRetryable: false };
         let found = null;
         let raised = null;
         let notes = null;
         if (remembered === undefined) {
-            const sceneNoted = { failure: null };
             let profile = null;
             try {
                 profile = (await ScribeLive.cast(live)).profile;
-                found = await ScribeScene.now({
-                    state: view.state,
-                    player: view.player,
-                    messages: view.messages,
-                    previous,
-                    ask: ScribeLive.asker(live, roles.Scribe, sceneNoted),
-                    profile,
-                });
             } catch (error) {
                 live.problem = ScribeLive.words(error);
             }
-            ScribeLive.report(live, sceneNoted);
-            if (!ScribeLive.current(live, epoch)) {
-                return;
+            if (asking.scene) {
+                const sceneNoted = { failure: null, retryable: false };
+                try {
+                    found = await ScribeScene.now({
+                        state: view.state,
+                        player: view.player,
+                        messages: view.messages,
+                        previous,
+                        ask: ScribeLive.asker(live, roles.Scribe, sceneNoted),
+                        profile,
+                    });
+                } catch (error) {
+                    live.problem = ScribeLive.words(error);
+                }
+                ScribeLive.report(live, sceneNoted);
+                if (!ScribeLive.current(live, epoch)) {
+                    return;
+                }
+                if (found === null) {
+                    failed.scene = sceneNoted.failure ?? settings.Messages.SceneUnreadable;
+                    failed.sceneRetryable = sceneNoted.retryable;
+                }
             }
-            const pedantNoted = { failure: null };
-            try {
-                const reviewed = await ScribePedant.review({
-                    state: view.state,
-                    player: view.player,
-                    message,
-                    unread: view.unread,
-                    messages: view.messages,
-                    ask: ScribeLive.asker(live, roles.Pedant, pedantNoted),
-                    profile,
-                });
-                raised = reviewed.findings;
-                notes = reviewed.notes;
-            } catch (error) {
-                live.problem = ScribeLive.words(error);
-            }
-            ScribeLive.report(live, pedantNoted);
-            if (!ScribeLive.current(live, epoch)) {
-                return;
+            if (asking.check) {
+                const pedantNoted = { failure: null, retryable: false };
+                try {
+                    const reviewed = await ScribePedant.review({
+                        state: view.state,
+                        player: view.player,
+                        message,
+                        unread: view.unread,
+                        messages: view.messages,
+                        ask: ScribeLive.asker(live, roles.Pedant, pedantNoted),
+                        profile,
+                    });
+                    raised = reviewed.findings;
+                    notes = reviewed.notes;
+                } catch (error) {
+                    live.problem = ScribeLive.words(error);
+                    failed.check = pedantNoted.failure ?? ScribeLive.words(error);
+                    failed.checkRetryable = pedantNoted.retryable;
+                }
+                ScribeLive.report(live, pedantNoted);
+                if (!ScribeLive.current(live, epoch)) {
+                    return;
+                }
             }
             if (ScribeLive.refusal(live) !== null) {
                 record.seen = seen;
@@ -16603,7 +19821,8 @@ const ScribeLive = Object.freeze({
             raised = remembered.findings;
             notes = remembered.notes;
         }
-        const now = found === null ? previous : found;
+        const kept = asking.scene ? previous : record.now;
+        const now = found === null ? kept : found;
         const draft = ScribeLive.merged(
             ScribeLive.pruned(record.findings, view.messages),
             record.dismissed,
@@ -16613,7 +19832,7 @@ const ScribeLive = Object.freeze({
         );
         let made = null;
         try {
-            if (record.edited === null && ScribeLive.due(record, view)) {
+            if (record.edited === null && ScribeLive.due(record, view) && ScribeLive.behind(now, view) === null) {
                 const drafted =
                     notes === null
                         ? record.notes
@@ -16635,6 +19854,9 @@ const ScribeLive = Object.freeze({
         if (found !== null && !ScribeScene.same(previous, found)) {
             live.offer = null;
             live.excluded = [];
+        }
+        if (remembered === undefined) {
+            ScribeLive.retried(live, message, again, asking, failed);
         }
         record.now = now;
         record.findings = ScribeLive.merged(
@@ -16684,6 +19906,7 @@ const ScribeLive = Object.freeze({
             made.composed !== null &&
             record.edited === null &&
             ScribeLive.due(record, latest) &&
+            ScribeLive.behind(now, latest) === null &&
             ScribeLive.holds(
                 made.basis,
                 now,
@@ -16707,6 +19930,179 @@ const ScribeLive = Object.freeze({
 
     /**
      * @param {object} live
+     * @param {object} message
+     * @param {object|null} again
+     * @param {{ scene: boolean, check: boolean }} asking
+     * @param {{ scene: string|null, check: string|null, sceneRetryable: boolean, checkRetryable: boolean }} failed
+     * @return {void}
+     */
+    retried(live, message, again, asking, failed) {
+        const settings = ScribeLive.Settings;
+        const kinds = settings.Retried;
+        const record = live.record;
+        const moment = live.clock.now();
+        const roles = [
+            { role: kinds.Scene, asked: asking.scene, reason: failed.scene, retryable: failed.sceneRetryable },
+            { role: kinds.Check, asked: asking.check, reason: failed.check, retryable: failed.checkRetryable },
+        ];
+        const added = [];
+        for (const { role, asked, reason, retryable } of roles) {
+            if (!asked) {
+                continue;
+            }
+            /**
+             * @param {{ id: string, fingerprint: string, role: string }} entry
+             * @return {boolean}
+             */
+            const mine = (entry) =>
+                entry.role === role && entry.id === message.id && entry.fingerprint === message.fingerprint;
+            if (reason === null) {
+                record.failing[role] = null;
+                record.retries = record.retries.filter(
+                    /**
+                     * @param {{ id: string, fingerprint: string, role: string }} entry
+                     * @return {boolean}
+                     */
+                    (entry) => (role === kinds.Scene ? entry.role !== role : !mine(entry)),
+                );
+                continue;
+            }
+            const tries = again !== null && again.role === role ? again.tries + 1 : settings.FirstTry;
+            const parked = !retryable || tries >= settings.RetryMs.length;
+            if (parked) {
+                record.failing[role] = reason;
+            }
+            record.retries = record.retries.filter(
+                /**
+                 * @param {{ id: string, fingerprint: string, role: string }} entry
+                 * @return {boolean}
+                 */
+                (entry) => (role === kinds.Scene ? entry.role !== role : !mine(entry)),
+            );
+            added.push({
+                id: message.id,
+                fingerprint: message.fingerprint,
+                position: message.position,
+                role,
+                reason,
+                tries: parked ? settings.RetryMs.length : tries,
+                at: parked ? moment : moment + settings.RetryMs[tries],
+            });
+        }
+        for (const entry of added) {
+            if (record.retries.length >= settings.RetriesKept) {
+                const spent = record.retries.findLastIndex(
+                    /**
+                     * @param {{ tries: number }} kept
+                     * @return {boolean}
+                     */
+                    (kept) => kept.tries >= settings.RetryMs.length,
+                );
+                if (spent === settings.NotFound) {
+                    record.failing[entry.role] = entry.reason;
+                    continue;
+                }
+                record.retries.splice(spent, settings.Removed);
+            }
+            record.retries.unshift(entry);
+        }
+    },
+
+    /**
+     * @param {object} live
+     * @return {void}
+     */
+    rekey(live) {
+        const settings = ScribeLive.Settings;
+        if (!ScribeLive.active(live)) {
+            return;
+        }
+        const record = live.record;
+        const spent = settings.RetryMs.length;
+        const parked = record.retries.some(
+            /**
+             * @param {{ tries: number }} entry
+             * @return {boolean}
+             */
+            (entry) => entry.tries >= spent,
+        );
+        const untold = record.untold !== null && record.untold.tries >= spent;
+        if (!parked && !untold) {
+            return;
+        }
+        const moment = live.clock.now();
+        const reply = ScribeLive.answered(live.keeper.view());
+        record.failing = { scene: null, check: null };
+        record.retries = record.retries.filter(
+            /**
+             * @param {{ id: string, fingerprint: string, role: string }} entry
+             * @return {boolean}
+             */
+            (entry) =>
+                entry.role === settings.Retried.Scene ||
+                (reply !== undefined && entry.id === reply.id && entry.fingerprint === reply.fingerprint),
+        );
+        for (const entry of record.retries) {
+            entry.tries = settings.FirstTry;
+            entry.at = moment;
+        }
+        if (record.untold !== null) {
+            record.untold.tries = settings.FirstTry;
+            record.untold.at = moment;
+        }
+        ScribeLive.changed(live);
+        ScribeLive.view(live);
+    },
+
+    /**
+     * @param {object} live
+     * @param {Readonly<object>} keeperView
+     * @return {{ entry: object, message: object }|null}
+     */
+    overdue(live, keeperView) {
+        const record = live.record;
+        const listed = Array.isArray(keeperView.messages) ? keeperView.messages : [];
+        const moment = live.clock.now();
+        const standing = record.retries.filter(
+            /**
+             * @param {{ id: string, fingerprint: string }} entry
+             * @return {boolean}
+             */
+            (entry) =>
+                listed.some(
+                    /**
+                     * @param {{ id: string, fingerprint: string }} message
+                     * @return {boolean}
+                     */
+                    (message) => message.id === entry.id && message.fingerprint === entry.fingerprint,
+                ),
+        );
+        if (standing.length !== record.retries.length) {
+            record.retries = standing;
+            ScribeLive.save(live);
+        }
+        const entry = standing.find(
+            /**
+             * @param {{ at: number, tries: number }} candidate
+             * @return {boolean}
+             */
+            (candidate) => candidate.at <= moment && candidate.tries < ScribeLive.Settings.RetryMs.length,
+        );
+        if (entry === undefined) {
+            return null;
+        }
+        const message = listed.find(
+            /**
+             * @param {{ id: string, fingerprint: string }} candidate
+             * @return {boolean}
+             */
+            (candidate) => candidate.id === entry.id && candidate.fingerprint === entry.fingerprint,
+        );
+        return { entry, message };
+    },
+
+    /**
+     * @param {object} live
      * @return {Promise<void>}
      */
     async refresh(live) {
@@ -16715,10 +20111,13 @@ const ScribeLive = Object.freeze({
         }
         const view = live.keeper.view();
         const record = live.record;
-        const waiting = record.ready === null ? record.forced && record.now !== null : !ScribeLive.fresh(live, view);
-        if (record.edited !== null || !ScribeLive.due(record, view) || !waiting) {
+        const owed = record.forced || record.untold !== null || live.owed;
+        const waiting = record.ready === null ? owed && record.now !== null : !ScribeLive.fresh(live, view);
+        const stale = ScribeLive.behind(record.now, view) !== null;
+        if (record.edited !== null || !ScribeLive.due(record, view) || !waiting || stale) {
             return;
         }
+        live.owed = false;
         const epoch = live.epoch;
         const now = record.now;
         let made = null;
@@ -16776,6 +20175,7 @@ const ScribeLive = Object.freeze({
                 record.edited !== null ||
                 ScribeLive.fresh(live, live.keeper.view()) ||
                 record.now === null ||
+                ScribeLive.behind(record.now, live.keeper.view()) !== null ||
                 live.running !== null ||
                 live.refreshing
             ) {
@@ -16820,12 +20220,20 @@ const ScribeLive = Object.freeze({
      * @return {Promise<void>}
      */
     async drain(live) {
-        while (!live.closed && (live.waiting !== null || live.refreshing)) {
+        while (!live.closed && (live.waiting !== null || live.again !== null || live.refreshing)) {
             if (live.waiting !== null) {
                 const next = live.waiting;
                 live.waiting = null;
                 try {
                     await ScribeLive.consider(live, next);
+                } catch (error) {
+                    live.problem = ScribeLive.words(error);
+                }
+            } else if (live.again !== null) {
+                const retry = live.again;
+                live.again = null;
+                try {
+                    await ScribeLive.consider(live, retry.message, retry.entry);
                 } catch (error) {
                     live.problem = ScribeLive.words(error);
                 }
@@ -16877,9 +20285,12 @@ const ScribeLive = Object.freeze({
         ScribeLive.active(live);
         const offer = ScribeLive.lines(live);
         const made = ScribeSender.compose(text, offer, settings.MessageBytes);
+        live.crowded = made.crowded;
         live.appended = Object.freeze({
             ready: made.ready ? offer.ready : null,
             suggestion: made.suggestion ? offer.suggestion : null,
+            carried: made.carried,
+            crowded: made.crowded,
         });
         return made.text;
     },
@@ -16900,15 +20311,19 @@ const ScribeLive = Object.freeze({
             return nothing;
         }
         const waiting = ScribeLive.due(record, view) && ScribeLive.fresh(live, view) ? record.ready : null;
+        const current = ScribeLive.behind(record.now, view) === null;
+        const typed = record.edited !== null && ScribeLive.written(record, view);
+        const prepared = current ? waiting : null;
         return Object.freeze({
-            ready: record.edited ?? waiting,
+            ready: typed ? record.edited : prepared,
             suggestion: record.suggestion,
+            ends: Object.freeze(typed || prepared === null ? [] : ScribeReminder.ends(prepared)),
         });
     },
 
     /**
      * @param {object} live
-     * @param {{ ready: string|null, suggestion: string|null }} lines
+     * @param {{ ready: string|null, suggestion: string|null, carried?: string|null, crowded?: boolean }} lines
      * @return {void}
      */
     went(live, lines) {
@@ -16918,14 +20333,24 @@ const ScribeLive = Object.freeze({
         }
         const record = live.record;
         const state = live.keeper.view().state;
+        live.crowded = lines.crowded === true;
         if (lines.ready !== null && lines.ready === (record.edited ?? record.ready)) {
             const led = record.led;
+            const carried = ScribeLive.isText(lines.carried) ? lines.carried : lines.ready;
+            const said = new Set(ScribeText.words(carried));
             ScribeLive.skip(record);
             for (const finding of record.findings) {
                 const reminded =
                     finding.kind === ScribePedant.Kind.Contradiction &&
                     finding.status === ScribeLive.Status.Open &&
                     led.includes(finding.fact) &&
+                    ScribeText.words(finding.book).every(
+                        /**
+                         * @param {string} word
+                         * @return {boolean}
+                         */
+                        (word) => said.has(word),
+                    ) &&
                     !ScribePedant.spent(state, finding);
                 if (reminded) {
                     finding.status = ScribeLive.Status.Reminded;
@@ -17058,6 +20483,7 @@ const ScribeLive = Object.freeze({
         }
         const record = live.record;
         ScribeLive.skip(record);
+        record.draft = null;
         record.suggestion = null;
         ScribeLive.changed(live);
     },
@@ -17071,18 +20497,34 @@ const ScribeLive = Object.freeze({
         record.led = [];
         record.basis = null;
         record.edited = null;
+        record.editedFor = null;
         record.forced = false;
         record.sends = ScribeLive.Settings.NoSends;
+    },
+
+    /**
+     * @param {{ editedFor: { id: string, fingerprint: string }|null }} record
+     * @param {Readonly<object>} keeperView
+     * @return {boolean}
+     */
+    written(record, keeperView) {
+        const reply = ScribeLive.answered(keeperView);
+        const against = record.editedFor;
+        if (reply === undefined) {
+            return against === null;
+        }
+        return against !== null && against.id === reply.id && against.fingerprint === reply.fingerprint;
     },
 
     /**
      * @param {object} live
      * @param {string} text
      * @param {boolean|null} shown
+     * @param {{ id: string, fingerprint: string }|null|undefined} against
      * @return {void}
      * @throws {Error}
      */
-    edit(live, text, shown) {
+    edit(live, text, shown, against) {
         const settings = ScribeLive.Settings;
         if (!ScribeLive.active(live)) {
             return;
@@ -17092,14 +20534,24 @@ const ScribeLive = Object.freeze({
         if (ScribeLive.hollow(line)) {
             if (shown ?? ScribeLive.lines(live).ready !== null) {
                 ScribeLive.skip(record);
+                record.draft = null;
                 ScribeLive.changed(live);
             }
             return;
         }
-        if (ScribeText.bytes(line) > settings.LongestEdit) {
+        if (Array.from(line).length > settings.LongestEdit) {
             throw new Error(settings.Messages.LongEdit);
         }
-        record.edited = line;
+        const reply = ScribeLive.answered(live.keeper.view());
+        const latest = reply === undefined ? null : { id: reply.id, fingerprint: reply.fingerprint };
+        const opened = against === undefined ? latest : against;
+        const same =
+            opened === null || latest === null
+                ? opened === latest
+                : opened.id === latest.id && opened.fingerprint === latest.fingerprint;
+        record.edited = same ? line : null;
+        record.editedFor = same ? latest : null;
+        record.draft = same ? null : line;
         record.led = [];
         ScribeLive.changed(live);
     },
@@ -17383,6 +20835,7 @@ const ScribeLive = Object.freeze({
         live.closed = true;
         live.epoch++;
         live.waiting = null;
+        live.again = null;
         live.refreshing = false;
     },
 
@@ -17408,13 +20861,23 @@ const ScribeLive = Object.freeze({
             if (unchecked && live.running === null && live.waiting === null) {
                 live.waiting = newest;
             }
+            if (live.running === null && live.waiting === null && live.again === null) {
+                live.again = ScribeLive.overdue(live, keeperView);
+            }
+            const untold = record.untold;
+            const retold =
+                untold !== null &&
+                untold.tries < settings.RetryMs.length &&
+                untold.at <= live.clock.now() &&
+                record.ready === null;
             live.refreshing =
                 live.refreshing ||
                 (record.edited === null &&
                     ScribeLive.due(record, keeperView) &&
-                    record.ready !== null &&
-                    !ScribeLive.fresh(live, keeperView));
-            if (live.waiting !== null || live.refreshing) {
+                    ((record.ready !== null && !ScribeLive.fresh(live, keeperView)) ||
+                        retold ||
+                        (live.owed && record.ready === null)));
+            if (live.waiting !== null || live.again !== null || live.refreshing) {
                 Promise.resolve().then(
                     /**
                      * @return {Promise<void>}
@@ -17424,11 +20887,40 @@ const ScribeLive = Object.freeze({
             }
         }
         live.shown = live.problem;
+        const messages = settings.Messages;
+        const failing = [];
+        if (record.failing.scene !== null) {
+            failing.push(messages.SceneFailing + record.failing.scene);
+        }
+        if (record.failing.check !== null) {
+            failing.push(messages.ChecksFailing + record.failing.check);
+        }
+        if (record.untold !== null && record.untold.tries >= settings.RetryMs.length) {
+            failing.push(messages.StoryFailing + record.untold.reason);
+        }
+        const untold = record.untold !== null && record.ready === null ? messages.Untold + record.untold.reason : null;
+        const typed = record.edited !== null && ScribeLive.written(record, keeperView);
+        const draft = typed ? null : (record.draft ?? record.edited);
+        let held = null;
+        if (draft !== null) {
+            held = messages.EditStale;
+        } else if (!typed) {
+            held = ScribeLive.behind(record.now, keeperView) ?? untold ?? (live.crowded ? messages.Crowded : null);
+        } else if (live.crowded) {
+            held = messages.Crowded;
+        }
+        const latest = ScribeLive.answered(keeperView);
         return Object.freeze({
             now: record.now,
             ready: ScribeLive.lines(live).ready,
+            draft,
+            stale: draft !== null,
+            latest: latest === undefined ? null : Object.freeze({ id: latest.id, fingerprint: latest.fingerprint }),
+            held,
+            failing: Object.freeze(failing),
+            calls: Object.freeze([...live.calls]),
             due: ScribeLive.due(record, keeperView),
-            edited: record.edited !== null,
+            edited: typed,
             prepared: record.ready !== null,
             forced: record.forced,
             forceBlock: ScribeLive.forceBlock(live),
@@ -17500,7 +20992,7 @@ const ScribeLive = Object.freeze({
             lines: () => ScribeLive.lines(live),
 
             /**
-             * @param {{ ready: string|null, suggestion: string|null }} lines
+             * @param {{ ready: string|null, suggestion: string|null, carried?: string|null, crowded?: boolean }} lines
              * @return {void}
              */
             went: (lines) => {
@@ -17539,16 +21031,24 @@ const ScribeLive = Object.freeze({
             /**
              * @param {string} text
              * @param {boolean|null} shown
+             * @param {{ id: string, fingerprint: string }|null|undefined} against
              * @return {void}
              */
-            edit: (text, shown = null) => {
-                ScribeLive.edit(live, text, shown);
+            edit: (text, shown = null, against = undefined) => {
+                ScribeLive.edit(live, text, shown, against);
             },
 
             /**
              * @return {Promise<void>}
              */
             force: () => ScribeLive.force(live),
+
+            /**
+             * @return {void}
+             */
+            rekey: () => {
+                ScribeLive.rekey(live);
+            },
 
             /**
              * @return {Promise<string|null>}
@@ -17600,20 +21100,26 @@ const ScribeLive = Object.freeze({
     },
 
     /**
-     * @param {{ keeper: { view: Function, rule: Function, file: Function, preview: Function }, storage: { get: Function, set: Function, remove: Function, list: Function }, roomId: string, ask: Function, clock: object, notify: Function, story: () => Promise<object>, profile: () => Promise<string> }} options
+     * @param {{ keeper: { view: Function, rule: Function, file: Function, preview: Function }, storage: { get: Function, set: Function, remove: Function, list: Function }, roomId: string, ask: Function, clock: { now: Function }, notify: Function, story: () => Promise<object>, profile: (plotId: string|null) => Promise<string|null> }} options
      * @return {Readonly<object>}
      */
     open(options) {
-        const { keeper, storage, roomId, ask, notify, story, profile } = options;
+        const { keeper, storage, roomId, ask, clock, notify, story, profile } = options;
         const settings = ScribeLive.Settings;
         const live = {
             keeper,
             storage,
             roomId,
             ask,
+            clock,
             notify,
             story,
             profile,
+            calls: [],
+            again: null,
+            recounting: null,
+            crowded: false,
+            owed: false,
             cast: null,
             casting: null,
             record: null,
@@ -17668,6 +21174,7 @@ const ScribeSender = Object.freeze({
         FunctionType: 'function',
         Newline: '\n',
         NarratorLead: '@: ',
+        NoLength: 0,
         Box: 'textarea[name="message"]',
         SendButton: 'button[aria-label="Send"]',
         Modifiers: Object.freeze(['Shift', 'Control', 'Alt', 'Meta']),
@@ -17683,38 +21190,54 @@ const ScribeSender = Object.freeze({
 
     /**
      * @param {string} text
-     * @param {{ ready: string|null, suggestion: string|null }} lines
+     * @param {{ ready: string|null, suggestion: string|null, ends?: readonly number[] }} lines
      * @param {number} limit
-     * @return {Readonly<{ text: string, ready: boolean, suggestion: boolean }>}
+     * @return {Readonly<{ text: string, ready: boolean, suggestion: boolean, carried: string|null, crowded: boolean }>}
      */
     compose(text, lines, limit) {
         const settings = ScribeSender.Settings;
+        const ready = lines.ready;
         if (settings.Blank.test(text)) {
-            return Object.freeze({ text, ready: false, suggestion: false });
+            return Object.freeze({ text, ready: false, suggestion: false, carried: null, crowded: false });
         }
-        const chosen = { ready: lines.ready, suggestion: lines.suggestion };
+        const ends = ready !== null && Array.isArray(lines.ends) ? lines.ends : [];
+        const versions = ready === null ? [] : [ready];
+        for (const end of [...ends].reverse()) {
+            if (Number.isSafeInteger(end) && end > settings.NoLength && end < ready.length) {
+                versions.push(ready.slice(settings.NoLength, end));
+            }
+        }
         /**
+         * @param {string|null} carried
+         * @param {string|null} suggestion
          * @return {string}
          */
-        const whole = () => {
+        const whole = (carried, suggestion) => {
             let joined = text;
-            for (const line of [chosen.ready, chosen.suggestion]) {
+            for (const line of [carried, suggestion]) {
                 if (line !== null) {
                     joined += settings.Newline + settings.NarratorLead + line;
                 }
             }
             return joined;
         };
-        while (ScribeText.bytes(whole()) > limit) {
-            if (chosen.ready !== null) {
-                chosen.ready = null;
-            } else if (chosen.suggestion !== null) {
-                chosen.suggestion = null;
-            } else {
-                break;
+        let suggestion = lines.suggestion;
+        let carried = null;
+        for (const version of versions) {
+            if (carried === null && ScribeText.bytes(whole(version, suggestion)) <= limit) {
+                carried = version;
             }
         }
-        return Object.freeze({ text: whole(), ready: chosen.ready !== null, suggestion: chosen.suggestion !== null });
+        if (carried === null && suggestion !== null && ScribeText.bytes(whole(null, suggestion)) > limit) {
+            suggestion = null;
+        }
+        return Object.freeze({
+            text: whole(carried, suggestion),
+            ready: carried !== null,
+            suggestion: suggestion !== null,
+            carried,
+            crowded: ready !== null && carried === null,
+        });
     },
 
     /**
@@ -18126,12 +21649,14 @@ const ScribeFrame = Object.freeze({
         ShortestToken: 16,
         LongestToken: 200,
         Nearest: 0,
+        NoLength: 0,
         ObjectType: 'object',
         StringType: 'string',
         BooleanType: 'boolean',
         NothingOffered: Object.freeze({
             ready: null,
             suggestion: null,
+            ends: Object.freeze([]),
         }),
     }),
 
@@ -18202,7 +21727,22 @@ const ScribeFrame = Object.freeze({
         if (!ScribeFrame.counted(seq) || !keyed || !lines) {
             return null;
         }
-        return Object.freeze({ [bridge.TagName]: bridge.Tag, kind: bridge.Kind.Arm, seq, token, ready, suggestion });
+        const given = Array.isArray(data.ends) && ready !== null ? data.ends : [];
+        const ordered = given.every(
+            /**
+             * @param {*} end
+             * @param {number} index
+             * @return {boolean}
+             */
+            (end, index) =>
+                Number.isSafeInteger(end) &&
+                end > settings.NoLength &&
+                end < ready.length &&
+                (index === settings.NoLength || end > given[index - 1]),
+        );
+        const ends = Object.freeze(ordered ? [...given] : []);
+        const kind = bridge.Kind.Arm;
+        return Object.freeze({ [bridge.TagName]: bridge.Tag, kind, seq, token, ready, suggestion, ends });
     },
 
     /**
@@ -18229,7 +21769,17 @@ const ScribeFrame = Object.freeze({
         if (!ScribeFrame.counted(seq) || !flags) {
             return null;
         }
-        return Object.freeze({ [bridge.TagName]: bridge.Tag, kind: bridge.Kind.Sent, seq, ready, suggestion });
+        const cut = ready && Number.isSafeInteger(data.cut) && data.cut > settings.NoLength ? data.cut : null;
+        const crowded = !ready && data.crowded === true;
+        return Object.freeze({
+            [bridge.TagName]: bridge.Tag,
+            kind: bridge.Kind.Sent,
+            seq,
+            ready,
+            suggestion,
+            cut,
+            crowded,
+        });
     },
 
     /**
@@ -18272,7 +21822,7 @@ const ScribeFrame = Object.freeze({
                 return;
             }
             frame.seq = arm.seq;
-            frame.offer = Object.freeze({ ready: arm.ready, suggestion: arm.suggestion });
+            frame.offer = Object.freeze({ ready: arm.ready, suggestion: arm.suggestion, ends: arm.ends });
             window.clearInterval(frame.repeat);
             frame.repeat = null;
         };
@@ -18290,6 +21840,8 @@ const ScribeFrame = Object.freeze({
                 seq: frame.seq,
                 ready: made.ready ? offer.ready : null,
                 suggestion: made.suggestion ? offer.suggestion : null,
+                cut: made.carried === null || made.carried === offer.ready ? null : made.carried.length,
+                crowded: made.crowded,
             });
             return made.text;
         };
@@ -18307,11 +21859,15 @@ const ScribeFrame = Object.freeze({
                 seq: went.seq,
                 ready: went.ready !== null,
                 suggestion: went.suggestion !== null,
+                cut: went.cut,
+                crowded: went.crowded,
             });
             const offer = frame.offer;
+            const kept = offer.ready === went.ready ? null : offer.ready;
             frame.offer = Object.freeze({
-                ready: offer.ready === went.ready ? null : offer.ready,
+                ready: kept,
                 suggestion: offer.suggestion === went.suggestion ? null : offer.suggestion,
+                ends: kept === null ? Object.freeze([]) : offer.ends,
             });
         };
         const hook = ScribeSender.attach({ document, window, outgoing, sent, ignore: null });
@@ -18487,6 +22043,20 @@ h4 {
     margin: 0;
     font-weight: 600;
     overflow-wrap: anywhere;
+}
+
+.choice {
+    flex: 1 1 100%;
+    min-width: 0;
+}
+
+.choice p {
+    margin: 0;
+    overflow-wrap: anywhere;
+}
+
+.panel.collapsed .choice {
+    display: none;
 }
 
 .badge {
@@ -18782,6 +22352,13 @@ const PanelView = Object.freeze({
             Budget: "the day's budget is spent.",
             NoReason: 'the reason was not recorded.',
             Watching: 'Another tab is reading this chat.',
+            CloudLoading: 'Loading the book from your Worker...',
+            CloudConflict: 'This PC and your Worker hold different books for this chat.',
+            WatchingPc: 'Another PC is reading this chat.',
+            Offline: ' Working offline.',
+            Refused: ' The DM API key was refused; the book stays on this PC.',
+            UnusableOpen: ' The book stays on this PC: ',
+            WorkerOpen: ' Worker: ',
             MessagesRead: ' messages read.',
             AboutOpen: ' About ',
             ReadingOne: ' reading to go.',
@@ -18799,6 +22376,8 @@ const PanelView = Object.freeze({
             Colon: ': ',
             Comma: ', ',
             Quote: '"',
+            Hash: '#',
+            Against: ' against ',
             InReply: '" in the reply; the book has ',
             BookHas: ': the book has ',
             ReplySays: '; the reply says ',
@@ -18937,17 +22516,27 @@ const PanelView = Object.freeze({
     /**
      * @param {{ phase: string, total: number, read: number, flight: string|null, stop: { reason: string, problem: string|null }|null, problem: string|null }} keeperView
      * @param {{ problem?: string|null }} liveView
+     * @param {{ phase: string, problem?: string|null }|null} cloudView
      * @return {string}
      */
-    headline(keeperView, liveView) {
+    headline(keeperView, liveView, cloudView = null) {
         const settings = PanelView.Settings;
         const words = settings.Words;
         const phases = ScribeKeeper.Phase;
+        const clouds = ScribeCloud.Phase;
         const stops = ScribeAdoption.Stop;
         const flight = keeperView.flight ?? null;
         const problem = keeperView.problem ?? null;
+        const cloud = cloudView === null ? clouds.Off : cloudView.phase;
+        const worker = cloudView === null ? null : (cloudView.problem ?? null);
         let line = words.Reading;
-        if (keeperView.phase === phases.Watching) {
+        if (cloud === clouds.Loading) {
+            line = words.CloudLoading;
+        } else if (cloud === clouds.Conflict) {
+            line = words.CloudConflict;
+        } else if (keeperView.phase === phases.Watching && cloud === clouds.Watching) {
+            line = words.WatchingPc;
+        } else if (keeperView.phase === phases.Watching) {
             line = words.Watching;
         } else if (flight !== null) {
             line = PanelView.said(flight);
@@ -18976,6 +22565,13 @@ const PanelView = Object.freeze({
             const recorded = typeof reason === settings.StringType && reason.trim() !== words.Nothing;
             line = words.StoppedOpen + (recorded ? reason : words.NoReason);
         }
+        if (cloud === clouds.Offline) {
+            line += words.Offline;
+        } else if (cloud === clouds.Refused) {
+            line += words.Refused;
+        } else if (cloud === clouds.Unusable) {
+            line += words.UnusableOpen + PanelView.said(worker ?? words.Unknown) + words.FullStop;
+        }
         if (problem === ZetaSource.Settings.Messages.NoLogin) {
             line += words.LoginWait;
         } else if (problem !== null) {
@@ -18984,6 +22580,14 @@ const PanelView = Object.freeze({
         const scribe = liveView.problem ?? null;
         if (scribe !== null) {
             line += words.ScribeOpen + PanelView.said(scribe);
+        }
+        for (const failing of PanelView.lines(liveView.failing)) {
+            if (failing !== null) {
+                line += words.Space + failing;
+            }
+        }
+        if (worker !== null && cloud !== clouds.Unusable) {
+            line += words.WorkerOpen + PanelView.said(worker);
         }
         return line;
     },
@@ -19277,6 +22881,68 @@ const PanelView = Object.freeze({
                   apart,
               )
             : apart();
+    },
+
+    /**
+     * @param {{ type: *, position: *, said: *, earlier: *, before: *, entry?: *, why: * }} operation
+     * @return {string[]}
+     */
+    sides(operation) {
+        const settings = PanelView.Settings;
+        const words = settings.Words;
+        if (operation.type !== ScribeAnswer.Type.Contradiction) {
+            return [];
+        }
+        /**
+         * @param {*} position
+         * @param {*} quote
+         * @return {string}
+         */
+        const cited = (position, quote) =>
+            words.Hash + PanelView.said(position) + words.Space + words.Quote + PanelView.said(quote) + words.Quote;
+        const earlier =
+            typeof operation.entry === settings.StringType
+                ? operation.entry
+                : cited(operation.earlier, operation.before);
+        return [cited(operation.position, operation.said), earlier, PanelView.said(operation.why)];
+    },
+
+    /**
+     * @param {object} state
+     * @return {Array<{ id: string, text: string, why: string }|null>}
+     */
+    contradictions(state) {
+        const words = PanelView.Settings.Words;
+        return PanelView.each(
+            state.contradictions,
+            /**
+             * @param {{ id: *, position: *, said: *, earlierPosition: *, before: *, why: *, dismissed: * }} item
+             * @return {Array<{ id: string, text: string, why: string }>}
+             */
+            (item) =>
+                item.dismissed === true
+                    ? []
+                    : [
+                          {
+                              id: PanelView.said(item.id),
+                              text:
+                                  words.Hash +
+                                  PanelView.said(item.position) +
+                                  words.Space +
+                                  words.Quote +
+                                  PanelView.said(item.said) +
+                                  words.Quote +
+                                  words.Against +
+                                  words.Hash +
+                                  PanelView.said(item.earlierPosition) +
+                                  words.Space +
+                                  words.Quote +
+                                  PanelView.said(item.before) +
+                                  words.Quote,
+                              why: PanelView.said(item.why),
+                          },
+                      ],
+        ).reverse();
     },
 
     /**
@@ -19788,11 +23454,18 @@ const ScribePanel = Object.freeze({
             Findings: 'findings',
             Lines: 'lines',
             Calls: 'calls',
+            Contradictions: 'contradictions',
+            LiveCalls: 'liveCalls',
         }),
         Ids: Object.freeze({
             Host: 'scribe-host',
             Panel: 'scribe-panel',
             Headline: 'scribe-headline',
+            Choice: 'scribe-choice',
+            ChoiceCounts: 'scribe-choice-counts',
+            UseCloud: 'scribe-use-cloud',
+            KeepHere: 'scribe-keep-here',
+            ChoiceOutcome: 'scribe-choice-outcome',
             Next: 'scribe-next',
             NextOutcome: 'scribe-next-outcome',
             Activity: 'scribe-activity',
@@ -19832,6 +23505,7 @@ const ScribePanel = Object.freeze({
             EditSave: 'scribe-edit-save',
             Force: 'scribe-force',
             ForceReason: 'scribe-force-reason',
+            Held: 'scribe-held',
             ForceOutcome: 'scribe-force-outcome',
             ReminderOutcome: 'scribe-reminder-outcome',
             Story: 'scribe-story',
@@ -19842,6 +23516,8 @@ const ScribePanel = Object.freeze({
             Work: 'scribe-tell-work',
             TellOutcome: 'scribe-tell-outcome',
             Understood: 'scribe-understood',
+            CloudState: 'scribe-cloud-state',
+            Notes: 'scribe-notes',
             KeyState: 'scribe-key-state',
             Key: 'scribe-key',
             SaveKey: 'scribe-save-key',
@@ -19885,6 +23561,12 @@ const ScribePanel = Object.freeze({
             Next: 'next',
             Offer: 'offer',
             Tell: 'tell',
+            Choice: 'choice',
+        }),
+        HeaderOutlets: Object.freeze(['next', 'choice']),
+        Choices: Object.freeze({
+            UseCloud: 'useCloud',
+            KeepHere: 'keep',
         }),
         Setup: Object.freeze([
             Object.freeze({ name: 'analyzer', label: 'Reading model', mode: 'text' }),
@@ -19921,6 +23603,8 @@ const ScribePanel = Object.freeze({
             Findings: 'findings',
             Lines: 'lines',
             Calls: 'calls',
+            Contradictions: 'contradictions',
+            LiveCalls: 'liveCalls',
         }),
         Acts: Object.freeze({
             Open: 'open',
@@ -20011,6 +23695,7 @@ const ScribePanel = Object.freeze({
             Activity: 'activity',
             Meter: 'meter',
             Hollow: 'hollow',
+            Choice: 'choice',
         }),
         Attributes: Object.freeze({
             Max: 'max',
@@ -20199,6 +23884,22 @@ const ScribePanel = Object.freeze({
                 Told: 'Marked as told',
                 Reminded: "The book's value went out in a reminder.",
             }),
+            UseCloud: "Use the cloud's",
+            KeepHere: "Keep this PC's book",
+            ChoiceHere: 'This PC: ',
+            ChoiceThere: ' Your Worker: ',
+            ReadOne: ' message read.',
+            ReadMany: ' messages read.',
+            NoBookThere: 'no book.',
+            CloudLocal:
+                'No DM API key: the book stays on this PC. ' +
+                'Set DM API key from the Tampermonkey menu to keep it in your Worker.',
+            CloudKept: 'The book is kept in your Worker and shared by every PC with the DM API key.',
+            NoNotes: 'No operator notes for this chat in your Worker.',
+            NotesGoOne: ' character of the operator notes goes to the models.',
+            NotesGoMany: ' characters of the operator notes go to the models.',
+            NotesCutOpen: ' They were cut from ',
+            NotesCutClose: ' characters.',
             KeySaved: 'A key is saved',
             NoKey: 'No key yet',
             KeyUnreadable: 'The key could not be read',
@@ -20231,6 +23932,13 @@ const ScribePanel = Object.freeze({
             UnreadClose: ' could not be read',
             LinesHeading: 'Readings',
             CallsHeading: 'Last calls',
+            LiveCallsHeading: 'Last live calls',
+            TokensIn: ': in ',
+            TokensOut: ', out ',
+            Reasoning: ', reasoning ',
+            FinishOpen: ', finish ',
+            CutAnswer: 'The start of the cut answer',
+            ContradictionsHeading: 'Contradictions the Analyzer read',
             Refused: 'Refused lines',
             CallOpen: 'Call ',
             Unreadable: 'Unreadable answer',
@@ -20288,7 +23996,7 @@ const ScribePanel = Object.freeze({
     }),
 
     /**
-     * @param {{ document: object, keeper: object, live: object, storage: object, confirm: (text: string) => boolean, download: (name: string, text: string) => void, clock: { now: () => number } }} environment
+     * @param {{ document: object, keeper: object, live: object, cloud: object, storage: object, confirm: (text: string) => boolean, download: (name: string, text: string) => void, clock: { now: () => number } }} environment
      * @return {Readonly<{ redraw: () => void, unmount: () => void, host: object }>}
      */
     mount(environment) {
@@ -20312,6 +24020,7 @@ const ScribePanel = Object.freeze({
             document,
             keeper: environment.keeper,
             live: environment.live,
+            cloud: environment.cloud,
             storage: environment.storage,
             confirm: environment.confirm,
             download: environment.download,
@@ -20371,6 +24080,8 @@ const ScribePanel = Object.freeze({
             composing: false,
             editing: false,
             editShown: false,
+            editStale: false,
+            editAgainst: undefined,
             editFrom: settings.Nothing,
             heldDraw: false,
             workedOut: null,
@@ -21141,12 +24852,56 @@ const ScribePanel = Object.freeze({
             ScribePanel.own(panel, 'Clock', ScribePanel.make(panel, tags.Paragraph, settings.Nothing)),
             ScribePanel.own(panel, 'Finished', ScribePanel.make(panel, tags.Paragraph, settings.Nothing)),
         );
+        const choice = ScribePanel.own(
+            panel,
+            'Choice',
+            ScribePanel.make(panel, tags.Block, settings.Nothing, classes.Choice),
+        );
+        choice.hidden = true;
+        const choosing = ScribePanel.make(panel, tags.Block, settings.Nothing, classes.Actions);
+        choosing.append(
+            ScribePanel.own(
+                panel,
+                'UseCloud',
+                ScribePanel.button(
+                    panel,
+                    words.UseCloud,
+                    /**
+                     * @return {Promise<boolean>}
+                     */
+                    () => ScribePanel.choose(panel, settings.Choices.UseCloud),
+                    settings.Guard.Free,
+                    settings.Ids.UseCloud,
+                ),
+            ),
+            ScribePanel.own(
+                panel,
+                'KeepHere',
+                ScribePanel.button(
+                    panel,
+                    words.KeepHere,
+                    /**
+                     * @return {Promise<boolean>}
+                     */
+                    () => ScribePanel.choose(panel, settings.Choices.KeepHere),
+                    settings.Guard.Free,
+                    settings.Ids.KeepHere,
+                    classes.Primary,
+                ),
+            ),
+        );
+        choice.append(
+            ScribePanel.own(panel, 'ChoiceCounts', ScribePanel.make(panel, tags.Paragraph, settings.Nothing)),
+            choosing,
+            ScribePanel.outlet(panel, 'ChoiceOutcome', settings.Outlets.Choice),
+        );
         header.append(
             ScribePanel.own(
                 panel,
                 'Headline',
                 ScribePanel.make(panel, tags.Paragraph, settings.Nothing, classes.Headline),
             ),
+            choice,
             ScribePanel.own(panel, 'Next', next),
             ScribePanel.outlet(panel, 'NextOutcome', settings.Outlets.Next),
             activity,
@@ -21500,6 +25255,11 @@ const ScribePanel = Object.freeze({
             ScribePanel.pager(panel, lists.Likes, ScribePanel.group(panel, section, words.LikesHeading));
             ScribePanel.pager(panel, lists.Scenes, ScribePanel.group(panel, section, words.ScenesHeading));
             ScribePanel.pager(panel, lists.Questions, ScribePanel.group(panel, section, words.QuestionsHeading));
+            ScribePanel.pager(
+                panel,
+                lists.Contradictions,
+                ScribePanel.group(panel, section, words.ContradictionsHeading),
+            );
             ScribePanel.pager(panel, lists.Aliases, ScribePanel.group(panel, section, words.AliasesHeading));
             ScribePanel.pager(panel, lists.Refinements, ScribePanel.group(panel, section, words.RefinementsHeading));
             ScribePanel.pager(panel, lists.Made, ScribePanel.group(panel, section, words.MadeHeading));
@@ -21631,6 +25391,15 @@ const ScribePanel = Object.freeze({
                     ScribePanel.own(
                         panel,
                         'ForceReason',
+                        ScribePanel.make(panel, settings.Tags.Paragraph, settings.Nothing, settings.Classes.Meta),
+                    ),
+                    true,
+                ),
+                ScribePanel.stale(
+                    panel,
+                    ScribePanel.own(
+                        panel,
+                        'Held',
                         ScribePanel.make(panel, settings.Tags.Paragraph, settings.Nothing, settings.Classes.Meta),
                     ),
                     true,
@@ -21793,6 +25562,11 @@ const ScribePanel = Object.freeze({
             section.append(controls, ScribePanel.outlet(panel, 'ControlsOutcome', outlets.Controls), story, pulled);
             ScribePanel.pager(panel, settings.Lists.Lines, ScribePanel.group(panel, section, words.LinesHeading));
             ScribePanel.pager(panel, settings.Lists.Calls, ScribePanel.group(panel, section, words.CallsHeading));
+            ScribePanel.pager(
+                panel,
+                settings.Lists.LiveCalls,
+                ScribePanel.group(panel, section, words.LiveCallsHeading),
+            );
         },
 
         /**
@@ -21809,7 +25583,11 @@ const ScribePanel = Object.freeze({
             const ids = settings.Ids;
             const guards = settings.Guard;
             const outlets = settings.Outlets;
+            const notes = ScribePanel.own(panel, 'Notes', ScribePanel.make(panel, tags.Paragraph, settings.Nothing));
+            notes.hidden = true;
             section.append(
+                ScribePanel.own(panel, 'CloudState', ScribePanel.make(panel, tags.Paragraph, settings.Nothing)),
+                notes,
                 ScribePanel.own(panel, 'KeyState', ScribePanel.make(panel, tags.Paragraph, settings.Nothing)),
             );
             const key = ScribePanel.field(panel, settings.InputTypes.Password, words.KeyLabel, ids.Key, false, false);
@@ -21911,6 +25689,8 @@ const ScribePanel = Object.freeze({
         panel.parts.EditCancel.disabled = true;
         panel.parts.EditSave.disabled = true;
         panel.parts.Force.disabled = true;
+        panel.parts.UseCloud.disabled = true;
+        panel.parts.KeepHere.disabled = true;
     },
 
     /**
@@ -21940,9 +25720,18 @@ const ScribePanel = Object.freeze({
         panel.shown = new Set();
         let view = null;
         let live = null;
+        let cloud = null;
         try {
             const kept = panel.keeper.view();
             const heard = panel.live.view();
+            const synced = panel.cloud.view();
+            cloud = {
+                ...synced,
+                keyed: synced.keyed === true,
+                conflict: synced.conflict ?? null,
+                notes: synced.notes ?? null,
+                problem: synced.problem ?? null,
+            };
             view = {
                 ...kept,
                 made: kept.made ?? [],
@@ -21971,6 +25760,11 @@ const ScribePanel = Object.freeze({
                 forceBlock: heard.forceBlock ?? null,
                 suggestion: heard.suggestion ?? null,
                 notice: heard.notice ?? null,
+                held: heard.held ?? null,
+                draft: heard.draft ?? null,
+                stale: heard.stale ?? false,
+                failing: heard.failing ?? [],
+                calls: heard.calls ?? [],
             };
         } catch (error) {
             ScribePanel.lockAll(panel);
@@ -21979,13 +25773,14 @@ const ScribePanel = Object.freeze({
         }
         ScribePanel.clearFailures(panel, view);
         try {
-            ScribePanel.header(panel, view, live);
+            ScribePanel.header(panel, view, live, cloud);
         } catch (error) {
             for (const name of ['Headline', 'Badge', 'Spend']) {
                 ScribePanel.write(panel.parts[name], settings.Nothing);
             }
             panel.parts.Badge.hidden = true;
             panel.parts.Next.hidden = true;
+            panel.parts.Choice.hidden = true;
             panel.parts.Activity.hidden = true;
             ScribePanel.stopClock(panel);
             ScribePanel.fold(panel);
@@ -21995,7 +25790,7 @@ const ScribePanel = Object.freeze({
             return;
         }
         try {
-            ScribePanel.draw(panel, view, live);
+            ScribePanel.draw(panel, view, live, cloud);
         } catch (error) {
             ScribePanel.lockAll(panel);
             ScribePanel.alarm(panel, words.Trouble + ScribePanel.reason(error));
@@ -22003,17 +25798,43 @@ const ScribePanel = Object.freeze({
     },
 
     /**
+     * @param {number|null} count
+     * @return {string}
+     */
+    readCount(count) {
+        const words = ScribePanel.Settings.Words;
+        if (count === null) {
+            return words.NoBookThere;
+        }
+        return PanelView.number(count) + (count === ScribePanel.Settings.Single ? words.ReadOne : words.ReadMany);
+    },
+
+    /**
      * @param {object} panel
      * @param {object} view
      * @param {object} live
+     * @param {object} cloud
      * @return {void}
      */
-    header(panel, view, live) {
+    header(panel, view, live, cloud) {
         const settings = ScribePanel.Settings;
         const words = settings.Words;
         const parts = panel.parts;
         ScribePanel.fold(panel);
-        ScribePanel.write(parts.Headline, PanelView.headline(view, live));
+        ScribePanel.write(parts.Headline, PanelView.headline(view, live, cloud));
+        const choiceOutlet = settings.Outlets.Choice;
+        const conflict = cloud.phase === ScribeCloud.Phase.Conflict ? cloud.conflict : null;
+        parts.Choice.hidden = conflict === null;
+        if (conflict !== null) {
+            const here = words.ChoiceHere + ScribePanel.readCount(conflict.here ?? null);
+            const there = words.ChoiceThere + ScribePanel.readCount(conflict.there ?? null);
+            ScribePanel.write(parts.ChoiceCounts, here + there);
+            panel.shown.add(choiceOutlet);
+        }
+        const choosing = panel.pending.has(choiceOutlet);
+        parts.UseCloud.disabled = choosing;
+        parts.KeepHere.disabled = choosing;
+        ScribePanel.write(parts.ChoiceOutcome, panel.outcomes.get(choiceOutlet) ?? settings.Nothing);
         const step = PanelView.next(view);
         ScribePanel.fill(panel, view);
         panel.step = step;
@@ -22102,9 +25923,10 @@ const ScribePanel = Object.freeze({
      * @param {object} panel
      * @param {object} view
      * @param {object} live
+     * @param {object} cloud
      * @return {void}
      */
-    draw(panel, view, live) {
+    draw(panel, view, live, cloud) {
         const settings = ScribePanel.Settings;
         const words = settings.Words;
         const focused = ScribePanel.remember(panel);
@@ -22123,7 +25945,7 @@ const ScribePanel = Object.freeze({
         }
         const failure = panel.failures[panel.tab];
         try {
-            ScribePanel.Drawers[panel.tab](panel, view, live);
+            ScribePanel.Drawers[panel.tab](panel, view, live, cloud);
             ScribePanel.write(failure, settings.Nothing);
             failure.hidden = true;
         } catch (error) {
@@ -22138,7 +25960,7 @@ const ScribePanel = Object.freeze({
             failure.hidden = false;
         }
         for (const [key, outlet] of panel.outlets) {
-            if (key === settings.Outlets.Next) {
+            if (settings.HeaderOutlets.includes(key)) {
                 continue;
             }
             ScribePanel.write(outlet, panel.outcomes.get(key) ?? settings.Nothing);
@@ -22400,6 +26222,26 @@ const ScribePanel = Object.freeze({
 
     /**
      * @param {object} panel
+     * @param {string} method
+     * @return {Promise<boolean>}
+     */
+    choose(panel, method) {
+        const settings = ScribePanel.Settings;
+        return ScribePanel.perform(panel, {
+            outlet: settings.Outlets.Choice,
+            /**
+             * @return {Promise<void>}
+             */
+            call: () => panel.cloud[method](),
+            question: null,
+            done: settings.Nothing,
+            pending: settings.Words.Working,
+            book: false,
+        });
+    },
+
+    /**
+     * @param {object} panel
      * @param {string} outlet
      * @param {string} key
      * @param {string} problem
@@ -22441,9 +26283,12 @@ const ScribePanel = Object.freeze({
      */
     openEdit(panel) {
         const settings = ScribePanel.Settings;
-        const shown = panel.live.view().ready ?? settings.Nothing;
+        const view = panel.live.view();
+        const shown = (view.stale === true ? view.draft : view.ready) ?? settings.Nothing;
         panel.editing = true;
         panel.editShown = shown !== settings.Nothing;
+        panel.editStale = view.stale === true;
+        panel.editAgainst = view.latest;
         panel.editFrom = shown;
         panel.parts.Reminder.value = shown;
         ScribePanel.say(panel, settings.Outlets.Reminder, settings.Nothing);
@@ -22459,9 +26304,10 @@ const ScribePanel = Object.freeze({
     closeEdit(panel, save) {
         const settings = ScribePanel.Settings;
         const outlet = settings.Outlets.Reminder;
-        if (save && ScribeLive.line(panel.parts.Reminder.value) !== ScribeLive.line(panel.editFrom)) {
+        const changed = ScribeLive.line(panel.parts.Reminder.value) !== ScribeLive.line(panel.editFrom);
+        if (save && (changed || panel.editStale)) {
             try {
-                panel.live.edit(panel.parts.Reminder.value, panel.editShown);
+                panel.live.edit(panel.parts.Reminder.value, panel.editShown, panel.editAgainst);
             } catch (error) {
                 ScribePanel.fail(panel, outlet, ScribePanel.refusal(error));
                 ScribePanel.redraw(panel);
@@ -22802,6 +26648,8 @@ const ScribePanel = Object.freeze({
             ScribeStore.setKey(panel.storage, typed);
             panel.last.set(settings.Ids.SaveKey, panel.clock.now());
             panel.trouble = settings.Nothing;
+            panel.keeper.rekey();
+            panel.live.rekey();
         } catch (error) {
             outcome = ScribePanel.reason(error);
         }
@@ -23248,6 +27096,21 @@ const ScribePanel = Object.freeze({
             );
             ScribePanel.paged(
                 panel,
+                lists.Contradictions,
+                PanelView.contradictions(view.state),
+                /**
+                 * @param {object} contradiction
+                 * @return {object}
+                 */
+                (contradiction) => rows.contradiction(panel, contradiction),
+                /**
+                 * @param {{ id: string }} contradiction
+                 * @return {string}
+                 */
+                (contradiction) => ScribePanel.key(sections.Contradictions, contradiction.id),
+            );
+            ScribePanel.paged(
+                panel,
                 lists.Aliases,
                 rulings.aliases,
                 /**
@@ -23310,11 +27173,13 @@ const ScribePanel = Object.freeze({
             const blocked = live.forceBlock !== null;
             const editing = panel.editing;
             if (!editing) {
-                parts.Reminder.value = live.ready ?? settings.Nothing;
+                parts.Reminder.value = live.ready ?? (live.stale ? live.draft : null) ?? settings.Nothing;
             }
             parts.Reminder.readOnly = !editing;
             let placeholder = words.NothingWaiting;
-            if (live.ready === null && live.edited) {
+            if (live.ready === null && live.held !== null && !blocked) {
+                placeholder = live.held;
+            } else if (live.ready === null && live.edited) {
                 placeholder = words.EditHeld;
             } else if (live.ready === null && blocked && (live.forced || (live.due && live.prepared))) {
                 placeholder = words.HeldReady;
@@ -23333,6 +27198,9 @@ const ScribePanel = Object.freeze({
             ScribePanel.wait(panel, settings.Outlets.Force, parts.Force);
             parts.ForceReason.hidden = !blocked;
             ScribePanel.write(parts.ForceReason, blocked ? live.forceBlock : settings.Nothing);
+            const held = blocked ? null : live.held;
+            parts.Held.hidden = held === null;
+            ScribePanel.write(parts.Held, held ?? settings.Nothing);
             const forceOutcome = panel.outcomes.get(settings.Outlets.Force);
             if ([words.Forced, words.PreparedLater].includes(forceOutcome)) {
                 const going = live.ready !== null || live.edited || (blocked && live.prepared);
@@ -23524,15 +27392,42 @@ const ScribePanel = Object.freeze({
                 (record) => ScribePanel.Rows.call(panel, record),
                 null,
             );
+            ScribePanel.paged(
+                panel,
+                settings.Lists.LiveCalls,
+                PanelView.each(live.calls, whole),
+                /**
+                 * @param {object} record
+                 * @return {object}
+                 */
+                (record) => ScribePanel.Rows.liveCall(panel, record),
+                null,
+            );
         },
 
         /**
          * @param {object} panel
+         * @param {object} view
+         * @param {object} live
+         * @param {{ keyed: boolean, notes: { length: number, cut: number|null }|null }} cloud
          * @return {void}
          */
-        Settings(panel) {
+        Settings(panel, view, live, cloud) {
             const settings = ScribePanel.Settings;
             const words = settings.Words;
+            const parts = panel.parts;
+            ScribePanel.write(parts.CloudState, cloud.keyed ? words.CloudKept : words.CloudLocal);
+            parts.Notes.hidden = !cloud.keyed;
+            const notes = cloud.notes;
+            let told = words.NoNotes;
+            if (notes !== null && notes.length > settings.NoCount) {
+                const going = notes.length === settings.Single ? words.NotesGoOne : words.NotesGoMany;
+                told = PanelView.number(notes.length) + going;
+                if (notes.cut !== null) {
+                    told += words.NotesCutOpen + PanelView.number(notes.cut) + words.NotesCutClose;
+                }
+            }
+            ScribePanel.write(parts.Notes, told);
             let keyState = words.KeyUnreadable;
             try {
                 keyState = ScribeStore.key(panel.storage) === settings.Nothing ? words.NoKey : words.KeySaved;
@@ -24153,6 +28048,47 @@ const ScribePanel = Object.freeze({
 
         /**
          * @param {object} panel
+         * @param {{ id: string, text: string, why: string }} contradiction
+         * @return {object}
+         */
+        contradiction(panel, contradiction) {
+            const settings = ScribePanel.Settings;
+            const section = settings.Sections.Contradictions;
+            const outlet = ScribePanel.key(section, contradiction.id);
+            const { item, outcome, actions } = ScribePanel.Rows.frame(panel, outlet);
+            actions.append(
+                ScribePanel.wait(
+                    panel,
+                    outlet,
+                    ScribePanel.button(
+                        panel,
+                        settings.Words.Dismiss,
+                        /**
+                         * @return {Promise<boolean>}
+                         */
+                        () =>
+                            ScribePanel.rule(
+                                panel,
+                                outlet,
+                                { type: ScribeLog.Ruling.DismissContradiction, contradiction: contradiction.id },
+                                null,
+                            ),
+                        settings.Guard.Book,
+                        ScribePanel.key(section, contradiction.id, settings.Acts.Dismiss),
+                    ),
+                ),
+            );
+            item.append(
+                ScribePanel.make(panel, settings.Tags.Paragraph, contradiction.text),
+                ScribePanel.make(panel, settings.Tags.Paragraph, contradiction.why, settings.Classes.Meta),
+                actions,
+                outcome,
+            );
+            return item;
+        },
+
+        /**
+         * @param {object} panel
          * @param {{ subject: string, label: string, name: string }} alias
          * @return {object}
          */
@@ -24432,6 +28368,7 @@ const ScribePanel = Object.freeze({
                             operation.name,
                             operation.category,
                             operation.text,
+                            ...PanelView.sides(operation),
                         ];
                         const text = parts
                             .filter(
@@ -24511,6 +28448,44 @@ const ScribePanel = Object.freeze({
 
         /**
          * @param {object} panel
+         * @param {{ role: *, tokensIn: *, tokensOut: *, reasoningTokens: *, finish: *, answer: *, problem: * }} record
+         * @return {object}
+         */
+        liveCall(panel, record) {
+            const settings = ScribePanel.Settings;
+            const words = settings.Words;
+            const tags = settings.Tags;
+            const item = ScribePanel.make(panel, tags.Item, settings.Nothing, settings.Classes.Row);
+            let line =
+                PanelView.said(record.role) +
+                words.TokensIn +
+                PanelView.said(record.tokensIn) +
+                words.TokensOut +
+                PanelView.said(record.tokensOut);
+            if (typeof record.reasoningTokens === settings.NumberType) {
+                line += words.Reasoning + PanelView.said(record.reasoningTokens);
+            }
+            line += words.FinishOpen + PanelView.said(record.finish);
+            item.append(ScribePanel.make(panel, tags.Paragraph, line));
+            if (typeof record.problem === settings.StringType) {
+                item.append(ScribePanel.make(panel, tags.Paragraph, record.problem, settings.Classes.Meta));
+            }
+            if (typeof record.answer === settings.StringType) {
+                item.append(
+                    ScribePanel.Rows.opening(
+                        panel,
+                        record,
+                        words.CutAnswer,
+                        ScribePanel.key(settings.Sections.LiveCalls, record.role, record.answer.length),
+                        ScribePanel.make(panel, tags.Preformatted, record.answer, settings.Classes.Message),
+                    ),
+                );
+            }
+            return item;
+        },
+
+        /**
+         * @param {object} panel
          * @param {object} source
          * @param {string} title
          * @param {string} key
@@ -24580,11 +28555,13 @@ const ScribeBoot = Object.freeze({
             Pedant: 'pedant',
         }),
         Budget: 'budget',
+        NotesOpen: '\n\nOPERATOR NOTES:\n',
         Parts: Object.freeze([
             Object.freeze({ name: 'sender', ending: 'detach' }),
             Object.freeze({ name: 'panel', ending: 'unmount' }),
             Object.freeze({ name: 'live', ending: 'close' }),
             Object.freeze({ name: 'keeper', ending: 'close' }),
+            Object.freeze({ name: 'cloud', ending: 'close' }),
         ]),
         IfAvailable: Object.freeze({ ifAvailable: true }),
         Once: Object.freeze({ once: true }),
@@ -24599,7 +28576,7 @@ const ScribeBoot = Object.freeze({
         SentWindowMs: 10000,
         TokenShortest: 16,
         TokenLongest: 200,
-        NothingOffered: Object.freeze({ ready: null, suggestion: null }),
+        NothingOffered: Object.freeze({ ready: null, suggestion: null, ends: Object.freeze([]) }),
         Capture: true,
         Hidden: 'hidden',
         ResponseType: 'text',
@@ -24653,6 +28630,7 @@ const ScribeBoot = Object.freeze({
             NoBridge: 'The bridge to the chat frame could not be keyed: ',
             NoToken: 'no usable token was made',
             NoStore: 'the token could not be read, made or saved',
+            NotSynced: 'The book could not be synced: ',
         }),
     }),
 
@@ -24919,7 +28897,7 @@ const ScribeBoot = Object.freeze({
      * @param {string} system
      * @param {string} user
      * @param {{ amount: number, settled: boolean }} bill
-     * @return {Promise<string>}
+     * @return {Promise<{ text: string, tokensIn: number, tokensOut: number, reasoningTokens: number|null, finish: string }>}
      * @throws {Error}
      */
     async call(session, role, system, user, bill) {
@@ -25022,6 +29000,9 @@ const ScribeBoot = Object.freeze({
                 },
             );
         };
+        const notes = session.cloud === null ? null : session.cloud.notes();
+        const noted = typeof notes === settings.StringType && notes !== settings.Nothing;
+        const told = noted ? `${user}${settings.NotesOpen}${notes}` : user;
         const answer = await ScribeGateway.retry(
             /**
              * @return {Promise<object>}
@@ -25032,14 +29013,14 @@ const ScribeBoot = Object.freeze({
                     key,
                     model,
                     system,
-                    user,
+                    user: told,
                     maxTokens: settings.MaxTokens[role],
                     sleep: pause,
                     timeoutMs,
                 }),
             { attempts: settings.Attempts, pauseMs: settings.PauseMs, sleep: pause },
         );
-        return answer.text;
+        return answer;
     },
 
     /**
@@ -25054,9 +29035,9 @@ const ScribeBoot = Object.freeze({
         const bill = { amount: ScribeBoot.Settings.NoSpending, settled: false };
         ScribeBoot.solvent(session);
         try {
-            const text = await ScribeBoot.call(session, role, system, user, bill);
+            const answer = await ScribeBoot.call(session, role, system, user, bill);
             bill.settled = true;
-            return { text, cost: bill.amount };
+            return { text: answer.text, cost: bill.amount };
         } catch (error) {
             bill.settled = true;
             ScribeBoot.charge(session, bill.amount);
@@ -25069,7 +29050,7 @@ const ScribeBoot = Object.freeze({
      * @param {string} role
      * @param {string} system
      * @param {string} user
-     * @return {Promise<{ text: string, cost: number }>}
+     * @return {Promise<{ text: string, cost: number, tokensIn: number, tokensOut: number, reasoningTokens: number|null, finish: string }>}
      * @throws {Error}
      */
     async counted(session, role, system, user) {
@@ -25077,13 +29058,24 @@ const ScribeBoot = Object.freeze({
         const environment = session.boot.environment;
         ScribeBoot.solvent(session);
         const budget = ScribeBoot.setting(session, settings.Budget);
-        if (ScribeStore.spent(environment.storage, session.roomId, environment.clock.today()) >= budget) {
+        const today = environment.clock.today();
+        const spent =
+            ScribeStore.spent(environment.storage, session.roomId, today) +
+            ScribeStore.others(environment.storage, session.roomId, today);
+        if (spent >= budget) {
             throw new Error(settings.Messages.Spent);
         }
         const bill = { amount: settings.NoSpending, settled: false };
         try {
-            const text = await ScribeBoot.call(session, role, system, user, bill);
-            return { text, cost: bill.amount };
+            const answer = await ScribeBoot.call(session, role, system, user, bill);
+            return {
+                text: answer.text,
+                cost: bill.amount,
+                tokensIn: answer.tokensIn,
+                tokensOut: answer.tokensOut,
+                reasoningTokens: answer.reasoningTokens,
+                finish: answer.finish,
+            };
         } finally {
             bill.settled = true;
             ScribeBoot.charge(session, bill.amount);
@@ -25393,7 +29385,12 @@ const ScribeBoot = Object.freeze({
         }
         session.live.view();
         const lines = session.live.lines();
-        return Object.freeze({ ready: ScribeBoot.fit(lines.ready), suggestion: ScribeBoot.fit(lines.suggestion) });
+        const ready = ScribeBoot.fit(lines.ready);
+        return Object.freeze({
+            ready,
+            suggestion: ScribeBoot.fit(lines.suggestion),
+            ends: ready === null ? ScribeBoot.Settings.NothingOffered.ends : lines.ends,
+        });
     },
 
     /**
@@ -25413,6 +29410,7 @@ const ScribeBoot = Object.freeze({
             token: boot.bridge,
             ready: lines.ready,
             suggestion: lines.suggestion,
+            ends: [...lines.ends],
         };
         const clone = boot.environment.clone;
         try {
@@ -25484,7 +29482,13 @@ const ScribeBoot = Object.freeze({
         );
         const live = session.live;
         if (kept !== undefined && kept.session === session && live !== null) {
-            const lines = Object.freeze({ ready: report.ready ? kept.ready : null, suggestion: report.suggestion ? kept.suggestion : null });
+            const ready = report.ready ? kept.ready : null;
+            const lines = Object.freeze({
+                ready,
+                suggestion: report.suggestion ? kept.suggestion : null,
+                carried: ready !== null && report.cut !== null ? ready.slice(0, report.cut) : ready,
+                crowded: report.crowded,
+            });
             ScribeBoot.attempt(
                 boot,
                 ScribeBoot.Settings.Messages.NotTold,
@@ -25597,6 +29601,15 @@ const ScribeBoot = Object.freeze({
         );
         ScribeBoot.contest(session);
         ScribeBoot.arm(session.boot, []);
+        const cloud = session.cloud;
+        ScribeBoot.attempt(
+            session.boot,
+            ScribeBoot.Settings.Messages.NotSynced,
+            /**
+             * @return {Promise<void>}
+             */
+            () => cloud.tick(),
+        );
         ScribeBoot.attempt(
             session.boot,
             ScribeBoot.Settings.Messages.NotChecked,
@@ -25605,6 +29618,40 @@ const ScribeBoot = Object.freeze({
              */
             () => keeper.tick(),
         );
+    },
+
+    /**
+     * @param {object} session
+     * @return {void}
+     */
+    sync(session) {
+        const cloud = session.cloud;
+        if (cloud === null || session.closed) {
+            return;
+        }
+        ScribeBoot.attempt(
+            session.boot,
+            ScribeBoot.Settings.Messages.NotSynced,
+            /**
+             * @return {Promise<void>}
+             */
+            () => cloud.stir(),
+        );
+    },
+
+    /**
+     * @param {object} session
+     * @return {boolean}
+     * @throws {Error}
+     */
+    chosen(session) {
+        if (session.locking) {
+            return session.reader;
+        }
+        const storage = session.boot.environment.storage;
+        const name = ScribeStore.name(ScribeStore.Settings.Types.Claim, ScribeStore.room(session.roomId));
+        const held = ScribeStore.claimOf(ScribeStore.fetch(storage, name));
+        return held !== null && held.tabId === session.boot.environment.tabId;
     },
 
     /**
@@ -26007,6 +30054,62 @@ const ScribeBoot = Object.freeze({
              * @return {Promise<void>}
              */
             const pause = (milliseconds) => ScribeBoot.pause(session, milliseconds);
+            session.cloud = ScribeCloud.open({
+                storage: environment.storage,
+                roomId: session.roomId,
+                notesRoom: environment.pageWindow.location.pathname,
+                xmlHttpRequest: environment.xmlHttpRequest,
+                clock: environment.clock,
+                random: environment.random,
+
+                /**
+                 * @param {number} milliseconds
+                 * @param {Function} action
+                 * @return {void}
+                 */
+                later: (milliseconds, action) => {
+                    ScribeBoot.later(session, milliseconds, action, null);
+                },
+
+                /**
+                 * @return {boolean}
+                 */
+                chosen: () => ScribeBoot.chosen(session),
+
+                /**
+                 * @return {boolean}
+                 */
+                reader: () => session.keeper !== null && session.keeper.view().reader === true,
+
+                /**
+                 * @return {boolean}
+                 */
+                busy: () => session.keeper !== null && (session.keeper.view().busy ?? null) !== null,
+
+                /**
+                 * @return {boolean}
+                 */
+                reading: () => ScribeBoot.reading(session),
+
+                /**
+                 * @return {void}
+                 */
+                notify: () => {
+                    const keeper = session.keeper;
+                    if (session.closed || keeper === null) {
+                        return;
+                    }
+                    ScribeBoot.redraw(session);
+                    ScribeBoot.attempt(
+                        boot,
+                        messages.NotChecked,
+                        /**
+                         * @return {Promise<void>}
+                         */
+                        () => keeper.tick(),
+                    );
+                },
+            });
             const options = {
                 storage: environment.storage,
                 roomId: session.roomId,
@@ -26064,10 +30167,16 @@ const ScribeBoot = Object.freeze({
                     }
                     ScribeBoot.redraw(session);
                     ScribeBoot.arm(boot, []);
+                    ScribeBoot.sync(session);
                     if (session.wanted) {
                         ScribeBoot.contest(session);
                     }
                 },
+
+                /**
+                 * @return {boolean}
+                 */
+                lease: () => session.cloud !== null && session.cloud.leads(),
             };
             if (session.locking) {
                 /**
@@ -26108,10 +30217,11 @@ const ScribeBoot = Object.freeze({
                 story: () => ZetaSource.story({ fetch, token: ScribeBoot.token(boot), roomId: session.roomId, pause }),
 
                 /**
-                 * @return {Promise<string>}
+                 * @param {string|null} plotId
+                 * @return {Promise<string|null>}
                  */
-                profile: () =>
-                    ZetaSource.profile({ fetch, token: ScribeBoot.token(boot), roomId: session.roomId, pause }),
+                profile: (plotId) =>
+                    ZetaSource.profile({ fetch, token: ScribeBoot.token(boot), roomId: session.roomId, pause }, plotId),
 
                 /**
                  * @return {void}
@@ -26119,6 +30229,7 @@ const ScribeBoot = Object.freeze({
                 notify: () => {
                     ScribeBoot.redraw(session);
                     ScribeBoot.arm(boot, []);
+                    ScribeBoot.sync(session);
                 },
             });
             session.live = live;
@@ -26138,6 +30249,7 @@ const ScribeBoot = Object.freeze({
                 document: environment.document,
                 keeper,
                 live,
+                cloud: session.cloud,
                 storage: environment.storage,
                 confirm: environment.confirm,
                 download: environment.download,
@@ -26171,6 +30283,15 @@ const ScribeBoot = Object.freeze({
             );
             session.ticking = true;
             ScribeBoot.arm(boot, ScribeBoot.targets(boot));
+            const cloud = session.cloud;
+            ScribeBoot.attempt(
+                boot,
+                messages.NotSynced,
+                /**
+                 * @return {Promise<void>}
+                 */
+                () => cloud.tick(),
+            );
         } catch (error) {
             const abandoned = session.closed;
             ScribeBoot.close(session);
@@ -26241,6 +30362,7 @@ const ScribeBoot = Object.freeze({
                     resting: false,
                     warned: false,
                     wanted: false,
+                    cloud: null,
                     keeper: null,
                     live: null,
                     panel: null,
@@ -26277,7 +30399,7 @@ const ScribeBoot = Object.freeze({
     },
 
     /**
-     * @param {{ pageWindow: object, document: object, storage: object, xmlHttpRequest: Function, exporter: Function|null, clone: Function|null, timers: { setTimeout: Function, clearTimeout: Function, setInterval: Function, clearInterval: Function }, clock: { now: () => number, today: () => string }, tabId: string, locks: object|null, confirm: (text: string) => boolean, download: (name: string, text: string) => void, log: (text: string) => void }} environment
+     * @param {{ pageWindow: object, document: object, storage: object, xmlHttpRequest: Function, exporter: Function|null, clone: Function|null, timers: { setTimeout: Function, clearTimeout: Function, setInterval: Function, clearInterval: Function }, clock: { now: () => number, today: () => string }, tabId: string, locks: object|null, confirm: (text: string) => boolean, download: (name: string, text: string) => void, log: (text: string) => void, random: () => string, menu: (label: string, action: Function) => void, prompt: (text: string) => string|null, alert: (text: string) => void }} environment
      * @return {Readonly<{ stop: () => void }>}
      */
     start(environment) {
@@ -26355,6 +30477,40 @@ const ScribeBoot = Object.freeze({
         environment.document.addEventListener(settings.VisibilityEvent, visibility);
         boot.visibility = visibility;
         ScribeBoot.keyed(boot);
+        const cloudWords = ScribeCloud.Settings;
+        environment.menu(
+            cloudWords.Menu,
+            /**
+             * @return {void}
+             */
+            () => {
+                ScribeBoot.attempt(
+                    boot,
+                    messages.NotSynced,
+                    /**
+                     * @return {void}
+                     * @throws {Error}
+                     */
+                    () => {
+                        const key = environment.prompt(cloudWords.Prompt);
+                        if (key === null || key === undefined) {
+                            return;
+                        }
+                        if (!ScribeCloud.validKey(key)) {
+                            environment.alert(cloudWords.BadKey);
+                            return;
+                        }
+                        if (key === ScribeStore.cloudKey(environment.storage)) {
+                            return;
+                        }
+                        ScribeStore.setCloudKey(environment.storage, key);
+                        if (boot.session !== null && !boot.session.closed) {
+                            ScribeBoot.askTick(boot.session);
+                        }
+                    },
+                );
+            },
+        );
         boot.request = ScribeBoot.request(environment.xmlHttpRequest);
         if (boot.watcher !== null) {
             boot.watcher.onTraffic(
@@ -26531,6 +30687,27 @@ switch (
              * @return {boolean}
              */
             confirm: (text) => window.confirm(text),
+
+            /**
+             * @param {string} label
+             * @param {Function} action
+             * @return {*}
+             */
+            menu: (label, action) => GM_registerMenuCommand(label, action),
+
+            /**
+             * @param {string} text
+             * @return {string|null}
+             */
+            prompt: (text) => window.prompt(text),
+
+            /**
+             * @param {string} text
+             * @return {void}
+             */
+            alert: (text) => {
+                window.alert(text);
+            },
 
             /**
              * @param {string} name

@@ -15,6 +15,8 @@ const ScribeAnalyzer = Object.freeze({
             Scenes: 'LAST SCENES:',
             Nights: 'NIGHTS:',
             Threads: 'OPEN THREADS:',
+            Ended: 'ENDED FACTS:',
+            Closed: 'CLOSED THREADS:',
             Notes: 'PLAYER NOTES:',
             Answers: 'ANSWERED QUESTIONS:',
         }),
@@ -34,6 +36,8 @@ const ScribeAnalyzer = Object.freeze({
         Pinned: ' pinned',
         Hidden: ' hidden',
         Stale: ' (check: the other side has changed)',
+        EndedMark: ' ENDED',
+        ClosedMark: ' CLOSED',
         Joiner: ' | ',
         Day: 'Day ',
         Hash: '#',
@@ -101,7 +105,7 @@ const ScribeAnalyzer = Object.freeze({
             '',
             'The book is a list of single facts. Each has an id like F12, a subject, a category, a statement and the message number that established it. You never rewrite the book. You only add facts, and say when the story has changed or ended one.',
             '',
-            'You receive PLAYER CHARACTER, SUBJECTS (everyone and everything that has an entry), LEDGER (the facts now in force for the subjects named in the new messages), LAST SCENES, NIGHTS, OPEN THREADS and the NEW MESSAGES.',
+            'You receive PLAYER CHARACTER, SUBJECTS (everyone and everything that has an entry), LEDGER (the facts now in force for the subjects named in the new messages), LAST SCENES, NIGHTS, OPEN THREADS, ENDED FACTS (facts on those same subjects that the story has ended, each with why and the message that ended it), CLOSED THREADS (each with how it resolved and the message that closed it) and the NEW MESSAGES.',
             "PLAYER CHARACTER PROFILE is the player's own description of their character; trust it for that character.",
             'In the LEDGER each fact ends with (#n), the message that established it, or (owner) when the player added it by hand. After that it may be marked pinned, hidden, or (check: the other side has changed).',
             '',
@@ -129,6 +133,9 @@ const ScribeAnalyzer = Object.freeze({
             'CLOSE T3 | how it resolved | #n',
             '=== QUESTIONS',
             'A question for the player | #n',
+            '=== CONTRADICTIONS',
+            '#n "words copied from the new message" | #n "words copied from an earlier message in NEW MESSAGES" | one sentence on what disagrees',
+            '#n "words copied from the new message" | F12 | one sentence on what disagrees',
             '',
             'Categories. Use exactly these words.',
             'One value at a time:',
@@ -174,6 +181,7 @@ const ScribeAnalyzer = Object.freeze({
             '12. NIGHTS: only nights slept through and stated time skips. Conditions need no tidying: they expire at the next night by themselves.',
             '13. THREADS: something left hanging that the story could pick up later: a threat, a promise, a plan, a mystery, someone due back. A fact, a feeling or something already finished is not a thread. At most two new threads per stretch. Never repeat the open list.',
             '14. QUESTIONS. When the story leaves something unclear and a guess would matter (does she like him or love him; is this the same man as before), write no fact for it. Ask the player one short question instead. At most two questions per stretch.',
+            '15. CONTRADICTIONS. One line for each place where the NEW MESSAGES contradict the LEDGER, an ENDED FACT, a CLOSED THREAD or an earlier message, about any subject and in any category, objects and events included (who holds an item and since when, who did what). The first quote is copied exactly from the new message, its number before it. The second part is where the other version comes from: when it is an earlier message among the NEW MESSAGES, that message\'s number and words copied exactly from it; otherwise the id of the entry it contradicts, as shown in LEDGER, ENDED FACTS, OPEN THREADS or CLOSED THREADS (F12 or T3), with nothing else. The line ends with the sentence, not a number. A value that rule 6 files as a plain FACTS line is still filed there too. Nothing goes here when nothing disagrees.',
         ]),
 
         NotesPromptLines: Object.freeze([
@@ -503,14 +511,29 @@ const ScribeAnalyzer = Object.freeze({
     },
 
     /**
+     * @param {object} fact
+     * @param {Map<string, string>} labels
+     * @return {string}
+     */
+    statement(fact, labels) {
+        const settings = ScribeAnalyzer.Settings;
+        let category = fact.category;
+        if (category === ScribeCategory.Settings.RelationCategory) {
+            category = settings.RelationTo + (fact.target === null ? fact.targetText : labels.get(fact.target));
+        }
+        const owned = fact.origin === ScribeLog.Origin.Operator;
+        const source = owned ? settings.Owner : settings.CiteOpen + fact.position + settings.Closing;
+        return category + settings.Colon + fact.text + source;
+    },
+
+    /**
      * @param {object} state
      * @param {string} player
-     * @param {string} text
-     * @param {number} before
+     * @param {readonly string[]} chosen
      * @param {number} through
      * @return {readonly string[]}
      */
-    opening(state, player, text, before, through) {
+    opening(state, player, chosen, through) {
         const settings = ScribeAnalyzer.Settings;
         const headings = settings.Headings;
         const labels = ScribeAnalyzer.labels(state);
@@ -529,7 +552,7 @@ const ScribeAnalyzer = Object.freeze({
             stale.add(JSON.stringify([mark.subject, mark.target]));
         }
         const ledgers = new Map();
-        for (const id of ScribeAnalyzer.select(state, text, player, before)) {
+        for (const id of chosen) {
             ledgers.set(id, []);
         }
         for (const fact of state.facts) {
@@ -537,16 +560,7 @@ const ScribeAnalyzer = Object.freeze({
             if (lines === undefined || fact.status !== ScribeReplay.Status.InForce || fact.position > through) {
                 continue;
             }
-            let category = fact.category;
-            if (category === ScribeCategory.Settings.RelationCategory) {
-                category = settings.RelationTo + (fact.target === null ? fact.targetText : labels.get(fact.target));
-            }
-            let line = fact.id + settings.Space + category + settings.Colon + fact.text;
-            if (fact.origin === ScribeLog.Origin.Operator) {
-                line += settings.Owner;
-            } else {
-                line += settings.CiteOpen + fact.position + settings.Closing;
-            }
+            let line = fact.id + settings.Space + ScribeAnalyzer.statement(fact, labels);
             if (fact.pinned) {
                 line += settings.Pinned;
             }
@@ -647,8 +661,51 @@ const ScribeAnalyzer = Object.freeze({
                  */
                 (thread) => thread.id + settings.Colon + thread.text,
             );
+        const chosen = ScribeAnalyzer.select(state, transcript, player, first);
+        const selected = new Set(chosen);
+        const ended = [];
+        for (const fact of state.facts) {
+            if (!selected.has(fact.subject) || fact.status !== ScribeReplay.Status.Ended || fact.position > last) {
+                continue;
+            }
+            const why = fact.ended.reason;
+            const reason = why === settings.Nothing ? settings.Nothing : settings.Colon + why;
+            ended.push(
+                fact.id +
+                    settings.Space +
+                    labels.get(fact.subject) +
+                    settings.Space +
+                    ScribeAnalyzer.statement(fact, labels) +
+                    settings.EndedMark +
+                    reason +
+                    settings.CiteOpen +
+                    fact.ended.position +
+                    settings.Closing,
+            );
+        }
+        const closed = [];
+        for (const thread of state.threads) {
+            if (thread.closed === null || thread.position > last) {
+                continue;
+            }
+            const resolved = thread.closed.how;
+            const how = resolved === settings.Nothing ? settings.Nothing : settings.Colon + resolved;
+            closed.push(
+                thread.id +
+                    settings.Colon +
+                    thread.text +
+                    settings.CiteOpen +
+                    thread.position +
+                    settings.Closing +
+                    settings.ClosedMark +
+                    how +
+                    settings.CiteOpen +
+                    thread.closed.position +
+                    settings.Closing,
+            );
+        }
         const messages = settings.MessagesOpen + first + settings.MessagesTo + last + settings.MessagesClose;
-        const [named, ...known] = ScribeAnalyzer.opening(state, player, transcript, first, last);
+        const [named, ...known] = ScribeAnalyzer.opening(state, player, chosen, last);
         const profiled = profile === null ? [] : [ScribeAnalyzer.section(headings.Profile, [profile])];
         return [
             named,
@@ -657,6 +714,8 @@ const ScribeAnalyzer = Object.freeze({
             ScribeAnalyzer.section(headings.Scenes, scenes),
             ScribeAnalyzer.section(headings.Nights, nights),
             ScribeAnalyzer.section(headings.Threads, threads),
+            ScribeAnalyzer.section(headings.Ended, ended),
+            ScribeAnalyzer.section(headings.Closed, closed),
             ScribeAnalyzer.section(messages, [transcript]),
         ].join(settings.BlankLine);
     },
@@ -685,8 +744,9 @@ const ScribeAnalyzer = Object.freeze({
              */
             (note) => settings.NumberOpen + note.position + settings.NumberClose + note.text,
         );
+        const chosen = ScribeAnalyzer.select(state, text, player, settings.NoSceneBefore);
         return [
-            ...ScribeAnalyzer.opening(state, player, text, settings.NoSceneBefore, settings.NoLimit),
+            ...ScribeAnalyzer.opening(state, player, chosen, settings.NoLimit),
             ScribeAnalyzer.section(settings.Headings.Notes, lines),
         ].join(settings.BlankLine);
     },
@@ -728,8 +788,9 @@ const ScribeAnalyzer = Object.freeze({
                 settings.AnswerMarker +
                 question.answer,
         );
+        const chosen = ScribeAnalyzer.select(state, text, player, settings.NoSceneBefore);
         return [
-            ...ScribeAnalyzer.opening(state, player, text, settings.NoSceneBefore, settings.NoLimit),
+            ...ScribeAnalyzer.opening(state, player, chosen, settings.NoLimit),
             ScribeAnalyzer.section(settings.Headings.Answers, lines),
         ].join(settings.BlankLine);
     },

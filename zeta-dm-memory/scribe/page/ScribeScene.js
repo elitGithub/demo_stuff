@@ -14,6 +14,9 @@ const ScribeScene = Object.freeze({
         Closing: ')',
         Day: 'Day ',
         Present: 'present: ',
+        StatusCategory: 'status',
+        StatusOpen: ' STATUS: ',
+        StatusJoiner: '; ',
         SubjectPrefix: 'subject:',
         LabelPrefix: 'label:',
         BoldInner: '$1',
@@ -106,6 +109,7 @@ const ScribeScene = Object.freeze({
             '5. present lists everyone who is there at the last message, the player\'s character included, separated by commas. Use a label from SUBJECTS exactly when the person has one; otherwise the name the story uses. Someone who has left is not present. Write nobody when no one is there.',
             '6. CHANGED is yes when the place, the day, or who is present differs from LAST KNOWN SCENE, or when there is no LAST KNOWN SCENE. Otherwise no.',
             '7. Never invent. If the messages do not say where the characters are, keep the place of LAST KNOWN SCENE.',
+            "8. A SUBJECTS line may end with STATUS: the book's word on whether they live. Someone whose STATUS says they died, were destroyed or left the story is never present, unless the RECENT MESSAGES show them back.",
         ]),
     }),
 
@@ -159,10 +163,21 @@ const ScribeScene = Object.freeze({
         const headings = settings.Headings;
         const subjects = [];
         const labels = new Map();
+        const statuses = new Map();
+        for (const fact of state.facts) {
+            if (fact.category === settings.StatusCategory && fact.status === ScribeReplay.Status.InForce) {
+                statuses.set(fact.subject, [...(statuses.get(fact.subject) ?? []), fact.text]);
+            }
+        }
         for (const subject of state.subjects) {
             labels.set(subject.id, subject.label);
             if (subject.mergedInto === null) {
-                subjects.push(settings.ListMarker + subject.label + settings.Opening + subject.kind + settings.Closing);
+                const held = statuses.get(subject.id) ?? [];
+                const status =
+                    held.length === 0 ? settings.Nothing : settings.StatusOpen + held.join(settings.StatusJoiner);
+                subjects.push(
+                    settings.ListMarker + subject.label + settings.Opening + subject.kind + settings.Closing + status,
+                );
             }
         }
         const scenes = [];
@@ -518,6 +533,7 @@ const ScribeScene = Object.freeze({
         const newest = messages.at(ScribeScene.Settings.Last);
         const found = {
             message: newest.id,
+            fingerprint: newest.fingerprint,
             position: newest.position,
             day: parsed.day,
             place: parsed.place,

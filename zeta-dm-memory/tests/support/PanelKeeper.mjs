@@ -81,6 +81,13 @@ export default class PanelKeeper {
     }
 
     /**
+     * @return {void}
+     */
+    rekey() {
+        this.calls.push({ name: 'rekey', args: [] });
+    }
+
+    /**
      * @return {Promise<void>}
      */
     pull() {

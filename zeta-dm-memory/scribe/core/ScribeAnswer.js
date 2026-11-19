@@ -19,6 +19,7 @@ const ScribeAnswer = Object.freeze({
         ThreadOpen: 'ThreadOpen',
         ThreadClose: 'ThreadClose',
         Question: 'Question',
+        Contradiction: 'Contradiction',
     }),
 
     Reach: Object.freeze({
@@ -36,6 +37,7 @@ const ScribeAnswer = Object.freeze({
         'NIGHTS',
         'THREADS',
         'QUESTIONS',
+        'CONTRADICTIONS',
     ]),
 
     Settings: Object.freeze({
@@ -78,6 +80,7 @@ const ScribeAnswer = Object.freeze({
         ThreadFields: 3,
         CloseOnlyFields: 2,
         QuestionFields: 2,
+        ContradictionFields: 3,
 
         /**
          * @return {RegExp}
@@ -252,6 +255,27 @@ const ScribeAnswer = Object.freeze({
          */
         get CloseThread() {
             return /^close\s+(T\d+)$/i;
+        },
+
+        /**
+         * @return {RegExp}
+         */
+        get QuotedCitation() {
+            return /^([^\s"“”]*)\s*["“”]([\s\S]*)["“”]$/u;
+        },
+
+        /**
+         * @return {RegExp}
+         */
+        get CitedNumber() {
+            return /^#(\d+)$/;
+        },
+
+        /**
+         * @return {RegExp}
+         */
+        get EntryId() {
+            return /^(?:#\d+\s+)?["'“”‘’]?([FT]\d+)\.?["'“”‘’]?\.?(?:\s*\(\s*#\d+\s*\))?$/i;
         },
     }),
 
@@ -766,6 +790,55 @@ const ScribeAnswer = Object.freeze({
                 return reasons.Citation;
             }
             return Object.freeze({ type: ScribeAnswer.Type.Question, text, position: cited.first });
+        },
+
+        /**
+         * @param {string[]} fields
+         * @return {object|string}
+         */
+        CONTRADICTIONS(fields) {
+            const settings = ScribeAnswer.Settings;
+            const reasons = ScribeAnswer.Reason;
+            if (fields.length !== settings.ContradictionFields) {
+                return reasons.Shape;
+            }
+            const [saidField, beforeField, whyField] = fields;
+            const saidMatch = saidField.match(settings.QuotedCitation);
+            const named = beforeField.match(settings.EntryId);
+            const entry = named === null ? null : named[1].toUpperCase();
+            const beforeMatch = entry === null ? beforeField.match(settings.QuotedCitation) : null;
+            const why = ScribeAnswer.text([whyField]);
+            if (saidMatch === null || (entry === null && beforeMatch === null) || why === null) {
+                return reasons.Shape;
+            }
+            const said = saidMatch[2].trim();
+            const before = beforeMatch === null ? null : beforeMatch[2].trim();
+            if (!settings.HasContent.test(said) || (before !== null && !settings.HasContent.test(before))) {
+                return reasons.Shape;
+            }
+            const saidNumber = saidMatch[1].match(settings.CitedNumber);
+            const position = saidNumber === null ? null : ScribeAnswer.positiveInteger(saidNumber[1]);
+            if (position === null) {
+                return reasons.Citation;
+            }
+            if (entry !== null) {
+                return Object.freeze({
+                    type: ScribeAnswer.Type.Contradiction,
+                    position,
+                    said,
+                    earlier: null,
+                    before: null,
+                    entry,
+                    why,
+                });
+            }
+            const beforeNumber = beforeMatch[1].match(settings.CitedNumber);
+            const earlier = beforeNumber === null ? null : ScribeAnswer.positiveInteger(beforeNumber[1]);
+            if (earlier === null || earlier >= position) {
+                return reasons.Citation;
+            }
+            const type = ScribeAnswer.Type.Contradiction;
+            return Object.freeze({ type, position, said, earlier, before, entry, why });
         },
     }),
 

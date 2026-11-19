@@ -161,6 +161,9 @@ const worker = Object.freeze({
         MethodNotAllowed: Object.freeze({ code: 'method_not_allowed', status: 405, message: 'Method not allowed.' }),
         RevisionConflict: Object.freeze({ code: 'revision_conflict', status: 409, message: 'Notes changed elsewhere. Reload before saving.' }),
         PayloadTooLarge: Object.freeze({ code: 'payload_too_large', status: 413, message: 'Request or notes exceed the size limit.' }),
+        ScribeTooLarge: Object.freeze({
+            code: 'payload_too_large', status: 413, message: 'Scribe request or part exceeds the size limit.',
+        }),
         UnsupportedMediaType: Object.freeze({ code: 'unsupported_media_type', status: 415, message: 'Use application/json with UTF-8 encoding.' }),
         UnsupportedText: Object.freeze({
             code: 'unsupported_media_type', status: 415, message: 'Use text/plain with UTF-8 encoding.',
@@ -726,10 +729,11 @@ const worker = Object.freeze({
      * @param {RegExp} pattern
      * @param {number} limit
      * @param {keyof typeof worker.Errors} unsupported
+     * @param {keyof typeof worker.Errors} tooLarge
      * @return {Promise<Uint8Array>}
      * @throws {Error}
      */
-    async readBody(request, pattern, limit, unsupported) {
+    async readBody(request, pattern, limit, unsupported, tooLarge) {
         const contentType = request.headers.get('Content-Type');
         if (!contentType || !pattern.test(contentType)) {
             throw worker.failure(unsupported);
@@ -751,7 +755,7 @@ const worker = Object.freeze({
                     try {
                         await reader.cancel();
                     } finally {
-                        throw worker.failure('PayloadTooLarge');
+                        throw worker.failure(tooLarge);
                     }
                 }
                 bytes.set(value, size);
@@ -772,7 +776,7 @@ const worker = Object.freeze({
      */
     async readSaveBody(request) {
         const bytes = await worker.readBody(
-            request, worker.MediaTypes.Json, worker.Limits.BodyBytes, 'UnsupportedMediaType'
+            request, worker.MediaTypes.Json, worker.Limits.BodyBytes, 'UnsupportedMediaType', 'PayloadTooLarge'
         );
         const revisionSources = new WeakMap();
         let payload;
@@ -849,7 +853,7 @@ const worker = Object.freeze({
      */
     async readPartText(request) {
         const bytes = await worker.readBody(
-            request, worker.MediaTypes.Text, worker.Limits.PartBytes, 'UnsupportedText'
+            request, worker.MediaTypes.Text, worker.Limits.PartBytes, 'UnsupportedText', 'ScribeTooLarge'
         );
         let text;
         try {
@@ -861,7 +865,7 @@ const worker = Object.freeze({
             throw worker.failure('BadRequest');
         }
         if (text.length > worker.Limits.PartCharacters) {
-            throw worker.failure('PayloadTooLarge');
+            throw worker.failure('ScribeTooLarge');
         }
         const hash = new Uint8Array(await crypto.subtle.digest('SHA-256', bytes));
         const digest = Array.from(hash,
@@ -881,7 +885,7 @@ const worker = Object.freeze({
      */
     async readScribeJson(request) {
         const bytes = await worker.readBody(
-            request, worker.MediaTypes.Json, worker.Limits.ScribeBodyBytes, 'UnsupportedMediaType'
+            request, worker.MediaTypes.Json, worker.Limits.ScribeBodyBytes, 'UnsupportedMediaType', 'ScribeTooLarge'
         );
         const sources = new WeakMap();
         let payload;
@@ -1061,7 +1065,7 @@ const worker = Object.freeze({
         }
         const action = JSON.stringify(payload.action);
         if (new TextEncoder().encode(action).length > worker.Limits.AskBytes) {
-            throw worker.failure('PayloadTooLarge');
+            throw worker.failure('ScribeTooLarge');
         }
         return Object.freeze({ browser, id, action });
     },

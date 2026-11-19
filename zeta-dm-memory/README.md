@@ -81,7 +81,7 @@ Each query name appears exactly once, with no others. `kind` is `settings`, `boo
 
 `POST /v1/scribe/spend` keeps this browser's running total for the day, between 0 and 1,000,000, only when it is higher than the stored one, so repeats are harmless; `sum` is every browser's total for that day and `mine` this browser's. `POST /v1/scribe/ask` queues one JSON object of at most 8,192 UTF-8 bytes for the reading browser, at most 20 per room; asks come back oldest first, `action` as the stored JSON text.
 
-The scribe's JSON bodies are at most 16,384 bytes; the notes PUT keeps its 524,288. The scribe routes have their own limit of 600 requests per UTC minute, beside the notes limit of 180, so neither starves the other. Rows of older revisions and abandoned staging are removed at the next commit; `scribe_spent` keeps one small row per room, day and browser.
+The scribe's JSON bodies are at most 16,384 bytes; the notes PUT keeps its 524,288. A `413` on a scribe route says `Scribe request or part exceeds the size limit.`; the notes routes keep `Request or notes exceed the size limit.` The scribe routes have their own limit of 600 requests per UTC minute, beside the notes limit of 180, so neither starves the other. Rows of older revisions and abandoned staging are removed at the next commit; `scribe_spent` keeps one small row per room, day and browser.
 
 ## Deploy through the Cloudflare dashboard
 
@@ -345,14 +345,14 @@ Run the engine's tests with `node --test tests/scribe-*.test.mjs`. The [scribe e
 
 ## The scribe on the Zeta page
 
-The scribe is a second userscript, separate from the notes widget above. It keeps a book of a campaign (people, facts, who knows what, scenes, open threads), reminds the scene what it knows with each message you send, checks each reply against the book, and offers developments. It stores everything in Tampermonkey's storage in this browser and talks to one outside service, OpenRouter, with your own key.
+The scribe is a second userscript, separate from the notes widget above. It keeps a book of a campaign (people, facts, who knows what, scenes, open threads), reminds the scene what it knows with each message you send, checks each reply against the book, and offers developments. It stores everything in Tampermonkey's storage in this browser and talks to OpenRouter with your own key. With the DM API key set it also keeps the book in your Worker, so every PC with the key opens the same book.
 
 ### Build and install
 
 1. From this directory run `node scribe/pack.mjs`. It writes `scribe/scribe.user.js` from the sources under `scribe/core/` and `scribe/page/`. Run it again after any change to those files.
 2. In the Tampermonkey dashboard create a new script, paste the contents of `scribe/scribe.user.js` and save. Its name is **Zeta Scribe**.
 3. **Disable the Zeta DM Memory script** while the scribe is enabled. Both hold Enter back and write into the chat box; together they append twice.
-4. When Tampermonkey asks for a connection, allow only `openrouter.ai`.
+4. When Tampermonkey asks for a connection, allow only `openrouter.ai` and the Worker host, `zeta-dm-memory.elit1989.workers.dev`.
 5. Open a Zeta room. The panel appears at the right edge; under 1,100 px of window width it starts collapsed behind a **Scribe** button.
 
 The chat box lives inside a frame served by `frame.pingpong.ai`, so the script runs in two places: on the room page, where it keeps the book, the key and the panel, and inside that frame, where it only adds the scribe's line to your message. The two talk by messages that each side checks for origin and sender. The key, the book and the settings never enter the frame.
@@ -382,6 +382,22 @@ Every answer OpenRouter bills is counted against the day's budget, including ans
 
 Each chat has its own book, and for each chat one tab reads and checks. Several chats can be open in several tabs at once; a tab keeps working while it is hidden. A second tab on the same chat shows the book and changes nothing; when the first tab is hidden, it hands that chat to the second.
 
+### The book in your Worker
+
+Without a DM API key the scribe works on this browser only, as above, and the **Settings** tab says the book stays on this PC. To share it between PCs:
+
+1. Run the reviewed `schema.sql` and deploy `worker.mjs` as in **Deploy** above; the scribe uses the `/v1/scribe` routes.
+2. Allow the Worker host when Tampermonkey asks (step 4 of **Build and install**).
+3. On Zeta, select **Set DM API key** from the Tampermonkey menu of **Zeta Scribe** and enter the same Worker key the notes script uses. Repeat on each PC. The key is kept in Tampermonkey's storage and sent only to your Worker; the OpenRouter key is sent only to OpenRouter.
+
+What goes to the Worker: the book, the settings and the live record (findings, reminder state), and each PC's spending for the day. The chat itself never leaves the browser; every PC pulls it from Zeta with the page's own login. The first time a chat is opened with the key and the Worker has nothing for it, this PC's book goes up as it is, with no new reading.
+
+One PC reads at a time. The reading PC holds a 90-second lease in the Worker and renews it every tick; another PC that opens the chat downloads the book and says **Another PC is reading this chat.** It takes over when the lease lapses, 90 seconds after the reading PC was closed. Changes go up two seconds after the last save, and the book only between readings. The budget counts every PC's spending for the day.
+
+When the Worker does not answer within 15 seconds the header adds **Working offline** and the scribe goes on with this PC's copy; what changed goes up when the Worker answers. If the Worker then holds a different book (another PC read meanwhile), the header asks which to keep, showing how many messages each has read: **Keep this PC's book** or **Use the cloud's**. A refused key says so in the header and keeps the book on this PC until the key is set again.
+
+The scribe also reads the chat's DM Memory notes from the Worker when the chat opens and every five minutes, and gives the first 4,000 characters to its models under `OPERATOR NOTES:`; the **Settings** tab says how many characters go. It never writes them.
+
 ### Limits
 
 - Nothing here has run in a real browser or against the real site or a real model yet. The [scribe page verification record](docs/verification/scribe-page-verification.md) lists what the tests cover and, in order, what to check on the real page first.
@@ -391,6 +407,8 @@ Each chat has its own book, and for each chat one tab reads and checks. Several 
 - Names in scripts without capital letters, and names with unusual characters, are counted among "others" in the reminder.
 - If the userscript runs in the page's own JavaScript world, a hostile script on the site could observe the key. The scribe assumes Zeta's own scripts are not hostile.
 - `scribe/private/` and `spike/` hold exports and are ignored by Git, but a web server that serves this directory would serve them.
+- A book larger than ten parts of 400,000 characters stays on this PC; the header says so.
+- A PC that only watches another PC's reading checks the lease every 20 seconds but does not download newer books until it reads; live updates between PCs come with the next step of this work.
 
 Run the tests one file at a time, for example `node --test tests/scribe-whole.test.mjs`. On a machine with little memory use `NODE_OPTIONS=--max-old-space-size=600 prlimit --as=3000000000 timeout -s KILL 120 node --test --test-timeout=20000 <file>`.
 

@@ -46,6 +46,7 @@ export default class WholeSite {
         zeta.most = WholeSite.MostRequests;
         zeta.plot = `plot-${room}`;
         zeta.profile = WholeSite.Profile;
+        zeta.persona = '';
         this.rooms.set(room, { builder, zeta });
     }
 
@@ -78,14 +79,9 @@ export default class WholeSite {
      * @return {object|undefined}
      */
     keptFor(url) {
-        const plot = /^\/v1\/plots\/([^/]+)$/.exec(new URL(String(url)).pathname);
-        if (plot === null) {
-            const room = WholeSite.roomOf(url);
-            return room === null ? undefined : this.rooms.get(room);
-        }
-        return [...this.rooms.values()].find(
-            (entry) => entry.zeta.plot !== null && encodeURIComponent(entry.zeta.plot) === plot[1],
-        );
+        const persona = /^\/v1\/plots\/[^/]+\/rooms\/([^/]+)\//.exec(new URL(String(url)).pathname);
+        const room = persona === null ? WholeSite.roomOf(url) : decodeURIComponent(persona[1]);
+        return room === null ? undefined : this.rooms.get(room);
     }
 
     /**

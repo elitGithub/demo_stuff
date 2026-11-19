@@ -638,8 +638,11 @@ const ScribeKeeper = Object.freeze({
      * @return {string|null}
      */
     recount(keeper) {
+        const today = keeper.clock.today();
         try {
-            keeper.spentToday = ScribeStore.spent(keeper.storage, keeper.roomId, keeper.clock.today()) + ScribeKeeper.owedToday(keeper);
+            const spent = ScribeStore.spent(keeper.storage, keeper.roomId, today);
+            const others = ScribeStore.others(keeper.storage, keeper.roomId, today);
+            keeper.spentToday = spent + others + ScribeKeeper.owedToday(keeper);
         } catch (error) {
             return ScribeKeeper.words(error);
         }
@@ -681,7 +684,7 @@ const ScribeKeeper = Object.freeze({
         const day = keeper.clock.today();
         const total = ScribeKeeper.spend(keeper, day, amount);
         if (total !== null) {
-            keeper.spentToday = total + ScribeKeeper.owedToday(keeper);
+            ScribeKeeper.counted(keeper);
             return true;
         }
         const owed = keeper.owed.has(day) ? keeper.owed.get(day) : ScribeKeeper.Settings.NoSpending;
@@ -745,10 +748,11 @@ const ScribeKeeper = Object.freeze({
      * @throws {Error}
      */
     claimed(keeper) {
-        if (keeper.claim !== null) {
-            return keeper.claim() === true;
-        }
-        return ScribeStore.claim(keeper.storage, keeper.roomId, keeper.tabId, keeper.clock.now());
+        const held =
+            keeper.claim === null
+                ? ScribeStore.claim(keeper.storage, keeper.roomId, keeper.tabId, keeper.clock.now())
+                : keeper.claim() === true;
+        return held && (keeper.lease === null || keeper.lease() === true);
     },
 
     /**
@@ -757,12 +761,15 @@ const ScribeKeeper = Object.freeze({
      * @throws {Error}
      */
     still(keeper) {
-        if (keeper.claim !== null) {
-            return keeper.claim() === true;
+        let held = false;
+        if (keeper.claim === null) {
+            const name = ScribeStore.name(ScribeStore.Settings.Types.Claim, ScribeStore.room(keeper.roomId));
+            const stored = ScribeStore.claimOf(ScribeStore.fetch(keeper.storage, name));
+            held = stored !== null && stored.tabId === keeper.tabId;
+        } else {
+            held = keeper.claim() === true;
         }
-        const name = ScribeStore.name(ScribeStore.Settings.Types.Claim, ScribeStore.room(keeper.roomId));
-        const held = ScribeStore.claimOf(ScribeStore.fetch(keeper.storage, name));
-        return held !== null && held.tabId === keeper.tabId;
+        return held && (keeper.lease === null || keeper.lease() === true);
     },
 
     /**
@@ -1408,7 +1415,10 @@ const ScribeKeeper = Object.freeze({
         ScribeKeeper.tell(keeper, { kind: ScribeKeeper.Event.Changed });
         let result = null;
         try {
-            job.recorded = ScribeStore.spent(keeper.storage, keeper.roomId, keeper.clock.today());
+            const today = keeper.clock.today();
+            job.recorded =
+                ScribeStore.spent(keeper.storage, keeper.roomId, today) +
+                ScribeStore.others(keeper.storage, keeper.roomId, today);
             const profile = keeper.profile === null ? null : await keeper.profile();
             result = await ScribeAdoption.run({
                 messages: chosen,
@@ -1907,6 +1917,26 @@ const ScribeKeeper = Object.freeze({
     /**
      * @param {object} keeper
      * @return {void}
+     */
+    rekey(keeper) {
+        const stop = keeper.stop;
+        const failed = stop !== null && stop.reason === ScribeAdoption.Stop.Failed;
+        if (keeper.closed || !keeper.reader || !failed || keeper.busy === ScribeKeeper.Busy.Reading) {
+            return;
+        }
+        if (!ScribeKeeper.writable(keeper)) {
+            return;
+        }
+        ScribeKeeper.keepStop(keeper, null, false);
+        if (keeper.phase === ScribeKeeper.Phase.Stopped) {
+            keeper.phase = ScribeKeeper.resting(keeper);
+        }
+        ScribeKeeper.tell(keeper, { kind: ScribeKeeper.Event.Changed });
+    },
+
+    /**
+     * @param {object} keeper
+     * @return {void}
      * @throws {Error}
      */
     solvent(keeper) {
@@ -2109,7 +2139,7 @@ const ScribeKeeper = Object.freeze({
         keeper.busy = null;
         keeper.flight = null;
         keeper.kept = [];
-        if (keeper.reader && keeper.claim === null) {
+        if (keeper.claim === null && (keeper.reader || keeper.lease !== null)) {
             try {
                 ScribeStore.release(keeper.storage, keeper.roomId, keeper.tabId);
             } catch (error) {
@@ -2147,6 +2177,13 @@ const ScribeKeeper = Object.freeze({
              */
             pause: () => {
                 ScribeKeeper.pause(keeper);
+            },
+
+            /**
+             * @return {void}
+             */
+            rekey: () => {
+                ScribeKeeper.rekey(keeper);
             },
 
             /**
@@ -2243,7 +2280,7 @@ const ScribeKeeper = Object.freeze({
     },
 
     /**
-     * @param {{ storage: { get: Function, set: Function, remove: Function, list: Function }, roomId: string, tabId: string, zeta: { history: Function, newest: Function }, ask: Function, clock: { now: Function, today: Function }, notify: Function, claim?: () => boolean, profile?: () => Promise<string|null> }} options
+     * @param {{ storage: { get: Function, set: Function, remove: Function, list: Function }, roomId: string, tabId: string, zeta: { history: Function, newest: Function }, ask: Function, clock: { now: Function, today: Function }, notify: Function, claim?: () => boolean, lease?: () => boolean, profile?: () => Promise<string|null> }} options
      * @return {Promise<Readonly<object>>}
      * @throws {Error}
      */
@@ -2252,6 +2289,10 @@ const ScribeKeeper = Object.freeze({
         const settings = ScribeKeeper.Settings;
         const claim = options.claim === undefined || options.claim === null ? null : options.claim;
         if (claim !== null && typeof claim !== settings.FunctionType) {
+            throw new Error(settings.Messages.BadClaim);
+        }
+        const lease = options.lease === undefined || options.lease === null ? null : options.lease;
+        if (lease !== null && typeof lease !== settings.FunctionType) {
             throw new Error(settings.Messages.BadClaim);
         }
         const profile = options.profile === undefined || options.profile === null ? null : options.profile;
@@ -2267,6 +2308,7 @@ const ScribeKeeper = Object.freeze({
             clock,
             notify,
             claim,
+            lease,
             profile,
             phase: ScribeKeeper.Phase.Loading,
             reader: false,

@@ -3,6 +3,7 @@ import { createHash } from 'node:crypto';
 import { test } from 'node:test';
 import worker from '../worker.mjs';
 import CloudflareCrypto from './support/CloudflareCrypto.mjs';
+import FakeScribeWorker from './support/FakeScribeWorker.mjs';
 import ScriptedD1 from './support/ScriptedD1.mjs';
 import SqliteD1 from './support/SqliteD1.mjs';
 
@@ -1126,4 +1127,107 @@ test('scribe_kind_holds_at_most_ten_parts', async (context) => {
     await scribe.answer(scribe.commit(db, BrowserA, [scribe.change('book', 0, texts)]));
     assert.equal(await scribe.published(db, 'book', 1, 10), texts.join(''));
     assert.equal(await scribe.refusal(scribe.part(db, 'book', 1, 10), 400), 'bad_request');
+});
+
+test('the_fake_worker_answers_as_the_worker', async (context) => {
+    CloudflareCrypto.install(context);
+    const db = new SqliteD1(context);
+    const { BrowserA, BrowserB, Start, Day, NextDay } = scribe;
+    let nowMs = Start;
+    context.mock.method(Date, 'now', () => nowMs);
+    const fake = new FakeScribeWorker({ now: () => nowMs }, fixtures.Key);
+    const room = { roomId: scribe.Room };
+    const settings = '{"budget":3}';
+    const book = ['{"subjects":["Mara é ', '𐍈"]}'];
+    const live = '{"findings":[]}';
+    const json = (route, payload) => ({ method: 'POST', route, query: room, body: JSON.stringify(payload) });
+    const lease = (browser, want = 'None') => json('/v1/scribe/lease', { browser, want });
+    const stage = (browser, kind, revision, part, text) => ({
+        method: 'PUT', route: '/v1/scribe/part', query: { ...room, kind, revision, part, browser }, body: text, type: scribe.TextType,
+    });
+    const commit = (browser, kinds, done = []) => json('/v1/scribe/commit', { browser, kinds, done });
+    const heads = (browser, day = Day) => ({ method: 'GET', route: '/v1/scribe', query: { ...room, browser, day }, body: null });
+    const part = (kind, revision, number) => ({
+        method: 'GET', route: '/v1/scribe/part', query: { ...room, kind, revision, part: number }, body: null,
+    });
+    const swapped = { ...scribe.change('book', 0, book), digests: [scribe.digest(book[1]), scribe.digest(book[0])] };
+    const steps = [
+        heads(BrowserA),
+        lease(BrowserA),
+        lease(BrowserB, 'Asked'),
+        stage(BrowserB, 'book', 1, 0, 'Intruder'),
+        stage(BrowserA, 'settings', 1, 0, settings),
+        stage(BrowserA, 'book', 1, 0, book[0]),
+        stage(BrowserA, 'book', 1, 1, book[1]),
+        commit(BrowserA, [scribe.change('settings', 0, [settings]), swapped]),
+        commit(BrowserA, [scribe.change('settings', 0, [settings]), scribe.change('book', 0, book)]),
+        part('book', 1, 0),
+        part('book', 1, 1),
+        part('book', 1, 2),
+        part('settings', 2, 0),
+        commit(BrowserA, [scribe.change('settings', 0, [settings])]),
+        stage(BrowserA, 'book', 1, 0, 'Rewrite'),
+        stage(BrowserA, 'live', 1, 0, live),
+        commit(BrowserA, [scribe.change('live', 0, [live])]),
+        commit(BrowserA, [scribe.change('live', 0, [live])]),
+        commit(BrowserB, [scribe.change('live', 1, [live])]),
+        json('/v1/scribe/spend', { browser: BrowserA, day: Day, total: 0.25 }),
+        json('/v1/scribe/spend', { browser: BrowserA, day: Day, total: 0.125 }),
+        json('/v1/scribe/spend', { browser: BrowserB, day: Day, total: 0.5 }),
+        json('/v1/scribe/spend', { browser: BrowserB, day: NextDay, total: 2 }),
+        heads(BrowserA),
+        heads(BrowserB, NextDay),
+        json('/v1/scribe/ask', { browser: BrowserB, id: 'Fictional-Ask-000000000001', action: { name: 'Dismiss' } }),
+        json('/v1/scribe/ask', { browser: BrowserB, id: 'Fictional-Ask-000000000001', action: { name: 'Dismiss' } }),
+        lease(BrowserA),
+        stage(BrowserA, 'live', 2, 0, '{"findings":[1]}'),
+        commit(BrowserA, [scribe.change('live', 1, ['{"findings":[1]}'])], ['Fictional-Ask-000000000001']),
+        heads(BrowserB),
+        { method: 'DELETE', route: '/v1/scribe/lease', query: { ...room, browser: BrowserB }, body: null },
+        { method: 'DELETE', route: '/v1/scribe/lease', query: { ...room, browser: BrowserA }, body: null },
+        lease(BrowserA),
+        stage(BrowserA, 'live', 3, 0, live),
+        'later',
+        lease(BrowserA, 'Waiting'),
+        { method: 'DELETE', route: '/v1/scribe/lease', query: { ...room, browser: BrowserB }, body: null },
+        lease(BrowserB),
+        { method: 'GET', route: '/v1/memory', query: room, body: null },
+    ];
+    const statuses = [];
+    for (const step of steps) {
+        if (step === 'later') {
+            nowMs += 91000;
+            continue;
+        }
+        const query = new URLSearchParams(step.query).toString();
+        const type = step.type ?? 'application/json';
+        const real = await scribe.send(db, step.method, step.route, step.query, step.body, type);
+        const realText = await real.text();
+        const answered = await new Promise((resolve) => {
+            const headers = { Authorization: 'Bearer ' + fixtures.Key };
+            if (step.body !== null) {
+                headers['Content-Type'] = type;
+            }
+            fake.request({
+                method: step.method,
+                url: FakeScribeWorker.Origin + step.route + '?' + query,
+                headers,
+                data: step.body ?? undefined,
+                onload: resolve,
+                onerror: () => resolve(null),
+            });
+        });
+        const label = `${step.method} ${step.route} ${query}`;
+        assert.equal(answered.status, real.status, label);
+        if (real.headers.get('Content-Type') === scribe.TextType) {
+            assert.equal(answered.responseText, realText, label);
+        } else {
+            assert.deepEqual(JSON.parse(answered.responseText), JSON.parse(realText), label);
+        }
+        statuses.push(real.status);
+    }
+    assert.deepEqual(statuses, [
+        200, 200, 200, 409, 200, 200, 200, 409, 200, 200, 200, 404, 404, 409, 409, 200, 200, 409, 409,
+        200, 200, 200, 200, 200, 200, 201, 200, 200, 200, 200, 200, 200, 200, 200, 409, 200, 200, 200, 404,
+    ]);
 });

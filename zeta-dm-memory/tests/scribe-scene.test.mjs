@@ -221,6 +221,36 @@ test('the input holds the sections in order', () => {
     assert.ok(ScribeScene.input(state, 'Orla', thirty.slice(0, 5), null).includes('RECENT MESSAGES (#1 to #5):'));
 });
 
+test('the status the book holds goes with each subject, so the dead are not reported present', () => {
+    const log = ScribeLog.create();
+    apply(
+        log,
+        answer({
+            SUBJECTS: ['Halvard | character', 'Mirelle | character', 'Tamsin | character', 'Corvane | place'],
+            FACTS: [
+                'Halvard | status | alive | #2',
+                'Halvard | status | missing since the flood | #6',
+                'Mirelle | status | dead, slain by Halvard at the ford | #8',
+                'Tamsin | status | alive | #3',
+                'Tamsin | role | ferry keeper | #3',
+            ],
+        }),
+        story.slice(0, 10),
+    );
+    const before = ScribeReplay.run(log, storyOrder);
+    const tamsinStatus = before.facts.find((fact) => fact.category === 'status' && fact.text === 'alive' && fact.position === 3);
+    apply(log, answer({ CHANGES: [`${tamsinStatus.id} | Tamsin | status | ENDED: no longer known | #12`] }), story.slice(10, 14));
+    const dead = ScribeReplay.run(log, storyOrder);
+    const text = ScribeScene.input(dead, 'Orla', story.slice(0, 20), null);
+    assert.deepEqual(sectionOf(text, 'SUBJECTS:'), [
+        '- Halvard (character) STATUS: missing since the flood',
+        '- Mirelle (character) STATUS: dead, slain by Halvard at the ford',
+        '- Tamsin (character)',
+        '- Corvane (place)',
+    ]);
+    assert.ok(ScribeScene.Prompt.includes('Someone whose STATUS says they died, were destroyed or left the story is never present'));
+});
+
 test('a scene line is read', () => {
     assert.deepEqual(plain(ScribeScene.parse(`${SCENE_LINE}\nCHANGED: yes`)), SCENE);
     assert.deepEqual(plain(ScribeScene.parse('DAY 12 | The mill | PUBLIC | PRESENT: Halvard | x\nCHANGED: no')), {
@@ -509,12 +539,16 @@ test('the prompt is exact', () => {
     const prompt = ScribeScene.Prompt;
     const lines = prompt.split('\n');
     assert.ok(prompt.startsWith('You are the Scribe:'));
-    assert.ok(prompt.endsWith('7. Never invent. If the messages do not say where the characters are, keep the place of LAST KNOWN SCENE.'));
+    assert.ok(
+        prompt.endsWith(
+            "8. A SUBJECTS line may end with STATUS: the book's word on whether they live. Someone whose STATUS says they died, were destroyed or left the story is never present, unless the RECENT MESSAGES show them back.",
+        ),
+    );
     const numbered = lines.filter((line) => /^\d+\. /.test(line));
-    assert.equal(numbered.length, 7);
+    assert.equal(numbered.length, 8);
     assert.deepEqual(
         numbered.map((line) => line.split('.')[0]),
-        ['1', '2', '3', '4', '5', '6', '7'],
+        ['1', '2', '3', '4', '5', '6', '7', '8'],
     );
     assert.ok(!prompt.includes('\t'));
     assert.ok(!prompt.includes('\r'));

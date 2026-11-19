@@ -168,6 +168,7 @@ function mounted(log, options = {}) {
     return new PanelHarness(scripts, {
         keeper: keeperView(log, options.keeper ?? {}),
         live: options.live ?? liveView(),
+        cloud: options.cloud,
         width: options.width,
         storage: options.storage,
     }).mount();
@@ -4564,4 +4565,328 @@ test('a failure that lands during a composition is compared when it ends', async
     assert.equal(panel.text('scribe-next-outcome'), '');
     panel.redraw();
     assert.equal(panel.text('scribe-next-outcome'), '');
+});
+
+/**
+ * @param {string} phase
+ * @param {object} changes
+ * @return {object}
+ */
+function cloudView(phase, changes = {}) {
+    return { phase, keyed: true, conflict: null, notes: null, unsent: 0, problem: null, ...changes };
+}
+
+const BAD_ROOM = "This chat's ID cannot be used as a room in your Worker";
+
+test('the headline says where the book is kept', () => {
+    const log = readTo(ScribeLog.create(), 0);
+    const idle = keeperView(log);
+    const watching = keeperView(log, { phase: Phase.Watching, reader: false });
+    const today = PanelView.headline(idle, liveView());
+    assert.equal(today.startsWith('Up to date: '), true);
+    const cases = [
+        [idle, null, today],
+        [idle, cloudView('Off', { keyed: false }), today],
+        [idle, cloudView('Leading'), today],
+        [watching, cloudView('Off', { keyed: false }), 'Another tab is reading this chat.'],
+        [watching, cloudView('Loading'), 'Loading the book from your Worker...'],
+        [watching, cloudView('Watching'), 'Another PC is reading this chat.'],
+        [watching, cloudView('Conflict', { conflict: { here: 1, there: 2 } }), 'This PC and your Worker hold different books for this chat.'],
+        [idle, cloudView('Offline'), `${today} Working offline.`],
+        [idle, cloudView('Refused'), `${today} The DM API key was refused; the book stays on this PC.`],
+        [idle, cloudView('Unusable', { problem: BAD_ROOM }), `${today} The book stays on this PC: ${BAD_ROOM}.`],
+        [
+            idle,
+            cloudView('Leading', { problem: 'Your Worker refused the request: bad_request' }),
+            `${today} Worker: Your Worker refused the request: bad_request`,
+        ],
+    ];
+    for (const [keeper, cloud, expected] of cases) {
+        const line = cloud === null ? PanelView.headline(keeper, liveView()) : PanelView.headline(keeper, liveView(), cloud);
+        assert.equal(line, expected, `${keeper.phase} ${cloud?.phase}`);
+        const panel = mounted(log, { keeper: { phase: keeper.phase, reader: keeper.reader }, cloud: cloud ?? undefined });
+        assert.equal(panel.text('scribe-headline'), expected);
+    }
+    const troubled = keeperView(log, { problem: 'Zeta could not be reached' });
+    const offline = PanelView.headline(troubled, liveView({}, { problem: 'The scene failed' }), cloudView('Offline', { problem: 'x' }));
+    assert.equal(offline.endsWith(' Working offline. Problem: Zeta could not be reached Scribe: The scene failed Worker: x'), true);
+});
+
+test('the choice shows only on a conflict, with both counts, Use the cloud on the left', () => {
+    const log = readTo(ScribeLog.create(), 10);
+    for (const phase of ['Off', 'Leading', 'Watching', 'Offline', 'Loading']) {
+        const panel = mounted(log, { cloud: cloudView(phase, { conflict: { here: 1, there: 2 } }) });
+        assert.equal(panel.byId('scribe-choice').hidden, true, phase);
+    }
+    const panel = mounted(log, { keeper: { phase: Phase.Watching, reader: false }, cloud: cloudView('Conflict', { conflict: { here: 120, there: 1310 } }) });
+    assert.equal(panel.byId('scribe-choice').hidden, false);
+    assert.equal(panel.text('scribe-choice-counts'), 'This PC: 120 messages read. Your Worker: 1,310 messages read.');
+    assert.deepEqual(panel.buttonTexts('scribe-choice'), ["Use the cloud's", "Keep this PC's book"]);
+    assert.equal(panel.byId('scribe-keep-here').classes.has('primary'), true);
+    assert.equal(panel.byId('scribe-use-cloud').classes.has('primary'), false);
+    assert.deepEqual(panel.buttonsWhere('scribe-choice', true), []);
+    assert.equal(panel.questions.length, 0);
+    panel.cloud.current = cloudView('Conflict', { conflict: { here: null, there: 1 } });
+    panel.redraw();
+    assert.equal(panel.text('scribe-choice-counts'), 'This PC: no book. Your Worker: 1 message read.');
+    panel.cloud.current = cloudView('Conflict', { conflict: { here: 0, there: null } });
+    panel.redraw();
+    assert.equal(panel.text('scribe-choice-counts'), 'This PC: 0 messages read. Your Worker: no book.');
+    panel.cloud.current = cloudView('Leading');
+    panel.redraw();
+    assert.equal(panel.byId('scribe-choice').hidden, true);
+});
+
+test('either choice says Working at once and shows a refusal in its outlet', async () => {
+    const log = readTo(ScribeLog.create(), 10);
+    const conflict = cloudView('Conflict', { conflict: { here: 120, there: 131 } });
+    const panel = mounted(log, { keeper: { phase: Phase.Watching, reader: false }, cloud: conflict });
+    const held = panel.cloud.hold();
+    panel.click('scribe-keep-here');
+    await panel.flush();
+    assert.equal(panel.text('scribe-choice-outcome'), 'Working...');
+    assert.deepEqual(panel.buttonsWhere('scribe-choice', true), ["Use the cloud's", "Keep this PC's book"]);
+    panel.click('scribe-use-cloud');
+    await panel.flush();
+    assert.equal(panel.cloud.called('useCloud').length, 0);
+    held.open();
+    await panel.flush();
+    assert.equal(panel.text('scribe-choice-outcome'), '');
+    assert.deepEqual(panel.buttonsWhere('scribe-choice', true), []);
+    assert.equal(panel.cloud.called('keep').length, 1);
+    const elsewhere = "Another PC is reading this chat; this PC's book is kept as soon as it lets go.";
+    panel.cloud.failure = new Error(elsewhere);
+    panel.click('scribe-keep-here');
+    await panel.flush();
+    assert.equal(panel.text('scribe-choice-outcome'), elsewhere);
+    assert.equal(panel.text('scribe-trouble'), '');
+    panel.click('scribe-use-cloud');
+    await panel.flush();
+    assert.equal(panel.cloud.called('useCloud').length, 1);
+    assert.equal(panel.text('scribe-choice-outcome'), '');
+    assert.equal(panel.questions.length, 0);
+});
+
+test('the Settings tab says where the book is kept and how much of the notes goes to the models', async () => {
+    const log = readTo(ScribeLog.create(), 10);
+    const local = mounted(log);
+    await local.tab('Settings');
+    assert.equal(
+        local.text('scribe-cloud-state'),
+        'No DM API key: the book stays on this PC. Set DM API key from the Tampermonkey menu to keep it in your Worker.',
+    );
+    assert.equal(local.byId('scribe-notes').hidden, true);
+    const cases = [
+        [null, 'No operator notes for this chat in your Worker.'],
+        [{ length: 0, cut: null }, 'No operator notes for this chat in your Worker.'],
+        [{ length: 1, cut: null }, '1 character of the operator notes goes to the models.'],
+        [{ length: 3000, cut: 4001 }, '3,000 characters of the operator notes go to the models. They were cut from 4,001 characters.'],
+        [{ length: 4000, cut: null }, '4,000 characters of the operator notes go to the models.'],
+    ];
+    for (const [notes, expected] of cases) {
+        const panel = mounted(log, { cloud: cloudView('Leading', { notes }) });
+        await panel.tab('Settings');
+        assert.equal(panel.text('scribe-cloud-state'), 'The book is kept in your Worker and shared by every PC with the DM API key.');
+        assert.equal(panel.byId('scribe-notes').hidden, false);
+        assert.equal(panel.text('scribe-notes'), expected);
+    }
+});
+
+test('the choice fits a phone: the block takes the width and its buttons wrap', () => {
+    const log = readTo(ScribeLog.create(), 10);
+    const panel = mounted(log, { width: 390, cloud: cloudView('Conflict', { conflict: { here: 120, there: 131 } }) });
+    assert.equal(panel.byId('scribe-choice').hidden, false);
+    assert.equal(panel.byId('scribe-use-cloud').parent.classes.has('actions'), true);
+    assert.equal(panel.byId('scribe-choice').classes.has('choice'), true);
+    assert.match(PanelStyle.Text, /\.choice \{[^}]*flex: 1 1 100%;/);
+    assert.match(PanelStyle.Text, /\.choice p \{[^}]*overflow-wrap: anywhere;/);
+    assert.match(PanelStyle.Text, /\.actions \{[^}]*flex-wrap: wrap;/);
+    assert.doesNotMatch(PanelStyle.Text, /\.choice[^{]*\{[^}]*(white-space: nowrap|overflow-x: (scroll|auto))/);
+});
+
+test('a cloud view that throws locks everything', () => {
+    const log = readTo(ScribeLog.create(), 10);
+    const panel = mounted(log, { cloud: cloudView('Conflict', { conflict: { here: 1, there: 2 } }) });
+    panel.cloud.view = () => {
+        throw new Error('The cloud view broke');
+    };
+    panel.redraw();
+    assert.equal(panel.text('scribe-trouble'), 'Something went wrong in the panel: The cloud view broke');
+    assert.equal(panel.byId('scribe-use-cloud').disabled, true);
+    assert.equal(panel.byId('scribe-keep-here').disabled, true);
+});
+
+test("the Analyzer's contradictions are listed newest first with both quotes, are dismissed, and never block", async () => {
+    const log = rulingsBook();
+    /**
+     * @param {string} id
+     * @param {number} position
+     * @param {number} earlierPosition
+     * @param {boolean} dismissed
+     * @return {object}
+     */
+    const read = (id, position, earlierPosition, dismissed) => ({
+        id,
+        cite: `MESSAGE-${position}`,
+        position,
+        earlier: `MESSAGE-${earlierPosition}`,
+        earlierPosition,
+        said: `guarded the staff ${position}`,
+        before: `held the staff ${earlierPosition}`,
+        why: `Two keepers of one staff at ${position}.`,
+        dismissed,
+    });
+    const contradictions = [read('first', 3, 1, false), read('gone', 4, 2, true), read('second', 9, 5, false)];
+    const state = { ...replay(log), contradictions };
+    const panel = mounted(log, { keeper: { state } });
+    const before = panel.text('scribe-badge');
+    await panel.tab('Rulings');
+    assert.deepEqual(panel.rowTexts('contradictions').map((text) => text.split('.')[0]), [
+        '#9 "guarded the staff 9" against #5 "held the staff 5"Two keepers of one staff at 9',
+        '#3 "guarded the staff 3" against #1 "held the staff 1"Two keepers of one staff at 3',
+    ]);
+    panel.button(panel.rowSaying('contradictions', 'staff 9'), 'Dismiss').click();
+    await panel.flush();
+    assert.deepEqual(panel.keeper.calls.at(-1), {
+        name: 'rule',
+        args: [{ type: 'DismissContradiction', contradiction: 'second' }],
+    });
+    const quiet = mounted(log, { keeper: { state: { ...replay(log), contradictions: [] } } });
+    assert.equal(quiet.text('scribe-badge'), before);
+    assert.deepEqual(plain(PanelView.needs(state)), plain(PanelView.needs(replay(log))));
+});
+
+test('the header says which live calls keep failing, and the reminder line says why none waits', async () => {
+    const log = readTo(ScribeLog.create(), 40);
+    const held = 'No reminder: the scene was last read at #157; the latest reply is #225.';
+    const panel = mounted(log, {
+        live: liveView([], {
+            failing: ['Scene failing: unexpected HTTP status; status 402', 'Checks failing: no answer'],
+            held,
+        }),
+    });
+    assert.equal(
+        panel.text('scribe-headline').endsWith(
+            ' Scene failing: unexpected HTTP status; status 402 Checks failing: no answer',
+        ),
+        true,
+        panel.text('scribe-headline'),
+    );
+    await panel.tab('Findings');
+    assert.equal(panel.byId('scribe-reminder').getAttribute('placeholder'), held);
+});
+
+test('live calls are listed beside the keeper calls, a cut-off answer with its first characters', async () => {
+    const log = readTo(ScribeLog.create(), 40);
+    const calls = [
+        Object.freeze({
+            role: 'Pedant',
+            tokensIn: 900,
+            tokensOut: 4000,
+            reasoningTokens: 3100,
+            finish: 'length',
+            answer: 'w'.repeat(2000),
+            problem: 'answer was cut off; status 200; finish length',
+        }),
+        Object.freeze({
+            role: 'Scribe',
+            tokensIn: 10,
+            tokensOut: 20,
+            reasoningTokens: null,
+            finish: 'stop',
+            answer: null,
+            problem: null,
+        }),
+    ];
+    const panel = mounted(log, { live: liveView([], { calls }) });
+    await panel.tab('Progress');
+    const texts = panel.rowTexts('liveCalls');
+    assert.equal(texts.length, 2);
+    assert.equal(texts[0].startsWith('Pedant: in 900, out 4,000, reasoning 3,100, finish length'), false, texts[0]);
+    assert.equal(texts[0].startsWith('Pedant: in 900, out 4000, reasoning 3100, finish length'), true, texts[0]);
+    assert.equal(texts[0].includes('answer was cut off'), true);
+    assert.equal(texts[0].includes('w'.repeat(2000)), true);
+    assert.equal(texts[1], 'Scribe: in 10, out 20, finish stop');
+});
+
+test('a refused contradiction shows its numbers and quotes in Progress', async () => {
+    const log = readTo(ScribeLog.create(), 40);
+    const report = {
+        pass: 'Story',
+        first: 41,
+        last: 80,
+        read: 80,
+        total: 100,
+        spent: 0.5,
+        calls: 2,
+        unpriced: 0,
+        stored: 3,
+        refusedLines: [],
+        refusedOperations: [
+            {
+                operation: {
+                    type: 'Contradiction',
+                    position: 45,
+                    said: 'guarded it',
+                    earlier: null,
+                    before: null,
+                    entry: 'F67',
+                    why: 'Two keepers',
+                },
+                reason: 'Quote',
+            },
+            {
+                operation: {
+                    type: 'Contradiction',
+                    position: 45,
+                    said: 'kept it',
+                    earlier: 5,
+                    before: 'held it',
+                    entry: null,
+                    why: 'Two spans',
+                },
+                reason: 'Citation',
+            },
+        ],
+    };
+    const panel = mounted(log, { keeper: { lines: [report] } });
+    await panel.tab('Progress');
+    const text = panel.rowTexts('lines')[0];
+    assert.equal(text.includes('Contradiction | #45 "guarded it" | F67 | Two keepers (Quote)'), true, text);
+    assert.equal(text.includes('Contradiction | #45 "kept it" | #5 "held it" | Two spans (Citation)'), true, text);
+});
+
+test('an edit written before the latest reply stays shown, says why, and goes when saved again unchanged', async () => {
+    const log = readTo(ScribeLog.create(), 40);
+    const held = 'Your edit was written before the latest reply; Save it again to send it.';
+    const panel = mounted(log, {
+        live: liveView([], { ready: null, edited: true, stale: true, draft: '[Scribe] Mine.', held }),
+    });
+    await panel.tab('Findings');
+    assert.equal(panel.byId('scribe-reminder').value, '[Scribe] Mine.');
+    assert.equal(panel.text('scribe-held'), held);
+    assert.equal(panel.byId('scribe-held').hidden, false);
+    panel.click('scribe-edit');
+    await panel.flush();
+    assert.equal(panel.byId('scribe-reminder').value, '[Scribe] Mine.');
+    panel.click('scribe-edit-save');
+    await panel.flush();
+    assert.deepEqual(panel.live.calls.at(-1), { name: 'edit', args: ['[Scribe] Mine.', true] });
+});
+
+test('saving a key asks the keeper to lift a failed reading', async () => {
+    const log = readTo(ScribeLog.create(), 40);
+    const panel = mounted(log);
+    await panel.tab('Settings');
+    panel.byId('scribe-key').value = 'sk-or-made-up-key';
+    panel.click('scribe-save-key');
+    await panel.flush();
+    assert.deepEqual(
+        panel.keeper.calls.map((call) => call.name),
+        ['rekey'],
+    );
+    assert.deepEqual(
+        panel.live.calls.map((call) => call.name),
+        ['rekey'],
+    );
 });

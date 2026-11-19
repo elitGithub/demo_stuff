@@ -296,10 +296,11 @@ function sents(page) {
  * @param {number} seq
  * @param {boolean} ready
  * @param {boolean} suggestion
+ * @param {boolean} crowded
  * @return {object}
  */
-function sentOf(seq, ready, suggestion) {
-    return { zetaScribe: 1, kind: 'sent', seq, ready, suggestion };
+function sentOf(seq, ready, suggestion, crowded = false) {
+    return { zetaScribe: 1, kind: 'sent', seq, ready, suggestion, cut: null, crowded };
 }
 
 /**
@@ -391,9 +392,14 @@ test('only well-formed messages are messages', () => {
     ]) {
         const message = ScribeFrame.arm(data);
         assert.equal(Object.isFrozen(message), true);
-        assert.deepEqual({ ...message }, expected);
+        assert.deepEqual({ ...message, ends: [...message.ends] }, { ...expected, ends: [] });
         assert.equal(ScribeFrame.report(data), null);
     }
+    assert.deepEqual([...ScribeFrame.arm({ ...goodArm, ends: [9, 25] }).ends], [9, 25]);
+    for (const ends of [[25, 9], [0, 9], [9, READY.length], [9, 'x'], 'nine', [1.5]]) {
+        assert.deepEqual([...ScribeFrame.arm({ ...goodArm, ends }).ends], [], JSON.stringify(ends));
+    }
+    assert.deepEqual([...ScribeFrame.arm({ ...goodArm, ready: null, ends: [9] }).ends], []);
     for (const [data, expected] of [
         [goodSent, goodSent],
         [{ ...goodSent, seq: 9, ready: false, suggestion: true }, { ...goodSent, seq: 9, ready: false, suggestion: true }],
@@ -402,9 +408,15 @@ test('only well-formed messages are messages', () => {
     ]) {
         const message = ScribeFrame.report(data);
         assert.equal(Object.isFrozen(message), true);
-        assert.deepEqual({ ...message }, expected);
+        const sent = expected.kind === 'sent' ? { ...expected, cut: null, crowded: false } : expected;
+        assert.deepEqual({ ...message }, sent);
         assert.equal(ScribeFrame.arm(data), null);
     }
+    assert.equal(ScribeFrame.report({ ...goodSent, cut: 12 }).cut, 12);
+    assert.equal(ScribeFrame.report({ ...goodSent, cut: -1 }).cut, null);
+    assert.equal(ScribeFrame.report({ ...goodSent, ready: false, cut: 12 }).cut, null);
+    assert.equal(ScribeFrame.report({ ...goodSent, ready: false, crowded: true }).crowded, true);
+    assert.equal(ScribeFrame.report({ ...goodSent, crowded: true }).crowded, false);
     const untagged = { ...goodArm };
     delete untagged.zetaScribe;
     const untaggedSent = { ...goodSent };
@@ -669,7 +681,7 @@ test('nothing goes twice', () => {
     full.raw.advance(25);
     assert.ok(full.sentTexts.at(-1) === `${player}\n@: ${SUGGESTION}`);
     full.raw.advance(100);
-    assert.deepEqual(sents(full).at(-1), sentOf(1, false, true));
+    assert.deepEqual(sents(full).at(-1), sentOf(1, false, true, true));
     type(full, 'Short');
     enter(full);
     full.raw.advance(25);
@@ -848,7 +860,7 @@ test('only what went stops being offered', () => {
     arm(page, { seq: 1 });
     const player = 'x'.repeat(4500 - Buffer.byteLength(`\n@: ${SUGGESTION}`));
     assert.ok(sendNow(page, player) === `${player}\n@: ${SUGGESTION}`);
-    assert.deepEqual(sents(page).at(-1), sentOf(1, false, true));
+    assert.deepEqual(sents(page).at(-1), sentOf(1, false, true, true));
     assert.equal(sendNow(page, 'Short'), `Short\n@: ${READY}`);
     assert.deepEqual(sents(page).at(-1), sentOf(1, true, false));
     assert.equal(sendNow(page, 'Bare'), 'Bare');
@@ -885,8 +897,31 @@ test('the token is compared exactly', () => {
     assert.deepEqual(sents(page), [sentOf(1, true, true), sentOf(2, true, false)]);
 });
 
+test('the frame trims a long reminder at a sentence end, as the top page does, and says when none fits', () => {
+    const page = framePage();
+    const told = `[Scribe] The story so far: ${'Halvard rode on. '.repeat(100).trim()} Halvard is aged 34.`;
+    const ends = [];
+    for (let end = told.indexOf('.') + 1; end > 0 && end < told.length; end = told.indexOf('.', end) + 1) {
+        ends.push(end);
+    }
+    arm(page, { seq: 1, ready: told, suggestion: null, ends });
+    const player = 'x'.repeat(4500 - Buffer.byteLength(`\n@: ${told}`) + 5);
+    const sent = sendNow(page, player);
+    const carried = sent.slice(player.length + '\n@: '.length);
+    assert.equal(told.startsWith(carried), true);
+    assert.equal(carried.endsWith('Halvard rode on.'), true);
+    assert.equal(Buffer.byteLength(sent) <= 4500, true);
+    const top = ScribeSender.compose(player, { ready: told, suggestion: null, ends }, 4500);
+    assert.equal(top.text, sent);
+    assert.deepEqual(sents(page).at(-1), { ...sentOf(1, true, false), cut: carried.length });
+    arm(page, { seq: 2, ready: told, suggestion: null, ends });
+    const crowded = 'x'.repeat(4500 - 20);
+    assert.equal(sendNow(page, crowded), crowded);
+    assert.deepEqual(sents(page).at(-1), sentOf(2, false, false, true));
+});
+
 test('the frame role touches nothing else', () => {
-    assert.equal(seen.pages.length, 20);
+    assert.equal(seen.pages.length, 21);
     assert.deepEqual(
         [...seen.window].filter((name) => !WINDOW_READS.includes(name)),
         [],
@@ -910,7 +945,7 @@ test('the frame role touches nothing else', () => {
 });
 
 test('the frame reads the token and nothing else', () => {
-    assert.equal(seen.pages.length, 20);
+    assert.equal(seen.pages.length, 21);
     assert.deepEqual(
         [...seen.calls].filter((name) => !OUTSIDE_CALLS.includes(name)),
         ['token'],

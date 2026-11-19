@@ -515,6 +515,113 @@ test('open threads only', () => {
     ]);
 });
 
+test('ended facts and closed threads reach the story input with their numbers', () => {
+    const log = ScribeLog.create();
+    apply(
+        log,
+        answer({
+            SUBJECTS: ['Brannoc | character', 'Sela | character', 'Kira | character', 'Staff of Tides | item'],
+            FACTS: [
+                'Brannoc | belonging | the Staff of Tides | #2',
+                'Brannoc | relation to Sela | trusts her | #3',
+                'Kira | trait | hums at night | #4',
+                'Staff of Tides | feature | carved from driftwood | #4',
+            ],
+            THREADS: ['OPEN | who stole the lantern | #5', 'OPEN | the toll owed at the ford | #6'],
+        }),
+        stretch(1, 9),
+    );
+    rule(log, {
+        type: 'AddFact',
+        subject: 'S1',
+        category: 'trait',
+        target: null,
+        text: 'fears deep water',
+        hidden: false,
+        cite: null,
+        position: 0,
+    });
+    apply(
+        log,
+        answer({
+            CHANGES: [
+                'F1 | Brannoc | belonging | ENDED: gave it to Sela | #10',
+                'F2 | Brannoc | relation to Sela | ENDED | #11',
+                'F3 | Kira | trait | ENDED: stopped humming | #12',
+                'F5 | Brannoc | trait | ENDED: learned to swim | #15',
+            ],
+            THREADS: ['CLOSE T1 | Kira confessed | #13', 'CLOSE T2 | #14'],
+        }),
+        stretch(10, 20),
+    );
+    apply(
+        log,
+        answer({ FACTS: ['Brannoc | trait | sings badly | #70'], THREADS: ['OPEN | the debt to the miller | #70'] }),
+        pick(70),
+    );
+    const state = apply(
+        log,
+        answer({ CHANGES: ['F6 | Brannoc | trait | ENDED: took lessons | #71'], THREADS: ['CLOSE T3 | paid | #71'] }),
+        pick(71),
+    );
+    assert.deepEqual(
+        plain(state.facts.filter((fact) => fact.status === 'Ended').map((fact) => [fact.id, fact.ended.position])),
+        [
+            ['F5', 15],
+            ['F1', 10],
+            ['F2', 11],
+            ['F3', 12],
+            ['F6', 71],
+        ],
+    );
+    const messages = storyWith({ 60: 'Brannoc hands the Staff of Tides to Sela.' }).slice(59, 62);
+    const text = ScribeAnalyzer.input(state, 'Orla', messages);
+    assert.deepEqual(sectionOf(text, 'ENDED FACTS:'), [
+        'F5 Brannoc trait: fears deep water (owner) ENDED: learned to swim (#15)',
+        'F1 Brannoc belonging: the Staff of Tides (#2) ENDED: gave it to Sela (#10)',
+        'F2 Brannoc relation to Sela: trusts her (#3) ENDED (#11)',
+    ]);
+    assert.deepEqual(sectionOf(text, 'CLOSED THREADS:'), [
+        'T1: who stole the lantern (#5) CLOSED: Kira confessed (#13)',
+        'T2: the toll owed at the ford (#6) CLOSED (#14)',
+    ]);
+    assert.deepEqual(sectionOf(text, 'OPEN THREADS:'), ['(none)']);
+    assert.deepEqual(sectionOf(text, 'LEDGER:'), [
+        '## Brannoc',
+        '(no facts yet)',
+        '## Sela',
+        '(no facts yet)',
+        '## Staff of Tides',
+        'F4 feature: carved from driftwood (#4)',
+    ]);
+    const later = ScribeAnalyzer.input(state, 'Orla', storyWith({ 80: 'Brannoc waits.' }).slice(79, 80));
+    assert.deepEqual(
+        [sectionOf(later, 'ENDED FACTS:').at(-1), sectionOf(later, 'CLOSED THREADS:').at(-1)],
+        [
+            'F6 Brannoc trait: sings badly (#70) ENDED: took lessons (#71)',
+            'T3: the debt to the miller (#70) CLOSED: paid (#71)',
+        ],
+    );
+    const shifted = ScribeReplay.run(log, storyOrder.filter((id) => id !== 'MESSAGE-1'));
+    const moved = ScribeAnalyzer.input(shifted, 'Orla', storyWith({ 60: 'Brannoc and Sela.' }).slice(59, 60));
+    assert.deepEqual(sectionOf(moved, 'ENDED FACTS:'), [
+        'F5 Brannoc trait: fears deep water (owner) ENDED: learned to swim (#14)',
+        'F1 Brannoc belonging: the Staff of Tides (#1) ENDED: gave it to Sela (#9)',
+        'F2 Brannoc relation to Sela: trusts her (#2) ENDED (#10)',
+    ]);
+    assert.deepEqual(sectionOf(moved, 'CLOSED THREADS:'), [
+        'T1: who stole the lantern (#4) CLOSED: Kira confessed (#12)',
+        'T2: the toll owed at the ford (#5) CLOSED (#13)',
+    ]);
+    for (const other of [
+        ScribeAnalyzer.notesInput(state, 'Orla', [{ text: 'Brannoc and Sela are cousins', position: 12 }]),
+        ScribeAnalyzer.answersInput(state, 'Orla', []),
+    ]) {
+        assert.equal(other.includes('ENDED FACTS:'), false);
+        assert.equal(other.includes('CLOSED THREADS:'), false);
+    }
+});
+
 test('sections are in order', () => {
     const state = richBook();
     const messages = storyWith({ 60: 'Mirelle waves.' }).slice(59, 62);
@@ -525,6 +632,8 @@ test('sections are in order', () => {
         'LAST SCENES:',
         'NIGHTS:',
         'OPEN THREADS:',
+        'ENDED FACTS:',
+        'CLOSED THREADS:',
         'NEW MESSAGES (#60 to #62):',
     ];
     assert.equal(text.startsWith('PLAYER CHARACTER:\nOrla\n\n'), true);
@@ -567,6 +676,12 @@ test('sections are in order', () => {
             'OPEN THREADS:',
             'T2: the missing ring',
             '',
+            'ENDED FACTS:',
+            '(none)',
+            '',
+            'CLOSED THREADS:',
+            'T1: the debt to Brandt (#8) CLOSED: paid in full (#45)',
+            '',
             'NEW MESSAGES (#60 to #62):',
             '[#60] Narrator: Mirelle waves.',
             '',
@@ -595,6 +710,12 @@ test('sections are in order', () => {
             '(none)',
             '',
             'OPEN THREADS:',
+            '(none)',
+            '',
+            'ENDED FACTS:',
+            '(none)',
+            '',
+            'CLOSED THREADS:',
             '(none)',
             '',
             'NEW MESSAGES (#61 to #63):',
@@ -1059,6 +1180,7 @@ test('the running scene stays in last scenes', () => {
 test('the prompts teach only what the parser accepts', () => {
     const placeholders = [
         ['#first-#last', '#3-#5'],
+        ['#n "words copied from an earlier message', '#2 "words copied from an earlier message'],
         ['#n', '#4'],
         ['Day N', 'Day 2'],
         ['public or private', 'public'],
@@ -1073,6 +1195,7 @@ test('the prompts teach only what the parser accepts', () => {
         ['SUBJECTS', ' | #3'],
         ['SCENES', ' | #5'],
         ['NIGHTS', ' | #5'],
+        ['CONTRADICTIONS', ' | #5'],
     ]) {
         const own = lines[lines.indexOf(`=== ${block}`) + 1];
         const accepted = ScribeAnswer.parse(`=== ${block}\n${own}`);
@@ -1095,8 +1218,13 @@ test('the prompt names every block and no removed one', () => {
         previous = index;
     }
     for (const text of [ScribeAnalyzer.Prompt, ScribeAnalyzer.NotesPrompt, ScribeAnalyzer.AnswersPrompt]) {
-        for (const removed of ['CONTRADICTIONS', '=== NOW', '=== TIMELINE', 'knows (', 'secret (', 'name (']) {
+        for (const removed of ['=== NOW', '=== TIMELINE', 'knows (', 'secret (', 'name (']) {
             assert.equal(text.includes(removed), false, removed);
+        }
+    }
+    for (const text of [ScribeAnalyzer.NotesPrompt, ScribeAnalyzer.AnswersPrompt]) {
+        for (const storyOnly of ['CONTRADICTIONS', 'ENDED FACTS', 'CLOSED THREADS']) {
+            assert.equal(text.includes(storyOnly), false, storyOnly);
         }
     }
 });
@@ -1104,6 +1232,7 @@ test('the prompt names every block and no removed one', () => {
 test('every example line in the prompts parses', () => {
     const placeholders = [
         ['#first-#last', '#3-#5'],
+        ['#n "words copied from an earlier message', '#2 "words copied from an earlier message'],
         ['#n', '#4'],
         ['Day N', 'Day 2'],
         ['public or private', 'public'],
@@ -1127,6 +1256,8 @@ test('every example line in the prompts parses', () => {
                 'ThreadOpen',
                 'ThreadClose',
                 'Question',
+                'Contradiction',
+                'Contradiction',
             ],
         ],
         [
@@ -1165,10 +1296,10 @@ test('the prompts are exact', () => {
     const prompts = [
         [
             ScribeAnalyzer.Prompt,
-            '14. QUESTIONS. When the story leaves something unclear and a guess would matter (does she like him or love him; is this the same man as before), write no fact for it. Ask the player one short question instead. At most two questions per stretch.',
-            14,
-            9023,
-            'f6a85e0d',
+            "15. CONTRADICTIONS. One line for each place where the NEW MESSAGES contradict the LEDGER, an ENDED FACT, a CLOSED THREAD or an earlier message, about any subject and in any category, objects and events included (who holds an item and since when, who did what). The first quote is copied exactly from the new message, its number before it. The second part is where the other version comes from: when it is an earlier message among the NEW MESSAGES, that message's number and words copied exactly from it; otherwise the id of the entry it contradicts, as shown in LEDGER, ENDED FACTS, OPEN THREADS or CLOSED THREADS (F12 or T3), with nothing else. The line ends with the sentence, not a number. A value that rule 6 files as a plain FACTS line is still filed there too. Nothing goes here when nothing disagrees.",
+            15,
+            10250,
+            'aff4b458',
         ],
         [
             ScribeAnalyzer.NotesPrompt,

@@ -1426,3 +1426,322 @@ test('run never rejects', async () => {
     });
     assert.deepEqual(plain(bare.result), ended('Failed', 'a bare complaint', 0, 1));
 });
+
+const staffKept = {
+    said: 'guarded the Staff of Tides for a thousand years',
+    before: 'the Staff of Tides, held for two centuries',
+    why: 'Two keepers and two spans for one staff',
+};
+const oathKept = {
+    said: `...Sela's oath binds her to the "Tide Hall"...`,
+    before: 'Sela has guarded the Staff of Tides',
+    why: 'She is bound to the hall, not the staff',
+};
+const staffLines = [
+    `#45 "${staffKept.said}" | F3 | ${staffKept.why}`,
+    `#46 "${oathKept.said}" | #45 "${oathKept.before}" | ${oathKept.why}`,
+    '#45 "guarded the Staff of Tides for ten years" | #5 "held the Staff of Tides" | The span differs',
+    `#45 "${staffKept.said}" | #4 "${staffKept.before}" | The earlier words are in another message`,
+    '#45 "uarded the Staff of Tides" | #5 "held the Staff of Tides" | A word cut in half',
+    '#45 "Sela" | #5 "held the Staff of Tides" | One word is no quote',
+    '#150 "guarded the Staff of Tides" | #5 "held the Staff of Tides" | No such message',
+    '#5 "held the Staff of Tides for two centuries" | #4 "The tide bell rang" | Both before the stretch',
+];
+
+/**
+ * @return {{ messages: readonly object[], notes: readonly object[], player: string }}
+ */
+function staffCampaign() {
+    const builder = new CampaignBuilder('Orla');
+    const written = {
+        4: 'The tide bell rang at dusk over the harbour.',
+        5: 'Old Brannoc has held the Sta​ff of Tides for two centuries, or so the harbour says.',
+        45: 'Sela has guarded the Staff of Tides for a thousand years.',
+        46: 'Sela’s oath binds her to the “Tide Hall” forever.',
+    };
+    for (let number = 1; number <= 100; number++) {
+        builder.narrator(written[number] ?? `The tale goes on, line ${number}.`);
+    }
+    return ScribeIntake.read(builder.messages);
+}
+
+/**
+ * @param {{ pass: string, marks: number[] }} call
+ * @return {string}
+ */
+function staffAnswer(call) {
+    if (call.pass === 'Story' && call.marks[0] === 1) {
+        const held = answer({ SUBJECTS: ['Brannoc | character'], FACTS: [`Brannoc | belonging | ${staffKept.before} | #5`] });
+        return `${scripted(call)}\n${held}`;
+    }
+    if (call.pass !== 'Story' || call.marks[0] !== 41) {
+        return scripted(call);
+    }
+    return answer({
+        SUBJECTS: ['Sela | character'],
+        FACTS: ['Sela | trait | keeps a long vigil | #45'],
+        CONTRADICTIONS: staffLines,
+    });
+}
+
+/**
+ * @param {object} run
+ * @return {void}
+ */
+function assertStaffRead(run) {
+    const parsed = ScribeAnswer.parse(answer({ CONTRADICTIONS: staffLines })).operations;
+    const report = run.reports.find((item) => item.first === 41);
+    assert.deepEqual(plain([report.pass, report.last, report.stored, report.refusedLines]), ['Story', 80, 4, []]);
+    assert.deepEqual(plain(report.refusedOperations), [
+        ...[2, 3, 4, 5].map((index) => ({ operation: plain(parsed[index]), reason: 'Quote' })),
+        ...[6, 7].map((index) => ({ operation: plain(parsed[index]), reason: 'Citation' })),
+    ]);
+    const state = ScribeReplay.run(run.log, orderOf(staffCampaign()));
+    assert.equal(timesSaid(state, 'keeps a long vigil'), 1);
+    assert.deepEqual(plain(state.contradictions), [
+        {
+            id: JSON.stringify(['MESSAGE-45', 'MESSAGE-5', staffKept.said, staffKept.before]),
+            cite: 'MESSAGE-45',
+            position: 45,
+            earlier: 'MESSAGE-5',
+            earlierPosition: 5,
+            ...staffKept,
+            dismissed: false,
+        },
+        {
+            id: JSON.stringify(['MESSAGE-46', 'MESSAGE-45', oathKept.said, oathKept.before]),
+            cite: 'MESSAGE-46',
+            position: 46,
+            earlier: 'MESSAGE-45',
+            earlierPosition: 45,
+            ...oathKept,
+            dismissed: false,
+        },
+    ]);
+    const entry = run.log.entries.find((item) => item.messageIds.includes('MESSAGE-45') && !item.withdrawn);
+    assert.deepEqual(plain(entry.operations.filter((operation) => operation.type === 'Contradiction')), [
+        {
+            type: 'Contradiction',
+            cite: 'MESSAGE-45',
+            position: 45,
+            earlier: 'MESSAGE-5',
+            earlierPosition: 5,
+            ...staffKept,
+        },
+        {
+            type: 'Contradiction',
+            cite: 'MESSAGE-46',
+            position: 46,
+            earlier: 'MESSAGE-45',
+            earlierPosition: 45,
+            ...oathKept,
+        },
+    ]);
+}
+
+test('a contradiction is kept only when both quotes are in the cited messages', async () => {
+    const chosen = staffCampaign();
+    assert.equal(chosen.messages[4].text.includes('​'), true);
+    const run = await adopt({ campaign: chosen, answering: staffAnswer });
+    assert.deepEqual(plain(run.result), ended('Done', null, 0.75, 3));
+    assert.equal(readCount(run.log, chosen), 100);
+    assertStaffRead(run);
+    assert.deepEqual(
+        plain(run.reports.filter((item) => item.first !== 41).map((item) => item.refusedOperations)),
+        [[], []],
+    );
+});
+
+test('a kept contradiction survives the stale state retry', async () => {
+    const chosen = staffCampaign();
+    const order = orderOf(chosen);
+    const log = ScribeLog.create();
+    let ruled = false;
+    const run = await adopt({
+        campaign: chosen,
+        log,
+        answering: (call) => {
+            if (!ruled && call.pass === 'Story' && call.marks[0] === 41) {
+                ruled = true;
+                ScribeLog.rule(log, ScribeReplay.run(log, order), {
+                    type: 'AddFact',
+                    subject: 'S1',
+                    category: 'trait',
+                    target: null,
+                    text: 'hums while rowing',
+                    hidden: false,
+                    cite: null,
+                    position: 0,
+                });
+            }
+            return staffAnswer(call);
+        },
+    });
+    assert.equal(ruled, true);
+    assert.deepEqual(plain(run.result), ended('Done', null, 0.75, 3));
+    assertStaffRead(run);
+});
+
+test('a contradiction can be dismissed and goes with its stretch', async () => {
+    const chosen = staffCampaign();
+    const order = orderOf(chosen);
+    const run = await adopt({ campaign: chosen, answering: staffAnswer });
+    const log = run.log;
+    const before = ScribeReplay.run(log, order);
+    const [staff, oath] = before.contradictions;
+    const ruling = ScribeLog.rule(log, before, { type: 'DismissContradiction', contradiction: staff.id });
+    assert.deepEqual(plain(ruling.operations), [
+        {
+            type: 'DismissContradiction',
+            contradiction: staff.id,
+            said: 'guarded the Staff of Tides for a thousand years',
+            before: staffKept.before,
+        },
+    ]);
+    /**
+     * @return {Array<[string, boolean]>}
+     */
+    const marks = () => plain(ScribeReplay.run(log, order).contradictions.map((item) => [item.id, item.dismissed]));
+    assert.deepEqual(marks(), [
+        [staff.id, true],
+        [oath.id, false],
+    ]);
+    const dismissed = ScribeReplay.run(log, order);
+    assert.throws(
+        () => ScribeLog.rule(log, dismissed, { type: 'DismissContradiction', contradiction: `${staff.id} ` }),
+        { message: 'Reference' },
+    );
+    for (const contradiction of [undefined, null, 4, [staff.id], { id: staff.id }]) {
+        assert.throws(
+            () => ScribeLog.rule(log, dismissed, { type: 'DismissContradiction', contradiction }),
+            { message: 'InvalidOperation' },
+            String(contradiction),
+        );
+    }
+    assert.deepEqual(plain(ScribeLog.withdraw(log, 'MESSAGE-45')), idsOf(chosen, 41, 80));
+    const withdrawn = ScribeReplay.run(log, order);
+    assert.deepEqual(plain(withdrawn.contradictions), []);
+    assert.throws(
+        () => ScribeLog.rule(log, withdrawn, { type: 'DismissContradiction', contradiction: oath.id }),
+        { message: 'Reference' },
+    );
+    const again = await adopt({ campaign: chosen, log, answering: staffAnswer });
+    assert.deepEqual(plain(again.result), ended('Done', null, 0.25, 1));
+    assert.deepEqual(passes(again.calls), [['Story', [41, 80]]]);
+    assert.deepEqual(marks(), [
+        [staff.id, true],
+        [oath.id, false],
+    ]);
+    assert.equal(ScribeLog.revoke(log, ruling.sequence), ruling);
+    assert.deepEqual(marks(), [
+        [staff.id, false],
+        [oath.id, false],
+    ]);
+});
+
+test("the operator's Staff shape: new words against an ended entry from an earlier stretch are kept", async () => {
+    const chosen = staffCampaign();
+    const said = 'guarded the Staff of Tides for a thousand years';
+    const why = 'Two keepers and two spans for one staff';
+    const run = await adopt({
+        campaign: chosen,
+        size: 20,
+        /**
+         * @param {{ pass: string, marks: number[] }} call
+         * @return {string}
+         */
+        answering: (call) => {
+            if (call.pass !== 'Story') {
+                return scripted(call);
+            }
+            const first = call.marks[0];
+            if (first === 1) {
+                return answer({
+                    SUBJECTS: ['Brannoc | character'],
+                    FACTS: [`Brannoc | belonging | ${staffKept.before} | #5`, 'Brannoc | eyes | grey | #10'],
+                    THREADS: ['OPEN | who will guard the Staff of Tides | #3'],
+                });
+            }
+            if (first === 21) {
+                return answer({
+                    CHANGES: ['F1 | Brannoc | belonging | ENDED: he left it at the tide hall | #30'],
+                    THREADS: ['CLOSE T1 | Brannoc keeps the Staff of Tides for good | #31'],
+                });
+            }
+            if (first === 41) {
+                return answer({
+                    CONTRADICTIONS: [
+                        `#45 "${said}" | f1 | ${why}`,
+                        '#45 "guarded the Staff of Tides" | F9 | No such entry',
+                        '#45 "carried the Staff of Tides" | F1 | Words the message does not hold',
+                        `#45 "${said}" | F2 | The eye colour has nothing to do with it`,
+                        '#45 "Sela has guarded" | F1 (#5) | Two common words are not enough',
+                        `#45 "${said}" | "T1." | The closed thread said Brannoc keeps it`,
+                    ],
+                });
+            }
+            return '=== FACTS';
+        },
+    });
+    assert.equal(run.result.stop, 'Done');
+    const state = ScribeReplay.run(run.log, orderOf(chosen));
+    assert.equal(state.facts.find((fact) => fact.id === 'F1').status, 'Ended');
+    const closing = 'Brannoc keeps the Staff of Tides for good';
+    assert.deepEqual(
+        plain(state.contradictions.map((item) => [item.position, item.earlierPosition, item.before])),
+        [
+            [45, 5, staffKept.before],
+            [45, 31, closing],
+        ],
+    );
+    assert.deepEqual(plain(state.contradictions[0]), {
+        id: JSON.stringify(['MESSAGE-45', 'MESSAGE-5', said, staffKept.before]),
+        cite: 'MESSAGE-45',
+        position: 45,
+        earlier: 'MESSAGE-5',
+        earlierPosition: 5,
+        said,
+        before: staffKept.before,
+        why,
+        dismissed: false,
+    });
+    const report = run.reports.find((item) => item.first === 41);
+    assert.deepEqual(
+        plain(report.refusedOperations.map((entry) => [entry.operation.entry, entry.reason])),
+        [
+            ['F9', 'Reference'],
+            ['F1', 'Quote'],
+            ['F2', 'Mismatch'],
+            ['F1', 'Mismatch'],
+        ],
+    );
+});
+
+test('the notes and answers passes keep no contradiction', async () => {
+    const noteLine = '#55 "I count the crates" | #2 "I answer the ferryman" | Crates or the ferryman';
+    const noted = await adopt({
+        campaign: notedCampaign,
+        answering: (call) =>
+            call.pass === 'Notes' && call.marks[0] === 55
+                ? `${scripted(call)}\n${answer({ CONTRADICTIONS: [noteLine] })}`
+                : scripted(call),
+    });
+    assert.deepEqual(plain(noted.result), ended('Done', null, 1.25, 5));
+    const notesReport = noted.reports.find((report) => report.pass === 'Notes' && report.first === 41);
+    const [noteOperation] = ScribeAnswer.parse(answer({ CONTRADICTIONS: [noteLine] })).operations;
+    assert.deepEqual(plain(notesReport.refusedOperations), [{ operation: plain(noteOperation), reason: 'Citation' }]);
+    assert.deepEqual(plain(ScribeReplay.run(noted.log, orderOf(notedCampaign)).contradictions), []);
+    const log = await answeredLog();
+    const answersLine = '#12 "I answer the ferryman" | #2 "I answer the ferryman" | Said twice';
+    const answered = await adopt({
+        log,
+        answering: (call) => (call.pass === 'Answers' ? answer({ CONTRADICTIONS: [answersLine] }) : scripted(call)),
+    });
+    assert.deepEqual(plain(answered.result), ended('Done', null, 0.25, 1));
+    const [answersOperation] = ScribeAnswer.parse(answer({ CONTRADICTIONS: [answersLine] })).operations;
+    assert.deepEqual(plain(answered.reports[0].refusedOperations), [
+        { operation: plain(answersOperation), reason: 'Citation' },
+    ]);
+    assert.equal(answered.reports[0].stored, 0);
+    assert.deepEqual(plain(ScribeReplay.run(log, orderOf(plainCampaign)).contradictions), []);
+});

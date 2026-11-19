@@ -30,6 +30,13 @@ const PanelView = Object.freeze({
             Budget: "the day's budget is spent.",
             NoReason: 'the reason was not recorded.',
             Watching: 'Another tab is reading this chat.',
+            CloudLoading: 'Loading the book from your Worker...',
+            CloudConflict: 'This PC and your Worker hold different books for this chat.',
+            WatchingPc: 'Another PC is reading this chat.',
+            Offline: ' Working offline.',
+            Refused: ' The DM API key was refused; the book stays on this PC.',
+            UnusableOpen: ' The book stays on this PC: ',
+            WorkerOpen: ' Worker: ',
             MessagesRead: ' messages read.',
             AboutOpen: ' About ',
             ReadingOne: ' reading to go.',
@@ -47,6 +54,8 @@ const PanelView = Object.freeze({
             Colon: ': ',
             Comma: ', ',
             Quote: '"',
+            Hash: '#',
+            Against: ' against ',
             InReply: '" in the reply; the book has ',
             BookHas: ': the book has ',
             ReplySays: '; the reply says ',
@@ -185,17 +194,27 @@ const PanelView = Object.freeze({
     /**
      * @param {{ phase: string, total: number, read: number, flight: string|null, stop: { reason: string, problem: string|null }|null, problem: string|null }} keeperView
      * @param {{ problem?: string|null }} liveView
+     * @param {{ phase: string, problem?: string|null }|null} cloudView
      * @return {string}
      */
-    headline(keeperView, liveView) {
+    headline(keeperView, liveView, cloudView = null) {
         const settings = PanelView.Settings;
         const words = settings.Words;
         const phases = ScribeKeeper.Phase;
+        const clouds = ScribeCloud.Phase;
         const stops = ScribeAdoption.Stop;
         const flight = keeperView.flight ?? null;
         const problem = keeperView.problem ?? null;
+        const cloud = cloudView === null ? clouds.Off : cloudView.phase;
+        const worker = cloudView === null ? null : (cloudView.problem ?? null);
         let line = words.Reading;
-        if (keeperView.phase === phases.Watching) {
+        if (cloud === clouds.Loading) {
+            line = words.CloudLoading;
+        } else if (cloud === clouds.Conflict) {
+            line = words.CloudConflict;
+        } else if (keeperView.phase === phases.Watching && cloud === clouds.Watching) {
+            line = words.WatchingPc;
+        } else if (keeperView.phase === phases.Watching) {
             line = words.Watching;
         } else if (flight !== null) {
             line = PanelView.said(flight);
@@ -224,6 +243,13 @@ const PanelView = Object.freeze({
             const recorded = typeof reason === settings.StringType && reason.trim() !== words.Nothing;
             line = words.StoppedOpen + (recorded ? reason : words.NoReason);
         }
+        if (cloud === clouds.Offline) {
+            line += words.Offline;
+        } else if (cloud === clouds.Refused) {
+            line += words.Refused;
+        } else if (cloud === clouds.Unusable) {
+            line += words.UnusableOpen + PanelView.said(worker ?? words.Unknown) + words.FullStop;
+        }
         if (problem === ZetaSource.Settings.Messages.NoLogin) {
             line += words.LoginWait;
         } else if (problem !== null) {
@@ -232,6 +258,14 @@ const PanelView = Object.freeze({
         const scribe = liveView.problem ?? null;
         if (scribe !== null) {
             line += words.ScribeOpen + PanelView.said(scribe);
+        }
+        for (const failing of PanelView.lines(liveView.failing)) {
+            if (failing !== null) {
+                line += words.Space + failing;
+            }
+        }
+        if (worker !== null && cloud !== clouds.Unusable) {
+            line += words.WorkerOpen + PanelView.said(worker);
         }
         return line;
     },
@@ -525,6 +559,68 @@ const PanelView = Object.freeze({
                   apart,
               )
             : apart();
+    },
+
+    /**
+     * @param {{ type: *, position: *, said: *, earlier: *, before: *, entry?: *, why: * }} operation
+     * @return {string[]}
+     */
+    sides(operation) {
+        const settings = PanelView.Settings;
+        const words = settings.Words;
+        if (operation.type !== ScribeAnswer.Type.Contradiction) {
+            return [];
+        }
+        /**
+         * @param {*} position
+         * @param {*} quote
+         * @return {string}
+         */
+        const cited = (position, quote) =>
+            words.Hash + PanelView.said(position) + words.Space + words.Quote + PanelView.said(quote) + words.Quote;
+        const earlier =
+            typeof operation.entry === settings.StringType
+                ? operation.entry
+                : cited(operation.earlier, operation.before);
+        return [cited(operation.position, operation.said), earlier, PanelView.said(operation.why)];
+    },
+
+    /**
+     * @param {object} state
+     * @return {Array<{ id: string, text: string, why: string }|null>}
+     */
+    contradictions(state) {
+        const words = PanelView.Settings.Words;
+        return PanelView.each(
+            state.contradictions,
+            /**
+             * @param {{ id: *, position: *, said: *, earlierPosition: *, before: *, why: *, dismissed: * }} item
+             * @return {Array<{ id: string, text: string, why: string }>}
+             */
+            (item) =>
+                item.dismissed === true
+                    ? []
+                    : [
+                          {
+                              id: PanelView.said(item.id),
+                              text:
+                                  words.Hash +
+                                  PanelView.said(item.position) +
+                                  words.Space +
+                                  words.Quote +
+                                  PanelView.said(item.said) +
+                                  words.Quote +
+                                  words.Against +
+                                  words.Hash +
+                                  PanelView.said(item.earlierPosition) +
+                                  words.Space +
+                                  words.Quote +
+                                  PanelView.said(item.before) +
+                                  words.Quote,
+                              why: PanelView.said(item.why),
+                          },
+                      ],
+        ).reverse();
     },
 
     /**

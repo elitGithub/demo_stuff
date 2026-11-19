@@ -1078,7 +1078,7 @@ test('a failed call shows why and can be resumed', async () => {
     page.server.model = (call, count) => (count === 2 ? { status: 400 } : scripted(call));
     page.click('start');
     await page.idle();
-    const problem = 'Stopped: unexpected HTTP status; status 400; finish none';
+    const problem = 'Stopped: unexpected HTTP status; status 400; finish none; reason: Refused by the fake provider';
     assert.equal(page.text('status'), problem);
     assert.equal(page.rows('progress-list')[0].textContent, problem);
     assert.equal(page.byId('continue').disabled, false);
@@ -2135,7 +2135,10 @@ test('the waiting line stops after a failure', async () => {
     page.server.model = () => ({ status: 400 });
     page.click('start');
     await page.idle();
-    assert.equal(page.text('status'), 'Stopped: unexpected HTTP status; status 400; finish none');
+    assert.equal(
+        page.text('status'),
+        'Stopped: unexpected HTTP status; status 400; finish none; reason: Refused by the fake provider',
+    );
     assert.equal(page.clock.intervals, 0);
     assert.equal(page.byId('waiting').hidden, true);
     page.clock.advance(5000);
@@ -2162,4 +2165,19 @@ test('an unreadable saved book is still guarded', async () => {
     await page.idle();
     assert.equal(page.server.modelCalls.length, 3);
     assert.equal(readCount(page.saved('log-a.json')), 100);
+});
+
+test('a dismissed contradiction is listed among the rulings made', () => {
+    const operation = {
+        type: 'DismissContradiction',
+        contradiction: '["MESSAGE-2","MESSAGE-1","guarded it","held it"]',
+        said: 'guarded it',
+        before: 'held it',
+    };
+    const log = {
+        entries: [{ sequence: 4, kind: 'Operator', origin: 'Operator', messageIds: [], operations: [operation], withdrawn: false }],
+    };
+    const rows = BenchView.made(log);
+    assert.equal(rows.length, 1);
+    assert.equal(rows[0].summary.endsWith('Dismiss the contradiction "guarded it" against "held it"'), true, rows[0].summary);
 });

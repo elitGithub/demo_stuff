@@ -22,7 +22,32 @@ const ScribeReminder = Object.freeze({
     }),
 
     Settings: Object.freeze({
-        MaxBytes: 1000,
+        MaxCharacters: 3000,
+        StoryOpen: 'The story so far: ',
+        LongestTimeline: 12000,
+        FirstScenes: 5,
+        StoryHeadings: Object.freeze({
+            Timeline: 'TIMELINE:',
+            Threads: 'OPEN THREADS:',
+            Now: 'NOW:',
+        }),
+        None: '(none)',
+        ListMarker: '- ',
+        Joiner: ' | ',
+        Day: 'Day ',
+        Newline: '\n',
+        BlankLine: '\n\n',
+        StoryPromptLines: Object.freeze([
+            'You are the Scribe: you tell the story so far of an ongoing adult fiction roleplay between consenting adult characters.',
+            'You receive TIMELINE (every scene in story order: day, place, what happened), OPEN THREADS (what is left hanging) and NOW (what is happening at the last message).',
+            '',
+            'Write the story so far as plain prose in story order: how it began (who came to whom, and for what), what has been done since, where things stand now and what is needed next. Write as much as the story needs.',
+            '',
+            'Rules.',
+            '1. Only what those lines say. No name, place, object or event that they do not hold.',
+            '2. Past tense for what happened; present tense for where things stand now.',
+            '3. Write the prose and nothing else: no heading, no label, no list, no remarks.',
+        ]),
         LongestText: 200,
         MostPlaces: 2,
         LongestLabel: 60,
@@ -298,6 +323,41 @@ const ScribeReminder = Object.freeze({
         /**
          * @return {RegExp}
          */
+        get Frames() {
+            return /[\[\]@]/gu;
+        },
+
+        /**
+         * @return {RegExp}
+         */
+        get SentenceEnd() {
+            return /[.!?…]["'”’)\]]*(?=\s|$)/gu;
+        },
+
+        /**
+         * @return {RegExp}
+         */
+        get WordEnd() {
+            return /\S(?=\s)/gu;
+        },
+
+        /**
+         * @return {RegExp}
+         */
+        get EchoedLabel() {
+            return /^[\s>*_"'“”‘’`]*(?:the\s+)?(?:story\s+)?so\s+far[*_"'“”‘’`]*\s*(?::|[—–]|-\s)[\s>*_"'“”‘’`]*/iu;
+        },
+
+        /**
+         * @return {RegExp}
+         */
+        get HeadedLabel() {
+            return /^\s*(?:#+|\*\*|__|>)\s*(?:the\s+)?(?:story\s+)?so\s+far\s*(?:\*\*|__)?\s*\r?\n[\s>]*/iu;
+        },
+
+        /**
+         * @return {RegExp}
+         */
         get Backslashes() {
             return /\\/g;
         },
@@ -379,6 +439,134 @@ const ScribeReminder = Object.freeze({
             return /\p{L}{2}ing$/u;
         },
     }),
+
+    /**
+     * @return {string}
+     */
+    get StoryPrompt() {
+        return ScribeReminder.Settings.StoryPromptLines.join(ScribeReminder.Settings.Newline);
+    },
+
+    /**
+     * @param {string} text
+     * @return {number}
+     */
+    span(text) {
+        return Array.from(text).length;
+    },
+
+    /**
+     * @param {object} state
+     * @param {object|null} now
+     * @return {string}
+     */
+    storyInput(state, now) {
+        const settings = ScribeReminder.Settings;
+        const headings = settings.StoryHeadings;
+        const lines = state.scenes.map(
+            /**
+             * @param {{ day: number, place: string, summary: string }} scene
+             * @return {string}
+             */
+            (scene) => [settings.Day + scene.day, scene.place, scene.summary].join(settings.Joiner),
+        );
+        let scenes = lines;
+        if (ScribeReminder.span(lines.join(settings.Newline)) > settings.LongestTimeline) {
+            const first = lines.slice(0, settings.FirstScenes);
+            const newest = [];
+            let used = ScribeReminder.span(first.join(settings.Newline));
+            for (const line of lines.slice(settings.FirstScenes).reverse()) {
+                const after = used + ScribeReminder.span(settings.Newline + line);
+                if (after > settings.LongestTimeline) {
+                    break;
+                }
+                newest.unshift(line);
+                used = after;
+            }
+            scenes = [...first, ...newest];
+        }
+        const threads = [];
+        for (const thread of state.threads) {
+            if (thread.closed === null) {
+                threads.push(settings.ListMarker + thread.text);
+            }
+        }
+        const summary = now === null || now.summary.trim() === settings.Nothing ? settings.None : now.summary;
+        return [
+            [headings.Timeline, scenes.length === 0 ? settings.None : scenes.join(settings.Newline)],
+            [headings.Threads, threads.length === 0 ? settings.None : threads.join(settings.Newline)],
+            [headings.Now, summary],
+        ]
+            .map(
+                /**
+                 * @param {string[]} section
+                 * @return {string}
+                 */
+                (section) => section.join(settings.Newline),
+            )
+            .join(settings.BlankLine);
+    },
+
+    /**
+     * @param {string} text
+     * @return {string|null}
+     */
+    told(text) {
+        const settings = ScribeReminder.Settings;
+        const said = ScribeIntake.collapse(
+            ScribeReminder.clean(
+                text.replace(settings.HeadedLabel, settings.Nothing).replace(settings.EchoedLabel, settings.Nothing),
+                settings.NormalForm,
+            )
+                .replace(settings.Frames, settings.Nothing)
+                .replace(settings.Backslashes, settings.Slash),
+        );
+        return said === settings.Nothing ? null : said;
+    },
+
+    /**
+     * @param {string} text
+     * @return {number[]}
+     */
+    ends(text) {
+        const settings = ScribeReminder.Settings;
+        const opening = (ScribeIntake.Settings.OwnMarker + settings.Space + settings.StoryOpen).length;
+        const ends = [];
+        for (const match of text.matchAll(settings.SentenceEnd)) {
+            const end = match.index + match[0].length;
+            if (end > opening && end < text.length) {
+                ends.push(end);
+            }
+        }
+        return ends;
+    },
+
+    /**
+     * @param {string} text
+     * @param {number} limit
+     * @return {string}
+     */
+    cut(text, limit) {
+        const settings = ScribeReminder.Settings;
+        const characters = Array.from(text);
+        if (characters.length <= limit) {
+            return text;
+        }
+        const room = characters.slice(0, limit).join(settings.Nothing).length;
+        let end = 0;
+        for (const pattern of [settings.SentenceEnd, settings.WordEnd]) {
+            for (const match of text.matchAll(pattern)) {
+                const reach = match.index + match[0].length;
+                if (reach <= room) {
+                    end = reach;
+                }
+            }
+            if (end > 0) {
+                break;
+            }
+        }
+        return text.slice(0, end === 0 ? room : end).trim();
+    },
 
     /**
      * @param {string} text
@@ -989,10 +1177,10 @@ const ScribeReminder = Object.freeze({
     },
 
     /**
-     * @param {{ state: object, now: ?object, player: string, unread: *, notes: *, characters: *, first: * }} request
+     * @param {{ state: object, now: ?object, player: string, unread: *, notes: *, characters: *, first: *, story?: string|null }} request
      * @return {Readonly<{ text: string, led: readonly string[] }>|null}
      */
-    compose({ state, now, player, unread, notes, characters, first }) {
+    compose({ state, now, player, unread, notes, characters, first, story = null }) {
         const settings = ScribeReminder.Settings;
         const parts = ScribeReminder.Part;
         const kinds = ScribePedant.Note;
@@ -1479,15 +1667,18 @@ const ScribeReminder = Object.freeze({
                     sentences.push(piece.person.own + settings.Colon + piece.text + settings.FullStop);
                 }
             }
-            return ScribeIntake.Settings.OwnMarker + settings.Space + sentences.join(settings.Space);
+            return [ScribeIntake.Settings.OwnMarker, ...told, ...sentences].join(settings.Space);
         };
+        const opening = ScribeIntake.Settings.OwnMarker + settings.Space + settings.StoryOpen;
+        const room = settings.MaxCharacters - ScribeReminder.span(opening);
+        const told = story === null ? [] : [settings.StoryOpen + ScribeReminder.cut(story, room)];
         const kept = [...pieces];
         let text = render(kept);
-        while (kept.length > 0 && ScribeText.bytes(text) > settings.MaxBytes) {
+        while (kept.length > 0 && ScribeReminder.span(text) > settings.MaxCharacters) {
             kept.pop();
             text = render(kept);
         }
-        if (kept.length === 0) {
+        if (kept.length === 0 && told.length === 0) {
             return null;
         }
         const led = kept

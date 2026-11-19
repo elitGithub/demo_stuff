@@ -6,6 +6,7 @@ import vm from 'node:vm';
 import { ScribePack } from '../scribe/pack.mjs';
 import CampaignBuilder from './support/CampaignBuilder.mjs';
 import FakeLocks from './support/FakeLocks.mjs';
+import FakeScribeWorker from './support/FakeScribeWorker.mjs';
 import FakeStorage from './support/FakeStorage.mjs';
 import FakeTimers from './support/FakeTimers.mjs';
 import WholeModel from './support/WholeModel.mjs';
@@ -37,8 +38,10 @@ const OFFICE = 'Day 1 | The ledger office | private | present: Halvard, Mirelle 
 const LOOKS =
     'Mirelle: brown eyes, black hair, worn in a braid, short and broad-shouldered, a scar across her left palm.';
 const PARTY = 'The party: a stranger asks after Oswin.';
-const FIRST_READY = `[Scribe] ${LOOKS} ${PARTY}`;
-const HAIR = '[Scribe] Mirelle has black hair, worn in a braid.';
+const TOLD = 'Halvard came to the harbour to keep the peace, and Mirelle owes Brandt.';
+const LEAD = `[Scribe] The story so far: ${TOLD}`;
+const FIRST_READY = `${LEAD} ${LOOKS} ${PARTY}`;
+const HAIR = `${LEAD} Mirelle has black hair, worn in a braid.`;
 const LOOKS_LEFT = 'Mirelle: brown eyes, short and broad-shouldered, a scar across her left palm.';
 const OLD_HAIR = 'black, worn in a braid';
 const APRON = 'an ink-stained apron';
@@ -92,6 +95,7 @@ const PROMPTS = new Map([
     [REFERENCE.ScribeScene.Prompt, 'Scene'],
     [REFERENCE.ScribePedant.Prompt, 'Pedant'],
     [REFERENCE.ScribeMuse.SuggestPrompt, 'Suggest'],
+    [REFERENCE.ScribeReminder.StoryPrompt, 'Told'],
 ]);
 
 const NARRATION = Object.freeze({
@@ -258,6 +262,7 @@ const ANSWERS = Object.freeze({
     Scene: sceneAnswer,
     Pedant: pedantAnswer,
     Suggest: () => `LINE: ${RIDER}`,
+    Told: () => TOLD,
 });
 
 /**
@@ -272,6 +277,7 @@ function world(options = {}) {
         clock,
         site,
         model: new WholeModel(PROMPTS, ANSWERS, COSTS),
+        worker: new FakeScribeWorker(clock),
         storage: new FakeStorage(),
         locks: options.locks === false ? null : new FakeLocks(),
         query: options.query !== false,
@@ -286,7 +292,7 @@ function world(options = {}) {
  * @param {object} walk
  * @param {string} path
  * @param {number} width
- * @param {{ origin?: string, layout?: string }} extra
+ * @param {{ origin?: string, layout?: string, storage?: FakeStorage, locks?: FakeLocks|null }} extra
  * @return {WholeTab}
  */
 function install(walk, path, width = WIDE, extra = {}) {
@@ -296,10 +302,11 @@ function install(walk, path, width = WIDE, extra = {}) {
         tabId: `tab-${walk.made}`,
         packed: PACKED,
         clock: walk.clock,
-        storage: walk.storage,
+        storage: extra.storage ?? walk.storage,
         site: walk.site,
         model: walk.model,
-        locks: walk.locks,
+        worker: walk.worker,
+        locks: extra.locks === undefined ? walk.locks : extra.locks,
         path,
         width,
         query: walk.query,
@@ -803,7 +810,7 @@ test('4. while the book is first read, only the Analyzer is asked; then the newe
     await forceReminder(walk, tab);
     const ready = stored(walk, 'live').ready;
     assert.equal(ready, FIRST_READY);
-    assert.equal(walk.model.calls.length, asked);
+    assert.deepEqual(rolesSince(walk, asked), ['Told']);
     assert.deepEqual(queued(tab), [`Reminder: ${ready}`]);
     assert.equal(tab.panel.byId('scribe-reminder').value, ready);
     assert.deepEqual(tab.panel.rowTexts('queued'), []);
@@ -909,11 +916,7 @@ test('6. a new reply arrives', async () => {
         .filter((request) => !WholeSite.paged(request.url))
         .map((request) => new URL(request.url).pathname)
         .sort();
-    assert.deepEqual(story, [
-        '/v1/plots/plot-harbour',
-        '/v1/rooms/harbour',
-        '/v1/rooms/harbour/user-plot-chat-profiles/me',
-    ]);
+    assert.deepEqual(story, ['/v1/plots/plot-harbour/rooms/harbour/user-personas/selected', '/v1/rooms/harbour']);
     tab.panel.tab('Progress');
     assert.equal(tab.panel.byId('scribe-story').hidden, true);
     tab.panel.tab('Findings');
@@ -942,7 +945,7 @@ test('6. a story character is told only what the chat added, and an unreadable s
     await forceReminder(told, tab);
     assert.equal(
         stored(told, 'live').ready,
-        `[Scribe] Mirelle: short and broad-shouldered, a scar across her left palm. ${PARTY}`,
+        `${LEAD} Mirelle: short and broad-shouldered, a scar across her left palm. ${PARTY}`,
     );
     tab.panel.tab('Progress');
     assert.equal(tab.panel.byId('scribe-story').hidden, true);
@@ -969,13 +972,12 @@ test('6. a story character is told only what the chat added, and an unreadable s
     assert.equal(lost.panel.byId('scribe-story').hidden, false);
     assert.equal(
         lost.panel.text('scribe-story'),
-        "The story's characters could not be read, so every character counts as custom: Zeta answered HTTP 404 " +
-            'The chat profile could not be read, so it is left out of the calls: Zeta answered HTTP 404',
+        "The story's characters could not be read, so every character counts as custom: Zeta answered HTTP 404",
     );
     const story = unread.site.scribeRequests().filter((request) => !WholeSite.paged(request.url));
     assert.deepEqual(
         story.map((request) => new URL(request.url).pathname).sort(),
-        ['/v1/rooms/harbour', '/v1/rooms/harbour/user-plot-chat-profiles/me'],
+        ['/v1/rooms/harbour'],
     );
     assert.equal(unread.model.calls.some((call) => call.user.includes('PLAYER CHARACTER PROFILE:')), false);
 });
@@ -1127,7 +1129,7 @@ test('9. an edited old message', async () => {
     );
     const roles = rolesSince(walk, from);
     assert.deepEqual(
-        roles.filter((role) => role !== 'Story'),
+        roles.filter((role) => role !== 'Story' && role !== 'Told'),
         [],
     );
     assert.equal(tab.panel.headline(), 'Up to date: 90 of 91 read.');
@@ -1474,7 +1476,7 @@ test('16. starting the book over', async () => {
     const newReady = live.ready;
     assert.equal(typeof newReady, 'string');
     assert.equal(newReady === oldReady, false);
-    assert.equal(newReady, `[Scribe] Mirelle has black hair, cut short. ${LOOKS_LEFT} ${PARTY}`);
+    assert.equal(newReady, `${LEAD} Mirelle has black hair, cut short. ${LOOKS_LEFT} ${PARTY}`);
     assert.equal(newReady.includes('worn in a braid'), false);
     assert.deepEqual(queued(tab), [`Reminder: ${newReady}`]);
     const newFindings = findingRows(tab).map((row) => row.textContent);
@@ -1932,7 +1934,7 @@ test('F1. the two copies start as they should', async () => {
     assert.equal(first.delivered, true);
     const arms = armsTo(walk, tab);
     assert.equal(arms.length >= 1, true);
-    assert.deepEqual(arms[0], { zetaScribe: 1, kind: 'arm', seq: 1, token, ready: null, suggestion: null });
+    assert.deepEqual(arms[0], { zetaScribe: 1, kind: 'arm', seq: 1, token, ready: null, suggestion: null, ends: [] });
     assert.equal(arms.every((arm) => arm.token === token), true);
     assert.equal(
         walk.posts.filter((post) => post.toLabel === `${tab.name}/frame`).every((post) => post.target === FRAME_ORIGIN),
@@ -2397,6 +2399,181 @@ test('F7. a second tab that only watches arms its frame with nothing', async () 
     await pass(walk, 1000);
     assert.equal(stored(walk, 'live').ready, ready);
     assert.equal(armsTo(walk, tab).at(-1).ready, ready);
+});
+
+const DM_KEY = FakeScribeWorker.Key;
+const CLOUD_ROOM = '/rooms/harbour';
+const SYNCED = Object.freeze(['settings', 'book', 'live']);
+
+/**
+ * @param {FakeStorage} storage
+ * @param {string} kind
+ * @return {string|null}
+ */
+function localText(storage, kind) {
+    return REFERENCE.ScribeStore.snapshot(storage, ROOM, kind)?.text ?? null;
+}
+
+/**
+ * @param {object} walk
+ * @param {FakeStorage} storage
+ * @return {boolean}
+ */
+function inWorker(walk, storage) {
+    return SYNCED.every((kind) => localText(storage, kind) !== null && walk.worker.textOf(CLOUD_ROOM, kind) === localText(storage, kind));
+}
+
+/**
+ * @param {object} walk
+ * @return {Promise<WholeTab>}
+ */
+async function adoptedInWorker(walk) {
+    const tab = await opened(walk);
+    tab.setDmKey(DM_KEY);
+    assert.deepEqual(tab.prompts, ['Enter DM API key']);
+    assert.deepEqual(tab.alerts, []);
+    await until(walk, 'PC A to hold the lease', () => walk.worker.leases.get(CLOUD_ROOM)?.browser.startsWith('tab-1-') === true, TICK_MS);
+    await until(walk, 'the chat to be pulled again', () => tab.panel.headline().startsWith('No book for this chat yet'), 15000);
+    await saveKey(walk, tab);
+    await adopt(walk, tab, '2');
+    await until(walk, "PC A's book, settings and live to reach the Worker", () => inWorker(walk, walk.storage), TICK_MS * 3);
+    await until(
+        walk,
+        "PC A's spending to reach the Worker",
+        () => walk.worker.spentOf(CLOUD_ROOM, dayOf(walk), 'nobody').sum === spentToday(walk),
+        TICK_MS * 3,
+    );
+    return tab;
+}
+
+/**
+ * @param {object} walk
+ * @return {string}
+ */
+function dayOf(walk) {
+    const date = new Date(walk.clock.now());
+    return [date.getFullYear(), date.getMonth() + 1, date.getDate()].map((part) => String(part).padStart(2, '0')).join('-');
+}
+
+/**
+ * @param {object} walk
+ * @param {FakeStorage} storage
+ * @return {WholeTab}
+ */
+function otherPc(walk, storage) {
+    REFERENCE.ScribeStore.setCloudKey(storage, DM_KEY);
+    return install(walk, CHAT, WIDE, { storage, locks: new FakeLocks() });
+}
+
+test('C1. two PCs, one book: the second PC opens what the first read and reads nothing again', async () => {
+    const walk = world();
+    const tab = await adoptedInWorker(walk);
+    assert.equal(walk.model.by(tab.name).filter((call) => call.role === 'Story').length > 0, true);
+    assert.equal(spentToday(walk) > 0, true);
+    const storageB = new FakeStorage();
+    const second = otherPc(walk, storageB);
+    await second.openPage();
+    second.ready();
+    await until(walk, 'PC B to say another PC reads', () => second.panel.headline() === 'Another PC is reading this chat.', 15000);
+    assert.equal(walk.model.by(second.name).length, 0);
+    for (const kind of SYNCED) {
+        assert.equal(localText(storageB, kind), localText(walk.storage, kind), kind);
+    }
+    assert.equal(second.panel.spend(), `$${spentToday(walk).toFixed(4)} today`);
+    assert.equal(tab.panel.headline().startsWith('Up to date'), true);
+    const before = walk.model.calls.length;
+    tab.unload();
+    await pass(walk, 60000);
+    assert.equal(second.panel.headline(), 'Another PC is reading this chat.');
+    await until(walk, 'PC B to take the lease and read', () => second.panel.headline().startsWith('Up to date'), 60000);
+    assert.equal(second.panel.headline(), 'Up to date: 90 of 91 read.');
+    assert.equal(walk.worker.leases.get(CLOUD_ROOM).browser.startsWith('tab-2-'), true);
+    await quiet(walk, 'PC B after taking over');
+    assert.deepEqual(rolesSince(walk, before), []);
+    assert.equal(localText(storageB, 'book'), localText(walk.storage, 'book'));
+    assert.deepEqual(second.alerts, []);
+});
+
+test('C2. offline and back: the second PC works offline at 15 s and its unsent work goes up', async () => {
+    const walk = world();
+    const tab = await adoptedInWorker(walk);
+    tab.unload();
+    await pass(walk, 91000);
+    const storageB = new FakeStorage();
+    const second = otherPc(walk, storageB);
+    second.cut = true;
+    await second.openPage();
+    second.ready();
+    await until(walk, 'PC B to load from the Worker', () => second.panel.headline() === 'Loading the book from your Worker...', 5000);
+    await until(walk, 'PC B to work offline', () => second.panel.headline().endsWith(' Working offline.'), 16000);
+    await until(
+        walk,
+        'PC B to pull the chat offline',
+        () => second.panel.headline() === 'No book for this chat yet: 91 messages. Working offline.',
+        15000,
+    );
+    second.panel.tab('Settings');
+    second.panel.type('scribe-setting-budget', '5');
+    second.panel.click('scribe-save-settings');
+    await settle();
+    assert.equal(stored({ storage: storageB }, 'settings').budget, 5);
+    assert.equal(second.unanswered > 0, true);
+    const before = walk.model.calls.length;
+    second.cut = false;
+    await until(walk, "PC B's settings to go up", () => walk.worker.textOf(CLOUD_ROOM, 'settings') === localText(storageB, 'settings'), TICK_MS * 4);
+    await until(walk, 'PC B to read the book from the Worker', () => second.panel.headline().startsWith('Up to date'), TICK_MS * 4);
+    assert.equal(second.panel.headline(), 'Up to date: 90 of 91 read.');
+    assert.equal(localText(storageB, 'book'), walk.worker.textOf(CLOUD_ROOM, 'book'));
+    assert.equal(JSON.parse(walk.worker.textOf(CLOUD_ROOM, 'settings')).budget, 5);
+    await quiet(walk, 'PC B back online');
+    assert.equal(rolesSince(walk, before).includes('Story'), false);
+});
+
+test('C3. offline and back: a book read on both PCs asks which to keep', async () => {
+    const walk = world();
+    const tab = await adoptedInWorker(walk);
+    const storageB = new FakeStorage();
+    const second = otherPc(walk, storageB);
+    second.cut = true;
+    await second.openPage();
+    second.ready();
+    await until(
+        walk,
+        'PC B to pull the chat offline',
+        () => second.panel.headline() === 'No book for this chat yet: 91 messages. Working offline.',
+        40000,
+    );
+    await saveKey(walk, second);
+    second.panel.tab('Settings');
+    second.panel.type('scribe-setting-size', '40');
+    second.panel.type('scribe-setting-budget', '2');
+    second.panel.click('scribe-next');
+    await until(walk, 'PC B to read its own book offline', () => second.panel.headline().startsWith('Up to date'), 30000);
+    await quiet(walk, 'PC B after its own reading');
+    assert.equal(walk.model.by(second.name).filter((call) => call.role === 'Story').length > 0, true);
+    assert.notEqual(localText(storageB, 'book'), localText(walk.storage, 'book'));
+    second.cut = false;
+    await until(
+        walk,
+        'PC B to ask which book to keep',
+        () => second.panel.headline() === 'This PC and your Worker hold different books for this chat.',
+        TICK_MS * 4,
+    );
+    assert.equal(second.panel.byId('scribe-choice').hidden, false);
+    assert.equal(second.panel.text('scribe-choice-counts'), 'This PC: 90 messages read. Your Worker: 90 messages read.');
+    assert.equal(tab.panel.headline().startsWith('Up to date'), true);
+    const cloudBook = walk.worker.textOf(CLOUD_ROOM, 'book');
+    second.panel.click('scribe-keep-here');
+    await settle();
+    assert.equal(
+        second.panel.text('scribe-choice-outcome'),
+        "Another PC is reading this chat; this PC's book is kept as soon as it lets go.",
+    );
+    assert.equal(walk.worker.textOf(CLOUD_ROOM, 'book'), cloudBook);
+    second.panel.click('scribe-use-cloud');
+    await until(walk, "PC B to take the Worker's book", () => second.panel.headline() === 'Another PC is reading this chat.', TICK_MS);
+    assert.equal(localText(storageB, 'book'), cloudBook);
+    assert.equal(second.panel.byId('scribe-choice').hidden, true);
 });
 
 test('F8. the old layout, the chat box in the top document, still works', async () => {

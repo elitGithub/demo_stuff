@@ -139,9 +139,23 @@ function expectFailure(error, retryable, status, finish) {
 test('a complete answer is returned', async () => {
     const usage = { prompt_tokens: 1200, completion_tokens: 80, cost: 0.0123 };
     const result = await run(json(answer('stop', CONTENT, usage)));
-    assert.deepEqual(plain(result), { text: CONTENT, tokensIn: 1200, tokensOut: 80, cost: 0.0123 });
+    assert.deepEqual(plain(result), {
+        text: CONTENT,
+        tokensIn: 1200,
+        tokensOut: 80,
+        reasoningTokens: null,
+        finish: 'stop',
+        cost: 0.0123,
+    });
     const bare = await run(json(answer('stop', CONTENT)));
-    assert.deepEqual(plain(bare), { text: CONTENT, tokensIn: 0, tokensOut: 0, cost: null });
+    assert.deepEqual(plain(bare), {
+        text: CONTENT,
+        tokensIn: 0,
+        tokensOut: 0,
+        reasoningTokens: null,
+        finish: 'stop',
+        cost: null,
+    });
     const padded = await run(json(answer('stop', `  \n${CONTENT}\n  `)));
     assert.equal(padded.text, `  \n${CONTENT}\n  `);
 });
@@ -478,13 +492,23 @@ test('a byte-order mark is tolerated', async () => {
     assert.equal(result.text, CONTENT);
 });
 
+/**
+ * @param {number} tokensIn
+ * @param {number} tokensOut
+ * @param {number|null} cost
+ * @return {object}
+ */
+function complete(tokensIn, tokensOut, cost) {
+    return { text: CONTENT, tokensIn, tokensOut, reasoningTokens: null, finish: 'stop', cost };
+}
+
 test('usage is read strictly', async () => {
     const counts = await run(json(answer('stop', CONTENT, { prompt_tokens: '12', completion_tokens: '7', cost: '0.5' })));
-    assert.deepEqual(plain(counts), { text: CONTENT, tokensIn: 0, tokensOut: 0, cost: null });
+    assert.deepEqual(plain(counts), complete(0, 0, null));
     const negative = await run(json(answer('stop', CONTENT, { prompt_tokens: -1, completion_tokens: -2, cost: -0.1 })));
-    assert.deepEqual(plain(negative), { text: CONTENT, tokensIn: 0, tokensOut: 0, cost: null });
+    assert.deepEqual(plain(negative), complete(0, 0, null));
     const fractional = await run(json(answer('stop', CONTENT, { prompt_tokens: 1.5, completion_tokens: 2.5, cost: 0 })));
-    assert.deepEqual(plain(fractional), { text: CONTENT, tokensIn: 0, tokensOut: 0, cost: 0 });
+    assert.deepEqual(plain(fractional), complete(0, 0, 0));
     const huge = await run(reply(200, `{"choices":[{"finish_reason":"stop","message":{"content":"ok"}}],"usage":{"cost":1e999,"prompt_tokens":1e999}}`));
     assert.equal(huge.text, 'ok');
     assert.equal(huge.tokensIn, 0);
@@ -495,7 +519,7 @@ test('usage is read strictly', async () => {
     const nan = await run(json(answer('stop', CONTENT, { cost: null })));
     assert.equal(nan.cost, null);
     const lone = await run(json(answer('stop', CONTENT, { prompt_tokens: 5 })));
-    assert.deepEqual(plain(lone), { text: CONTENT, tokensIn: 5, tokensOut: 0, cost: null });
+    assert.deepEqual(plain(lone), complete(5, 0, null));
     const edge = await run(json(answer('stop', CONTENT), 299));
     assert.equal(edge.text, CONTENT);
     const keyed = await failureOf(run(json({ choices: { 0: { finish_reason: 'stop', message: { content: CONTENT } } } })));
@@ -648,6 +672,48 @@ test('retry with call end to end', async () => {
         pauses.push(milliseconds);
     };
     const result = await ScribeGateway.retry(() => send(fetch, { sleep: never }), { attempts: 4, pauseMs: 100, sleep });
-    assert.deepEqual(plain(result), { text: CONTENT, tokensIn: 3, tokensOut: 4, cost: null });
+    assert.deepEqual(plain(result), complete(3, 4, null));
     assert.deepEqual(pauses, [100, 200]);
+});
+
+test('a refused request keeps the provider text, masked', async () => {
+    const body = { error: { code: 402, message: `Insufficient credits for ${KEY}; add more at the settings page` } };
+    const refused = await failureOf(run(json(body, 402)));
+    expectFailure(refused, false, 402, null);
+    assert.match(refused.message, /unexpected HTTP status; status 402; finish none; reason: Insufficient credits/);
+    assert.equal(refused.message.includes(KEY), false);
+    assert.equal(refused.reason, 'Insufficient credits for [key]; add more at the settings page');
+    const plainText = await failureOf(run(reply(500, `${'x'.repeat(290)} ${KEY} tail`)));
+    expectFailure(plainText, true, 500, null);
+    assert.equal(plainText.reason.length, 300);
+    assert.equal(plainText.reason.includes('sk-or'), false);
+    assert.equal(plainText.reason.endsWith('[key]'), false);
+    const halfKey = await failureOf(run(reply(500, `${'y'.repeat(296)}${KEY}`)));
+    assert.equal(halfKey.message.includes('sk-or'), false);
+    const silent = await failureOf(run(reply(503, '   ')));
+    assert.equal(silent.reason, null);
+    assert.equal(silent.message.includes('reason'), false);
+    const bare = await failureOf(run(json({ error: { code: 401 } }, 401)));
+    assert.equal(bare.reason, '{"error":{"code":401}}');
+});
+
+test('a cut-off answer is refused whole but keeps its first 2,000 characters', async () => {
+    const long = `${KEY} ${'w'.repeat(2500)}`;
+    const usage = { prompt_tokens: 900, completion_tokens: 4000, completion_tokens_details: { reasoning_tokens: 3100 } };
+    const cut = await failureOf(run(json(answer('length', long, usage))));
+    expectFailure(cut, false, 200, 'length');
+    assert.equal(cut.answer.length, 2000);
+    assert.equal(cut.answer.startsWith('[key] w'), true);
+    assert.equal(cut.tokensIn, 900);
+    assert.equal(cut.tokensOut, 4000);
+    assert.equal(cut.reasoningTokens, 3100);
+    const empty = await failureOf(run(json(answer('length', null))));
+    assert.equal(empty.answer, '');
+    const other = await failureOf(run(json(answer('error', CONTENT))));
+    assert.equal(other.answer, undefined);
+    assert.equal(other.reasoningTokens, null);
+    const reasoned = await run(json(answer('stop', CONTENT, { completion_tokens_details: { reasoning_tokens: 12 } })));
+    assert.equal(reasoned.reasoningTokens, 12);
+    const odd = await run(json(answer('stop', CONTENT, { completion_tokens_details: { reasoning_tokens: -3 } })));
+    assert.equal(odd.reasoningTokens, null);
 });

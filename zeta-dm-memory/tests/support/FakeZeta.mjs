@@ -13,6 +13,8 @@ export default class FakeZeta {
 
     static Profile = 'Orla is a sellsword from the northern marches.';
 
+    static Persona = 'Orla';
+
     /**
      * @param {object[]} messages
      * @param {string} room
@@ -25,6 +27,7 @@ export default class FakeZeta {
         this.plot = FakeZeta.Plot;
         this.characters = [];
         this.profile = FakeZeta.Profile;
+        this.persona = FakeZeta.Persona;
         this.repeat = null;
         this.endless = false;
         this.perPage = null;
@@ -136,6 +139,37 @@ export default class FakeZeta {
     }
 
     /**
+     * @return {object}
+     */
+    roomBody() {
+        return {
+            id: this.room,
+            createdAt: '2026-01-01T00:00:00.000Z',
+            lastMessage: { id: 'm001', text: 'A line of the tale.' },
+            isActive: true,
+            title: 'The harbour tale',
+            unreadCount: 0,
+            plot: {
+                id: this.plot,
+                name: 'Harbour Lights',
+                shortDescription: 'A short tale of a harbour.',
+                longDescription: 'A longer tale of a harbour and its lamps.',
+                characters: this.characters.map((character, index) => ({
+                    id: `character-${index + 1}`,
+                    plotId: this.plot,
+                    imageUrl: null,
+                    isProfileImageDeletedByAbusing: false,
+                    ...character,
+                })),
+                intros: [],
+                lorebooks: [],
+            },
+            savedAt: null,
+            penalty: null,
+        };
+    }
+
+    /**
      * @param {*} receiver
      * @param {string} url
      * @param {{ headers?: Object<string, string> }} options
@@ -149,14 +183,13 @@ export default class FakeZeta {
         }
         const address = new URL(url);
         const room = `/v1/rooms/${encodeURIComponent(this.room)}`;
-        const plot = this.plot === null ? null : `/v1/plots/${encodeURIComponent(this.plot)}`;
         const story = {
-            [room]: () => (this.plot === null ? null : { id: this.room, plotId: this.plot }),
-            [`${room}/user-plot-chat-profiles/me`]: () =>
-                this.profile === null ? null : { roomId: this.room, description: this.profile },
+            [room]: () => (this.plot === null ? null : this.roomBody()),
         };
-        if (plot !== null) {
-            story[plot] = () => ({ id: this.plot, characters: this.characters });
+        if (this.plot !== null) {
+            const plot = `/v1/plots/${encodeURIComponent(this.plot)}`;
+            story[`${plot}/rooms/${encodeURIComponent(this.room)}/user-personas/selected`] = () =>
+                this.profile === null ? null : { name: this.persona, profileImageUrl: null, description: this.profile };
         }
         const known = address.pathname === `${room}/messages` || Object.hasOwn(story, address.pathname);
         if (address.origin !== FakeZeta.Origin || !known) {

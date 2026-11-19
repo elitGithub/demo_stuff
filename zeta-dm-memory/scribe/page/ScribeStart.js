@@ -114,6 +114,27 @@ switch (
             confirm: (text) => window.confirm(text),
 
             /**
+             * @param {string} label
+             * @param {Function} action
+             * @return {*}
+             */
+            menu: (label, action) => GM_registerMenuCommand(label, action),
+
+            /**
+             * @param {string} text
+             * @return {string|null}
+             */
+            prompt: (text) => window.prompt(text),
+
+            /**
+             * @param {string} text
+             * @return {void}
+             */
+            alert: (text) => {
+                window.alert(text);
+            },
+
+            /**
              * @param {string} name
              * @param {string} text
              * @return {void}

@@ -1541,3 +1541,180 @@ test('a part is recorded before it is set', () => {
     assert.deepEqual(partsOf(storage, 'record', Kind.Book).filter((name) => name.includes(':book:2:')), []);
     assertSame(ScribeStore.read(storage, 'record', Kind.Book), MEDIUM, 'the previous book');
 });
+
+test('pieces split as the write does, and writeText stores what write stores', () => {
+    const pair = '𐍈';
+    const text = JSON.stringify({ text: `${'a'.repeat(499990)}${pair}${'b'.repeat(700000)}` });
+    assert.equal(text.charCodeAt(499999) >= 0xd800 && text.charCodeAt(499999) <= 0xdbff, true);
+    const written = new FakeStorage();
+    ScribeStore.write(written, 'split', Kind.Book, JSON.parse(text));
+    const stored = partsOf(written, 'split', Kind.Book)
+        .sort((one, other) => Number(one.split(':').at(-1)) - Number(other.split(':').at(-1)))
+        .map((name) => written.values.get(name));
+    const pieces = ScribeStore.pieces(text, 500000);
+    assert.equal(pieces.length, 3);
+    assert.equal(pieces.every((piece, index) => piece === stored[index]), true);
+    assert.equal(pieces[0].length, 499999);
+    assert.equal(pieces[1].charCodeAt(0) >= 0xdc00 && pieces[1].charCodeAt(0) <= 0xdfff, false);
+    assert.equal(pieces.join(''), text);
+    assert.deepEqual(plain(ScribeStore.pieces('', 400000)), []);
+    assert.deepEqual(plain(ScribeStore.pieces(`ab${pair}`, 3)), ['ab', pair]);
+    for (const size of [1, 0, -1, 2.5, Number.NaN, '3']) {
+        assert.throws(() => ScribeStore.pieces('abc', size), { message: 'The argument is not valid: size' });
+    }
+    const typed = new FakeStorage();
+    assert.equal(ScribeStore.writeText(typed, 'split', Kind.Book, text), text.length);
+    assert.deepEqual([...typed.values.entries()].sort(), [...written.values.entries()].sort());
+    for (const refused of ['', 'null', '[1]', '"text"', '{"a":', 7, null, undefined]) {
+        assert.throws(() => ScribeStore.writeText(typed, 'split', Kind.Book, refused), {
+            message: 'The argument is not valid: value',
+        });
+    }
+    assert.throws(() => ScribeStore.writeText(typed, 'split', 'other', text), { message: 'The argument is not valid: kind' });
+    assert.throws(() => ScribeStore.writeText(typed, '\ud800', Kind.Book, text), {
+        message: 'The argument is not valid: roomId',
+    });
+});
+
+test('a snapshot carries the text and generation, and the generation is read from the head alone', () => {
+    const storage = new FakeStorage();
+    assert.equal(ScribeStore.snapshot(storage, 'snap', Kind.Live), null);
+    assert.equal(ScribeStore.generation(storage, 'snap', Kind.Live), 0);
+    ScribeStore.write(storage, 'snap', Kind.Live, MEDIUM);
+    ScribeStore.write(storage, 'snap', Kind.Live, TAB_A);
+    assert.deepEqual(plain(ScribeStore.snapshot(storage, 'snap', Kind.Live)), { text: JSON.stringify(TAB_A), generation: 2 });
+    const reads = storage.count('get');
+    const lists = storage.count('list');
+    assert.equal(ScribeStore.generation(storage, 'snap', Kind.Live), 2);
+    assert.equal(storage.count('get'), reads + 1);
+    assert.equal(storage.count('list'), lists);
+    storage.values.set(headName('snap', Kind.Live), '{"generation":"two"}');
+    assert.equal(ScribeStore.generation(storage, 'snap', Kind.Live), null);
+    assert.equal(failureOf(() => ScribeStore.snapshot(storage, 'snap', Kind.Live)).damaged, true);
+    storage.values.set(headName('snap', Kind.Live), 'not json');
+    assert.equal(ScribeStore.generation(storage, 'snap', Kind.Live), null);
+    assert.throws(() => ScribeStore.generation(storage, 'snap', 'other'), { message: 'The argument is not valid: kind' });
+});
+
+test('the synced record keeps only sound entries', () => {
+    const storage = new FakeStorage();
+    assert.deepEqual(plain(ScribeStore.synced(storage, 'kept')), {});
+    ScribeStore.setSynced(storage, 'kept', Kind.Book, 3, 7);
+    ScribeStore.setSynced(storage, 'kept', Kind.Live, 0, 0);
+    assert.deepEqual(plain(ScribeStore.synced(storage, 'kept')), {
+        book: { revision: 3, generation: 7 },
+        live: { revision: 0, generation: 0 },
+    });
+    const name = 'scribe:synced:kept';
+    const sound = { revision: 1, generation: 1 };
+    const cases = [
+        [{ revision: -1, generation: 1 }, 'a negative revision'],
+        [{ revision: 1, generation: -1 }, 'a negative generation'],
+        [{ revision: 1.5, generation: 1 }, 'a fraction'],
+        [{ revision: '1', generation: 1 }, 'a string'],
+        [{ revision: 1 }, 'a missing generation'],
+        [{ revision: 9007199254740992, generation: 1 }, 'past the safe integers'],
+        [null, 'null'],
+        [7, 'a number'],
+        ['entry', 'a string entry'],
+    ];
+    for (const [entry, label] of cases) {
+        storage.values.set(name, JSON.stringify({ settings: sound, book: entry, other: sound }));
+        assert.deepEqual(plain(ScribeStore.synced(storage, 'kept')), { settings: sound }, label);
+    }
+    for (const junk of ['not json', '[1,2]', 'null', 7]) {
+        storage.values.set(name, junk);
+        assert.deepEqual(plain(ScribeStore.synced(storage, 'kept')), {}, String(junk));
+    }
+    for (const [revision, generation] of [[-1, 0], [0, -1], [1.5, 0], ['1', 0], [null, 0]]) {
+        assert.throws(() => ScribeStore.setSynced(storage, 'kept', Kind.Book, revision, generation), {
+            message: `The argument is not valid: ${revision === -1 || revision === 1.5 || revision === '1' || revision === null ? 'revision' : 'generation'}`,
+        });
+    }
+    assert.throws(() => ScribeStore.setSynced(storage, 'kept', 'other', 1, 1), { message: 'The argument is not valid: kind' });
+});
+
+test('the others amount is for its day only', () => {
+    const storage = new FakeStorage();
+    assert.equal(ScribeStore.others(storage, 'spend', DAY), 0);
+    ScribeStore.setOthers(storage, 'spend', DAY, 1.25);
+    assert.equal(ScribeStore.others(storage, 'spend', DAY), 1.25);
+    assert.equal(ScribeStore.others(storage, 'spend', NEXT_DAY), 0);
+    assert.equal(ScribeStore.others(storage, 'elsewhere', DAY), 0);
+    for (const amount of [-1, '1', null]) {
+        storage.values.set('scribe:others:spend', JSON.stringify({ day: DAY, amount }));
+        assert.equal(ScribeStore.others(storage, 'spend', DAY), 0, String(amount));
+    }
+    storage.values.set('scribe:others:spend', 'not json');
+    assert.equal(ScribeStore.others(storage, 'spend', DAY), 0);
+    for (const amount of [-0.01, Number.NaN, Number.POSITIVE_INFINITY, '1']) {
+        assert.throws(() => ScribeStore.setOthers(storage, 'spend', DAY, amount), { message: 'The argument is not valid: amount' });
+    }
+    assert.throws(() => ScribeStore.setOthers(storage, 'spend', 7, 1), { message: 'The argument is not valid: day' });
+    ScribeStore.setOthers(storage, 'spend', DAY, 0);
+    assert.equal(ScribeStore.others(storage, 'spend', DAY), 0);
+    ScribeStore.spend(storage, 'spend', DAY, 2);
+    assert.equal(ScribeStore.spent(storage, 'spend', DAY), 2);
+    assert.equal(ScribeStore.others(storage, 'spend', DAY), 0);
+});
+
+test('the DM key is kept apart from the OpenRouter key, and the browser ID is made once', () => {
+    const storage = new FakeStorage();
+    assert.equal(ScribeStore.cloudKey(storage), '');
+    ScribeStore.setKey(storage, KEY);
+    assert.equal(ScribeStore.cloudKey(storage), '');
+    ScribeStore.setCloudKey(storage, ' dm-key-value ');
+    assert.equal(ScribeStore.cloudKey(storage), 'dm-key-value');
+    assert.equal(ScribeStore.key(storage), KEY);
+    assert.equal(storage.values.get('scribe:cloudkey'), 'dm-key-value');
+    ScribeStore.setCloudKey(storage, '   ');
+    assert.equal(storage.values.has('scribe:cloudkey'), false);
+    assert.equal(ScribeStore.key(storage), KEY);
+    assert.throws(() => ScribeStore.setCloudKey(storage, 7), { message: 'The argument is not valid: key' });
+    storage.refuseSetsMatching(/^scribe:cloudkey$/);
+    assert.throws(() => ScribeStore.setCloudKey(storage, 'another'), { message: 'The key could not be saved' });
+    storage.allow();
+    let made = 0;
+    const random = () => {
+        made++;
+        return `Fictional-Browser-${String(made).padStart(4, '0')}`;
+    };
+    assert.equal(ScribeStore.browserId(storage, random), 'Fictional-Browser-0001');
+    assert.equal(ScribeStore.browserId(storage, random), 'Fictional-Browser-0001');
+    assert.equal(made, 1);
+    for (const bad of ['short', 'has_underscore-0000000', 'x'.repeat(65), 7]) {
+        storage.values.set('scribe:browser', bad);
+        assert.equal(ScribeStore.browserId(storage, random), `Fictional-Browser-${String(made).padStart(4, '0')}`);
+    }
+    assert.equal(made, 5);
+    const fresh = new FakeStorage();
+    for (const bad of ['short', 'with space 000000000', null]) {
+        assert.throws(() => ScribeStore.browserId(fresh, () => bad), { message: 'The argument is not valid: browser' });
+    }
+    assert.equal(fresh.values.has('scribe:browser'), false);
+});
+
+test('the new names leave rooms, sweep and the export as they were', () => {
+    const plainStore = new FakeStorage();
+    const busy = new FakeStorage();
+    for (const storage of [plainStore, busy]) {
+        ScribeStore.write(storage, 'harbour', Kind.Book, MEDIUM);
+        ScribeStore.write(storage, 'harbour', Kind.Book, TAB_A);
+        ScribeStore.write(storage, 'harbour', Kind.Live, sample('live'));
+    }
+    ScribeStore.setCloudKey(busy, 'dm-key-value');
+    ScribeStore.browserId(busy, () => 'Fictional-Browser-0001');
+    ScribeStore.setSynced(busy, 'harbour', Kind.Book, 2, 2);
+    ScribeStore.setOthers(busy, 'harbour', DAY, 0.5);
+    assert.deepEqual(plain(ScribeStore.rooms(busy)), plain(ScribeStore.rooms(plainStore)));
+    assert.equal(ScribeStore.exportText(busy, 'harbour'), ScribeStore.exportText(plainStore, 'harbour'));
+    assert.equal(ScribeStore.exportText(busy, 'harbour').includes('dm-key-value'), false);
+    assert.equal(ScribeStore.sweep(busy, 'harbour'), ScribeStore.sweep(plainStore, 'harbour'));
+    assert.equal(busy.values.has('scribe:synced:harbour'), true);
+    assert.equal(busy.values.has('scribe:others:harbour'), true);
+    for (const name of ['scribe:cloudkey', 'scribe:browser']) {
+        assert.equal(ScribeStore.describe(name), null, name);
+    }
+    ScribeStore.drop(busy, 'harbour');
+    assert.deepEqual(names(busy), ['scribe:browser', 'scribe:cloudkey']);
+});

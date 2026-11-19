@@ -5,6 +5,7 @@ const ScribeLog = Object.freeze({
         Ambiguous: 'Ambiguous',
         Mismatch: 'Mismatch',
         Ruled: 'Ruled',
+        Quote: 'Quote',
     }),
 
     Kind: Object.freeze({
@@ -31,6 +32,7 @@ const ScribeLog = Object.freeze({
         Unalias: 'Unalias',
         Answer: 'Answer',
         Dismiss: 'Dismiss',
+        DismissContradiction: 'DismissContradiction',
     }),
 
     Settings: Object.freeze({
@@ -790,6 +792,30 @@ const ScribeLog = Object.freeze({
             };
             return null;
         },
+
+        /**
+         * @param {object} operation
+         * @param {object} context
+         * @param {{ subjects: object[], draft: object|null, checks: object[] }} outcome
+         * @return {string|null}
+         */
+        Contradiction(operation, context, outcome) {
+            const cite = context.cites.get(operation.position);
+            if (cite === undefined || typeof operation.earlierCite !== 'string') {
+                return ScribeLog.Reason.Citation;
+            }
+            outcome.draft = {
+                type: ScribeAnswer.Type.Contradiction,
+                cite,
+                position: operation.position,
+                earlier: operation.earlierCite,
+                earlierPosition: operation.earlier,
+                said: operation.said,
+                before: operation.before,
+                why: operation.why,
+            };
+            return null;
+        },
     }),
 
     Finishers: Object.freeze({
@@ -1195,6 +1221,25 @@ const ScribeLog = Object.freeze({
                 return ScribeLog.Reason.Reference;
             }
             outcome.stored = { type: operation.type, question, questionText: asked.text };
+            return null;
+        },
+
+        /**
+         * @param {object} operation
+         * @param {object} view
+         * @param {{ counters: object, stored: object|null }} outcome
+         * @return {string|null}
+         */
+        DismissContradiction(operation, view, outcome) {
+            const { contradiction } = operation;
+            if (typeof contradiction !== 'string') {
+                return ScribeLog.Settings.InvalidOperation;
+            }
+            const read = ScribeLog.lookup(view.state.contradictions, contradiction);
+            if (read === undefined) {
+                return ScribeLog.Reason.Reference;
+            }
+            outcome.stored = { type: operation.type, contradiction, said: read.said, before: read.before };
             return null;
         },
     }),

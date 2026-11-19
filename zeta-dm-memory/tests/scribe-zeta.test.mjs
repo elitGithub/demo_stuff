@@ -434,6 +434,81 @@ test('the newest page alone', async () => {
     assert.equal(error.status, 403);
 });
 
+test('the status-only watcher reads only the room and HTTP result for player message POSTs', async () => {
+    const page = FakeZeta.window();
+    const headerSetter = page.XMLHttpRequest.prototype.setRequestHeader;
+    const watcher = ZetaSource.watch(page, undefined, false);
+    assert.equal(page.XMLHttpRequest.prototype.setRequestHeader, headerSetter);
+    const attempts = [];
+    watcher.onPost((room) => {
+        const outcomes = [];
+        attempts.push({ room, outcomes });
+        return (status) => outcomes.push(status);
+    });
+    const reads = [];
+    const privateField = () => { reads.push('private'); throw new Error('private field'); };
+    const init = { method: 'POST', get headers() { return privateField(); }, get body() { return privateField(); } };
+    const response = { status: 401, get headers() { return privateField(); }, get text() { return privateField(); } };
+    const pending = deferred();
+    page.answer = () => pending.promise;
+    assert.equal(page.fetch(MESSAGES, init), pending.promise);
+    assert.deepEqual(attempts, [{ room: 'abc', outcomes: [] }]);
+    pending.resolve(response);
+    await settle();
+    const xhr = new page.XMLHttpRequest();
+    xhr.open('POST', MESSAGES);
+    xhr.setRequestHeader('Authorization', bearer('unused'));
+    xhr.send({});
+    xhr.status = 201;
+    xhr.finish();
+    await page.fetch(MESSAGES, { method: 'GET' });
+    await page.fetch(`${MESSAGES}/one/regenerate`, init);
+    await page.fetch('https://unrelated.example/v1/rooms/abc/messages', init);
+    assert.deepEqual(attempts, [{ room: 'abc', outcomes: [401] }, { room: 'abc', outcomes: [201] }]);
+    assert.deepEqual(reads, []);
+    assert.equal(watcher.token(), null);
+    watcher.stop();
+});
+
+test('the POST watcher accepts HTTP results only from the original final endpoint', async () => {
+    const page = FakeZeta.window();
+    const watcher = ZetaSource.watch(page, undefined, false);
+    const statuses = [];
+    watcher.onPost(() => (status) => statuses.push(status));
+    const login = 'https://zeta-ai.io/login';
+    const otherRoom = `${API}/v1/rooms/another/messages`;
+    const otherOrigin = 'https://elsewhere.example/v1/rooms/abc/messages';
+    const fetchCases = [
+        [{ status: 201, redirected: false, url: MESSAGES }, 201],
+        [{ status: 401, redirected: false, url: MESSAGES }, 401],
+        [{ status: 200, redirected: true, url: login }, null],
+        [{ status: 200, redirected: true, url: MESSAGES }, null],
+        [{ status: 401, url: login }, null],
+        [{ status: 200, url: otherRoom }, null],
+        [{ status: 200, url: otherOrigin }, null],
+        [{ status: 200, url: '' }, null],
+        [{ status: 200, get url() { throw new Error('inaccessible'); } }, null],
+        [{ status: 201 }, 201],
+    ];
+    for (const [response, expected] of fetchCases) {
+        const nativeResult = Promise.resolve(response);
+        page.answer = () => nativeResult;
+        assert.equal(page.fetch(MESSAGES, { method: 'POST' }), nativeResult);
+        await settle();
+        assert.deepEqual(statuses.splice(0), [expected]);
+    }
+    for (const [finalUrl, expected] of [[MESSAGES, 201], [login, null], [otherRoom, null], [otherOrigin, null], ['', null]]) {
+        const xhr = new page.XMLHttpRequest();
+        xhr.open('POST', MESSAGES);
+        xhr.send();
+        xhr.status = 201;
+        xhr.responseURL = finalUrl;
+        xhr.finish();
+        assert.deepEqual(statuses.splice(0), [expected]);
+    }
+    watcher.stop();
+});
+
 test('the watcher sees the token', () => {
     const page = FakeZeta.window();
     const watcher = ZetaSource.watch(page);

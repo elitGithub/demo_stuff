@@ -225,9 +225,11 @@ const ZetaSource = Object.freeze({
         if (path === null) {
             return null;
         }
-        const given = init?.headers;
-        const headers = given === undefined || given === null ? (carried ? input.headers : null) : given;
-        ZetaSource.remember(state, ZetaSource.authorization(headers));
+        if (state.credentials) {
+            const given = init?.headers;
+            const headers = given === undefined || given === null ? (carried ? input.headers : null) : given;
+            ZetaSource.remember(state, ZetaSource.authorization(headers));
+        }
         return ZetaSource.traffic(path, init?.method ?? (carried ? input.method : settings.ReadMethod));
     },
 
@@ -246,12 +248,32 @@ const ZetaSource = Object.freeze({
     },
 
     /**
+     * @param {string} path
+     * @param {object} response
+     * @param {string} address
+     * @return {number|null}
+     */
+    postStatus(path, response, address) {
+        if (!response || (address === 'url' && response.redirected === true)) {
+            return null;
+        }
+        const finalUrl = response[address];
+        if (finalUrl !== undefined) {
+            const endpoint = new URL(finalUrl);
+            if (endpoint.origin !== ZetaSource.Settings.ApiOrigin || endpoint.pathname !== path) {
+                return null;
+            }
+        }
+        return Number.isInteger(response.status) ? response.status : null;
+    },
+
+    /**
      * @param {{ callbacks: Function[], stopped: boolean }} state
      * @param {*} result
      * @param {Readonly<{ method: string, path: string }>|null} traffic
      * @return {void}
      */
-    settled(state, result, traffic) {
+    settled(state, result, traffic, receipt) {
         if (traffic === null) {
             return;
         }
@@ -259,10 +281,30 @@ const ZetaSource = Object.freeze({
         /**
          * @return {void}
          */
-        const finished = () => {
+        const finished = (status) => {
+            if (!state.stopped && typeof receipt === 'function') {
+                ZetaSource.quietly(null, receipt, status);
+            }
             ZetaSource.notify(state, traffic);
         };
-        result.then(finished, finished);
+        result.then((response) => {
+            const status = receipt ? ZetaSource.quietly(null, ZetaSource.postStatus, traffic.path, response, 'url') : null;
+            finished(status);
+        }, () => finished(null));
+    },
+
+    /**
+     * @param {object} state
+     * @param {object|null} traffic
+     * @return {Function|null}
+     */
+    posting(state, traffic) {
+        if (!state.onPost || traffic?.method !== 'POST') {
+            return null;
+        }
+        const room = /^\/v1\/rooms\/([^/]+)\/messages$/.exec(traffic.path);
+        const id = room === null ? null : ZetaSource.quietly(null, decodeURIComponent, room[1]);
+        return id === null ? null : ZetaSource.quietly(null, state.onPost, id);
     },
 
     /**
@@ -323,9 +365,14 @@ const ZetaSource = Object.freeze({
         /**
          * @return {void}
          */
+        const receipt = ZetaSource.posting(state, record.traffic);
         record.listener = () => {
             if (ZetaSource.Requests.get(request) === record) {
                 ZetaSource.Requests.delete(request);
+            }
+            if (!state.stopped && typeof receipt === 'function') {
+                const status = ZetaSource.quietly(null, ZetaSource.postStatus, record.traffic.path, request, 'responseURL');
+                ZetaSource.quietly(null, receipt, status);
             }
             ZetaSource.notify(state, record.traffic);
         };
@@ -376,9 +423,10 @@ const ZetaSource = Object.freeze({
     /**
      * @param {object} pageWindow
      * @param {(wrapper: Function) => Function} [exporter]
+     * @param {boolean} credentials
      * @return {Readonly<{ token: () => string|null, onTraffic: (callback: Function) => void, stop: () => void }>}
      */
-    watch(pageWindow, exporter) {
+    watch(pageWindow, exporter, credentials = true) {
         const known = ZetaSource.Watchers.get(pageWindow);
         if (known !== undefined) {
             return known;
@@ -392,13 +440,13 @@ const ZetaSource = Object.freeze({
             (target) => target.XMLHttpRequest.prototype,
             pageWindow,
         );
-        const owners = { fetch: pageWindow, open: prototype, setRequestHeader: prototype, send: prototype };
+        const owners = { fetch: pageWindow, open: prototype, ...(credentials ? { setRequestHeader: prototype } : {}), send: prototype };
         const originals = {};
         const installed = {};
         for (const name of Object.keys(owners)) {
             originals[name] = ZetaSource.quietly(null, ZetaSource.held, owners[name], name);
         }
-        const state = { pageWindow, token: null, callbacks: [], stopped: false };
+        const state = { pageWindow, credentials, token: null, callbacks: [], onPost: null, stopped: false };
         const wrappers = {
             /**
              * @param {*} input
@@ -408,8 +456,9 @@ const ZetaSource = Object.freeze({
                 'use strict';
                 const init = arguments[ZetaSource.Settings.InitPosition];
                 const traffic = ZetaSource.quietly(null, ZetaSource.fetched, state, input, init);
+                const receipt = ZetaSource.quietly(null, ZetaSource.posting, state, traffic);
                 const result = originals.fetch.apply(this, arguments);
-                ZetaSource.quietly(null, ZetaSource.settled, state, result, traffic);
+                ZetaSource.quietly(null, ZetaSource.settled, state, result, traffic, receipt);
                 return result;
             },
 
@@ -463,6 +512,12 @@ const ZetaSource = Object.freeze({
              * @return {string|null}
              */
             token: () => state.token,
+
+            /**
+             * @param {Function} callback
+             * @return {void}
+             */
+            onPost: (callback) => { state.onPost = callback; },
 
             /**
              * @param {(traffic: Readonly<{ method: string, path: string }>) => void} callback

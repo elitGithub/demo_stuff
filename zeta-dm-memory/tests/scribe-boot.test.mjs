@@ -175,11 +175,11 @@ function answer(call, status, text) {
 
 /**
  * @param {{ details: { data: string } }} call
- * @return {Array<string|number>}
+ * @return {Array<string|boolean>}
  */
 function asked(call) {
     const body = JSON.parse(call.details.data);
-    return [body.model, body.max_tokens];
+    return [body.model, Object.hasOwn(body, 'max_tokens')];
 }
 
 /**
@@ -432,9 +432,15 @@ function standIns(timers) {
                 live: null,
                 ready: world.offerAtOpen,
                 suggestion: null,
+                reminder: null,
+                attempt: null,
                 afterView: null,
                 reads: [],
                 went: [],
+                wentLines: [],
+                starting: [],
+                cancelled: [],
+                uncertain: [],
                 profiles: 0,
             };
             world.order.push(`live ${options.roomId}`);
@@ -465,7 +471,13 @@ function standIns(timers) {
                  */
                 lines: () => {
                     record.reads.push('lines');
-                    return { ready: record.ready, suggestion: record.suggestion, ends: [] };
+                    return {
+                        ready: record.ready,
+                        suggestion: record.suggestion,
+                        ends: [],
+                        reminder: record.reminder,
+                        attempt: record.attempt,
+                    };
                 },
 
                 /**
@@ -474,6 +486,25 @@ function standIns(timers) {
                  */
                 went: (lines) => {
                     record.went.push(`${lines.ready} | ${lines.suggestion}`);
+                    record.wentLines.push(lines);
+                },
+                /**
+                 * @param {object} lines
+                 * @return {void}
+                 */
+                starting: (lines) => {
+                    record.starting.push(lines);
+                },
+                posting: () => ({ key: 'current attempt' }),
+                outstanding: (key) => record.uncertain.find((lines) => lines.key === key &&
+                    !record.wentLines.includes(lines) && !record.cancelled.includes(lines)) ?? null,
+                uncertain: (lines) => { record.uncertain.push(lines); },
+                /**
+                 * @param {object} lines
+                 * @return {void}
+                 */
+                cancelled: (lines) => {
+                    record.cancelled.push(lines);
                 },
                 /**
                  * @param {*} message
@@ -993,7 +1024,6 @@ test('a failed model request says nothing of the request', async () => {
     const options = { method: 'POST', headers: { Authorization: `Bearer ${KEY}` }, body: JSON.stringify({ key: KEY }) };
     const endings = [
         ['onerror', 'The request failed'],
-        ['ontimeout', 'The request timed out'],
         ['onabort', 'The request was stopped'],
     ];
     for (const [ending, sentence] of endings) {
@@ -1388,23 +1418,24 @@ test('the model is asked by role', async () => {
     const plain = ask(ScribeBoot.Role.Analyzer, SYSTEM, USER);
     await settle();
     assert.equal(run.sent.calls.length, 1);
-    assert.deepEqual(asked(run.sent.calls[0]), [DEFAULTS.analyzer, 40000]);
+    assert.deepEqual(asked(run.sent.calls[0]), [DEFAULTS.analyzer, false]);
     answer(run.sent.calls[0], 200, completion('The plain answer.', 0.25));
     const result = await plain;
-    assert.deepEqual(Object.keys(result), ['text', 'cost']);
+    assert.deepEqual(Object.keys(result), ['text', 'cost', 'stopped']);
+    assert.equal(result.stopped, 0);
     assert.equal(result.text, 'The plain answer.');
     assert.equal(result.cost, 0.25);
     ScribeStore.write(run.storage, 'harbour', ScribeStore.Kind.Settings, { analyzer: 'invented/analyzer-model', scribe: 'invented/scribe-model', budget: 3 });
     const roles = [
-        ['Analyzer', 'invented/analyzer-model', 40000],
-        ['Scribe', 'invented/scribe-model', 4000],
-        ['Pedant', DEFAULTS.pedant, 4000],
+        ['Analyzer', 'invented/analyzer-model'],
+        ['Scribe', 'invented/scribe-model'],
+        ['Pedant', DEFAULTS.pedant],
     ];
-    for (const [role, model, tokens] of roles) {
+    for (const [role, model] of roles) {
         const asking = ask(ScribeBoot.Role[role], SYSTEM, USER);
         await settle();
         const call = run.sent.calls.at(-1);
-        assert.deepEqual(asked(call), [model, tokens], role);
+        assert.deepEqual(asked(call), [model, false], role);
         assert.equal(call.details.url, ENDPOINT);
         assert.equal(call.details.headers.Authorization, `Bearer ${KEY}`);
         answer(call, 200, completion(`The ${role} answer.`, 0.5));
@@ -1420,7 +1451,7 @@ test('the model is asked by role', async () => {
     assert.equal(run.sent.calls.length, 5);
     await pass(run, 1);
     assert.equal(run.sent.calls.length, 6);
-    assert.deepEqual(asked(run.sent.calls.at(-1)), ['invented/scribe-model', 4000]);
+    assert.deepEqual(asked(run.sent.calls.at(-1)), ['invented/scribe-model', false]);
     answer(run.sent.calls.at(-1), 200, completion('The second try.', 0.1));
     assert.equal((await retried).text, 'The second try.');
     run.boot.stop();
@@ -1853,63 +1884,152 @@ test('a billed amount that cannot be written is kept', async () => {
     run.boot.stop();
 });
 
-test('a request that is given up is ended', async () => {
+test('Force stop shows at 4 minutes, ends the call and asks once more to answer now', async () => {
     const run = harness();
-    run.sent = requests({ timers: run.timers });
+    run.sent = requests({ aborting: false });
     run.environment.xmlHttpRequest = run.sent.xmlHttpRequest;
     start(run);
     await settle();
     ScribeStore.setKey(run.storage, KEY);
+    const panel = run.world.panels[0];
+    const calls = panel.options.calls;
     const scene = run.world.lives[0].options.ask(ScribeBoot.Role.Scribe, SYSTEM, USER);
     await settle();
     assert.equal(run.sent.calls.length, 1);
-    assert.equal(run.sent.calls[0].details.timeout, ScribeBoot.Settings.TimeoutMs.Scribe - 5000);
-    await pass(run, 174999);
-    assert.equal(run.sent.calls[0].ended, false);
+    assert.equal(calls.due(), false);
+    await pass(run, 239999);
+    assert.equal(calls.due(), false);
+    const redraws = panel.redraws;
     await pass(run, 1);
-    assert.equal(run.sent.calls[0].ended, true);
-    assert.equal(run.sent.calls.length, 1);
-    await pass(run, 2000);
+    assert.equal(calls.due(), true);
+    assert.equal(panel.redraws > redraws, true);
+    calls.stop();
+    await settle();
+    assert.equal(run.sent.calls[0].handle.aborts, 1);
     assert.equal(run.sent.calls.length, 2);
-    assert.throws(() => answer(run.sent.calls[0], 200, completion('A late answer.', 0.5)));
-    answer(run.sent.calls[1], 200, completion('The scene.', 0.01));
-    assert.equal((await scene).cost, 0.01);
+    const first = JSON.parse(run.sent.calls[0].details.data);
+    const second = JSON.parse(run.sent.calls[1].details.data);
+    assert.equal(second.messages[1].content, `${first.messages[1].content}\n\nAnswer now, without more thinking.`);
+    assert.deepEqual({ ...second, messages: [second.messages[0]] }, { ...first, messages: [first.messages[0]] });
+    assert.equal(calls.due(), false);
+    answer(run.sent.calls[0], 200, completion('A late answer.', 0.5));
+    await pass(run, 10000);
+    assert.equal(run.sent.calls.length, 2);
+    await pass(run, 229999);
+    assert.equal(calls.due(), false);
+    await pass(run, 1);
+    assert.equal(calls.due(), true);
+    calls.stop();
+    await settle();
+    assert.equal(run.sent.calls.length, 3);
+    const third = JSON.parse(run.sent.calls[2].details.data);
+    assert.equal(third.messages[1].content, second.messages[1].content);
+    answer(run.sent.calls[2], 200, completion('The scene.', 0.01));
+    const result = await scene;
+    assert.equal(result.text, 'The scene.');
+    assert.equal(result.cost, 0.01);
+    assert.equal(result.stopped, 2);
     assert.equal(ScribeStore.spent(run.storage, 'harbour', DAY), 0.01);
-    assert.equal(run.sent.most, 1);
+    assert.equal(calls.due(), false);
     run.boot.stop();
-    const deaf = harness();
-    deaf.sent = requests({ aborting: false });
-    deaf.environment.xmlHttpRequest = deaf.sent.xmlHttpRequest;
-    start(deaf);
+});
+
+test('one Force stop stops every call past 4 minutes and leaves a younger call running', async () => {
+    const run = harness();
+    start(run);
     await settle();
-    ScribeStore.setKey(deaf.storage, KEY);
-    const waited = deaf.world.lives[0].options.ask(ScribeBoot.Role.Scribe, SYSTEM, USER);
+    ScribeStore.setKey(run.storage, KEY);
+    const calls = run.world.panels[0].options.calls;
+    const reading = run.world.keepers[0].options.ask(ScribeBoot.Role.Analyzer, SYSTEM, USER);
+    await pass(run, 30000);
+    const check = run.world.lives[0].options.ask(ScribeBoot.Role.Pedant, SYSTEM, USER);
+    await pass(run, 210000);
+    const scene = run.world.lives[0].options.ask(ScribeBoot.Role.Scribe, SYSTEM, USER);
+    await pass(run, 30000);
+    assert.equal(run.sent.calls.length, 3);
+    assert.equal(calls.due(), true);
+    calls.stop();
     await settle();
-    await pass(deaf, 182000);
-    assert.equal(deaf.sent.calls[0].handle.aborts, 1);
-    assert.equal(deaf.sent.calls.length, 1);
-    deaf.sent.calls[0].ended = true;
-    deaf.sent.calls[0].details.onerror({ status: 0 });
+    assert.deepEqual(run.sent.calls.slice(0, 3).map((call) => call.handle.aborts), [1, 1, 0]);
+    assert.equal(run.sent.calls.length, 5);
+    const resent = run.sent.calls.slice(3).map((call) => JSON.parse(call.details.data).messages[1].content);
+    assert.deepEqual(resent, [`${USER}\n\nAnswer now, without more thinking.`, `${USER}\n\nAnswer now, without more thinking.`]);
+    assert.equal(calls.due(), false);
+    calls.stop();
     await settle();
-    assert.equal(deaf.sent.calls.length, 2);
-    assert.equal(deaf.sent.most, 1);
-    answer(deaf.sent.calls[1], 200, completion('The scene at last.', 0.01));
-    assert.equal((await waited).text, 'The scene at last.');
-    deaf.boot.stop();
+    assert.equal(run.sent.calls.length, 5);
+    assert.equal(run.sent.calls[2].handle.aborts, 0);
+    answer(run.sent.calls[2], 200, completion('The scene.', 0.01));
+    answer(run.sent.calls[3], 200, completion('The reading.', 0.01));
+    answer(run.sent.calls[4], 200, completion('The check.', 0.01));
+    assert.equal((await reading).stopped, 1);
+    assert.equal((await check).stopped, 1);
+    assert.equal((await scene).stopped, 0);
+    run.boot.stop();
+});
+
+test('Force stop sends nothing more once the day is spent, and the call ends with that refusal', async () => {
+    const run = harness();
+    start(run);
+    await settle();
+    ScribeStore.setKey(run.storage, KEY);
+    ScribeStore.write(run.storage, 'harbour', ScribeStore.Kind.Settings, { budget: 1 });
+    const calls = run.world.panels[0].options.calls;
+    const scene = failureOf(run.world.lives[0].options.ask(ScribeBoot.Role.Scribe, SYSTEM, USER));
+    await settle();
+    ScribeStore.spend(run.storage, 'harbour', DAY, 1);
+    await pass(run, 240000);
+    calls.stop();
+    await settle();
+    assert.equal(run.sent.calls.length, 1);
+    assert.equal(run.sent.calls[0].handle.aborts, 1);
+    const ended = await scene;
+    assert.equal(ended.message, "The day's budget is spent");
+    assert.equal(ended.stopped, 1);
+    assert.equal(ScribeStore.spent(run.storage, 'harbour', DAY), 1);
+    run.boot.stop();
+});
+
+test('Force stop sends nothing more while spending is unrecorded, and the call ends with that refusal', async () => {
+    const run = harness();
+    start(run);
+    await settle();
+    ScribeStore.setKey(run.storage, KEY);
+    const calls = run.world.panels[0].options.calls;
+    const reading = failureOf(run.world.keepers[0].options.ask(ScribeBoot.Role.Analyzer, SYSTEM, USER));
+    const scene = failureOf(run.world.lives[0].options.ask(ScribeBoot.Role.Scribe, SYSTEM, USER));
+    await settle();
+    run.storage.refuseSetsMatching(/spent/);
+    const check = run.world.lives[0].options.ask(ScribeBoot.Role.Pedant, SYSTEM, USER);
+    await settle();
+    answer(run.sent.calls[2], 200, completion('Checked.', 2));
+    await check;
+    assert.equal((await failureOf(run.world.lives[0].options.ask(ScribeBoot.Role.Pedant, SYSTEM, USER))).message, UNRECORDED);
+    await pass(run, 240000);
+    calls.stop();
+    await settle();
+    assert.equal(run.sent.calls.length, 3);
+    for (const ended of [await reading, await scene]) {
+        assert.equal(ended.message, UNRECORDED);
+        assert.equal(ended.stopped, 1);
+    }
+    run.storage.allow();
+    run.boot.stop();
 });
 
 test('nothing is looked up outside the details', async () => {
     const made = requests();
     const fetch = ScribeBoot.request(made.xmlHttpRequest);
-    const going = fetch(ENDPOINT, { method: 'POST', headers: { Authorization: `Bearer ${KEY}` }, body: '{}', timeout: 175000 });
+    const going = fetch(ENDPOINT, { method: 'POST', headers: { Authorization: `Bearer ${KEY}` }, body: '{}' });
     const details = made.calls[0].details;
     assert.equal(Object.getPrototypeOf(details), null);
     assert.equal(Object.getPrototypeOf(details.headers), null);
-    for (const name of ['anonymous', 'timeout', 'redirect', 'responseType', 'method', 'url', 'headers', 'data']) {
+    for (const name of ['anonymous', 'redirect', 'responseType', 'method', 'url', 'headers', 'data']) {
         assert.equal(Object.hasOwn(details, name), true, name);
     }
+    assert.equal(Object.hasOwn(details, 'timeout'), false);
+    assert.equal(Object.hasOwn(details, 'ontimeout'), false);
     assert.equal(details.redirect, 'error');
-    assert.equal(details.timeout, 175000);
     assert.equal(details.anonymous, true);
     assert.equal(Object.hasOwn(details.headers, 'Authorization'), true);
     answer(made.calls[0], 200, '{}');
@@ -2249,11 +2369,9 @@ test('each part is closed on its own', async () => {
     run.boot.stop();
 });
 
-test('the model timeout is the setting', async () => {
-    assert.equal(ScribeBoot.Settings.TimeoutMs.Analyzer, 600000);
-    assert.equal(ScribeBoot.Settings.TimeoutMs.Scribe, 180000);
-    assert.equal(ScribeBoot.Settings.TimeoutMs.Pedant, 180000);
-    assert.equal(ScribeBoot.Settings.TransportMarginMs, 5000);
+test('a call left running ends when the chat is left', async () => {
+    assert.equal(Object.hasOwn(ScribeBoot.Settings, 'TimeoutMs'), false);
+    assert.equal(Object.hasOwn(ScribeBoot.Settings, 'TransportMarginMs'), false);
     const run = harness();
     start(run);
     await settle();
@@ -2261,8 +2379,7 @@ test('the model timeout is the setting', async () => {
     const pending = failureOf(run.world.keepers[0].options.ask(ScribeBoot.Role.Analyzer, SYSTEM, USER));
     await settle();
     assert.equal(run.sent.calls.length, 1);
-    assert.equal(run.sent.calls[0].details.timeout, 595000);
-    assert.equal(run.timers.delays.includes(600000), true);
+    assert.equal(Object.hasOwn(run.sent.calls[0].details, 'timeout'), false);
     run.boot.stop();
     assert.equal(await stateOf(pending), 'settled');
     assert.equal((await pending).message, 'The chat has been left');
@@ -2373,42 +2490,38 @@ test('a spending write that landed is not kept', async () => {
     run.boot.stop();
 });
 
-test('the boot ends what the transport does not', async () => {
+test('no timer ends a model call, whatever its role', async () => {
     const run = harness();
     start(run);
     await settle();
     ScribeStore.setKey(run.storage, KEY);
-    const scene = run.world.lives[0].options.ask(ScribeBoot.Role.Scribe, SYSTEM, USER);
+    const keeper = run.world.keepers[0].options.ask;
+    const live = run.world.lives[0].options.ask;
+    const roles = [
+        [keeper, ScribeBoot.Role.Analyzer],
+        [live, ScribeBoot.Role.Scribe],
+        [live, ScribeBoot.Role.Pedant],
+    ];
+    const asking = roles.map(([ask, role]) => ask(role, SYSTEM, USER));
     await settle();
-    assert.equal(run.sent.calls.length, 1);
-    await pass(run, 174999);
-    assert.equal(run.sent.calls[0].handle.aborts, 0);
-    await pass(run, 1);
-    assert.equal(run.sent.calls[0].handle.aborts, 1);
-    assert.equal(run.sent.calls[0].ended, true);
-    await pass(run, 2000);
-    assert.equal(run.sent.calls.length, 2);
-    answer(run.sent.calls[1], 200, completion('The scene.', 0.01));
-    assert.equal((await scene).text, 'The scene.');
-    assert.equal(run.sent.calls[1].handle.aborts, 0);
+    assert.equal(run.sent.calls.length, 3);
+    for (const call of run.sent.calls) {
+        assert.equal(Object.hasOwn(call.details, 'timeout'), false);
+    }
+    for (let stretch = 0; stretch < 6; stretch++) {
+        await pass(run, 600000);
+    }
+    for (const [index, pending] of asking.entries()) {
+        assert.equal(await stateOf(pending), 'pending', roles[index][1]);
+        assert.equal(run.sent.calls[index].handle.aborts, 0, roles[index][1]);
+        assert.equal(run.sent.calls[index].ended, false, roles[index][1]);
+    }
+    assert.equal(run.sent.calls.length, 3);
+    for (const [index, pending] of asking.entries()) {
+        answer(run.sent.calls[index], 200, completion(`The ${roles[index][1]} answer.`, 0.01));
+        assert.equal((await pending).text, `The ${roles[index][1]} answer.`);
+    }
     run.boot.stop();
-    const stuck = harness();
-    stuck.sent = requests({ aborting: false });
-    stuck.environment.xmlHttpRequest = stuck.sent.xmlHttpRequest;
-    start(stuck);
-    await settle();
-    ScribeStore.setKey(stuck.storage, KEY);
-    const given = failureOf(stuck.world.lives[0].options.ask(ScribeBoot.Role.Scribe, SYSTEM, USER));
-    await settle();
-    await pass(stuck, 546000);
-    assert.equal(await stateOf(given), 'settled');
-    assert.equal((await given).message.startsWith('no answer within 180 seconds'), true);
-    assert.equal(stuck.sent.calls.length, 1);
-    stuck.sent.calls[0].ended = true;
-    stuck.sent.calls[0].details.onerror({ status: 0 });
-    await pass(stuck, 10000);
-    assert.equal(stuck.sent.calls.length, 1);
-    stuck.boot.stop();
 });
 
 test('a lock granted late is given back', async () => {
@@ -2504,7 +2617,7 @@ test('a tab opened hidden starts at once', async () => {
     run.boot.stop();
 });
 
-test('the reading role may answer at length', async () => {
+test('no role caps the length of its answer', async () => {
     const run = harness();
     start(run);
     await settle();
@@ -2512,63 +2625,21 @@ test('the reading role may answer at length', async () => {
     const keeper = run.world.keepers[0].options.ask;
     const live = run.world.lives[0].options.ask;
     const expected = [
-        [keeper, ScribeBoot.Role.Analyzer, 40000],
-        [live, ScribeBoot.Role.Scribe, 4000],
-        [live, ScribeBoot.Role.Pedant, 4000],
+        [keeper, ScribeBoot.Role.Analyzer],
+        [live, ScribeBoot.Role.Scribe],
+        [live, ScribeBoot.Role.Pedant],
     ];
-    for (const [ask, role, tokens] of expected) {
+    assert.equal(Object.hasOwn(ScribeBoot.Settings, 'MaxTokens'), false);
+    for (const [ask, role] of expected) {
         const asking = ask(role, SYSTEM, USER);
         await settle();
         const call = run.sent.calls.at(-1);
-        assert.equal(JSON.parse(call.details.data).max_tokens, tokens, role);
+        assert.equal(Object.hasOwn(JSON.parse(call.details.data), 'max_tokens'), false, role);
         answer(call, 200, completion(`The ${role} answer.`, 0.01));
         assert.equal((await asking).text, `The ${role} answer.`);
     }
     assert.equal(run.sent.calls.length, 3);
     run.boot.stop();
-});
-
-test('each role has its own timeout', async () => {
-    const run = harness();
-    start(run);
-    await settle();
-    ScribeStore.setKey(run.storage, KEY);
-    const keeper = run.world.keepers[0].options.ask;
-    const live = run.world.lives[0].options.ask;
-    const reading = keeper(ScribeBoot.Role.Analyzer, SYSTEM, USER);
-    await settle();
-    assert.equal(run.sent.calls.length, 1);
-    assert.equal(run.sent.calls[0].details.timeout, 595000);
-    assert.equal(run.timers.delays.includes(600000), true);
-    assert.equal(run.timers.delays.includes(595000), true);
-    await pass(run, 300000);
-    assert.equal(await stateOf(reading), 'pending');
-    assert.equal(run.sent.calls[0].handle.aborts, 0);
-    answer(run.sent.calls[0], 200, completion('A long reading.', 0.2));
-    assert.equal(await stateOf(reading), 'settled');
-    assert.equal((await reading).text, 'A long reading.');
-    assert.equal(run.sent.calls.length, 1);
-    const unanswered = failureOf(keeper(ScribeBoot.Role.Analyzer, SYSTEM, USER));
-    await settle();
-    assert.equal(run.sent.calls.length, 2);
-    await pass(run, 594999);
-    assert.equal(run.sent.calls[1].handle.aborts, 0);
-    await pass(run, 1);
-    assert.equal(run.sent.calls[1].handle.aborts, 1);
-    assert.equal(run.sent.calls[1].ended, true);
-    for (const role of [ScribeBoot.Role.Scribe, ScribeBoot.Role.Pedant]) {
-        const asking = live(role, SYSTEM, USER);
-        await settle();
-        const call = run.sent.calls.at(-1);
-        assert.equal(call.details.timeout, 175000, role);
-        assert.equal(run.timers.delays.includes(180000), true, role);
-        assert.equal(run.timers.delays.includes(175000), true, role);
-        answer(call, 200, completion(`The ${role} answer.`, 0.01));
-        assert.equal((await asking).text, `The ${role} answer.`);
-    }
-    run.boot.stop();
-    assert.equal(await stateOf(unanswered), 'settled');
-    assert.equal((await unanswered).message, 'The chat has been left');
 });
 
 /**
@@ -2785,6 +2856,109 @@ test('a sent under an earlier kept arm still tells the live part', async () => {
     run.boot.stop();
 });
 
+/**
+ * @param {*} source
+ * @param {number} seq
+ * @param {object} fields
+ * @return {{ origin: string, source: *, data: object }}
+ */
+function reminderSentFrom(source, seq, fields) {
+    const base = sentFrom(source, seq, true, false);
+    return { ...base, data: { ...base.data, ...fields } };
+}
+
+test('a reminder report is told to the live part with the identities of the arm it answers', async () => {
+    const { run, chat, live } = await bridged();
+    live.ready = 'Remember the mill.';
+    live.reminder = 'room-1#reminder-1';
+    live.attempt = 'room-1#attempt-1';
+    await deliver(run, readyFrom(chat.window));
+    await deliver(run, reminderSentFrom(chat.window, 1, { reminder: 'room-1#reminder-1', attempt: 'room-1#attempt-1', index: 0 }));
+    assert.equal(live.wentLines.length, 1);
+    assert.deepEqual(
+        [live.wentLines[0].ready, live.wentLines[0].reminder, live.wentLines[0].attempt],
+        ['Remember the mill.', 'room-1#reminder-1', 'room-1#attempt-1'],
+    );
+    await deliver(run, sentFrom(chat.window, 2, false, false));
+    assert.deepEqual(
+        [live.wentLines[1].ready, live.wentLines[1].reminder, live.wentLines[1].attempt],
+        [null, null, null],
+    );
+    run.boot.stop();
+});
+
+test('a duplicate report of one arm tells the live part once, and a new index is a new send', async () => {
+    const { run, chat, live } = await bridged();
+    await deliver(run, readyFrom(chat.window));
+    const plain = { index: 0 };
+    await deliver(run, reminderSentFrom(chat.window, 1, { ...plain, ready: false }));
+    await deliver(run, reminderSentFrom(chat.window, 1, { ...plain, ready: false }));
+    assert.equal(live.wentLines.length, 1);
+    await deliver(run, reminderSentFrom(chat.window, 1, { index: 1, ready: false }));
+    assert.equal(live.wentLines.length, 2);
+    await deliver(run, reminderSentFrom(chat.window, 1, { index: 1, ready: false }));
+    assert.equal(live.wentLines.length, 2);
+    run.boot.stop();
+});
+
+test('the top page journals a frame send before confirmation and can release it on cancellation', async () => {
+    const { run, chat, live } = await bridged();
+    live.ready = 'The full paragraph.';
+    live.reminder = 'first';
+    live.attempt = 'first-attempt';
+    await deliver(run, readyFrom(chat.window));
+    const identity = { index: 0, reminder: live.reminder, attempt: live.attempt };
+    await deliver(run, reminderSentFrom(chat.window, 1, { ...identity, kind: 'starting', attempt: 'other' }));
+    assert.equal(live.starting.length, 0);
+    await deliver(run, reminderSentFrom(chat.window, 1, { ...identity, kind: 'starting' }));
+    await deliver(run, reminderSentFrom(chat.window, 1, { ...identity, kind: 'starting' }));
+    assert.equal(live.starting.length, 1);
+    assert.equal(live.wentLines.length, 0);
+    assert.equal(live.starting[0].key, 'frame:tab-one:1:1:0');
+    await deliver(run, reminderSentFrom(chat.window, 1, { ...identity, kind: 'cancelled' }));
+    await deliver(run, reminderSentFrom(chat.window, 1, identity));
+    assert.deepEqual(live.cancelled, live.starting);
+    assert.equal(live.wentLines.length, 0);
+    const seq = chat.window.posted.at(-1).seq;
+    const plain = { index: 1, ready: false };
+    await deliver(run, reminderSentFrom(chat.window, seq, { ...plain, kind: 'starting' }));
+    await deliver(run, reminderSentFrom(chat.window, seq, plain));
+    assert.equal(live.wentLines.length, 1);
+    assert.equal(live.wentLines[0], live.starting[1]);
+    assert.notEqual(live.wentLines[0].key, live.starting[0].key);
+    run.boot.stop();
+});
+
+test('a report naming another reminder than the arm offered tells nothing, and one naming none is the arm', async () => {
+    const { run, chat, live } = await bridged();
+    live.ready = 'Remember the mill.';
+    live.reminder = 'room-1#reminder-1';
+    live.attempt = 'room-1#attempt-1';
+    await deliver(run, readyFrom(chat.window));
+    await deliver(run, reminderSentFrom(chat.window, 1, { reminder: 'room-0#reminder-9', attempt: 'room-0#attempt-9', index: 0 }));
+    assert.deepEqual(live.wentLines, []);
+    await deliver(run, reminderSentFrom(chat.window, 1, { index: 1 }));
+    assert.equal(live.wentLines.length, 1);
+    assert.deepEqual([live.wentLines[0].reminder, live.wentLines[0].attempt], ['room-1#reminder-1', 'room-1#attempt-1']);
+    run.boot.stop();
+});
+
+test('an offer whose text is unchanged but whose reminder is new arms the frame again', async () => {
+    const { run, chat, live } = await bridged();
+    live.reminder = 'room-1#reminder-1';
+    live.attempt = 'room-1#attempt-1';
+    await offer(run, live, 'Remember the mill.');
+    await deliver(run, readyFrom(chat.window));
+    const armed = chat.window.posted.length;
+    live.reminder = 'room-1#reminder-2';
+    live.attempt = 'room-1#attempt-2';
+    await offer(run, live, 'Remember the mill.');
+    assert.equal(chat.window.posted.length, armed + 1);
+    await offer(run, live, 'Remember the mill.');
+    assert.equal(chat.window.posted.length, armed + 1);
+    run.boot.stop();
+});
+
 test('the lines are read after the live part is brought up to date', async () => {
     const { run, chat, live } = await bridged();
     await deliver(run, readyFrom(chat.window));
@@ -2931,7 +3105,8 @@ test('the top document\'s own hook still works', async () => {
     sendWindow.advance(100);
     const live = run.world.lives[0];
     assert.deepEqual(live.outgoing, ['true Hello']);
-    assert.deepEqual(live.sent, ['true ']);
+    assert.deepEqual(live.sent, []);
+    assert.deepEqual(live.uncertain, [{ key: 'current attempt' }]);
     run.boot.stop();
 });
 
@@ -2999,6 +3174,27 @@ test('a removed frame is forgotten', async () => {
     run.document.frames.push(chat.element);
     await offer(run, live, 'Remember the bridge.');
     assert.equal(chat.window.posted.length, 1);
+    run.boot.stop();
+});
+
+test('a delayed result cannot finish a journaled send after its originating frame was detached', async () => {
+    const { run, chat, live } = await bridged();
+    live.ready = 'The old paragraph.';
+    live.reminder = 'first';
+    live.attempt = 'first-attempt';
+    await deliver(run, readyFrom(chat.window));
+    const seq = chat.window.posted.at(-1).seq;
+    const identity = { index: 0, reminder: live.reminder, attempt: live.attempt };
+    await deliver(run, reminderSentFrom(chat.window, seq, { ...identity, kind: 'starting' }));
+    await deliver(run, reminderSentFrom(chat.window, seq, { ...identity, kind: 'uncertain' }));
+    assert.equal(live.uncertain.length, 1);
+    run.document.frames.length = 0;
+    await offer(run, live, 'A later paragraph.');
+    await pass(run, 20000);
+    run.document.frames.push(chat.element);
+    await deliver(run, readyFrom(chat.window));
+    await deliver(run, reminderSentFrom(chat.window, seq, identity));
+    assert.equal(live.wentLines.length, 0);
     run.boot.stop();
 });
 
@@ -3126,6 +3322,65 @@ test('a flood is ignored', async () => {
     await pass(run, 1);
     await deliver(run, sentFrom(chat.window, chat.window.posted.at(-1).seq, true, false));
     assert.equal(live.went.length, 11);
+    run.boot.stop();
+});
+
+test('a full frame window admits one start for the current named reminder, across rearms', async () => {
+    const { run, chat, live } = await bridged();
+    await deliver(run, readyFrom(chat.window));
+    for (let count = 0; count < 10; count++) {
+        await deliver(run, sentFrom(chat.window, chat.window.posted.at(-1).seq, false, false));
+    }
+    const old = chat.window.posted.at(-1).seq;
+    live.reminder = 'harbour#reminder-2';
+    live.attempt = 'harbour#attempt-2';
+    await offer(run, live, 'The bell rings.');
+    const current = chat.window.posted.at(-1).seq;
+    const identity = { index: 0, reminder: live.reminder, attempt: live.attempt };
+    const start = { ...identity, kind: 'starting', submission: 'abcd1234' };
+    await deliver(run, reminderSentFrom(chat.window, old, start));
+    await deliver(run, reminderSentFrom(chat.window, current, { ...start, cut: 1 }));
+    await deliver(run, reminderSentFrom(chat.window, current, { ...start, attempt: 'other' }));
+    await deliver(run, reminderSentFrom(chat.window, current, { ...start, ready: false }));
+    assert.equal(live.starting.length, 0);
+    await deliver(run, reminderSentFrom(chat.window, current, start));
+    await deliver(run, reminderSentFrom(chat.window, current, identity));
+    assert.equal(live.starting.length, 1);
+    assert.equal(live.wentLines.at(-1), live.starting[0]);
+    const rearmed = chat.window.posted.at(-1).seq;
+    assert.notEqual(rearmed, current);
+    await deliver(run, reminderSentFrom(chat.window, rearmed, { ...start, index: 1 }));
+    await deliver(run, reminderSentFrom(chat.window, rearmed, { ...identity, index: 1 }));
+    assert.equal(live.starting.length, 1);
+    assert.equal(live.wentLines.length, 11);
+    run.boot.stop();
+});
+
+test('an explicitly cancelled reserved send rearms after its retry delay', async () => {
+    const { run, chat, live } = await bridged();
+    await deliver(run, readyFrom(chat.window));
+    for (let count = 0; count < 10; count++) {
+        await deliver(run, sentFrom(chat.window, chat.window.posted.at(-1).seq, false, false));
+    }
+    live.reminder = 'harbour#reminder-3';
+    live.attempt = 'harbour#attempt-3';
+    await offer(run, live, 'The bell rings.');
+    const first = chat.window.posted.at(-1).seq;
+    const identity = { index: 0, reminder: live.reminder, attempt: live.attempt };
+    const start = { ...identity, kind: 'starting', submission: 'abcd1234' };
+    await deliver(run, reminderSentFrom(chat.window, first, start));
+    assert.equal(chat.window.posted.at(-1).ready, null);
+    await deliver(run, reminderSentFrom(chat.window, first, { ...identity, kind: 'cancelled' }));
+    await deliver(run, reminderSentFrom(chat.window, first, { ...start, index: 1 }));
+    assert.equal(live.starting.length, 1);
+    await pass(run, 1000);
+    assert.equal(chat.window.posted.at(-1).ready, 'The bell rings.');
+    const retry = chat.window.posted.at(-1).seq;
+    await deliver(run, reminderSentFrom(chat.window, retry, start));
+    await deliver(run, reminderSentFrom(chat.window, retry, identity));
+    assert.equal(live.starting.length, 2);
+    assert.equal(live.cancelled.length, 1);
+    assert.equal(live.wentLines.length, 11);
     run.boot.stop();
 });
 
@@ -3404,7 +3659,7 @@ test('a session that finishes building arms at once', async () => {
 test('the start gives each role only what it needs', async () => {
     const framed = startIn({ origin: PINGPONG, top: false, ancestors: [ZETA], parented: true }, BRIDGE);
     assert.equal(framed.framed, 1);
-    assert.deepEqual([...Object.keys(framed.options)].sort(), ['document', 'token', 'window']);
+    assert.deepEqual([...Object.keys(framed.options)].sort(), ['document', 'token', 'watch', 'window']);
     assert.equal(framed.storage, 0);
     assert.equal(framed.options.token(), BRIDGE);
     assert.deepEqual(framed.asked, [TOKEN_NAME]);
@@ -3467,12 +3722,16 @@ test('the DM API key is set from the menu, once per page', async () => {
     const cloud = run.world.clouds[0];
     const keeper = run.world.keepers[0];
     const ticks = cloud.ticks.length;
+    assert.equal(run.storage.values.has('scribe:browser'), false);
     run.asked = [];
     run.typed.push(DM_KEY);
     action();
     await settle();
     assert.deepEqual(run.asked, ['prompt Enter DM API key']);
     assert.equal(ScribeStore.cloudKey(run.storage), DM_KEY);
+    assert.equal(run.storage.values.get('scribe:browser'), BRIDGE);
+    const written = run.storage.calls.filter((call) => call.operation === 'set').map((call) => call.name);
+    assert.deepEqual(written.slice(-2), ['scribe:browser', 'scribe:cloudkey']);
     assert.equal(cloud.ticks.length, ticks + 1);
     assert.equal(keeper.ticks.length, 1);
     const saved = sets();

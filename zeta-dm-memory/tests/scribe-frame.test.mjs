@@ -288,8 +288,18 @@ function posts(page, kind) {
 function sents(page) {
     return posts(page, 'sent').map((post) => {
         assert.equal(post.origin, TOP);
-        return post.data;
+        const { index, ...rest } = post.data;
+        assert.equal(Number.isSafeInteger(index), true);
+        return rest;
     });
+}
+
+/**
+ * @param {object} page
+ * @return {number[]}
+ */
+function indexes(page) {
+    return posts(page, 'sent').map((post) => post.data.index);
 }
 
 /**
@@ -300,7 +310,7 @@ function sents(page) {
  * @return {object}
  */
 function sentOf(seq, ready, suggestion, crowded = false) {
-    return { zetaScribe: 1, kind: 'sent', seq, ready, suggestion, cut: null, crowded };
+    return { zetaScribe: 1, kind: 'sent', seq, ready, suggestion, cut: null, crowded, reminder: null, attempt: null };
 }
 
 /**
@@ -342,10 +352,11 @@ test('the role is told by where it runs', () => {
             TagName: 'zetaScribe',
             Tag: 1,
             TokenName: 'scribe-bridge',
-            Kind: { Ready: 'ready', Arm: 'arm', Sent: 'sent' },
+            Kind: { Ready: 'ready', Arm: 'arm', Starting: 'starting', Cancelled: 'cancelled', Rejected: 'rejected', Uncertain: 'uncertain', Sent: 'sent' },
             ReadyRepeatMs: 1000,
             MessageBytes: 4500,
             LongestLine: 6000,
+            LongestIdentity: 200,
         },
     );
     assert.equal(Object.isFrozen(ScribeFrame.Bridge) && Object.isFrozen(ScribeFrame.Bridge.Kind), true);
@@ -392,7 +403,7 @@ test('only well-formed messages are messages', () => {
     ]) {
         const message = ScribeFrame.arm(data);
         assert.equal(Object.isFrozen(message), true);
-        assert.deepEqual({ ...message, ends: [...message.ends] }, { ...expected, ends: [] });
+        assert.deepEqual({ ...message, ends: [...message.ends] }, { ...expected, ends: [], reminder: null, attempt: null });
         assert.equal(ScribeFrame.report(data), null);
     }
     assert.deepEqual([...ScribeFrame.arm({ ...goodArm, ends: [9, 25] }).ends], [9, 25]);
@@ -408,7 +419,10 @@ test('only well-formed messages are messages', () => {
     ]) {
         const message = ScribeFrame.report(data);
         assert.equal(Object.isFrozen(message), true);
-        const sent = expected.kind === 'sent' ? { ...expected, cut: null, crowded: false } : expected;
+        const sent =
+            expected.kind === 'sent'
+                ? { ...expected, cut: null, crowded: false, reminder: null, attempt: null, index: null }
+                : expected;
         assert.deepEqual({ ...message }, sent);
         assert.equal(ScribeFrame.arm(data), null);
     }
@@ -920,8 +934,75 @@ test('the frame trims a long reminder at a sentence end, as the top page does, a
     assert.deepEqual(sents(page).at(-1), sentOf(2, false, false, true));
 });
 
+test('an offer carries its reminder and attempt identities, and each report has its own index', () => {
+    const page = framePage();
+    const reminder = 'room-1#reminder-1';
+    const attempt = 'room-1#attempt-1';
+    arm(page, { seq: 3, reminder, attempt });
+    assert.equal(sendNow(page, 'Go'), both('Go'));
+    assert.deepEqual(sents(page), [{ ...sentOf(3, true, true), reminder, attempt }]);
+    assert.equal(sendNow(page, 'Again'), 'Again');
+    assert.deepEqual(sents(page).at(-1), sentOf(3, false, false));
+    assert.deepEqual(indexes(page), [0, 1]);
+    arm(page, { seq: 4, reminder: 'room-1#reminder-2', attempt: 'room-1#attempt-2' });
+    assert.equal(sendNow(page, 'Third'), both('Third'));
+    assert.deepEqual(sents(page).at(-1), {
+        ...sentOf(4, true, true),
+        reminder: 'room-1#reminder-2',
+        attempt: 'room-1#attempt-2',
+    });
+    assert.deepEqual(indexes(page), [0, 1, 0]);
+    const base = { zetaScribe: 1, kind: 'arm', seq: 1, token: TOKEN, ready: READY, suggestion: null };
+    for (const bad of [
+        { reminder: 'x' },
+        { attempt: 'x' },
+        { reminder: '', attempt: '' },
+        { reminder: 7, attempt: 8 },
+        { reminder: 'x'.repeat(201), attempt: 'y' },
+    ]) {
+        assert.equal(refused(ScribeFrame.arm, { ...base, ...bad }), true, JSON.stringify(bad));
+    }
+    const bare = ScribeFrame.arm({ ...base, ready: null, reminder: 'a', attempt: 'b' });
+    assert.deepEqual([bare.reminder, bare.attempt], [null, null]);
+    const sentData = { zetaScribe: 1, kind: 'sent', seq: 0, ready: true, suggestion: false };
+    assert.equal(refused(ScribeFrame.report, { ...sentData, reminder: 7 }), true);
+    assert.equal(ScribeFrame.report({ ...sentData, index: -1 }).index, null);
+    assert.equal(ScribeFrame.report({ ...sentData, ready: false, reminder: 'a', attempt: 'b' }).reminder, null);
+});
+
+test('starting and cancellation identify the attempt, and a late confirmation keeps a new offer with identical text', () => {
+    const page = framePage();
+    arm(page, { seq: 7, reminder: 'first', attempt: 'first-attempt', suggestion: null });
+    type(page, 'Start');
+    page.refusing = true;
+    enter(page);
+    const { submission, ...started } = posts(page, 'starting').at(-1).data;
+    assert.match(submission, /^[0-9a-f]{8}$/);
+    for (const invalid of [null, 'short', 'not-hex!', 12345678]) {
+        assert.equal(ScribeFrame.report({ ...started, submission: invalid }), null);
+    }
+    assert.equal(started.seq, 7);
+    assert.equal(started.index, 0);
+    assert.deepEqual(sents(page), []);
+    page.raw.advance(1600);
+    assert.deepEqual(posts(page, 'cancelled').at(-1).data, { ...started, kind: 'cancelled' });
+    assert.deepEqual(sents(page), []);
+    assert.equal(page.box.value, 'Start');
+    page.refusing = false;
+    enter(page);
+    const { submission: retried, ...retry } = posts(page, 'starting').at(-1).data;
+    assert.equal(retried, submission);
+    assert.equal(retry.index, 1);
+    page.raw.advance(25);
+    arm(page, { seq: 8, reminder: 'second', attempt: 'second-attempt', suggestion: null });
+    page.raw.advance(100);
+    assert.deepEqual(posts(page, 'sent').at(-1).data, { ...retry, kind: 'sent' });
+    assert.equal(sendNow(page, 'Next'), `Next\n@: ${READY}`);
+    assert.equal(posts(page, 'sent').at(-1).data.reminder, 'second');
+});
+
 test('the frame role touches nothing else', () => {
-    assert.equal(seen.pages.length, 21);
+    assert.equal(seen.pages.length, 23);
     assert.deepEqual(
         [...seen.window].filter((name) => !WINDOW_READS.includes(name)),
         [],
@@ -945,7 +1026,7 @@ test('the frame role touches nothing else', () => {
 });
 
 test('the frame reads the token and nothing else', () => {
-    assert.equal(seen.pages.length, 21);
+    assert.equal(seen.pages.length, 23);
     assert.deepEqual(
         [...seen.calls].filter((name) => !OUTSIDE_CALLS.includes(name)),
         ['token'],

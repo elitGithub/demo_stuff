@@ -70,6 +70,7 @@ const ScribePanel = Object.freeze({
             UseCloud: 'scribe-use-cloud',
             KeepHere: 'scribe-keep-here',
             ChoiceOutcome: 'scribe-choice-outcome',
+            ForceStop: 'scribe-force-stop',
             Next: 'scribe-next',
             NextOutcome: 'scribe-next-outcome',
             Activity: 'scribe-activity',
@@ -178,7 +179,7 @@ const ScribePanel = Object.freeze({
             Object.freeze({ name: 'pedant', label: 'Pedant model', mode: 'text' }),
             Object.freeze({ name: 'size', label: 'Messages per stretch', mode: 'numeric' }),
             Object.freeze({ name: 'budget', label: 'Daily budget in dollars', mode: 'decimal' }),
-            Object.freeze({ name: 'refresh', label: 'Sends between reminders', mode: 'numeric' }),
+            Object.freeze({ name: 'refresh', label: 'User messages between reminders', mode: 'numeric' }),
         ]),
         Models: Object.freeze(['analyzer', 'scribe', 'pedant']),
         Counts: Object.freeze(['size', 'refresh']),
@@ -454,6 +455,7 @@ const ScribePanel = Object.freeze({
             EditCancel: 'Cancel',
             EditSave: 'Save',
             Force: 'Send a reminder with my next message',
+            Resend: 'Resend this reminder with my next message',
             Forced: 'It goes with your next message.',
             Suggestion: 'Suggestion: ',
             Clear: 'Clear',
@@ -490,6 +492,9 @@ const ScribePanel = Object.freeze({
             }),
             UseCloud: "Use the cloud's",
             KeepHere: "Keep this PC's book",
+            ForceStop: 'Force stop',
+            StoppedCall: 'Stopped by the operator: ',
+            CostUnknown: '; cost unknown',
             ChoiceHere: 'This PC: ',
             ChoiceThere: ' Your Worker: ',
             ReadOne: ' message read.',
@@ -513,7 +518,7 @@ const ScribePanel = Object.freeze({
             ModelMissing: 'Enter a model.',
             CountWrong: Object.freeze({
                 size: 'Messages per stretch must be a whole number of at least 1.',
-                refresh: 'Sends between reminders must be a whole number of at least 1.',
+                refresh: 'User messages between reminders must be a whole number of at least 1.',
             }),
             BudgetWrong: 'The budget must be a number of dollars, more than 0.',
             FixFields: 'Nothing was saved: a field above needs attention.',
@@ -600,7 +605,7 @@ const ScribePanel = Object.freeze({
     }),
 
     /**
-     * @param {{ document: object, keeper: object, live: object, cloud: object, storage: object, confirm: (text: string) => boolean, download: (name: string, text: string) => void, clock: { now: () => number } }} environment
+     * @param {{ document: object, keeper: object, live: object, cloud: object, calls: { due: () => boolean, stop: () => void }, storage: object, confirm: (text: string) => boolean, download: (name: string, text: string) => void, clock: { now: () => number } }} environment
      * @return {Readonly<{ redraw: () => void, unmount: () => void, host: object }>}
      */
     mount(environment) {
@@ -625,6 +630,7 @@ const ScribePanel = Object.freeze({
             keeper: environment.keeper,
             live: environment.live,
             cloud: environment.cloud,
+            calls: environment.calls,
             storage: environment.storage,
             confirm: environment.confirm,
             download: environment.download,
@@ -683,6 +689,7 @@ const ScribePanel = Object.freeze({
             fixing: null,
             composing: false,
             editing: false,
+            resendId: null,
             editShown: false,
             editStale: false,
             editAgainst: undefined,
@@ -1499,12 +1506,27 @@ const ScribePanel = Object.freeze({
             choosing,
             ScribePanel.outlet(panel, 'ChoiceOutcome', settings.Outlets.Choice),
         );
+        const forceStop = ScribePanel.button(
+            panel,
+            words.ForceStop,
+            /**
+             * @return {Promise<void>}
+             */
+            async () => {
+                panel.calls.stop();
+                ScribePanel.redraw(panel);
+            },
+            settings.Guard.Free,
+            settings.Ids.ForceStop,
+        );
+        forceStop.hidden = true;
         header.append(
             ScribePanel.own(
                 panel,
                 'Headline',
                 ScribePanel.make(panel, tags.Paragraph, settings.Nothing, classes.Headline),
             ),
+            ScribePanel.own(panel, 'ForceStop', forceStop),
             choice,
             ScribePanel.own(panel, 'Next', next),
             ScribePanel.outlet(panel, 'NextOutcome', settings.Outlets.Next),
@@ -2438,6 +2460,11 @@ const ScribePanel = Object.freeze({
         const choosing = panel.pending.has(choiceOutlet);
         parts.UseCloud.disabled = choosing;
         parts.KeepHere.disabled = choosing;
+        const forcing = panel.calls.due();
+        if (!forcing && panel.root.activeElement === parts.ForceStop) {
+            parts.Toggle.focus();
+        }
+        parts.ForceStop.hidden = !forcing;
         ScribePanel.write(parts.ChoiceOutcome, panel.outcomes.get(choiceOutlet) ?? settings.Nothing);
         const step = PanelView.next(view);
         ScribePanel.fill(panel, view);
@@ -2932,12 +2959,13 @@ const ScribePanel = Object.freeze({
         const settings = ScribePanel.Settings;
         const words = settings.Words;
         const outlet = settings.Outlets.Force;
+        const resendId = panel.resendId;
         const filed = await ScribePanel.perform(panel, {
             outlet,
             /**
              * @return {Promise<void>}
              */
-            call: () => panel.live.force(),
+            call: () => panel.live.force(resendId),
             question: null,
             done: words.Forced,
             pending: words.Working,
@@ -3776,8 +3804,10 @@ const ScribePanel = Object.freeze({
             const parts = panel.parts;
             const blocked = live.forceBlock !== null;
             const editing = panel.editing;
+            const unconfirmed = live.unconfirmed ?? null;
+            panel.resendId = unconfirmed?.id ?? null;
             if (!editing) {
-                parts.Reminder.value = live.ready ?? (live.stale ? live.draft : null) ?? settings.Nothing;
+                parts.Reminder.value = unconfirmed?.text ?? live.ready ?? (live.stale ? live.draft : null) ?? settings.Nothing;
             }
             parts.Reminder.readOnly = !editing;
             let placeholder = words.NothingWaiting;
@@ -3793,12 +3823,13 @@ const ScribePanel = Object.freeze({
             parts.Reminder.setAttribute(settings.Attributes.Placeholder, placeholder);
             parts.Reminder.disabled = blocked;
             parts.Edit.hidden = editing;
-            parts.Edit.disabled = blocked;
+            parts.Edit.disabled = blocked || unconfirmed !== null;
             parts.EditCancel.hidden = !editing;
             parts.EditCancel.disabled = false;
             parts.EditSave.hidden = !editing;
             parts.EditSave.disabled = blocked;
             parts.Force.disabled = blocked;
+            ScribePanel.write(parts.Force, unconfirmed ? words.Resend : words.Force);
             ScribePanel.wait(panel, settings.Outlets.Force, parts.Force);
             parts.ForceReason.hidden = !blocked;
             ScribePanel.write(parts.ForceReason, blocked ? live.forceBlock : settings.Nothing);
@@ -5016,7 +5047,7 @@ const ScribePanel = Object.freeze({
 
         /**
          * @param {object} panel
-         * @param {{ sequence: number|null, pass: string, answer?: string, readable: boolean }} record
+         * @param {{ sequence: number|null, pass: string, answer?: string, readable: boolean, stopped?: boolean }} record
          * @return {object}
          */
         call(panel, record) {
@@ -5025,6 +5056,11 @@ const ScribePanel = Object.freeze({
             const tags = settings.Tags;
             const answer = typeof record.answer === settings.StringType ? record.answer : settings.Nothing;
             const item = ScribePanel.make(panel, tags.Item, settings.Nothing, settings.Classes.Row);
+            if (record.stopped === true) {
+                const stopped = words.StoppedCall + PanelView.said(record.pass) + words.CostUnknown;
+                item.append(ScribePanel.make(panel, tags.Paragraph, stopped, settings.Classes.Unreadable));
+                return item;
+            }
             const heading = record.readable
                 ? ScribePanel.make(
                       panel,

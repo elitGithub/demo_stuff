@@ -776,7 +776,7 @@ test('a forced reminder is made for those in the scene, and a changed scene alon
     assert.equal(unreminded.live.view().due, true);
 });
 
-test('the refresh count makes a reminder due', async () => {
+test('the refresh count makes a reminder due for the send that reaches it', async () => {
     const { model, live } = rig({ settings: { refresh: 3 } });
     await live.reply(at(41));
     assert.equal(live.view().ready, null);
@@ -785,28 +785,21 @@ test('the refresh count makes a reminder due', async () => {
     live.outgoing('One.');
     live.sent();
     assert.equal(live.view().sends, 1);
+    assert.equal(live.view().due, false);
     model.scene = TENT;
     await live.reply(at(45));
     assert.equal(live.view().now.changed, true);
     assert.equal(live.view().ready, null);
+    assert.equal(chooses(model), 0);
     live.outgoing('Two.');
     live.sent();
-    model.scene = ROAD;
-    await live.reply(at(49));
-    assert.equal(live.view().now.changed, true);
-    assert.equal(live.view().ready, null);
     assert.equal(live.view().sends, 2);
-    assert.equal(live.view().due, false);
-    assert.equal(chooses(model), 0);
-    live.outgoing('Three.');
-    live.sent();
-    assert.equal(live.view().sends, 3);
     assert.equal(live.view().due, true);
-    model.scene = ROAD.replace('CHANGED: yes', 'CHANGED: no');
+    model.scene = TENT.replace('CHANGED: yes', 'CHANGED: no');
     await live.reply(at(51));
     assert.equal(live.view().now.changed, false);
     assert.ok(reminds(live.view().ready, 'Halvard'));
-    assert.equal(live.outgoing('Four.'), `Four.${lineOf(live.view().ready)}`);
+    assert.equal(live.outgoing('Three.'), `Three.${lineOf(live.view().ready)}`);
     live.sent();
     assert.equal(live.view().sends, 0);
     assert.equal(live.view().ready, null);
@@ -1001,8 +994,10 @@ test("the player's words go first and unchanged", async () => {
     const result = live.outgoing(text);
     assert.equal(result, `${text}\n@: ${view.ready}\n@: ${GULL}`);
     assert.equal(result.slice(0, text.length), text);
+    const sending = storage.count('set');
+    assert.equal(sending > saves, true);
     assert.equal(live.outgoing(text), result);
-    assert.equal(storage.count('set'), saves);
+    assert.equal(storage.count('set'), sending);
     assert.equal(live.view().ready, view.ready);
     assert.equal(live.view().suggestion, GULL);
     const spaced = '\n  *I wait.*\t\n';
@@ -2101,6 +2096,7 @@ test('nothing goes out while the book cannot be trusted', async () => {
     const ready = live.view().ready;
     const whole = `Hello.${lineOf(ready)}${lineOf(GULL)}`;
     assert.equal(live.outgoing('Hello.'), whole);
+    live.cancelled();
     for (const fields of [
         { trusted: false, mismatch: true },
         { trusted: false, phase: 'NoBook' },
@@ -2114,6 +2110,7 @@ test('nothing goes out while the book cannot be trusted', async () => {
         assert.equal(live.view().ready, ready);
         assert.equal(live.view().suggestion, GULL);
         assert.equal(live.outgoing('Hello.'), whole);
+        live.cancelled();
     }
     for (const stopped of [PAUSED, BUDGET]) {
         keeper.change(stopped);
@@ -3608,19 +3605,17 @@ test('emptying a box that shows nothing keeps the forced flag, the count and the
 
     const big = bookState(BIG);
     const rebuilding = rig({ settings: { refresh: 1, budget: 3 }, state: big });
-    rebuilding.cast.unseen(3);
     await rebuilding.live.reply(at(41));
     rebuilding.live.sent();
     await rebuilding.live.reply(at(43));
-    const release = rebuilding.cast.hold();
-    const darker = bookState(BIG.map((fact) => fact.replace('skin | pale', 'skin | dark')));
-    rebuilding.keeper.change({ state: revised(darker) });
-    rebuilding.live.view();
+    const release = rebuilding.model.holdSystem(ScribeScene.Prompt);
+    rebuilding.model.scene = TENT;
+    const writing = rebuilding.live.reply(at(45));
     await ticks();
-    assert.equal(rebuilding.cast.reads.story, 4);
     assert.equal(rebuilding.live.view().ready, null);
     rebuilding.live.edit(' ', false);
     release();
+    await writing;
     await ticks();
     assert.notEqual(rebuilding.live.view().ready, null);
     assert.equal(rebuilding.live.view().sends, 1);
@@ -3668,7 +3663,7 @@ test('a reminder that arrives while the box is open keeps its led list when an e
     live.sent();
     await live.reply(at(43));
     const led = ledOf(storage);
-    assert.equal(led.includes(AGE), true);
+    assert.equal(led.includes(EYES), true);
     live.edit('', false);
     assert.deepEqual(ledOf(storage), led);
     assert.notEqual(live.view().ready, null);
@@ -3900,8 +3895,9 @@ test('a record saved before the edit and the flag loads without them, and bad on
         const editedFor = { id: at(59).id, fingerprint: at(59).fingerprint };
         ScribeStore.write(storage, ROOM, ScribeStore.Kind.Live, { ...base, ...fields, editedFor });
         const view = rig({}, storage).live.view();
-        assert.equal(view.edited, kept, JSON.stringify(fields).slice(0, 40));
-        assert.equal(view.ready, kept ? fields.edited : null, JSON.stringify(fields).slice(0, 40));
+        assert.equal(view.unconfirmed?.text ?? null, kept ? fields.edited : null, JSON.stringify(fields).slice(0, 40));
+        assert.equal(view.ready, null);
+        assert.equal(ScribeStore.read(storage, ROOM, ScribeStore.Kind.Live).edited, kept ? fields.edited : null);
     }
     const unplaced = new FakeStorage();
     ScribeStore.write(unplaced, ROOM, ScribeStore.Kind.Live, { ...base, edited: '[Scribe] ok' });
@@ -4893,6 +4889,35 @@ test('live calls are listed with their tokens and finish, and a cut-off answer k
     assert.equal(live.view().calls.length, 20);
 });
 
+test('a call stopped by the operator is listed before the one that answered, with its cost unknown', async () => {
+    const stoppedCall = {
+        tokensIn: null,
+        tokensOut: null,
+        reasoningTokens: null,
+        finish: null,
+        answer: null,
+        problem: 'Stopped by the operator; cost unknown',
+    };
+    const failed = Object.assign(new Error('Pedant is offline'), { stopped: 1 });
+    const ask = async (role, system) => {
+        if (system === ScribePedant.Prompt) {
+            throw failed;
+        }
+        const text = system === ScribeScene.Prompt ? MILL : '';
+        return { text, cost: 0.01, tokensIn: 10, tokensOut: 20, reasoningTokens: null, finish: 'stop', stopped: 2 };
+    };
+    const { live } = timed({}, ask);
+    await live.reply(at(41));
+    const answered = { role: 'Scribe', tokensIn: 10, tokensOut: 20, reasoningTokens: null, finish: 'stop' };
+    assert.deepEqual(plain(live.view().calls), [
+        { role: 'Pedant', ...stoppedCall, problem: 'Pedant is offline' },
+        { role: 'Pedant', ...stoppedCall },
+        { ...answered, answer: null, problem: null },
+        { role: 'Scribe', ...stoppedCall },
+        { role: 'Scribe', ...stoppedCall },
+    ]);
+});
+
 test('the story so far leads the reminder, is reused while the timeline and the scene stand, and is asked again on a change', async () => {
     const { model, live } = rig();
     await live.reply(at(41));
@@ -5329,4 +5354,564 @@ test('a reminder or an edit saved by an older build is never sent: the reminder 
     assert.equal(loaded.view().draft, old);
     assert.equal(loaded.view().held, 'Your edit was written before the latest reply; Save it again to send it.');
     assert.equal(loaded.outgoing('Go.'), 'Go.');
+});
+
+/**
+ * @param {Object<number, string>} carried
+ * @param {number} length
+ * @param {number} parity
+ * @param {Object<number, string>} spoken
+ * @return {{ messages: readonly object[], own: readonly object[] }}
+ */
+function carriedStory(carried, length = 60, parity = 0, spoken = {}) {
+    const builder = new CampaignBuilder('Orla');
+    for (let number = 1; number <= length; number++) {
+        const blocks = scripted[number];
+        if (number > 40 && number % 2 === parity) {
+            const note = carried[number] === undefined ? '' : `\n@: ${carried[number]}`;
+            builder.player((spoken[number] ?? `I wait, turn ${number}.`) + note);
+        } else if (blocks !== undefined) {
+            builder.reply(blocks);
+        } else {
+            builder.narrator(`The tale goes on, line ${number}.`);
+        }
+    }
+    const read = ScribeIntake.read(builder.messages);
+    return { messages: read.messages, own: read.own };
+}
+
+/**
+ * @param {object} fields
+ * @param {FakeStorage} storage
+ * @return {Promise<object>}
+ */
+async function preparedRoom(fields = {}, storage = new FakeStorage()) {
+    const room = rig(fields, storage);
+    await room.live.reply(at(41));
+    await room.live.force();
+    return room;
+}
+
+/**
+ * @return {Promise<{ storage: FakeStorage, ready: string, reminder: string, attempt: string }>}
+ */
+async function interrupted() {
+    const room = await preparedRoom();
+    const ready = room.live.view().ready;
+    const player = 'I wait, turn 42.';
+    assert.equal(room.live.outgoing(player), player + lineOf(ready));
+    const delivery = ScribeStore.read(room.storage, ROOM, ScribeStore.Kind.Live).delivery;
+    room.live.close();
+    return { storage: room.storage, ready, reminder: delivery.id, attempt: delivery.attempt };
+}
+
+test('a forced reminder clears the moment it goes, and the next message carries nothing', async () => {
+    const { storage, live } = await preparedRoom();
+    const ready = live.view().ready;
+    assert.ok(reminds(ready, 'Halvard'), ready);
+    const offered = live.lines();
+    assert.equal(offered.reminder, `${ROOM}#reminder-1`);
+    assert.equal(offered.attempt, `${ROOM}#attempt-1`);
+    assert.equal(live.outgoing('Go.'), `Go.${lineOf(ready)}`);
+    live.sent();
+    const after = live.view();
+    assert.equal(after.ready, null);
+    assert.equal(after.forced, false);
+    assert.equal(after.edited, false);
+    assert.equal(after.draft, null);
+    assert.equal(after.prepared, false);
+    assert.equal(after.sends, 0);
+    const none = live.lines();
+    assert.deepEqual([none.ready, none.reminder, none.attempt], [null, null, null]);
+    assert.equal(live.outgoing('Again.'), 'Again.');
+    const stored = ScribeStore.read(storage, ROOM, ScribeStore.Kind.Live);
+    assert.equal(stored.ready, null);
+    assert.equal(stored.forced, false);
+    assert.equal(stored.delivery, null);
+    assert.deepEqual(plain(stored.settled), [`${ROOM}#reminder-1`]);
+    await live.force();
+    assert.equal(live.lines().reminder, `${ROOM}#reminder-2`);
+});
+
+for (const interval of [6, 8, 10]) {
+    test(`with ${interval} user messages between reminders the reminder goes on send ${interval} and ${interval * 2}, also after a reload`, async () => {
+        const fields = { settings: { refresh: interval, budget: 3 } };
+        let room = rig(fields);
+        const storage = room.storage;
+        await room.live.reply(at(41));
+        for (let count = 1; count <= interval * 2; count++) {
+            const text = `Message ${count}.`;
+            const regular = count % interval === 0;
+            let ready = null;
+            if (regular) {
+                await room.live.reply(at(count === interval ? 43 : 45));
+                ready = room.live.view().ready;
+                assert.ok(reminds(ready), `a reminder is ready before message ${count}`);
+                room.live.close();
+                room = rig({ ...fields, messages: room.keeper.current.messages }, storage);
+                assert.equal(room.live.view().ready, ready, `the reminder survives a reload before message ${count}`);
+            }
+            assert.equal(room.live.outgoing(text), regular ? `${text}${lineOf(ready)}` : text, `message ${count}`);
+            room.live.sent();
+            assert.equal(room.live.view().sends, regular ? 0 : count % interval, `count after message ${count}`);
+        }
+    });
+}
+
+test('a manual delivery on turn 3 with an interval of 8 makes turn 11 the next regular target', async () => {
+    const { live } = rig({ settings: { refresh: 8, budget: 3 } });
+    await live.reply(at(41));
+    for (const turn of [1, 2]) {
+        assert.equal(live.outgoing(`Turn ${turn}.`), `Turn ${turn}.`);
+        live.sent();
+    }
+    await live.force();
+    const manual = live.view().ready;
+    assert.equal(live.outgoing('Turn 3.'), `Turn 3.${lineOf(manual)}`);
+    live.sent();
+    assert.equal(live.view().sends, 0);
+    for (let turn = 4; turn <= 10; turn++) {
+        assert.equal(live.outgoing(`Turn ${turn}.`), `Turn ${turn}.`);
+        live.sent();
+    }
+    assert.equal(live.view().sends, 7);
+    await live.reply(at(43));
+    const regular = live.view().ready;
+    assert.ok(reminds(regular));
+    assert.equal(live.outgoing('Turn 11.'), `Turn 11.${lineOf(regular)}`);
+});
+
+test('changing the interval keeps the count, and lowering it below the count makes the next send eligible', async () => {
+    const { keeper, live } = rig({ settings: { refresh: 8, budget: 3 } });
+    for (let count = 1; count <= 5; count++) {
+        live.outgoing(`Message ${count}.`);
+        live.sent();
+    }
+    assert.equal(live.view().sends, 5);
+    assert.equal(live.view().due, false);
+    keeper.change({ settings: { refresh: 3, budget: 3 } });
+    assert.equal(live.view().sends, 5);
+    assert.equal(live.view().due, true);
+    keeper.change({ settings: { refresh: 10, budget: 3 } });
+    assert.equal(live.view().sends, 5);
+    assert.equal(live.view().due, false);
+    keeper.change({ settings: { refresh: 6, budget: 3 } });
+    assert.equal(live.view().sends, 5);
+    assert.equal(live.view().due, true);
+});
+
+test('replies, regenerations, redraws and Force are not user messages', async () => {
+    const { live } = rig({ settings: { refresh: 8, budget: 3 } });
+    live.outgoing('One.');
+    live.sent();
+    await live.reply(at(41));
+    await live.reply(at(43));
+    await live.reply(variant(43, [['Narrator', 'A different third line.']], 'OTHER-43'));
+    for (let looks = 0; looks < 3; looks++) {
+        live.view();
+        live.lines();
+    }
+    await live.force();
+    await live.force();
+    assert.equal(live.view().sends, 1);
+    assert.equal(live.view().forced, true);
+});
+
+test('a delivery report settles its own reminder once, whatever repeats it or comes from elsewhere', async () => {
+    const { live } = await preparedRoom();
+    const ready = live.view().ready;
+    const offered = live.lines();
+    const report = {
+        ready,
+        suggestion: null,
+        carried: ready,
+        crowded: false,
+        reminder: offered.reminder,
+        attempt: offered.attempt,
+    };
+    live.went({ ready: null, suggestion: null });
+    assert.equal(live.view().sends, 1);
+    live.went({ ...report, reminder: 'elsewhere#reminder-1', attempt: 'elsewhere#attempt-1' });
+    assert.equal(live.view().sends, 1);
+    assert.equal(live.view().ready, ready);
+    assert.equal(live.view().forced, true);
+    live.went(report);
+    assert.equal(live.view().ready, null);
+    assert.equal(live.view().forced, false);
+    assert.equal(live.view().sends, 0);
+    live.went(report);
+    live.went(report);
+    assert.equal(live.view().sends, 0);
+
+    await live.force();
+    live.edit(ready);
+    const again = live.lines();
+    assert.notEqual(again.ready, null);
+    assert.notEqual(again.reminder, offered.reminder);
+    assert.notEqual(again.attempt, offered.attempt);
+    live.went(report);
+    assert.equal(live.view().ready, again.ready);
+    assert.equal(live.view().forced, true);
+    assert.equal(live.view().sends, 0);
+    live.went({ ...report, reminder: again.reminder, attempt: again.attempt });
+    assert.equal(live.view().ready, null);
+    assert.equal(live.view().edited, false);
+    assert.equal(live.view().forced, false);
+    live.went({ ...report, reminder: again.reminder, attempt: again.attempt });
+    assert.equal(live.view().sends, 0);
+});
+
+test('a send that never completes leaves the reminder pending, with the same identities for the retry', async () => {
+    const { live } = await preparedRoom();
+    const ready = live.view().ready;
+    const first = live.lines();
+    live.went({ ready: null, suggestion: null });
+    assert.equal(live.outgoing('Try.'), `Try.${lineOf(ready)}`);
+    assert.equal(live.view().ready, ready);
+    assert.equal(live.view().forced, true);
+    assert.equal(live.view().sends, 1);
+    assert.equal(live.outgoing('Try again.'), `Try again.${lineOf(ready)}`);
+    const retry = live.lines();
+    assert.deepEqual([retry.reminder, retry.attempt], [first.reminder, first.attempt]);
+    live.sent();
+    assert.equal(live.view().ready, null);
+    assert.equal(live.view().sends, 0);
+});
+
+test('a send with no room for the reminder counts once and leaves the reminder due', async () => {
+    const { live } = await preparedRoom();
+    const ready = live.view().ready;
+    const first = live.lines();
+    const long = 'x'.repeat(4600);
+    assert.equal(live.outgoing(long), long);
+    live.sent();
+    const view = live.view();
+    assert.equal(view.sends, 1);
+    assert.equal(view.forced, true);
+    assert.equal(view.ready, ready);
+    assert.equal(live.lines().reminder, first.reminder);
+    assert.equal(live.outgoing('Short.'), `Short.${lineOf(ready)}`);
+    live.sent();
+    assert.equal(live.view().ready, null);
+    assert.equal(live.view().sends, 0);
+});
+
+test('a delayed unauthorized response releases only its own pending attempt and leaves the reminder queued', async () => {
+    const { live, storage } = await preparedRoom();
+    const offer = live.lines();
+    live.outgoing('I wait.');
+    const attempt = live.posting();
+    live.uncertain(attempt);
+    assert.equal(live.view().awaiting, true);
+    assert.equal(live.lines().ready, null);
+    assert.equal(live.outgoing('I listen.'), 'I listen.');
+    const ordinary = live.posting();
+    live.went(ordinary);
+    assert.equal(live.view().sends, 1);
+    live.rejected(attempt);
+    const rejected = live.view();
+    assert.equal(rejected.sends, 1);
+    assert.equal(rejected.awaiting, false);
+    assert.match(rejected.held, /HTTP 401/);
+    assert.deepEqual([live.lines().reminder, live.lines().ready], [offer.reminder, offer.ready]);
+    assert.equal(ScribeStore.read(storage, ROOM, ScribeStore.Kind.Live).settled.length, 0);
+    live.went(attempt);
+    assert.equal(live.view().sends, 1);
+    assert.equal(live.outgoing('Please retry.'), `Please retry.${lineOf(offer.ready)}`);
+    live.sent();
+    assert.equal(live.view().sends, 0);
+    assert.equal(live.view().ready, null);
+    assert.equal(live.view().held, null);
+});
+
+test('an edited reminder clears when it goes, and a newer edit made meanwhile stays as a draft', async () => {
+    const { live } = await preparedRoom();
+    const mine = '[Scribe] Mine, not yours.';
+    live.edit(mine);
+    assert.equal(live.outgoing('Go.'), `Go.${lineOf(mine)}`);
+    live.sent();
+    const gone = live.view();
+    assert.equal(gone.ready, null);
+    assert.equal(gone.edited, false);
+    assert.equal(gone.draft, null);
+    assert.equal(gone.forced, false);
+    assert.equal(live.outgoing('Again.'), 'Again.');
+
+    const room = await preparedRoom();
+    const first = '[Scribe] First wording.';
+    const newer = first + ' I saved this new sentence while confirmation was pending.';
+    room.live.edit(first);
+    assert.equal(room.live.outgoing('Go.'), `Go.${lineOf(first)}`);
+    room.live.edit(newer);
+    room.live.sent();
+    const view = room.live.view();
+    assert.equal(view.ready, null);
+    assert.equal(view.edited, false);
+    assert.equal(view.draft, newer);
+    assert.equal(room.live.outgoing('Next.'), 'Next.');
+});
+
+test('a writer response that arrives after the send is dropped', async () => {
+    const big = bookState(BIG);
+    const { storage, keeper, model, live } = rig({ state: big, settings: { refresh: 1, budget: 3 } });
+    await live.reply(at(41));
+    const first = live.view().ready;
+    assert.notEqual(first, null);
+    const offered = live.lines();
+    assert.equal(offered.ready, first);
+    const release = model.holdSystem(ScribeReminder.StoryPrompt);
+    keeper.change({ state: revised(bookState(BIG.map((fact) => fact.replace('skin | pale', 'skin | dark')))) });
+    live.view();
+    await ticks();
+    live.went({
+        ready: first,
+        suggestion: null,
+        carried: first,
+        crowded: false,
+        reminder: offered.reminder,
+        attempt: offered.attempt,
+    });
+    release();
+    await ticks();
+    assert.equal(live.view().ready, null);
+    assert.equal(live.lines().ready, null);
+    assert.equal(ScribeStore.read(storage, ROOM, ScribeStore.Kind.Live).ready, null);
+});
+
+test('two tabs: a watcher neither counts nor settles a delivery, and takes the settled state when it reads', async () => {
+    const reader = await preparedRoom();
+    const ready = reader.live.view().ready;
+    const offered = reader.live.lines();
+    const report = {
+        ready,
+        suggestion: null,
+        carried: ready,
+        crowded: false,
+        reminder: offered.reminder,
+        attempt: offered.attempt,
+    };
+    const watching = rig({ reader: false, trusted: false }, reader.storage);
+    watching.live.went(report);
+    watching.live.sent();
+    assert.equal(ScribeStore.read(reader.storage, ROOM, ScribeStore.Kind.Live).ready, ready);
+    assert.equal(reader.live.view().ready, ready);
+    reader.live.went(report);
+    assert.equal(reader.live.view().ready, null);
+    reader.live.close();
+    watching.keeper.change({ reader: true, trusted: true });
+    const taken = watching.live.view();
+    assert.equal(taken.ready, null);
+    assert.equal(taken.forced, false);
+    assert.equal(taken.awaiting, false);
+    assert.equal(watching.live.outgoing('Hello.'), 'Hello.');
+});
+
+test('a reload between the send and its acknowledgement waits, and a matching new player message settles it once', async () => {
+    const { storage, ready, reminder, attempt } = await interrupted();
+    const saved = ScribeStore.read(storage, ROOM, ScribeStore.Kind.Live);
+    assert.equal(saved.posts[0].carried, ready);
+    assert.equal(saved.posts[0].floor, 41);
+    const chat = carriedStory({ 42: ready });
+    const room = rig({ messages: story.slice(0, 41), unread: story.slice(40, 41) }, storage);
+    const waiting = room.live.view();
+    assert.equal(waiting.awaiting, true);
+    assert.equal(waiting.ready, null);
+    assert.equal(waiting.held.startsWith('Awaiting confirmation'), true, waiting.held);
+    assert.equal(room.live.outgoing('Typed.'), 'Typed.');
+    assert.equal(room.live.lines().ready, null);
+    room.live.edit(ready);
+    assert.equal(room.live.view().awaiting, true);
+    const echo = new CampaignBuilder('Orla');
+    for (let number = 1; number <= 42; number++) {
+        if (number === 42) {
+            echo.narrator(`The echo of ${ready}`);
+        } else if (scripted[number] !== undefined) {
+            echo.reply(scripted[number]);
+        } else {
+            echo.narrator(`The tale goes on, line ${number}.`);
+        }
+    }
+    const echoed = ScribeIntake.read(echo.messages);
+    room.keeper.change({ messages: echoed.messages, own: [{ text: `@: ${ready}`, position: 42 }] });
+    assert.equal(room.live.view().awaiting, true);
+    assert.equal(room.live.view().ready, null);
+    room.keeper.change({ messages: chat.messages.slice(0, 42), own: chat.own });
+    const settled = room.live.view();
+    assert.equal(settled.awaiting, false);
+    assert.equal(settled.ready, null);
+    assert.equal(settled.edited, false);
+    assert.equal(settled.forced, false);
+    assert.equal(settled.sends, 0);
+    const stored = ScribeStore.read(storage, ROOM, ScribeStore.Kind.Live);
+    assert.equal(stored.ready, null);
+    assert.equal(stored.delivery, null);
+    assert.deepEqual(plain(stored.settled), [reminder]);
+    assert.deepEqual(plain(stored.counted), [{ id: chat.messages[41].id, fingerprint: chat.messages[41].fingerprint }]);
+    room.live.went({ ready, suggestion: null, carried: ready, crowded: false, reminder, attempt });
+    assert.equal(room.live.view().sends, 0);
+});
+
+test('plain player wording shared with an interrupted reminder counts once and cannot identify the delivery', async () => {
+    const { storage } = await interrupted();
+    const plainChat = carriedStory({});
+    const room = rig({ messages: story.slice(0, 41), unread: story.slice(40, 41) }, storage);
+    assert.equal(room.live.view().awaiting, true);
+    assert.equal(room.live.lines().ready, null);
+    room.keeper.change({ messages: plainChat.messages.slice(0, 42), own: plainChat.own });
+    const view = room.live.view();
+    assert.equal(view.awaiting, true);
+    assert.equal(view.forced, true);
+    assert.equal(view.sends, 1);
+    assert.equal(room.live.lines().ready, null);
+    assert.equal(room.live.outgoing('Next.'), 'Next.');
+});
+
+test('the first sentence of an interrupted full paragraph is a different block', async () => {
+    const { storage, ready } = await interrupted();
+    const shorter = ready.slice(0, ready.indexOf('. ') + 1);
+    assert.ok(shorter.length > 0 && shorter.length < ready.length);
+    const chat = carriedStory({ 42: shorter });
+    const room = rig({ messages: chat.messages.slice(0, 42), own: chat.own }, storage);
+    assert.equal(room.live.view().sends, 1);
+    assert.equal(room.live.view().forced, true);
+    assert.equal(room.live.lines().ready, ready);
+    assert.deepEqual(plain(ScribeStore.read(storage, ROOM, ScribeStore.Kind.Live).settled), []);
+});
+
+test('a different player submission quoting the full paragraph leaves its interrupted delivery pending across reload', async () => {
+    const { storage, ready, reminder } = await interrupted();
+    const chat = carriedStory({ 42: ready, 44: ready }, 44, 0, { 42: 'Someone else copies the reminder.', 44: 'I wait, turn 42.' });
+    const partial = { messages: chat.messages.slice(0, 42), own: chat.own };
+    const first = rig(partial, storage);
+    assert.equal(first.live.view().sends, 1);
+    assert.equal(first.live.view().awaiting, true);
+    first.live.close();
+    const next = rig(partial, storage);
+    assert.equal(next.live.view().awaiting, true);
+    next.keeper.change({ messages: chat.messages, own: chat.own });
+    assert.equal(next.live.view().sends, 0);
+    assert.equal(next.live.view().awaiting, false);
+    assert.deepEqual(plain(ScribeStore.read(storage, ROOM, ScribeStore.Kind.Live).settled), [reminder]);
+});
+
+test('a saved offer that matches the block on the player message after its target is consumed once, and counts later messages', async () => {
+    const offer = '[Scribe] Dark Wings, the pursuit, and Mirra still inside.';
+    const target = 896;
+    const chat = carriedStory({ 897: offer }, 900, 1);
+    const messages = chat.messages;
+    assert.equal(messages[target - 1].fromPlayer, false);
+    assert.equal(messages[target].fromPlayer, true);
+    const scene = {
+        message: messages[target - 1].id,
+        fingerprint: messages[target - 1].fingerprint,
+        position: target,
+        day: 1,
+        place: 'The inn room',
+        reach: 'private',
+        present: [{ subject: null, label: 'Kira' }],
+        summary: 'They plan a ride',
+        changed: false,
+    };
+    const record = {
+        now: scene,
+        reminded: scene,
+        ready: offer,
+        led: [],
+        basis: { revision: state.revision, first: [], notes: ScribeLive.marked([]), story: 'abcd1234' },
+        story: { key: 'abcd1234', text: 'They plan a ride.' },
+        sends: 6,
+        findings: [],
+        seen: { id: scene.message, fingerprint: scene.fingerprint, position: target, before: null },
+        edition: 1,
+    };
+    const fields = { messages, own: chat.own, unread: [], read: 900, lastRead: { id: scene.message, position: target } };
+    const storage = new FakeStorage();
+    ScribeStore.write(storage, ROOM, ScribeStore.Kind.Live, record);
+    const room = rig(fields, storage);
+    const view = room.live.view();
+    assert.equal(view.prepared, false);
+    assert.equal(view.ready, null);
+    assert.equal(view.sends, 1);
+    const stored = ScribeStore.read(storage, ROOM, ScribeStore.Kind.Live);
+    assert.equal(stored.ready, null);
+    assert.equal(stored.sends, 1);
+    const counted = messages.slice(target).filter((message) => message.fromPlayer)
+        .map(({ id, fingerprint }) => ({ id, fingerprint }));
+    assert.deepEqual(plain(stored.counted), plain(counted));
+    room.live.close();
+    const again = rig(fields, storage);
+    assert.equal(again.live.view().prepared, false);
+    assert.equal(again.live.view().sends, 1);
+
+    const other = carriedStory({ 897: '[Scribe] A different reminder altogether.' }, 900, 1);
+    const uncertain = new FakeStorage();
+    ScribeStore.write(uncertain, ROOM, ScribeStore.Kind.Live, record);
+    const stays = rig({ ...fields, messages: other.messages, own: other.own }, uncertain);
+    assert.equal(stays.live.view().prepared, true);
+    assert.equal(ScribeStore.read(uncertain, ROOM, ScribeStore.Kind.Live).ready, offer);
+});
+
+test('records saved before delivery identities, and damaged identity fields, load as empty and mint from one', async () => {
+    const base = {
+        now: null,
+        ready: null,
+        led: [],
+        sends: 2,
+        findings: [],
+        suggestion: null,
+        seen: null,
+        reminded: null,
+        edition: 1,
+    };
+    for (const fields of [
+        {},
+        { delivery: 'x', serial: -4, settled: [7], counted: 'y' },
+        { delivery: { id: 'a' }, serial: 1.5 },
+        { delivery: { id: 'a', attempt: 'b', sending: { text: 5, after: null } } },
+        { delivery: { id: 'a', attempt: 'b', sending: { text: 't', after: { id: 1, position: 'x' } } } },
+        { delivery: { id: 'a', attempt: 'b' } },
+    ]) {
+        const storage = new FakeStorage();
+        ScribeStore.write(storage, ROOM, ScribeStore.Kind.Live, { ...base, ...fields });
+        const view = rig({}, storage).live.view();
+        const named = JSON.stringify(fields);
+        assert.equal(view.awaiting, false, named);
+        assert.equal(view.sends, 2, named);
+        assert.equal(view.ready, null, named);
+    }
+    const storage = new FakeStorage();
+    ScribeStore.write(storage, ROOM, ScribeStore.Kind.Live, { ...base, serial: -4, delivery: 'x' });
+    const { live } = rig({}, storage);
+    await live.reply(at(41));
+    await live.force();
+    const stored = ScribeStore.read(storage, ROOM, ScribeStore.Kind.Live);
+    assert.equal(stored.serial, 1);
+    assert.equal(stored.delivery.id, `${ROOM}#reminder-1`);
+    assert.equal(stored.delivery.attempt, `${ROOM}#attempt-1`);
+    const pending = new FakeStorage();
+    ScribeStore.write(pending, ROOM, ScribeStore.Kind.Live, {
+        ...base,
+        delivery: { id: 'a', attempt: 'b', sending: { text: '[Scribe] x', after: { id: story.at(-1).id, position: 60 } } },
+    });
+    assert.equal(rig({}, pending).live.view().awaiting, true);
+});
+
+test('a late receipt settles an interrupted reminder after manual rearming and before the retry is submitted', async () => {
+    const { storage, ready, reminder } = await interrupted();
+    const waiting = { messages: story.slice(0, 41), unread: story.slice(40, 41) };
+    const room = rig(waiting, storage);
+    assert.equal(room.live.view().unconfirmed.id, reminder);
+    await room.live.force('an-obsolete-reminder');
+    assert.equal(room.live.lines().ready, null);
+    await room.live.force(reminder);
+    assert.equal(room.live.lines().ready, ready);
+    room.live.close();
+    const opened = rig(waiting, storage);
+    assert.equal(opened.live.view().unconfirmed, null);
+    const history = carriedStory({ 42: ready });
+    opened.keeper.change({ messages: history.messages.slice(0, 42), own: history.own });
+    assert.equal(opened.live.view().sends, 0);
+    assert.deepEqual(plain(ScribeStore.read(storage, ROOM, ScribeStore.Kind.Live).settled), [reminder]);
+    await opened.live.force(reminder);
+    assert.equal(opened.live.outgoing('After confirmation.'), 'After confirmation.');
 });

@@ -23,6 +23,8 @@ The index of demos is in `README.md`. Each demo has its own README or DEMO.md wi
 
 ## How work is run
 
+When an instruction names an Anthropic model, use a native OpenAI/ChatGPT model of comparable capability for that role. This applies to implementers and reviewers across all demos.
+
 1. **Brainstorm first**, one question at a time, until the operator has decided the forks. The operator decides; the assistant proposes argued options and settles nothing on its own.
 2. **Design document** at `<demo>/docs/superpowers/specs/YYYY-MM-DD-<topic>-design.md`, checked by a fresh reviewer reading as a builder, then approved by the operator.
 3. **Plan** at `<demo>/docs/superpowers/plans/YYYY-MM-DD-<topic>.md`: exact files, signatures, values and the tests that try to break each task. Approved by the operator.

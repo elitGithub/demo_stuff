@@ -209,6 +209,25 @@ const ScribeText = Object.freeze({
 
     /**
      * @param {string} text
+     * @param {boolean} includeReminder
+     * @return {string}
+     */
+    submission(text, includeReminder = false) {
+        const lines = text.split(/\r?\n/);
+        const kept = includeReminder ? lines : lines.filter((line) => !ScribeText.reminderLine(line));
+        return ScribeText.fingerprint(kept.join('\n').replace(/^\s*@:\s*/gm, '').trim());
+    },
+
+    /**
+     * @param {string} line
+     * @return {boolean}
+     */
+    reminderLine(line) {
+        return /^[\p{Zs}\t]*(?:@:[\p{Zs}\t]*)?\[Scribe\](?=[\p{Zs}\t]|$)/u.test(line);
+    },
+
+    /**
+     * @param {string} text
      * @return {number}
      */
     bytes(text) {

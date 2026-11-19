@@ -116,19 +116,23 @@ export default class FakeSendWindow {
                 }
             }
         };
+        event.eventPhase = 1;
         run(this.listeners.filter((listening) => listening.type === event.type && listening.capture));
         for (const step of chain) {
             if (event.stopped) {
                 break;
             }
+            event.eventPhase = step === target ? 2 : 3;
             run((step.listeners ?? []).filter((listening) => listening.type === event.type));
             if (!event.bubbles) {
                 break;
             }
         }
         if (event.bubbles && !event.stopped) {
+            event.eventPhase = 3;
             run(this.listeners.filter((listening) => listening.type === event.type && !listening.capture));
         }
+        event.eventPhase = 0;
         return event;
     }
 

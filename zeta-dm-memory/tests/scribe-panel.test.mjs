@@ -688,11 +688,15 @@ test('settings are validated before they are saved', async () => {
         Object.keys(good).map((name) => field(name).value),
         ['mistralai/mistral-large-4-0', 'mistralai/mistral-small-3.2-24b-instruct', 'mistralai/mistral-small-3.2-24b-instruct', '40', '3', '6'],
     );
+    assert.equal(
+        plain(scripts.ScribePanel.Settings.Setup).find((entry) => entry.name === 'refresh').label,
+        'User messages between reminders',
+    );
     const wrong = [
         ['size', '0', 'Messages per stretch must be a whole number of at least 1.'],
         ['size', '2.5', 'Messages per stretch must be a whole number of at least 1.'],
         ['size', 'forty', 'Messages per stretch must be a whole number of at least 1.'],
-        ['refresh', '0', 'Sends between reminders must be a whole number of at least 1.'],
+        ['refresh', '0', 'User messages between reminders must be a whole number of at least 1.'],
         ['budget', '-1', 'The budget must be a number of dollars, more than 0.'],
         ['budget', 'two', 'The budget must be a number of dollars, more than 0.'],
         ['budget', '0', 'The budget must be a number of dollars, more than 0.'],
@@ -4807,6 +4811,67 @@ test('live calls are listed beside the keeper calls, a cut-off answer with its f
     assert.equal(texts[0].includes('answer was cut off'), true);
     assert.equal(texts[0].includes('w'.repeat(2000)), true);
     assert.equal(texts[1], 'Scribe: in 10, out 20, finish stop');
+});
+
+test('Force stop shows only while a call has run four minutes, and pressing it stops that call', async () => {
+    const panel = mounted(readTo(ScribeLog.create(), 40));
+    assert.equal(panel.byId('scribe-force-stop').hidden, true);
+    panel.callDue = true;
+    panel.redraw();
+    assert.equal(panel.byId('scribe-force-stop').hidden, false);
+    assert.equal(panel.text('scribe-force-stop'), 'Force stop');
+    panel.click('scribe-force-stop');
+    await panel.flush();
+    assert.equal(panel.forceStops, 1);
+    panel.callDue = false;
+    panel.redraw();
+    assert.equal(panel.byId('scribe-force-stop').hidden, true);
+});
+
+test('focus leaves Force stop for the toggle when the button hides while it holds focus', async () => {
+    const panel = mounted(readTo(ScribeLog.create(), 40));
+    panel.callDue = true;
+    panel.redraw();
+    const button = panel.byId('scribe-force-stop');
+    button.focus();
+    assert.equal(panel.root.activeElement, button);
+    panel.click('scribe-force-stop');
+    await panel.flush();
+    panel.callDue = false;
+    panel.redraw();
+    assert.equal(button.hidden, true);
+    assert.equal(panel.root.activeElement, panel.byId('scribe-toggle'));
+});
+
+test('a call stopped by the operator shows as stopped, with its cost unknown', async () => {
+    const stoppedRead = Object.freeze({
+        sequence: null,
+        pass: 'Story',
+        system: 'prompt',
+        input: 'the messages',
+        answer: null,
+        readable: true,
+        stopped: true,
+    });
+    const stoppedLive = Object.freeze({
+        role: 'Scribe',
+        tokensIn: null,
+        tokensOut: null,
+        reasoningTokens: null,
+        finish: null,
+        answer: null,
+        problem: 'Stopped by the operator; cost unknown',
+    });
+    const panel = mounted(readTo(ScribeLog.create(), 40), {
+        keeper: { calls: [stoppedRead] },
+        live: liveView([], { calls: [stoppedLive] }),
+    });
+    await panel.tab('Progress');
+    assert.deepEqual(panel.rowTexts('calls'), ['Stopped by the operator: Story; cost unknown']);
+    const [live] = panel.rowTexts('liveCalls');
+    assert.equal(live.startsWith('Scribe: in (unknown), out (unknown), finish (unknown)'), true, live);
+    assert.equal(live.endsWith('Stopped by the operator; cost unknown'), true, live);
+    assert.equal(/\b0\b/.test(live), false, live);
 });
 
 test('a refused contradiction shows its numbers and quotes in Progress', async () => {

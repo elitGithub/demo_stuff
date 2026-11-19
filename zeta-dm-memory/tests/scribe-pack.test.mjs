@@ -419,7 +419,7 @@ test('inside the chat frame only the frame part starts', () => {
     assert.equal(frame.marks.size, 0);
     assert.deepEqual(frame.documentAdded, []);
     assert.deepEqual(frame.queries, []);
-    assert.equal(frame.page.fetch === frame.original, true);
+    assert.notEqual(frame.page.fetch, frame.original);
     assert.deepEqual(frame.logs, []);
     assert.deepEqual(frame.posted, [['{"zetaScribe":1,"kind":"ready"}', 'https://zeta-ai.io']]);
     assert.equal(frame.added.includes('message'), true);

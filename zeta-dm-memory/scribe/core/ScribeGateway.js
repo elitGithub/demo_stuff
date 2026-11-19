@@ -216,7 +216,7 @@ const ScribeGateway = Object.freeze({
     },
 
     /**
-     * @param {{ fetch: Function, sleep: Function, key: string, model: string, system: string, user: string, maxTokens: number, timeoutMs?: number, signal?: object }} request
+     * @param {{ fetch: Function, sleep: Function, key: string, model: string, system: string, user: string, timeoutMs?: number|null, signal?: object }} request
      * @return {Promise<{ text: string, tokensIn: number, tokensOut: number, reasoningTokens: number|null, finish: string, cost: number|null }>}
      */
     async call(request) {
@@ -228,7 +228,6 @@ const ScribeGateway = Object.freeze({
             ['model', ScribeGateway.filled(request.model)],
             ['system', ScribeGateway.filled(request.system)],
             ['user', ScribeGateway.filled(request.user)],
-            ['maxTokens', Number.isSafeInteger(request.maxTokens) && request.maxTokens > 0],
         ];
         for (const [name, valid] of checks) {
             if (!valid) {
@@ -242,7 +241,12 @@ const ScribeGateway = Object.freeze({
         }
         const key = request.key;
         const send = request.fetch;
-        const timeoutMs = Number.isFinite(request.timeoutMs) && request.timeoutMs > 0 ? request.timeoutMs : settings.TimeoutMs;
+        let timeoutMs = settings.TimeoutMs;
+        if (request.timeoutMs === null) {
+            timeoutMs = null;
+        } else if (Number.isFinite(request.timeoutMs) && request.timeoutMs > 0) {
+            timeoutMs = request.timeoutMs;
+        }
         const options = {
             method: settings.Method,
             headers: {
@@ -252,7 +256,6 @@ const ScribeGateway = Object.freeze({
             body: JSON.stringify({
                 model: request.model,
                 temperature: settings.Temperature,
-                max_tokens: request.maxTokens,
                 reasoning: { effort: settings.ReasoningEffort },
                 usage: { include: true },
                 messages: [
@@ -310,8 +313,9 @@ const ScribeGateway = Object.freeze({
         };
 
         const exchanged = exchange();
-        const timer = Promise.resolve(request.sleep(timeoutMs)).then(() => null);
-        const outcome = await Promise.race([exchanged, timer]);
+        const timer =
+            timeoutMs === null ? null : Promise.resolve(request.sleep(timeoutMs)).then(() => null);
+        const outcome = timer === null ? await exchanged : await Promise.race([exchanged, timer]);
         if (outcome === null) {
             const seconds = timeoutMs / settings.MillisecondsPerSecond;
             throw ScribeGateway.failure(key, `${settings.Messages.TimeoutPrefix}${seconds}${settings.Messages.TimeoutSuffix}`, {

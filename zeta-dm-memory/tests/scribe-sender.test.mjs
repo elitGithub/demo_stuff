@@ -115,9 +115,10 @@ function type(page, text, field = null) {
  * @param {object} page
  * @param {function(string): string} outgoing
  * @param {function(): void} sent
+ * @param {function(): void} cancelled
  * @return {{ calls: { outgoing: string[], sent: number }, handle: { detach: function(): void } }}
  */
-function wire(page, outgoing, sent = () => {}) {
+function wire(page, outgoing, sent = () => {}, cancelled = () => {}) {
     const calls = { outgoing: [], sent: 0 };
     const handle = ScribeSender.attach({
         document: page.document,
@@ -131,6 +132,7 @@ function wire(page, outgoing, sent = () => {}) {
             calls.sent++;
             sent();
         },
+        cancelled,
     });
     return { calls, handle };
 }
@@ -501,6 +503,38 @@ test('nothing is appended twice', () => {
     page.window.advance(100);
     assert.equal(second.calls.sent, 1);
     assert.equal(keydowns(page.box), 0);
+});
+
+test('editing before the deferred Enter cancels that attempt and prevents the page from sending it', () => {
+    const page = makePage();
+    const phases = [];
+    wire(page, appendLine, () => phases.push('sent'), () => phases.push('cancelled'));
+    type(page, 'Wait.');
+    pressEnter(page);
+    page.window.dispatch(page.box, 'beforeinput');
+    page.window.advance(2000);
+    assert.equal(page.box.value, 'Wait.');
+    assert.deepEqual(page.sentTexts, []);
+    assert.deepEqual(phases, ['cancelled']);
+    pressEnter(page);
+    page.window.advance(2000);
+    assert.deepEqual(page.sentTexts, [appendLine('Wait.')]);
+    assert.deepEqual(phases, ['cancelled', 'sent']);
+});
+
+test('new input after the host emptied the composer confirms the first send exactly once', () => {
+    const page = makePage();
+    const phases = [];
+    wire(page, (text) => text, () => phases.push('sent'), () => phases.push('cancelled'));
+    type(page, 'I wait.');
+    pressEnter(page);
+    page.window.advance(30);
+    assert.deepEqual(page.sentTexts, ['I wait.']);
+    type(page, 'I listen.');
+    pressEnter(page);
+    page.window.advance(200);
+    assert.deepEqual(page.sentTexts, ['I wait.', 'I listen.']);
+    assert.deepEqual(phases, ['sent', 'sent']);
 });
 
 test('the sender never breaks the page', () => {

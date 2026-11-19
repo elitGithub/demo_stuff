@@ -263,7 +263,8 @@ async function adopt(chosen = {}) {
             context.calls.push(call);
             context.events.push('ask');
             call.answer = answering(call, context.calls.length);
-            return { text: call.answer, cost: costing(call, context.calls.length) };
+            const stopped = (chosen.stopping ?? (() => 0))(call, context.calls.length);
+            return { text: call.answer, cost: costing(call, context.calls.length), stopped };
         },
         /**
          * @param {object} kept
@@ -790,6 +791,38 @@ test('a failed call applies nothing', async () => {
     assert.deepEqual(plain(run.log), run.saved[0]);
     assert.equal(run.records.length, 1);
     assert.equal(run.reports.length, 1);
+});
+
+test('a call stopped by the operator is recorded before the call that answered, its cost unknown', async () => {
+    const run = await adopt({ stopping: (call, index) => (index === 1 ? 1 : 0) });
+    assert.deepEqual(plain(run.result), ended('Done', null, 0.75, 4, 1));
+    assert.deepEqual(
+        plain(run.records.map((item) => [item.sequence, item.pass, item.readable, item.stopped === true, item.answer])),
+        [
+            [null, 'Story', true, true, null],
+            [1, 'Story', true, false, run.calls[0].answer],
+            [2, 'Story', true, false, run.calls[1].answer],
+            [3, 'Story', true, false, run.calls[2].answer],
+        ],
+    );
+    assert.equal(run.records[0].input, run.calls[0].user);
+    /**
+     * @param {{ pass: string, marks: number[] }} call
+     * @param {number} index
+     * @return {string}
+     */
+    const quiet = (call, index) => {
+        if (index === 2) {
+            throw Object.assign(new Error('the model went quiet'), { stopped: 1 });
+        }
+        return scripted(call);
+    };
+    const failed = await adopt({ answering: quiet });
+    assert.deepEqual(plain(failed.result), ended('Failed', 'the model went quiet', 0.25, 3, 1));
+    assert.deepEqual(plain(failed.records.map((item) => [item.sequence, item.stopped === true])), [
+        [1, false],
+        [null, true],
+    ]);
 });
 
 test('resume after a failed save reads the stretch once', async () => {

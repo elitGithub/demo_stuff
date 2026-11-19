@@ -369,6 +369,7 @@ const ScribeKeeper = Object.freeze({
             made: keeper.made,
             state: keeper.state,
             messages,
+            own: keeper.intake === null ? Object.freeze([]) : keeper.intake.own,
             player: keeper.intake === null ? ScribeIntake.Settings.UnknownPlayer : keeper.intake.player,
             settings: keeper.settings,
             spentToday: keeper.spentToday,
@@ -376,6 +377,7 @@ const ScribeKeeper = Object.freeze({
             began: keeper.flight === null ? null : keeper.began,
             stop: keeper.stop,
             pulled: keeper.lastPull,
+            historyChecked: keeper.historyChecked,
             adoptBlock: ScribeKeeper.blocked(keeper),
             mismatch: keeper.mismatch !== null,
             trusted: keeper.reader && keeper.unloaded === null && keeper.book !== null && keeper.book.adopted && ScribeKeeper.held(keeper) === null,
@@ -583,6 +585,7 @@ const ScribeKeeper = Object.freeze({
             return false;
         }
         keeper.unloaded = null;
+        keeper.historyChecked = false;
         keeper.pullDone = false;
         keeper.partial = false;
         keeper.cutShort = false;
@@ -1159,6 +1162,9 @@ const ScribeKeeper = Object.freeze({
         if (keeper.epoch !== epoch) {
             return false;
         }
+        if (taken.fresh && whole && !result.skipped && pulled.at(settings.Last)?.id === keeper.campaign.messages.at(settings.Last)?.id) {
+            keeper.historyChecked = true;
+        }
         keeper.cut = ScribeKeeper.shortfall(result, !taken.joined);
         keeper.partial = !whole && !taken.shared && !(keeper.book === null && natural && taken.joined);
         if (taken.shared || (taken.joined && whole)) {
@@ -1204,7 +1210,8 @@ const ScribeKeeper = Object.freeze({
             return false;
         }
         keeper.problem = null;
-        const taken = ScribeKeeper.takeIn(keeper, ScribeKeeper.single(page.messages), page.skipped > ScribeKeeper.Settings.NoCount);
+        const pulled = ScribeKeeper.single(page.messages);
+        const taken = ScribeKeeper.takeIn(keeper, pulled, page.skipped > ScribeKeeper.Settings.NoCount);
         if (keeper.epoch !== epoch) {
             return false;
         }
@@ -1218,6 +1225,9 @@ const ScribeKeeper = Object.freeze({
         }
         if (taken.shared) {
             keeper.suspectAt = null;
+        }
+        if (taken.fresh && !page.skipped && pulled.at(ScribeKeeper.Settings.Last)?.id === keeper.campaign.messages.at(ScribeKeeper.Settings.Last)?.id) {
+            keeper.historyChecked = true;
         }
         const skipped = ScribeKeeper.skippedWords(page.skipped);
         if (skipped !== null) {
@@ -2338,6 +2348,7 @@ const ScribeKeeper = Object.freeze({
             owing: null,
             pulledAt: null,
             lastPull: null,
+            historyChecked: false,
             cut: null,
             state: null,
             read: settings.NoCount,

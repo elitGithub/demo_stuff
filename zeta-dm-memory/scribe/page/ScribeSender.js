@@ -8,6 +8,9 @@ const ScribeSender = Object.freeze({
         ComposingKeyCode: 229,
         EnterKeyCode: 13,
         Capture: true,
+        Unauthorized: 401,
+        AcceptedForProcessing: 202,
+        Refused: Object.freeze([400, 403, 404, 405, 413, 415, 422, 429]),
         Bubbles: true,
         Cancelable: true,
         Nothing: '',
@@ -15,6 +18,7 @@ const ScribeSender = Object.freeze({
         EnterCode: 'Enter',
         KeyDown: 'keydown',
         PointerDown: 'pointerdown',
+        Click: 'click',
         Input: 'input',
         Change: 'change',
         InputType: 'insertText',
@@ -183,7 +187,8 @@ const ScribeSender = Object.freeze({
      */
     watch(sender) {
         if (sender.pending !== null && sender.resend === null && sender.timer === null) {
-            sender.timer = sender.window.setTimeout(sender.tick, ScribeSender.Settings.CheckMs);
+            const delay = sender.pending.sampled ? ScribeSender.Settings.CheckMs : ScribeSender.Settings.NoWait;
+            sender.timer = sender.window.setTimeout(sender.tick, delay);
         }
     },
 
@@ -200,27 +205,86 @@ const ScribeSender = Object.freeze({
         }
         const pending = sender.pending;
         if (pending !== null) {
-            if (text.includes(ScribeSender.tracked(pending))) {
+            if (!pending.cleared && text.includes(ScribeSender.tracked(pending))) {
                 pending.waited = settings.NoWait;
                 return sender.resend !== null;
             }
             sender.window.clearTimeout(sender.timer);
             sender.timer = null;
             sender.pending = null;
-            sender.sent();
+            ScribeSender.finish(sender, pending, true);
         }
         const result = sender.outgoing(text);
         const added = result.slice(text.length);
         const writes = result.startsWith(text) && !text.endsWith(added);
         if (writes) {
+            const { selectionStart, selectionEnd, selectionDirection } = box;
             ScribeSender.write(sender.window, box, result);
+            if (typeof box.setSelectionRange === settings.FunctionType &&
+                (box.selectionStart !== selectionStart || box.selectionEnd !== selectionEnd)) {
+                box.setSelectionRange(selectionStart, selectionEnd, selectionDirection);
+            }
         }
-        sender.pending = { added: writes ? added : null, original: text, waited: settings.NoWait };
+        sender.pending = {
+            box, added: writes ? added : null, original: text, waited: settings.NoWait, sampled: false, cleared: false,
+            receipt: sender.receipt?.(), event: null, bound: false, ambiguous: false, status: null, finished: false, outcome: null,
+        };
         return writes;
     },
 
     /**
-     * @param {{ document: Document, window: Window, outgoing: function(string): string, sent: function(): void, ignore: Element|null }} options
+     * @param {object} sender
+     * @param {object} pending
+     * @param {boolean} consumed
+     * @return {void}
+     */
+    finish(sender, pending, consumed) {
+        if (!pending.receipt) {
+            if (consumed) {
+                sender.sent();
+            } else {
+                sender.cancelled?.();
+            }
+            return;
+        }
+        pending.finished = true;
+        let outcome = 'uncertain';
+        if (!consumed && !pending.bound) {
+            outcome = 'cancelled';
+        } else if (!pending.ambiguous && pending.status === ScribeSender.Settings.Unauthorized) {
+            outcome = 'rejected';
+        } else if (!pending.ambiguous && ScribeSender.Settings.Refused.includes(pending.status)) {
+            outcome = 'cancelled';
+        } else if (!pending.ambiguous && pending.status >= 200 && pending.status < 300 && pending.status !== ScribeSender.Settings.AcceptedForProcessing) {
+            outcome = 'confirmed';
+        }
+        if (outcome !== pending.outcome && !sender.detached) {
+            pending.outcome = outcome;
+            if ((outcome === 'rejected' || outcome === 'cancelled') && sender.pending === pending) {
+                sender.window.clearTimeout(sender.resend);
+                sender.window.clearTimeout(sender.timer);
+                sender.resend = null;
+                sender.timer = null;
+                sender.pending = null;
+                const box = pending.box;
+                if (pending.added !== null && box === ScribeSender.find(sender.document, sender.ignore) &&
+                    box.value.startsWith(pending.original + pending.added)) {
+                    const start = pending.original.length;
+                    const end = start + pending.added.length;
+                    const mapped = (position) => position <= start ? position : Math.max(start, position - pending.added.length);
+                    const caret = [mapped(box.selectionStart), mapped(box.selectionEnd), box.selectionDirection];
+                    ScribeSender.write(sender.window, box, pending.original + box.value.slice(end));
+                    if (typeof box.setSelectionRange === ScribeSender.Settings.FunctionType) {
+                        box.setSelectionRange(...caret);
+                    }
+                }
+            }
+            pending.receipt[outcome]();
+        }
+    },
+
+    /**
+     * @param {{ document: Document, window: Window, outgoing: function(string): string, sent: function(): void, cancelled?: function(): void, ignore: Element|null }} options
      * @return {Readonly<{ detach: function(): void }>}
      */
     attach(options) {
@@ -229,8 +293,12 @@ const ScribeSender = Object.freeze({
         const sender = {
             document,
             window,
+            ignore,
             outgoing,
             sent,
+            receipt: options.receipt,
+            cancelled: options.cancelled,
+            detached: false,
             pending: null,
             timer: null,
             resend: null,
@@ -240,14 +308,28 @@ const ScribeSender = Object.freeze({
         /**
          * @return {void}
          */
+        const cancelled = (pending) => {
+            window.clearTimeout(sender.resend);
+            sender.resend = null;
+            ScribeSender.finish(sender, pending, false);
+        };
+        /**
+         * @return {void}
+         */
         sender.tick = () => {
             const pending = sender.pending;
             sender.timer = null;
             try {
                 const box = ScribeSender.find(document, ignore);
-                if (box !== null && !box.value.includes(ScribeSender.tracked(pending))) {
+                if (!pending.sampled) {
+                    pending.sampled = true;
+                    pending.cleared = box !== null && box.value === settings.Nothing;
+                    ScribeSender.watch(sender);
+                    return;
+                }
+                if (pending.cleared || (box !== null && !box.value.includes(ScribeSender.tracked(pending)))) {
                     sender.pending = null;
-                    sent();
+                    ScribeSender.finish(sender, pending, true);
                     return;
                 }
                 pending.waited += settings.CheckMs;
@@ -256,8 +338,11 @@ const ScribeSender = Object.freeze({
                     return;
                 }
                 sender.pending = null;
-                if (box !== null && pending.added !== null) {
-                    ScribeSender.withdraw(window, box, pending.added);
+                if (box !== null) {
+                    cancelled(pending);
+                    if (pending.added !== null) {
+                        ScribeSender.withdraw(window, box, pending.added);
+                    }
                 }
             } catch {
                 sender.pending = null;
@@ -280,10 +365,11 @@ const ScribeSender = Object.freeze({
                 window.clearTimeout(sender.timer);
                 sender.timer = null;
                 sender.pending = null;
-                if (!box.value.includes(ScribeSender.tracked(pending))) {
-                    sent();
+                if (pending.cleared || !box.value.includes(ScribeSender.tracked(pending))) {
+                    ScribeSender.finish(sender, pending, true);
                     return;
                 }
+                cancelled(pending);
                 if (pending.added !== null) {
                     const end = pending.original.length;
                     ScribeSender.write(window, box, pending.original);
@@ -312,6 +398,11 @@ const ScribeSender = Object.freeze({
                 window.clearTimeout(sender.timer);
                 sender.timer = null;
                 sender.pending = null;
+                if (pending.cleared) {
+                    ScribeSender.finish(sender, pending, true);
+                    return;
+                }
+                cancelled(pending);
                 const value = box.value;
                 const original = pending.original;
                 const added = pending.added;
@@ -370,6 +461,9 @@ const ScribeSender = Object.freeze({
          */
         const key = (event) => {
             if (sender.resending) {
+                if (sender.pending) {
+                    sender.pending.event = event;
+                }
                 return;
             }
             try {
@@ -392,6 +486,9 @@ const ScribeSender = Object.freeze({
                     return;
                 }
                 if (!ScribeSender.prepare(sender, active)) {
+                    if (sender.pending) {
+                        sender.pending.event = event;
+                    }
                     ScribeSender.watch(sender);
                     return;
                 }
@@ -425,25 +522,63 @@ const ScribeSender = Object.freeze({
                 const box = ScribeSender.find(document, ignore);
                 if (button !== null && box !== null) {
                     ScribeSender.prepare(sender, box);
+                    if (sender.pending) {
+                        sender.pending.event = event;
+                    }
                     ScribeSender.watch(sender);
                 }
             } catch {
                 return;
             }
         };
+        const click = (event) => {
+            if (sender.pending && event.target?.closest?.(settings.SendButton) && !ScribeSender.inside(event, ignore)) {
+                sender.pending.event = event;
+            }
+        };
         window.addEventListener(settings.KeyDown, key, settings.Capture);
         window.addEventListener(settings.PointerDown, press, settings.Capture);
+        if (options.receipt) {
+            window.addEventListener(settings.Click, click, settings.Capture);
+        }
         window.addEventListener(settings.Input, typed, settings.Capture);
         for (const type of settings.Edits) {
             window.addEventListener(type, touched, settings.Capture);
         }
         return Object.freeze({
             /**
+             * @param {string} room
+             * @return {Function|null}
+             */
+            posting: (room) => {
+                const pending = sender.pending;
+                if (!pending?.receipt || !(pending.event?.eventPhase > 0) || !pending.receipt.room(room)) {
+                    return null;
+                }
+                if (pending.bound) {
+                    pending.ambiguous = true;
+                }
+                pending.bound = true;
+                return (status) => {
+                    pending.status = Number.isInteger(status) ? status : null;
+                    if (pending.finished || status === settings.Unauthorized || settings.Refused.includes(status)) {
+                        if (pending.event?.eventPhase > 0) {
+                            Promise.resolve().then(() => ScribeSender.finish(sender, pending, true));
+                        } else {
+                            ScribeSender.finish(sender, pending, true);
+                        }
+                    }
+                };
+            },
+            /**
              * @return {void}
              */
             detach: () => {
                 window.removeEventListener(settings.KeyDown, key, settings.Capture);
                 window.removeEventListener(settings.PointerDown, press, settings.Capture);
+                if (options.receipt) {
+                    window.removeEventListener(settings.Click, click, settings.Capture);
+                }
                 window.removeEventListener(settings.Input, typed, settings.Capture);
                 for (const type of settings.Edits) {
                     window.removeEventListener(type, touched, settings.Capture);
@@ -451,6 +586,10 @@ const ScribeSender = Object.freeze({
                 window.clearTimeout(sender.resend);
                 window.clearTimeout(sender.timer);
                 const pending = sender.pending;
+                if (pending !== null && sender.resend !== null) {
+                    cancelled(pending);
+                }
+                sender.detached = true;
                 sender.resend = null;
                 sender.timer = null;
                 sender.pending = null;

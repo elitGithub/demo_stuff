@@ -832,7 +832,7 @@ const ScribeCloud = Object.freeze({
             settings.Methods.Post,
             settings.Paths.Lease,
             { roomId: cloud.room },
-            { browser: cloud.browser, want: settings.Wants.None },
+            { browser: ScribeStore.browserId(cloud.storage, cloud.random), want: settings.Wants.None },
             settings.TimeoutMs,
         );
     },
@@ -847,7 +847,11 @@ const ScribeCloud = Object.freeze({
             cloud,
             settings.Methods.Get,
             settings.Paths.Heads,
-            { roomId: cloud.room, browser: cloud.browser, day: cloud.clock.today() },
+            {
+                roomId: cloud.room,
+                browser: ScribeStore.browserId(cloud.storage, cloud.random),
+                day: cloud.clock.today(),
+            },
             null,
             settings.TimeoutMs,
         );
@@ -902,7 +906,7 @@ const ScribeCloud = Object.freeze({
             return;
         }
         try {
-            cloud.browser = ScribeStore.browserId(cloud.storage, cloud.random);
+            ScribeStore.browserId(cloud.storage, cloud.random);
         } catch (error) {
             cloud.phase = phases.Offline;
             cloud.problem = ScribeCloud.words(error);
@@ -1387,7 +1391,7 @@ const ScribeCloud = Object.freeze({
                     kind: item.kind,
                     revision: item.base + settings.Next,
                     part,
-                    browser: cloud.browser,
+                    browser: ScribeStore.browserId(cloud.storage, cloud.random),
                 };
                 const staged = await ScribeCloud.request(
                     cloud,
@@ -1418,7 +1422,7 @@ const ScribeCloud = Object.freeze({
             settings.Methods.Post,
             settings.Paths.Commit,
             { roomId: cloud.room },
-            { browser: cloud.browser, kinds: changes, done: [] },
+            { browser: ScribeStore.browserId(cloud.storage, cloud.random), kinds: changes, done: [] },
             settings.TimeoutMs,
         );
         if (cloud.epoch !== epoch) {
@@ -1552,7 +1556,7 @@ const ScribeCloud = Object.freeze({
                 settings.Methods.Post,
                 settings.Paths.Spend,
                 { roomId: cloud.room },
-                { browser: cloud.browser, day: today, total },
+                { browser: ScribeStore.browserId(cloud.storage, cloud.random), day: today, total },
                 settings.TimeoutMs,
             );
         } finally {
@@ -1731,7 +1735,6 @@ const ScribeCloud = Object.freeze({
             notify: options.notify,
             phase: ScribeCloud.Phase.Off,
             key: settings.Nothing,
-            browser: null,
             room: null,
             epoch: settings.FirstEpoch,
             heads: new Map(),

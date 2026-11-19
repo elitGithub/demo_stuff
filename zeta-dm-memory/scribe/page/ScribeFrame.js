@@ -9,11 +9,16 @@ const ScribeFrame = Object.freeze({
         Kind: Object.freeze({
             Ready: 'ready',
             Arm: 'arm',
+            Starting: 'starting',
+            Cancelled: 'cancelled',
+            Rejected: 'rejected',
+            Uncertain: 'uncertain',
             Sent: 'sent',
         }),
         ReadyRepeatMs: 1000,
         MessageBytes: 4500,
         LongestLine: 6000,
+        LongestIdentity: 200,
     }),
 
     Role: Object.freeze({
@@ -37,7 +42,11 @@ const ScribeFrame = Object.freeze({
             ready: null,
             suggestion: null,
             ends: Object.freeze([]),
+            reminder: null,
+            attempt: null,
         }),
+        FirstIndex: 0,
+        OneIndex: 1,
     }),
 
     /**
@@ -83,8 +92,22 @@ const ScribeFrame = Object.freeze({
     },
 
     /**
+     * @param {*} identity
+     * @return {boolean}
+     */
+    named(identity) {
+        const settings = ScribeFrame.Settings;
+        return (
+            identity === null ||
+            (typeof identity === settings.StringType &&
+                identity.length > settings.NoLength &&
+                identity.length <= ScribeFrame.Bridge.LongestIdentity)
+        );
+    },
+
+    /**
      * @param {*} data
-     * @return {Readonly<{ zetaScribe: number, kind: string, seq: number, token: string, ready: string|null, suggestion: string|null }>|null}
+     * @return {Readonly<{ zetaScribe: number, kind: string, seq: number, token: string, ready: string|null, suggestion: string|null, ends: readonly number[], reminder: string|null, attempt: string|null }>|null}
      */
     arm(data) {
         const bridge = ScribeFrame.Bridge;
@@ -104,7 +127,11 @@ const ScribeFrame = Object.freeze({
             typeof token === settings.StringType &&
             token.length >= settings.ShortestToken &&
             token.length <= settings.LongestToken;
-        if (!ScribeFrame.counted(seq) || !keyed || !lines) {
+        const reminder = data.reminder === undefined ? null : data.reminder;
+        const attempt = data.attempt === undefined ? null : data.attempt;
+        const identified =
+            ScribeFrame.named(reminder) && ScribeFrame.named(attempt) && (reminder === null) === (attempt === null);
+        if (!ScribeFrame.counted(seq) || !keyed || !lines || !identified) {
             return null;
         }
         const given = Array.isArray(data.ends) && ready !== null ? data.ends : [];
@@ -122,7 +149,18 @@ const ScribeFrame = Object.freeze({
         );
         const ends = Object.freeze(ordered ? [...given] : []);
         const kind = bridge.Kind.Arm;
-        return Object.freeze({ [bridge.TagName]: bridge.Tag, kind, seq, token, ready, suggestion, ends });
+        return Object.freeze({
+            [bridge.TagName]: bridge.Tag,
+            kind,
+            seq,
+            ...(typeof data.room === 'string' && ScribeFrame.named(data.room) ? { room: data.room } : {}),
+            token,
+            ready,
+            suggestion,
+            ends,
+            reminder: ready === null ? null : reminder,
+            attempt: ready === null ? null : attempt,
+        });
     },
 
     /**
@@ -135,7 +173,7 @@ const ScribeFrame = Object.freeze({
         if (ScribeFrame.tagged(data, bridge.Kind.Ready)) {
             return Object.freeze({ [bridge.TagName]: bridge.Tag, kind: bridge.Kind.Ready });
         }
-        if (!ScribeFrame.tagged(data, bridge.Kind.Sent)) {
+        if (![bridge.Kind.Starting, bridge.Kind.Sent, bridge.Kind.Cancelled, bridge.Kind.Uncertain, bridge.Kind.Rejected].some((kind) => ScribeFrame.tagged(data, kind))) {
             return null;
         }
         const { seq, ready, suggestion } = data;
@@ -151,14 +189,31 @@ const ScribeFrame = Object.freeze({
         }
         const cut = ready && Number.isSafeInteger(data.cut) && data.cut > settings.NoLength ? data.cut : null;
         const crowded = !ready && data.crowded === true;
+        const reminder = data.reminder === undefined ? null : data.reminder;
+        const attempt = data.attempt === undefined ? null : data.attempt;
+        const index = Number.isSafeInteger(data.index) && data.index >= settings.FirstIndex ? data.index : null;
+        const stamped = data.kind === bridge.Kind.Starting && data.submission !== undefined;
+        if (
+            (stamped && (typeof data.submission !== settings.StringType || !/^[0-9a-f]{8}$/.test(data.submission))) ||
+            !ScribeFrame.named(reminder) ||
+            !ScribeFrame.named(attempt) ||
+            (reminder === null) !== (attempt === null) ||
+            (data.kind !== bridge.Kind.Sent && index === null)
+        ) {
+            return null;
+        }
         return Object.freeze({
             [bridge.TagName]: bridge.Tag,
-            kind: bridge.Kind.Sent,
+            kind: data.kind,
             seq,
             ready,
             suggestion,
             cut,
             crowded,
+            reminder: ready ? reminder : null,
+            attempt: ready ? attempt : null,
+            index,
+            ...(stamped ? { submission: data.submission } : {}),
         });
     },
 
@@ -175,6 +230,7 @@ const ScribeFrame = Object.freeze({
             offer: settings.NothingOffered,
             went: null,
             repeat: null,
+            index: settings.FirstIndex,
         };
         /**
          * @param {object} message
@@ -201,10 +257,39 @@ const ScribeFrame = Object.freeze({
             if (arm === null || arm.token !== token()) {
                 return;
             }
-            frame.seq = arm.seq;
-            frame.offer = Object.freeze({ ready: arm.ready, suggestion: arm.suggestion, ends: arm.ends });
+            if (arm.seq !== frame.seq) {
+                frame.seq = arm.seq;
+                frame.index = settings.FirstIndex;
+            }
+            frame.offer = Object.freeze({
+                room: arm.room,
+                ready: arm.ready,
+                suggestion: arm.suggestion,
+                ends: arm.ends,
+                reminder: arm.reminder,
+                attempt: arm.attempt,
+            });
             window.clearInterval(frame.repeat);
             frame.repeat = null;
+        };
+        /**
+         * @param {string} kind
+         * @return {void}
+         */
+        const report = (kind, went = frame.went) => {
+            post({
+                [bridge.TagName]: bridge.Tag,
+                kind,
+                seq: went.seq,
+                ready: went.ready !== null,
+                suggestion: went.suggestion !== null,
+                cut: went.cut,
+                crowded: went.crowded,
+                reminder: went.reminder,
+                attempt: went.attempt,
+                index: went.index,
+                ...(kind === bridge.Kind.Starting ? { submission: went.submission } : {}),
+            });
         };
         /**
          * @param {string} text
@@ -217,40 +302,69 @@ const ScribeFrame = Object.freeze({
             const offer = frame.offer;
             const made = ScribeSender.compose(text, offer, bridge.MessageBytes);
             frame.went = Object.freeze({
+                room: offer.room,
                 seq: frame.seq,
+                index: frame.index,
+                submission: ScribeText.submission(made.text),
                 ready: made.ready ? offer.ready : null,
                 suggestion: made.suggestion ? offer.suggestion : null,
                 cut: made.carried === null || made.carried === offer.ready ? null : made.carried.length,
                 crowded: made.crowded,
+                reminder: made.ready ? offer.reminder : null,
+                attempt: made.ready ? offer.attempt : null,
             });
+            frame.index += settings.OneIndex;
+            report(bridge.Kind.Starting);
             return made.text;
         };
         /**
          * @return {void}
          */
-        const sent = () => {
-            const went = frame.went;
+        const sent = (went = frame.went, kind = bridge.Kind.Sent) => {
             if (went === null) {
                 return;
             }
-            post({
-                [bridge.TagName]: bridge.Tag,
-                kind: bridge.Kind.Sent,
-                seq: went.seq,
-                ready: went.ready !== null,
-                suggestion: went.suggestion !== null,
-                cut: went.cut,
-                crowded: went.crowded,
-            });
+            report(kind, went);
+            if (frame.went === went) {
+                frame.went = null;
+            }
             const offer = frame.offer;
-            const kept = offer.ready === went.ready ? null : offer.ready;
+            const same = offer.ready === went.ready && offer.reminder === went.reminder && offer.attempt === went.attempt;
+            const kept = same ? null : offer.ready;
             frame.offer = Object.freeze({
+                room: offer.room,
                 ready: kept,
                 suggestion: offer.suggestion === went.suggestion ? null : offer.suggestion,
                 ends: kept === null ? Object.freeze([]) : offer.ends,
+                reminder: kept === null ? null : offer.reminder,
+                attempt: kept === null ? null : offer.attempt,
             });
         };
-        const hook = ScribeSender.attach({ document, window, outgoing, sent, ignore: null });
+        /**
+         * @return {void}
+         */
+        const cancelled = () => {
+            if (frame.went !== null) {
+                report(bridge.Kind.Cancelled);
+                frame.went = null;
+            }
+        };
+        const receipt = () => {
+            const went = frame.went;
+            if (!went) {
+                return null;
+            }
+            return {
+                room: (roomId) => went.room === roomId,
+                confirmed: () => sent(went),
+                uncertain: () => sent(went, bridge.Kind.Uncertain),
+                rejected: () => report(bridge.Kind.Rejected, went),
+                cancelled: () => report(bridge.Kind.Cancelled, went),
+            };
+        };
+        const hook = ScribeSender.attach({ document, window, outgoing, sent, cancelled, receipt: options.watch ? receipt : null, ignore: null });
+        const watcher = options.watch?.();
+        watcher?.onPost(hook.posting);
         window.addEventListener(settings.Message, heard);
         ready();
         frame.repeat = window.setInterval(ready, bridge.ReadyRepeatMs);
@@ -260,6 +374,7 @@ const ScribeFrame = Object.freeze({
              */
             stop: () => {
                 hook.detach();
+                watcher?.stop();
                 window.removeEventListener(settings.Message, heard);
                 window.clearInterval(frame.repeat);
                 frame.repeat = null;

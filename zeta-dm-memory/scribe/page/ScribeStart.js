@@ -169,6 +169,8 @@ switch (
         ScribeFrame.start({
             window: unsafeWindow,
             document,
+            watch: () => ZetaSource.watch(unsafeWindow,
+                typeof exportFunction === 'function' ? (wrapper) => exportFunction(wrapper, unsafeWindow) : undefined, false),
 
             /**
              * @return {*}

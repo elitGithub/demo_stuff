@@ -655,6 +655,18 @@ async function send(walk, tab, text) {
     return tab.sent.at(-1);
 }
 
+/**
+ * @param {object} walk
+ * @param {number} after
+ * @return {object[]}
+ */
+function playerReceipts(walk, after) {
+    return plain(REFERENCE.ScribeIntake.read(walk.site.messages).messages
+        .slice(after)
+        .filter((message) => message.fromPlayer)
+        .map(({ id, fingerprint }) => ({ id, fingerprint })));
+}
+
 test('1. installed on a page that is not a chat', async () => {
     const walk = world();
     let tab = null;
@@ -1934,7 +1946,17 @@ test('F1. the two copies start as they should', async () => {
     assert.equal(first.delivered, true);
     const arms = armsTo(walk, tab);
     assert.equal(arms.length >= 1, true);
-    assert.deepEqual(arms[0], { zetaScribe: 1, kind: 'arm', seq: 1, token, ready: null, suggestion: null, ends: [] });
+    assert.deepEqual(arms[0], {
+        zetaScribe: 1,
+        kind: 'arm',
+        seq: 1,
+        token,
+        ready: null,
+        suggestion: null,
+        ends: [],
+        reminder: null,
+        attempt: null,
+    });
     assert.equal(arms.every((arm) => arm.token === token), true);
     assert.equal(
         walk.posts.filter((post) => post.toLabel === `${tab.name}/frame`).every((post) => post.target === FRAME_ORIGIN),
@@ -2386,6 +2408,59 @@ test('F6. leaving the chat disarms the frame, and returning arms it again', asyn
     assert.equal(stored(walk, 'live').ready, null);
 });
 
+test('F11. a check left running gets Force stop at 4 minutes, and the call asked again answers now', async () => {
+    const { walk, tab } = await adopted('2');
+    walk.model.holding = 'Pedant';
+    const checks = walk.model.of('Pedant').length;
+    await arrive(walk, tab, ASKED, REPLY);
+    await until(walk, 'the check to be held', () => walk.model.of('Pedant').length === checks + 1, TICK_MS * 2);
+    const held = walk.model.of('Pedant').at(-1);
+    await pass(walk, held.at + 239999 - walk.clock.now());
+    assert.equal(tab.panel.byId('scribe-force-stop').hidden, true);
+    await pass(walk, 1);
+    assert.equal(tab.panel.byId('scribe-force-stop').hidden, false);
+    assert.equal(tab.panel.text('scribe-force-stop'), 'Force stop');
+    walk.model.holding = null;
+    tab.panel.click('scribe-force-stop');
+    await pass(walk, 1000);
+    assert.equal(held.ended, true);
+    const asked = walk.model.of('Pedant').slice(checks + 1);
+    assert.equal(asked.length, 1);
+    assert.equal(asked[0].user, `${held.user}\n\nAnswer now, without more thinking.`);
+    assert.equal(asked[0].system, held.system);
+    assert.equal(tab.panel.byId('scribe-force-stop').hidden, true);
+    await until(walk, 'the reply to be checked', () => typeof stored(walk, 'live')?.ready === 'string', TICK_MS * 2);
+    await tab.panel.tab('Progress');
+    const rows = tab.panel.rowTexts('liveCalls');
+    const stopped = rows.filter((row) => row.startsWith('Pedant: in (unknown), out (unknown), finish (unknown)'));
+    assert.equal(stopped.length, 1, rows.join(' | '));
+    assert.equal(stopped[0].endsWith('Stopped by the operator; cost unknown'), true, stopped[0]);
+});
+
+test('F12. Force stop once the day is spent asks nothing more, and the stopped check is still listed', async () => {
+    const { walk, tab } = await adopted('2');
+    walk.model.holding = 'Pedant';
+    const checks = walk.model.of('Pedant').length;
+    await arrive(walk, tab, ASKED, REPLY);
+    await until(walk, 'the check to be held', () => walk.model.of('Pedant').length === checks + 1, TICK_MS * 2);
+    const held = walk.model.of('Pedant').at(-1);
+    REFERENCE.ScribeStore.spend(walk.storage, ROOM, dayOf(walk), 2);
+    await pass(walk, held.at + 240000 - walk.clock.now());
+    assert.equal(tab.panel.byId('scribe-force-stop').hidden, false);
+    const before = walk.model.calls.length;
+    tab.panel.click('scribe-force-stop');
+    await pass(walk, 1000);
+    assert.equal(held.ended, true);
+    assert.equal(walk.model.calls.length, before);
+    assert.equal(tab.panel.byId('scribe-force-stop').hidden, true);
+    await tab.panel.tab('Progress');
+    const rows = tab.panel.rowTexts('liveCalls');
+    assert.equal(rows[0].startsWith('Pedant: in (unknown), out (unknown), finish (unknown)'), true, rows.join(' | '));
+    assert.equal(rows[0].endsWith("The day's budget is spent"), true, rows[0]);
+    assert.equal(rows[1].startsWith('Pedant: in (unknown), out (unknown), finish (unknown)'), true, rows.join(' | '));
+    assert.equal(rows[1].endsWith('Stopped by the operator; cost unknown'), true, rows[1]);
+});
+
 test('F7. a second tab that only watches arms its frame with nothing', async () => {
     const { walk, tab } = await replied('2');
     const ready = stored(walk, 'live').ready;
@@ -2591,3 +2666,882 @@ test('F8. the old layout, the chat box in the top document, still works', async 
     assert.equal(stored(walk, 'live').ready, null);
     assert.deepEqual(plain(stored(walk, 'live').findings.map((finding) => finding.status)), ['Reminded']);
 });
+
+for (const layout of ['frame', 'top']) {
+    test(`D1. through the ${layout} path a forced reminder clears with its one send, and the next send carries nothing`, async () => {
+        const { walk, tab } = await adopted('2', { layout });
+        const ready = stored(walk, 'live').ready;
+        assert.equal(stored(walk, 'live').forced, true);
+        assert.deepEqual(queued(tab), [`Reminder: ${ready}`]);
+        assert.equal(await send(walk, tab, 'I step forward.'), `I step forward.\n@: ${ready}`);
+        await quiet(walk, 'after the reminder went');
+        const live = stored(walk, 'live');
+        assert.equal(live.ready, null);
+        assert.equal(live.forced, false);
+        assert.equal(live.edited, null);
+        assert.equal(live.delivery, null);
+        assert.equal(live.sends, 0);
+        assert.deepEqual(queued(tab), []);
+        assert.equal(tab.panel.byId('scribe-reminder').value, '');
+        assert.equal(await send(walk, tab, 'I step again.'), 'I step again.');
+        assert.equal(stored(walk, 'live').sends, 1);
+    });
+
+    test(`D2. through the ${layout} path Enter and a press on Send together deliver the reminder once`, async () => {
+        const { walk, tab } = await adopted('2', { layout });
+        const ready = stored(walk, 'live').ready;
+        const before = tab.sent.length;
+        tab.type('I step forward.');
+        tab.press('Send', true);
+        tab.enter();
+        await pass(walk, 2000);
+        assert.equal(tab.sent.length, before + 1);
+        assert.equal(tab.sent.at(-1), `I step forward.\n@: ${ready}`);
+        assert.equal(tab.sent.at(-1).split('\n@: [Scribe] ').length - 1, 1);
+        assert.equal(stored(walk, 'live').sends, 0);
+        assert.equal(stored(walk, 'live').ready, null);
+        assert.equal(await send(walk, tab, 'I step again.'), 'I step again.');
+    });
+
+    for (const interval of [6, 8, 10]) {
+        test(`D3. the ${layout} path delivers exactly on sends ${interval} and ${2 * interval} across a reload`, async () => {
+            const walk = world({ layout });
+            let tab = await opened(walk);
+            await saveKey(walk, tab);
+            tab.panel.tab('Settings');
+            tab.panel.type('scribe-setting-refresh', String(interval));
+            await adopt(walk, tab, '5');
+            const beginning = walk.site.messages.length;
+            for (let turn = 1; turn <= 2 * interval + 1; turn++) {
+                if (turn === interval + 2) {
+                    tab = await reload(walk, tab);
+                }
+                const text = `I watch the market, turn ${turn}.`;
+                const sent = await send(walk, tab, text);
+                const due = turn % interval === 0;
+                if (due) {
+                    assert.ok(sent.startsWith(`${text}\n@: [Scribe] The story so far:`), sent);
+                } else {
+                    assert.equal(sent, text);
+                }
+                assert.equal(stored(walk, 'live').sends, turn % interval, `after send ${turn}`);
+                if ((turn + 1) % interval === 0) {
+                    const reply = walk.site.reply(CALM_REPLY);
+                    await until(
+                        walk,
+                        `the reminder for send ${turn + 1}`,
+                        () => stored(walk, 'live').seen?.id === reply.id && typeof stored(walk, 'live').ready === 'string',
+                        TICK_MS * 2,
+                    );
+                }
+            }
+            const players = walk.site.messages.slice(beginning).filter((message) => message.sender.type === 'USER');
+            assert.equal(players.length, 2 * interval + 1);
+            const deliveries = players.flatMap((message, index) => message.contents[0].text.includes('[Scribe]') ? [index + 1] : []);
+            assert.deepEqual(deliveries, [interval, 2 * interval]);
+        });
+    }
+
+    test(`D5. the ${layout} path recovers a delivered reminder and counts two rapid player sends across reloads`, async () => {
+        const { walk, tab } = await adopted('2', { layout });
+        const offer = stored(walk, 'live').delivery.id;
+        const start = walk.site.messages.length;
+        tab.type('I approach.');
+        tab.enter();
+        await pass(walk, 30);
+        assert.ok(walk.site.messages[start].contents[0].text.includes('[Scribe]'));
+        assert.equal(stored(walk, 'live').settled.includes(offer), false);
+        const second = await reload(walk, tab);
+        await until(walk, 'the accepted paragraph to clear after reload', () => stored(walk, 'live').settled.includes(offer), TICK_MS * 2);
+        assert.equal(stored(walk, 'live').sends, 0);
+        assert.deepEqual(queued(second), []);
+        for (const text of ['I wait.', 'I listen.']) {
+            second.type(text);
+            second.enter();
+            await pass(walk, 30);
+            assert.equal(walk.site.messages.at(-1).contents[0].text, text);
+        }
+        const fresh = await reload(walk, second);
+        const expected = REFERENCE.ScribeIntake.read(walk.site.messages).messages.slice(start)
+            .map(({ id, fingerprint }) => ({ id, fingerprint }));
+        assert.equal(expected.length, 3);
+        await until(walk, 'both rapid player messages to count', () => stored(walk, 'live').sends === 2, TICK_MS * 2);
+        assert.deepEqual(plain(stored(walk, 'live').counted.slice(-3)), plain(expected));
+        await pass(walk, TICK_MS * 2);
+        assert.equal(stored(walk, 'live').sends, 2);
+        assert.equal(await send(walk, fresh, 'I turn around.'), 'I turn around.');
+        assert.equal(stored(walk, 'live').sends, 3);
+    });
+
+    test(`D6. the ${layout} path offers the same reminder after a refused send, withdrawal, and reload`, async () => {
+        const { walk, tab } = await adopted('2', { layout });
+        const { ready, delivery } = stored(walk, 'live');
+        const before = walk.site.messages.length;
+        tab.refusing = true;
+        tab.type('I listen.');
+        tab.enter();
+        await pass(walk, 3000);
+        assert.ok(tab.refused > 0);
+        assert.equal(walk.site.messages.length, before);
+        assert.equal(tab.box.value, 'I listen.');
+        const fresh = await reload(walk, tab);
+        assert.equal(stored(walk, 'live').delivery.id, delivery.id);
+        assert.equal(await send(walk, fresh, 'I try again.'), `I try again.\n@: ${ready}`);
+        assert.equal(walk.site.messages.length, before + 1);
+        assert.equal(stored(walk, 'live').sends, 0);
+        assert.equal(stored(walk, 'live').ready, null);
+    });
+
+    test(`D7. a manual reminder on send 3 moves the next ${layout} reminder to send 11`, async () => {
+        const walk = world({ layout });
+        const tab = await opened(walk);
+        await saveKey(walk, tab);
+        tab.panel.tab('Settings');
+        tab.panel.type('scribe-setting-refresh', '8');
+        await adopt(walk, tab, '2');
+        assert.equal(await send(walk, tab, 'I look around.'), 'I look around.');
+        assert.equal(await send(walk, tab, 'I wait.'), 'I wait.');
+        assert.equal(stored(walk, 'live').sends, 2);
+        await forceReminder(walk, tab);
+        assert.equal(await send(walk, tab, 'I nod.'), `I nod.\n@: ${FIRST_READY}`);
+        const fresh = await reload(walk, tab);
+        for (let turn = 4; turn <= 10; turn++) {
+            const text = `I wait, turn ${turn}.`;
+            assert.equal(await send(walk, fresh, text), text);
+            assert.equal(stored(walk, 'live').sends, turn - 3);
+        }
+        const reply = walk.site.reply(CALM_REPLY);
+        await until(
+            walk,
+            'the reminder for send 11',
+            () => stored(walk, 'live').seen?.id === reply.id && typeof stored(walk, 'live').ready === 'string',
+            TICK_MS * 2,
+        );
+        const ready = stored(walk, 'live').ready;
+        assert.equal(await send(walk, fresh, 'I step forward.'), `I step forward.\n@: ${ready}`);
+        assert.equal(stored(walk, 'live').sends, 0);
+        assert.equal(await send(walk, fresh, 'I wait again.'), 'I wait again.');
+    });
+
+    test(`D8. the ${layout} acknowledgement preserves a sentence added to the sent reminder`, async () => {
+        const { walk, tab } = await adopted('2', { layout });
+        const first = '[Scribe] Mirelle opens the ledger and examines the figures.';
+        const newer = `${first} Halvard listens at the door.`;
+        tab.panel.tab('Findings');
+        tab.panel.click('scribe-edit');
+        tab.panel.type('scribe-reminder', first);
+        tab.panel.click('scribe-edit-save');
+        await pass(walk, 500);
+        tab.type('I wait.');
+        tab.enter();
+        await pass(walk, 30);
+        assert.equal(walk.site.messages.at(-1).contents[0].text, `I wait.\n@: ${first}`);
+        tab.panel.click('scribe-edit');
+        tab.panel.type('scribe-reminder', newer);
+        tab.panel.click('scribe-edit-save');
+        await settle();
+        assert.equal(stored(walk, 'live').edited, newer);
+        await pass(walk, 1000);
+        assert.equal(stored(walk, 'live').draft, newer);
+        assert.equal(stored(walk, 'live').ready, null);
+        assert.equal(await send(walk, tab, 'I keep watch.'), 'I keep watch.');
+    });
+
+    test(`D9. the ${layout} recovery requires the entire carried paragraph on the player message`, async () => {
+        const { walk, tab } = await adopted('2', { layout });
+        const { ready, delivery } = stored(walk, 'live');
+        const prefix = ready.slice(0, ready.indexOf('. ') + 1);
+        assert.ok(prefix.length > '[Scribe]'.length && prefix.length < ready.length);
+        tab.type('I search the room.');
+        tab.enter();
+        await pass(walk, 30);
+        assert.equal(walk.site.messages.at(-1).contents[0].text, `I search the room.\n@: ${ready}`);
+        walk.site.edit(walk.site.messages.length, `I search the room.\n@: ${prefix}`);
+        const fresh = await reload(walk, tab);
+        await until(walk, 'the player message with a different block to count', () => stored(walk, 'live').sends === 1, TICK_MS * 2);
+        assert.equal(stored(walk, 'live').delivery.id, delivery.id);
+        assert.equal(stored(walk, 'live').forced, true);
+        assert.equal(stored(walk, 'live').settled.includes(delivery.id), false);
+        assert.equal(await send(walk, fresh, 'I wait.'), `I wait.\n@: ${ready}`);
+        assert.equal(stored(walk, 'live').sends, 0);
+    });
+
+    test(`D10. reloading before the ${layout} submission counts only the next accepted send`, async () => {
+        const { walk, tab } = await adopted('2', { layout });
+        const start = walk.site.messages.length;
+        const offer = stored(walk, 'live').delivery.id;
+        tab.type('First.');
+        tab.enter();
+        await pass(walk, 1);
+        assert.equal(walk.site.messages.length, start);
+        const fresh = await reload(walk, tab);
+        assert.equal(await send(walk, fresh, 'Second.'), 'Second.');
+        await pass(walk, 2 * TICK_MS);
+        assert.equal(walk.site.messages.length, start + 1);
+        const saved = stored(walk, 'live');
+        assert.equal(saved.sends, 1);
+        assert.deepEqual(plain(saved.counted), playerReceipts(walk, start));
+        assert.deepEqual(plain(saved.posts), []);
+        assert.equal(saved.delivery.id, offer);
+        assert.equal(saved.settled.includes(offer), false);
+    });
+
+    for (const [splitPolls, sameBody] of [[false, false], [true, false], [false, true], [true, true]]) {
+        const timing = splitPolls ? 'separate polls' : 'one poll';
+        const wording = sameBody ? 'identical' : 'different';
+        test(`D11. the ${layout} path finds its reminder after a second device uses ${wording} player text in ${timing}`, async () => {
+            const { walk, tab } = await adopted('2', { layout });
+            const { ready, delivery } = stored(walk, 'live');
+            const start = walk.site.messages.length;
+            await tab.pagePost(sameBody ? 'I wait.' : 'A message from a second device.');
+            tab.type('I wait.');
+            tab.enter();
+            await pass(walk, 30);
+            assert.equal(walk.site.messages.length, start + 2);
+            assert.equal(walk.site.messages.at(-1).contents[0].text, `I wait.\n@: ${ready}`);
+            assert.equal(stored(walk, 'live').settled.includes(delivery.id), false);
+            const api = walk.site.rooms.get(ROOM).zeta;
+            if (splitPolls) {
+                api.messages = walk.site.messages.slice(0, start + 1);
+            }
+            const fresh = await reload(walk, tab);
+            if (splitPolls) {
+                await pass(walk, 2 * TICK_MS);
+                assert.equal(stored(walk, 'campaign').messages.length, start + 1);
+                assert.equal(stored(walk, 'live').sends, 1);
+                assert.equal(stored(walk, 'live').settled.includes(delivery.id), false);
+                assert.equal(await send(walk, fresh, 'I listen while the history is catching up.'), 'I listen while the history is catching up.');
+                assert.equal(walk.site.messages.length, start + 3);
+                api.messages = walk.site.messages;
+            }
+            await pass(walk, 2 * TICK_MS);
+            const delivered = stored(walk, 'live');
+            assert.equal(delivered.sends, splitPolls ? 1 : 0);
+            assert.deepEqual(plain(delivered.settled), [delivery.id]);
+            assert.deepEqual(plain(delivered.counted), playerReceipts(walk, start));
+            assert.equal(await send(walk, fresh, 'Once more.'), 'Once more.');
+            await pass(walk, 2 * TICK_MS);
+            assert.equal(stored(walk, 'live').sends, splitPolls ? 2 : 1);
+            assert.deepEqual(plain(stored(walk, 'live').counted), playerReceipts(walk, start));
+        });
+    }
+}
+
+for (const layout of ['top', 'frame']) {
+    test(`D13. the ${layout} counter binds a confirmed ordinary send to its edited history row`, async () => {
+        const { walk, tab } = await adopted('2', { layout });
+        const start = walk.site.messages.length;
+        await send(walk, tab, 'First.');
+        await pass(walk, 2 * TICK_MS);
+        tab.type('I stand.');
+        tab.enter();
+        await pass(walk, 200);
+        assert.equal(stored(walk, 'live').sends, 1);
+        assert.equal(stored(walk, 'live').posts.at(-1).confirmed, true);
+        walk.site.edit(start + 2, 'I stood.');
+        await pass(walk, 2 * TICK_MS);
+        await reload(walk, tab);
+        await pass(walk, 2 * TICK_MS);
+        const live = stored(walk, 'live');
+        assert.equal(live.sends, 1);
+        assert.deepEqual(plain(live.posts), []);
+        assert.deepEqual(plain(live.counted), playerReceipts(walk, start));
+    });
+}
+
+for (const layout of ['top', 'frame']) {
+    test(`D13. two identical ${layout} sends have two receipts when the first is edited before the poll`, async () => {
+        const { walk, tab } = await adopted('2', { layout });
+        const start = walk.site.messages.length;
+        await send(walk, tab, 'First.');
+        await pass(walk, 2 * TICK_MS);
+        const api = walk.site.rooms.get(ROOM).zeta;
+        api.messages = walk.site.messages.slice();
+        for (let turn = 0; turn < 2; turn++) {
+            assert.equal(await send(walk, tab, 'I stand.'), 'I stand.');
+        }
+        assert.equal(stored(walk, 'live').sends, 2);
+        walk.site.edit(start + 2, 'I stood.');
+        api.messages = walk.site.messages;
+        await pass(walk, 2 * TICK_MS);
+        await reload(walk, tab);
+        await pass(walk, 2 * TICK_MS);
+        const live = stored(walk, 'live');
+        assert.equal(live.sends, 2);
+        assert.deepEqual(plain(live.posts), []);
+        assert.deepEqual(plain(live.counted), playerReceipts(walk, start));
+    });
+}
+
+for (const layout of ['top', 'frame']) {
+    test(`a ${layout} POST returning 401 keeps the unsent reminder for a manual retry, even across reload`, async () => {
+        const { walk, tab } = await adopted('2', { layout });
+        const { ready, delivery } = stored(walk, 'live');
+        const start = walk.site.messages.length;
+        const respond = walk.site.respond.bind(walk.site);
+        let attempts = 0;
+        walk.site.respond = (receiver, url, options) => {
+            if (url === WholeSite.Messages && options?.method === 'POST') {
+                attempts++;
+                return Promise.resolve({ status: 401 });
+            }
+            return respond(receiver, url, options);
+        };
+        tab.type('I try.');
+        tab.enter();
+        await pass(walk, 30);
+        assert.equal(attempts, 1);
+        assert.equal(tab.box.value, '');
+        assert.equal(walk.site.messages.length, start);
+        assert.equal(stored(walk, 'live').unauthorizedSend, true);
+        assert.deepEqual(plain(stored(walk, 'live').posts), []);
+        const fresh = await reload(walk, tab);
+        await pass(walk, 2 * TICK_MS);
+        const rejected = stored(walk, 'live');
+        assert.equal(attempts, 1);
+        assert.equal(rejected.delivery.id, delivery.id);
+        assert.equal(rejected.sends, 0);
+        assert.equal(rejected.forced, true);
+        assert.equal(rejected.settled.includes(delivery.id), false);
+        walk.site.respond = respond;
+        assert.equal(await send(walk, fresh, 'Again.'), `Again.\n@: ${ready}`);
+        assert.equal(stored(walk, 'live').unauthorizedSend, false);
+        assert.equal(walk.site.messages.length, start + 1);
+        assert.deepEqual(plain(stored(walk, 'live').settled), [delivery.id]);
+    });
+
+    test(`a delayed ${layout} rejection releases only the POST whose composer cleared`, async () => {
+        const { walk, tab } = await adopted('2', { layout });
+        const { ready, delivery } = stored(walk, 'live');
+        const start = walk.site.messages.length;
+        const respond = walk.site.respond.bind(walk.site);
+        let release;
+        const pending = new Promise((resolve) => { release = resolve; });
+        walk.site.respond = (receiver, url, options) => url === WholeSite.Messages && options?.method === 'POST'
+            ? pending : respond(receiver, url, options);
+        assert.equal(await send(walk, tab, 'First.'), `First.\n@: ${ready}`);
+        assert.equal(stored(walk, 'live').sends, 0);
+        walk.site.respond = respond;
+        assert.equal(await send(walk, tab, 'Second.'), 'Second.');
+        assert.equal(walk.site.messages.length, start + 1);
+        assert.equal(stored(walk, 'live').sends, 1);
+        release({ status: 401 });
+        await pass(walk, 500);
+        assert.equal(stored(walk, 'live').delivery.id, delivery.id);
+        assert.equal(stored(walk, 'live').unauthorizedSend, true);
+        assert.equal(await send(walk, tab, 'Retry.'), `Retry.\n@: ${ready}`);
+        await pass(walk, 2 * TICK_MS);
+        const accepted = stored(walk, 'live');
+        assert.equal(accepted.sends, 0);
+        assert.deepEqual(plain(accepted.counted), playerReceipts(walk, start));
+        assert.deepEqual(plain(accepted.settled), [delivery.id]);
+    });
+
+    test(`a 401 with text left in the ${layout} composer can be retried immediately without retyping`, async () => {
+        const { walk, tab } = await adopted('2', { layout });
+        const start = walk.site.messages.length;
+        const { ready, delivery } = stored(walk, 'live');
+        const normalSend = tab.send.bind(tab);
+        const respond = walk.site.respond.bind(walk.site);
+        const submissions = [];
+        tab.send = () => {
+            submissions.push(tab.state);
+            return tab.pagePost(tab.state);
+        };
+        walk.site.respond = (receiver, url, options) => url === WholeSite.Messages && options?.method === 'POST'
+            ? Promise.resolve({ status: 401 }) : respond(receiver, url, options);
+        tab.type('Stayed.');
+        tab.box.setSelectionRange(2, 5);
+        tab.enter();
+        await pass(walk, 1);
+        const first = stored(walk, 'live').posts[0].key;
+        await pass(walk, 34);
+        assert.deepEqual(submissions, [`Stayed.\n@: ${ready}`]);
+        assert.equal(walk.site.messages.length, start);
+        assert.equal(stored(walk, 'live').unauthorizedSend, true);
+        assert.deepEqual(plain(stored(walk, 'live').posts), []);
+        assert.equal(tab.state, 'Stayed.');
+        assert.equal(tab.box.value, 'Stayed.');
+        assert.deepEqual([tab.box.selectionStart, tab.box.selectionEnd], [2, 5]);
+        tab.send = normalSend;
+        walk.site.respond = respond;
+        tab.enter();
+        await pass(walk, 1);
+        assert.notEqual(stored(walk, 'live').posts[0].key, first);
+        await pass(walk, 200);
+        assert.equal(walk.site.messages.length, start + 1);
+        assert.equal(walk.site.messages.at(-1).contents[0].text, `Stayed.\n@: ${ready}`);
+        assert.deepEqual(plain(stored(walk, 'live').settled), [delivery.id]);
+        assert.equal(stored(walk, 'live').sends, 0);
+        const fresh = await reload(walk, tab);
+        await pass(walk, TICK_MS * 2);
+        assert.deepEqual(plain(stored(walk, 'live').counted), playerReceipts(walk, start));
+        assert.equal(await send(walk, fresh, 'Next.'), 'Next.');
+        assert.equal(stored(walk, 'live').sends, 1);
+    });
+
+    test(`a delayed 401 keeps a newer manually typed draft in the ${layout} composer`, async () => {
+        const { walk, tab } = await adopted('2', { layout });
+        const start = walk.site.messages.length;
+        const { ready } = stored(walk, 'live');
+        const respond = walk.site.respond.bind(walk.site);
+        let release;
+        const pending = new Promise((resolve) => { release = resolve; });
+        walk.site.respond = (receiver, url, options) => url === WholeSite.Messages && options?.method === 'POST'
+            ? pending : respond(receiver, url, options);
+        assert.equal(await send(walk, tab, 'First.'), `First.\n@: ${ready}`);
+        const newer = `First.\n@: ${ready} — keep my addition.`;
+        tab.type(newer);
+        tab.box.setSelectionRange(3, 5);
+        release({ status: 401 });
+        await pass(walk, 3000);
+        assert.equal(stored(walk, 'live').unauthorizedSend, true);
+        assert.equal(tab.box.value, newer);
+        assert.equal(tab.state, newer);
+        assert.deepEqual([tab.box.selectionStart, tab.box.selectionEnd], [3, 5]);
+        assert.equal(walk.site.messages.length, start);
+    });
+
+    test(`a transient ${layout} POST stays uncertain after reload until the player message appears`, async () => {
+        const { walk, tab } = await adopted('2', { layout });
+        const { ready, delivery } = stored(walk, 'live');
+        const start = walk.site.messages.length;
+        const respond = walk.site.respond.bind(walk.site);
+        let status = 503;
+        walk.site.respond = (receiver, url, options) => url === WholeSite.Messages && options?.method === 'POST'
+            ? Promise.resolve({ status }) : respond(receiver, url, options);
+        assert.equal(await send(walk, tab, 'I wait.'), `I wait.\n@: ${ready}`);
+        status = 200;
+        await tab.pagePost('A separate POST outside the original send event.');
+        await pass(walk, 500);
+        assert.equal(walk.site.messages.length, start);
+        const fresh = await reload(walk, tab);
+        assert.equal(stored(walk, 'live').sends, 0);
+        assert.equal(stored(walk, 'live').unauthorizedSend, false);
+        assert.equal(stored(walk, 'live').settled.includes(delivery.id), false);
+        walk.site.respond = respond;
+        await fresh.pagePost(`I wait.\n@: ${ready}`);
+        await pass(walk, 2 * TICK_MS);
+        assert.deepEqual(plain(stored(walk, 'live').settled), [delivery.id]);
+        assert.deepEqual(plain(stored(walk, 'live').counted), playerReceipts(walk, start));
+        assert.equal(await send(walk, fresh, 'Next.'), 'Next.');
+    });
+
+    test(`when the ${layout} host starts its fetch after the send event, a 200 alone cannot settle the reminder`, async () => {
+        const { walk, tab } = await adopted('2', { layout });
+        const { ready, delivery } = stored(walk, 'live');
+        const start = walk.site.messages.length;
+        const pagePost = tab.pagePost.bind(tab);
+        tab.pagePost = (text) => Promise.resolve().then(() => pagePost(text));
+        const respond = walk.site.respond.bind(walk.site);
+        let calls = 0;
+        walk.site.respond = (receiver, url, options) => {
+            if (url === WholeSite.Messages && options?.method === 'POST') {
+                calls++;
+                return Promise.resolve({ status: 200 });
+            }
+            return respond(receiver, url, options);
+        };
+        assert.equal(await send(walk, tab, 'I wait.'), `I wait.\n@: ${ready}`);
+        assert.equal(calls, 1);
+        assert.equal(walk.site.messages.length, start);
+        const fresh = await reload(walk, tab);
+        assert.equal(stored(walk, 'live').sends, 0);
+        assert.equal(stored(walk, 'live').delivery.id, delivery.id);
+        assert.equal(stored(walk, 'live').posts.length, 1);
+        walk.site.respond = respond;
+        await fresh.pagePost(`I wait.\n@: ${ready}`);
+        await pass(walk, TICK_MS * 2);
+        assert.deepEqual(plain(stored(walk, 'live').settled), [delivery.id]);
+        assert.deepEqual(plain(stored(walk, 'live').counted), playerReceipts(walk, start));
+    });
+
+    test(`a history GET returning 401 leaves the interrupted ${layout} send pending until the player row can be read`, async () => {
+        const { walk, tab } = await adopted('2', { layout });
+        const start = walk.site.messages.length;
+        const { ready, delivery } = stored(walk, 'live');
+        tab.type('I wait.');
+        tab.enter();
+        await pass(walk, 1);
+        assert.equal(walk.site.messages.length, start);
+        assert.equal(stored(walk, 'live').posts.length, 1);
+        tab.unload();
+        const api = walk.site.rooms.get(ROOM).zeta;
+        const respond = api.respond.bind(api);
+        let refused = 0;
+        api.respond = (receiver, url, options) => {
+            if (WholeSite.paged(url)) {
+                refused++;
+                return Promise.resolve({ status: 401, ok: false, text: async () => 'Login required.' });
+            }
+            return respond(receiver, url, options);
+        };
+        const fresh = install(walk, CHAT);
+        await fresh.openPage();
+        fresh.ready();
+        await pass(walk, 2 * TICK_MS);
+        assert.ok(refused > 0);
+        assert.equal(stored(walk, 'live').delivery.id, delivery.id);
+        assert.equal(stored(walk, 'live').sends, 0);
+        assert.equal(stored(walk, 'live').unauthorizedSend, false);
+        assert.equal(stored(walk, 'live').posts.length, 1);
+        await fresh.pagePost(`I wait.\n@: ${ready}`);
+        await pass(walk, 2 * TICK_MS);
+        assert.equal(stored(walk, 'live').settled.includes(delivery.id), false);
+        assert.equal(walk.site.messages.length, start + 1);
+        api.respond = respond;
+        await until(walk, 'the restored history to identify the original player send', () =>
+            stored(walk, 'live').settled.includes(delivery.id), 4 * TICK_MS);
+        assert.equal(stored(walk, 'live').sends, 0);
+        assert.deepEqual(plain(stored(walk, 'live').counted), playerReceipts(walk, start));
+        assert.equal(await send(walk, fresh, 'I stand.'), 'I stand.');
+        assert.equal(stored(walk, 'live').sends, 1);
+        assert.equal(walk.site.messages.length, start + 2);
+    });
+}
+
+test('a delayed frame rejection survives nine newer unresolved sends', async () => {
+    const { walk, tab } = await adopted('2', { layout: 'frame' });
+    const { ready, delivery } = stored(walk, 'live');
+    const start = walk.site.messages.length;
+    const respond = walk.site.respond.bind(walk.site);
+    let release;
+    let posts = 0;
+    const delayed = new Promise((resolve) => { release = resolve; });
+    walk.site.respond = (receiver, url, options) => {
+        if (url === WholeSite.Messages && options?.method === 'POST') {
+            posts++;
+            return posts === 1 ? delayed : Promise.resolve({ status: 503 });
+        }
+        return respond(receiver, url, options);
+    };
+    assert.equal(await send(walk, tab, 'First.'), `First.\n@: ${ready}`);
+    const key = stored(walk, 'live').posts[0].key;
+    for (let index = 1; index <= 9; index++) {
+        const text = `Another send ${index}.`;
+        assert.equal(await send(walk, tab, text), text);
+        await pass(walk, 2600);
+    }
+    assert.equal(stored(walk, 'live').posts.length, 10);
+    release({ status: 401 });
+    await pass(walk, 500);
+    const refused = stored(walk, 'live');
+    assert.equal(refused.unauthorizedSend, true);
+    assert.equal(refused.posts.some((entry) => entry.key === key), false);
+    assert.equal(refused.posts.length, 9);
+    assert.equal(refused.sends, 0);
+    assert.equal(walk.site.messages.length, start);
+    assert.equal(posts, 10);
+    walk.site.respond = respond;
+    assert.equal(await send(walk, tab, 'Retry.'), `Retry.\n@: ${ready}`);
+    assert.deepEqual(plain(stored(walk, 'live').settled), [delivery.id]);
+    assert.equal(await send(walk, tab, 'Next.'), 'Next.');
+    assert.equal(stored(walk, 'live').sends, 1);
+});
+
+test('a frame receipt from an earlier visit cannot reject an attempt on returning to the room', async () => {
+    const { walk, tab } = await adopted('2', { layout: 'frame' });
+    const respond = walk.site.respond.bind(walk.site);
+    let release;
+    const pending = new Promise((resolve) => { release = resolve; });
+    walk.site.respond = (receiver, url, options) =>
+        url === WholeSite.Messages && options?.method === 'POST' ? pending : respond(receiver, url, options);
+    await send(walk, tab, 'Pending.');
+    const key = stored(walk, 'live').posts[0].key;
+    tab.go('/');
+    await pass(walk, 2000);
+    tab.go(CHAT);
+    await tab.openPage();
+    await pass(walk, 2 * TICK_MS);
+    release({ status: 401 });
+    await pass(walk, 2000);
+    const live = stored(walk, 'live');
+    assert.equal(live.unauthorizedSend, false);
+    assert.equal(live.posts.some((post) => post.key === key), true);
+    assert.equal(live.sends, 0);
+});
+
+test('a refused history refresh leaves a prepared reminder and its counter alone', async () => {
+    const { walk, tab } = await adopted('2');
+    const { ready, delivery, sends } = stored(walk, 'live');
+    const start = walk.site.messages.length;
+    const api = walk.site.rooms.get(ROOM).zeta;
+    const respond = api.respond.bind(api);
+    let refused = 0;
+    api.respond = (receiver, url, options) => {
+        if (WholeSite.paged(url)) {
+            refused++;
+            return Promise.resolve({ status: 401, ok: false, text: async () => 'Unauthorized.' });
+        }
+        return respond(receiver, url, options);
+    };
+    await pass(walk, 2 * TICK_MS);
+    assert.ok(refused > 0);
+    assert.equal(stored(walk, 'live').ready, ready);
+    assert.equal(stored(walk, 'live').sends, sends);
+    assert.equal(stored(walk, 'live').unauthorizedSend, false);
+    assert.deepEqual(plain(stored(walk, 'live').posts), []);
+    assert.equal(walk.site.messages.length, start);
+    api.respond = respond;
+    await pass(walk, 2 * TICK_MS);
+    assert.equal(await send(walk, tab, 'I wait.'), `I wait.\n@: ${ready}`);
+    assert.deepEqual(plain(stored(walk, 'live').settled), [delivery.id]);
+});
+
+test('an external edit and a confirmed ordinary send count as two distinct player messages', async () => {
+    const { walk, tab } = await adopted('2');
+    const start = walk.site.messages.length;
+    await send(walk, tab, 'First.');
+    await pass(walk, 2 * TICK_MS);
+    await tab.pagePost('A different player message.');
+    walk.site.edit(start + 2, 'A corrected player message.');
+    await send(walk, tab, 'I stand.');
+    await pass(walk, 2 * TICK_MS);
+    const live = stored(walk, 'live');
+    assert.equal(live.sends, 2);
+    assert.deepEqual(plain(live.counted), playerReceipts(walk, start));
+    assert.deepEqual(plain(live.posts), []);
+});
+
+test('D12. history counts all thirteen frame sends when the notification rate limit is reached', async () => {
+    const { walk, tab } = await adopted('2', { layout: 'frame' });
+    const start = walk.site.messages.length;
+    const offer = stored(walk, 'live').delivery.id;
+    for (let index = 0; index < 13; index++) {
+        tab.type('I wait.');
+        tab.enter();
+        await pass(walk, 180);
+    }
+    const accepted = walk.site.messages.slice(start);
+    assert.equal(accepted.length, 13);
+    assert.equal(accepted[0].contents[0].text.includes('[Scribe]'), true);
+    assert.equal(accepted.slice(1).every((message) => message.contents[0].text === 'I wait.'), true);
+    await pass(walk, 2 * TICK_MS);
+    const saved = stored(walk, 'live');
+    assert.equal(saved.sends, 12);
+    assert.deepEqual(plain(saved.settled), [offer]);
+    assert.deepEqual(plain(saved.counted), playerReceipts(walk, start));
+    assert.deepEqual(plain(saved.posts), []);
+    await reload(walk, tab);
+    await pass(walk, 2 * TICK_MS);
+    assert.equal(stored(walk, 'live').sends, 12);
+    assert.deepEqual(plain(stored(walk, 'live').counted), playerReceipts(walk, start));
+});
+
+for (const afterAcknowledgement of [false, true]) {
+    const timing = afterAcknowledgement ? 'after' : 'before';
+    test(`D12. a new reminder at the frame rate limit survives reload ${timing} acknowledgement`, async () => {
+        const { walk, tab } = await adopted('2', { layout: 'frame' });
+        const start = walk.site.messages.length;
+        const first = stored(walk, 'live').delivery.id;
+        for (let index = 0; index < 10; index++) {
+            tab.type(`Turn ${index + 1}.`);
+            tab.enter();
+            await pass(walk, 180);
+        }
+        assert.equal(walk.site.messages.length, start + 10);
+        const ready = '[Scribe] The bell rings.';
+        tab.panel.tab('Findings');
+        tab.panel.click('scribe-edit');
+        tab.panel.type('scribe-reminder', ready);
+        tab.panel.click('scribe-edit-save');
+        await pass(walk, 100);
+        const second = stored(walk, 'live').delivery.id;
+        assert.notEqual(first, second);
+        tab.type('Eleven.');
+        tab.enter();
+        await pass(walk, afterAcknowledgement ? 400 : 30);
+        assert.equal(walk.site.messages.length, start + 11);
+        assert.equal(walk.site.messages.at(-1).contents[0].text, `Eleven.\n@: ${ready}`);
+        assert.equal(stored(walk, 'live').settled.includes(second), afterAcknowledgement);
+        const fresh = await reload(walk, tab);
+        await pass(walk, 2 * TICK_MS);
+        const saved = stored(walk, 'live');
+        assert.deepEqual(plain(saved.settled), [first, second]);
+        assert.equal(saved.sends, 0);
+        assert.equal(saved.edited, null);
+        assert.equal(saved.draft, null);
+        assert.deepEqual(plain(saved.counted), playerReceipts(walk, start));
+        assert.deepEqual(queued(fresh), []);
+        assert.equal(await send(walk, fresh, 'Twelve.'), 'Twelve.');
+        assert.equal(stored(walk, 'live').sends, 1);
+    });
+}
+
+test('D4. a repeated report of one frame send tells the live part once', async () => {
+    const { walk, tab } = await adopted('2');
+    const ready = stored(walk, 'live').ready;
+    const armed = armsTo(walk, tab).at(-1);
+    assert.equal(armed.ready, ready);
+    assert.equal(typeof armed.reminder, 'string');
+    assert.equal(typeof armed.attempt, 'string');
+    assert.equal(await send(walk, tab, 'I step forward.'), `I step forward.\n@: ${ready}`);
+    await quiet(walk, 'after the reminder went');
+    const first = reportsFrom(walk, tab).filter((message) => message.kind === 'sent').at(-1);
+    assert.deepEqual([first.seq, first.ready, first.reminder, first.attempt], [armed.seq, true, armed.reminder, armed.attempt]);
+    tab.frame.toTop.postMessage(first, TOP_ORIGIN);
+    await pass(walk, 2000);
+    assert.equal(stored(walk, 'live').sends, 0);
+    assert.equal(stored(walk, 'live').ready, null);
+    assert.equal(await send(walk, tab, 'I step again.'), 'I step again.');
+    const plainReport = reportsFrom(walk, tab).filter((message) => message.kind === 'sent').at(-1);
+    assert.equal(plainReport.ready, false);
+    assert.equal(stored(walk, 'live').sends, 1);
+    tab.frame.toTop.postMessage(plainReport, TOP_ORIGIN);
+    tab.frame.toTop.postMessage(plainReport, TOP_ORIGIN);
+    await pass(walk, 2000);
+    assert.equal(stored(walk, 'live').sends, 1);
+    assert.deepEqual(tab.logs, []);
+    assert.deepEqual(tab.frame.logs, []);
+});
+
+for (const layout of ['top', 'frame']) {
+    for (const state of ['already sent', 'delayed receipt', 'unsent']) {
+        test(`the ${layout} path migrates an ${state} legacy reminder against fresh room history`, async () => {
+            const { walk, tab } = await adopted('2', { layout });
+            const start = walk.site.messages.length;
+            const modern = stored(walk, 'live');
+            const contemporary = new Set(['serial', 'delivery', 'settled', 'counted', 'posts', 'postSerial', 'observed', 'observedSends', 'receipts']);
+            const legacy = Object.fromEntries(Object.entries(modern).filter(([key]) => !contemporary.has(key)));
+            if (state !== 'unsent') {
+                await tab.pagePost(`From version one.\n@: ${legacy.ready}`);
+            }
+            tab.unload();
+            const api = walk.site.rooms.get(ROOM).zeta;
+            if (state === 'delayed receipt') {
+                api.messages = walk.site.messages.slice(0, start);
+            }
+            REFERENCE.ScribeStore.write(walk.storage, ROOM, 'live', legacy);
+            let fresh = install(walk, CHAT);
+            await fresh.openPage();
+            fresh.ready();
+            await pass(walk, 2000);
+            if (state === 'delayed receipt') {
+                await pass(walk, 4 * TICK_MS);
+                fresh.panel.tab('Findings');
+                assert.equal(fresh.panel.byId('scribe-reminder').value, legacy.ready);
+                assert.equal(fresh.panel.text('scribe-force'), 'Resend this reminder with my next message');
+                const ceiling = api.most;
+                const attempts = api.requests.length;
+                api.most = attempts;
+                await pass(walk, 2 * TICK_MS);
+                assert.ok(api.requests.length > attempts);
+                api.most = ceiling;
+                assert.equal(stored(walk, 'campaign').messages.length, start);
+                assert.equal(await send(walk, fresh, 'While history catches up.'), 'While history catches up.');
+                api.messages = walk.site.messages;
+            }
+            await pass(walk, 3 * TICK_MS);
+            if (state === 'unsent') {
+                assert.equal(await send(walk, fresh, 'Still holding.'), 'Still holding.');
+                fresh = await reload(walk, fresh);
+                await pass(walk, 3 * TICK_MS);
+                fresh.panel.tab('Findings');
+                assert.equal(fresh.panel.byId('scribe-reminder').value, legacy.ready);
+                assert.match(fresh.panel.text('scribe-held'), /no delivery receipt/);
+                assert.equal(fresh.panel.text('scribe-force'), 'Resend this reminder with my next message');
+                fresh.panel.click('scribe-force');
+                await pass(walk, 200);
+                assert.equal(walk.site.messages.length, start + 1);
+                fresh.refusing = true;
+                fresh.type('Refused.');
+                fresh.enter();
+                await pass(walk, 3000);
+                assert.ok(fresh.refused > 0);
+                fresh = await reload(walk, fresh);
+                assert.equal(await send(walk, fresh, 'Resend now.'), `Resend now.\n@: ${legacy.ready}`);
+            }
+            await pass(walk, 2 * TICK_MS);
+            const recovered = stored(walk, 'live');
+            assert.equal(recovered.ready, null);
+            assert.equal(recovered.forced, false);
+            assert.equal(recovered.sends, state === 'delayed receipt' ? 1 : 0);
+            assert.deepEqual(plain(recovered.counted), playerReceipts(walk, start));
+            assert.deepEqual(plain(recovered.posts), []);
+            assert.equal(await send(walk, fresh, 'After migration.'), 'After migration.');
+            assert.equal(walk.site.messages.slice(start).filter((message) => message.contents[0].text.includes(legacy.ready)).length, 1);
+        });
+    }
+}
+
+for (const layout of ['top', 'frame']) {
+    test(`the ${layout} panel explicitly retries a send whose result was lost on reload`, async () => {
+        const { walk, tab } = await adopted('2', { layout });
+        const start = walk.site.messages.length;
+        const offer = stored(walk, 'live').ready;
+        tab.type('An interrupted send.');
+        tab.enter();
+        await pass(walk, 1);
+        let fresh = await reload(walk, tab);
+        await pass(walk, TICK_MS * 3);
+        fresh.panel.tab('Findings');
+        assert.equal(fresh.panel.byId('scribe-reminder').value, offer);
+        assert.equal(fresh.panel.text('scribe-force'), 'Resend this reminder with my next message');
+        assert.match(fresh.panel.text('scribe-held'), /Awaiting confirmation/);
+        fresh.panel.click('scribe-force');
+        await pass(walk, 100);
+        assert.equal(walk.site.messages.length, start);
+        fresh = await reload(walk, fresh);
+        assert.equal(await send(walk, fresh, 'Deliberate retry.'), `Deliberate retry.\n@: ${offer}`);
+        await pass(walk, TICK_MS * 2);
+        assert.equal(stored(walk, 'live').sends, 0);
+        assert.equal(stored(walk, 'live').ready, null);
+        assert.equal(await send(walk, fresh, 'After retry.'), 'After retry.');
+        assert.equal(stored(walk, 'live').sends, 1);
+    });
+}
+
+for (const layout of ['top', 'frame']) {
+    for (const recovery of ['deliberate retry', 'history receipt']) {
+        test(`a redirected ${layout} POST stays pending across reload until a ${recovery}`, async () => {
+            const { walk, tab } = await adopted('2', { layout });
+            const start = walk.site.messages.length;
+            const { ready, delivery } = stored(walk, 'live');
+            const respond = walk.site.respond.bind(walk.site);
+            const result = recovery === 'deliberate retry'
+                ? { status: 200, redirected: true, url: 'https://zeta-ai.io/login' }
+                : { status: 200, redirected: false, url: WholeSite.Messages.replace(/\/messages$/, '/members') };
+            let attempts = 0;
+            walk.site.respond = (receiver, url, options) => {
+                if (url === WholeSite.Messages && options?.method === 'POST') {
+                    attempts++;
+                    return Promise.resolve(result);
+                }
+                return respond(receiver, url, options);
+            };
+            const original = `Waiting.\n@: ${ready}`;
+            assert.equal(await send(walk, tab, 'Waiting.'), original);
+            assert.equal(tab.box.value, '');
+            assert.equal(stored(walk, 'live').ready, ready);
+            const fresh = await reload(walk, tab);
+            await pass(walk, 2 * TICK_MS);
+            const pending = stored(walk, 'live');
+            assert.equal(pending.ready, ready);
+            assert.equal(pending.delivery.id, delivery.id);
+            assert.equal(pending.settled.includes(delivery.id), false);
+            assert.equal(pending.sends, 0);
+            assert.equal(pending.unauthorizedSend, false);
+            assert.equal(attempts, 1);
+            assert.equal(walk.site.messages.length, start);
+            walk.site.respond = respond;
+            if (recovery === 'deliberate retry') {
+                fresh.panel.tab('Findings');
+                assert.equal(fresh.panel.text('scribe-force'), 'Resend this reminder with my next message');
+                fresh.panel.click('scribe-force');
+                await pass(walk, 200);
+                assert.equal(walk.site.messages.length, start);
+                assert.equal(await send(walk, fresh, 'Trying again.'), `Trying again.\n@: ${ready}`);
+            } else {
+                await fresh.pagePost(original);
+            }
+            await pass(walk, 2 * TICK_MS);
+            const recovered = stored(walk, 'live');
+            assert.deepEqual(plain(recovered.settled), [delivery.id]);
+            assert.deepEqual(plain(recovered.counted), playerReceipts(walk, start));
+            assert.equal(recovered.ready, null);
+            assert.equal(recovered.sends, 0);
+            assert.equal(walk.site.messages.length, start + 1);
+            assert.equal(await send(walk, fresh, 'After recovery.'), 'After recovery.');
+        });
+    }
+}

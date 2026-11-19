@@ -795,6 +795,67 @@ test('a lapsed lease stops leading at once, and the next tick settles before it 
     }
 });
 
+/**
+ * @param {FakeScribeWorker} worker
+ * @param {number} from
+ * @return {Set<string>}
+ */
+function browsersSince(worker, from) {
+    const browsers = new Set();
+    for (const entry of worker.log.slice(from)) {
+        const body = entry.body !== null && entry.method !== 'PUT' ? JSON.parse(entry.body) : null;
+        const browser = entry.query.browser ?? body?.browser;
+        if (browser !== undefined) {
+            browsers.add(browser);
+        }
+    }
+    return browsers;
+}
+
+test('two tabs that make the browser ID at the same moment end with one', async () => {
+    const place = world();
+    const storage = new FakeStorage();
+    ScribeStore.setCloudKey(storage, KEY);
+    const first = computer(place, { storage, name: 'T1' });
+    const second = computer(place, { storage, name: 'T2' });
+    await first.cloud.tick();
+    assert.equal(storage.values.get('scribe:browser'), 'Fictional-Browser-T1-0001');
+    storage.values.delete('scribe:browser');
+    await second.cloud.tick();
+    assert.equal(storage.values.get('scribe:browser'), 'Fictional-Browser-T2-0001');
+    const from = place.worker.log.length;
+    for (let tick = 0; tick < 3; tick++) {
+        await pass(place.timers, 20000);
+        await first.cloud.tick();
+        await second.cloud.tick();
+    }
+    assert.equal(place.worker.log.length > from, true);
+    assert.deepEqual([...browsersSince(place.worker, from)], ['Fictional-Browser-T2-0001']);
+    assert.equal(storage.values.get('scribe:browser'), 'Fictional-Browser-T2-0001');
+});
+
+test('a tab whose browser ID was replaced uses the stored one, and leads once the old lease lapses', async () => {
+    const place = world();
+    const pc = await leading(place);
+    const replaced = 'Fictional-Browser-Z-0002';
+    pc.storage.set('scribe:browser', replaced);
+    const from = place.worker.log.length;
+    await pass(place.timers, 20000);
+    await pc.cloud.tick();
+    assert.equal(pc.cloud.view().phase, 'Watching');
+    assert.equal(pc.cloud.leads(), false);
+    for (let tick = 0; tick < 3; tick++) {
+        await pass(place.timers, 20000);
+        await pc.cloud.tick();
+        assert.equal(pc.cloud.view().phase, 'Watching');
+    }
+    await pass(place.timers, 20000);
+    await pc.cloud.tick();
+    assert.equal(pc.cloud.view().phase, 'Leading');
+    assert.equal(place.worker.leases.get(CLOUD_ROOM).browser, replaced);
+    assert.deepEqual([...browsersSince(place.worker, from)], [replaced]);
+});
+
 const SAVED_BEFORE_SLEEP = Object.freeze({ ...BOOK, note: 'saved before sleep' });
 
 /**

@@ -96,7 +96,6 @@ function send(fetch, extra = {}) {
         model: 'm/x',
         system: 'sys',
         user: 'usr',
-        maxTokens: 500,
         ...extra,
     });
 }
@@ -173,7 +172,6 @@ test('the request is built as specified', async () => {
     assert.deepEqual(JSON.parse(calls[0].options.body), {
         model: 'm/x',
         temperature: 0.2,
-        max_tokens: 500,
         reasoning: { effort: 'low' },
         usage: { include: true },
         messages: [
@@ -185,7 +183,7 @@ test('the request is built as specified', async () => {
     await send(fetch, { signal, maxTokens: 77 });
     assert.deepEqual(Object.keys(calls[1].options), ['method', 'headers', 'body', 'signal']);
     assert.equal(calls[1].options.signal, signal);
-    assert.equal(JSON.parse(calls[1].options.body).max_tokens, 77);
+    assert.equal(Object.hasOwn(JSON.parse(calls[1].options.body), 'max_tokens'), false);
 });
 
 test('bad arguments make no request', async () => {
@@ -209,13 +207,6 @@ test('bad arguments make no request', async () => {
         ['system', { system: null }],
         ['user', { user: '' }],
         ['user', { user: {} }],
-        ['maxTokens', { maxTokens: 0 }],
-        ['maxTokens', { maxTokens: -5 }],
-        ['maxTokens', { maxTokens: 1.5 }],
-        ['maxTokens', { maxTokens: '500' }],
-        ['maxTokens', { maxTokens: Number.NaN }],
-        ['maxTokens', { maxTokens: Number.MAX_SAFE_INTEGER + 1 }],
-        ['maxTokens', { maxTokens: undefined }],
     ];
     for (const [name, extra] of cases) {
         const { fetch, calls } = scripted([json(answer('stop', CONTENT))]);
@@ -236,11 +227,30 @@ test('fetch is called without a receiver', async () => {
         seen.push(this);
         return Promise.resolve(json(answer('stop', CONTENT)));
     };
-    const request = { fetch, sleep: never, key: KEY, model: 'm/x', system: 'sys', user: 'usr', maxTokens: 500 };
+    const request = { fetch, sleep: never, key: KEY, model: 'm/x', system: 'sys', user: 'usr' };
     await ScribeGateway.call(request);
     assert.equal(seen.length, 1);
     assert.notEqual(seen[0], request);
     assert.ok(seen[0] === undefined || seen[0] === globalThis || Object.keys(seen[0]).length === 0);
+});
+
+test('a call with no timeout sets no timer and waits for its answer', async () => {
+    const asked = [];
+    const sleep = (milliseconds) => {
+        asked.push(milliseconds);
+        return never();
+    };
+    let release = null;
+    const fetch = () =>
+        new Promise((resolve) => {
+            release = resolve;
+        });
+    const waiting = send(fetch, { sleep, timeoutMs: null });
+    await new Promise((resolve) => setImmediate(resolve));
+    assert.deepEqual(asked, []);
+    release(json(answer('stop', CONTENT)));
+    assert.equal((await waiting).text, CONTENT);
+    assert.deepEqual(asked, []);
 });
 
 test('a call that never answers times out', async () => {

@@ -16,6 +16,7 @@ export default class WholeModel {
         this.strays = [];
         this.silenced = 0;
         this.watch = null;
+        this.holding = null;
     }
 
     /**
@@ -92,6 +93,9 @@ export default class WholeModel {
         }
         if (this.calls.length > WholeModel.MostCalls) {
             this.silenced++;
+            return handle;
+        }
+        if (call.role === this.holding) {
             return handle;
         }
         const answer = Object.hasOwn(this.answers, call.role) ? this.answers[call.role] : null;

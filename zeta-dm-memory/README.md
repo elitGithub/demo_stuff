@@ -345,6 +345,8 @@ Run the engine's tests with `node --test tests/scribe-*.test.mjs`. The [scribe e
 
 ## The scribe on the Zeta page
 
+For development on a second computer, start with the [Zeta Scribe handoff](CODEX-HANDOFF.md). It records the working copy to transfer, the verified Task 1 behavior and the next task awaiting approval.
+
 The scribe is a second userscript, separate from the notes widget above. It keeps a book of a campaign (people, facts, who knows what, scenes, open threads), reminds the scene what it knows with each message you send, checks each reply against the book, and offers developments. It stores everything in Tampermonkey's storage in this browser and talks to OpenRouter with your own key. With the DM API key set it also keeps the book in your Worker, so every PC with the key opens the same book.
 
 ### Build and install
@@ -376,7 +378,11 @@ The other tabs: **Summary** (what needs you, the cast, where the story stands), 
 
 ### Money
 
-Every answer OpenRouter bills is counted against the day's budget, including answers that came back empty or cut off. When the budget is reached, reading stops and replies are no longer checked until the next day. The header shows the day's spending.
+Every answer that comes back is counted against the day's budget, including answers that came back empty or cut off. A call stopped with **Force stop** is not counted: its answer is ignored and its cost is unknown. When the budget is reached, reading stops and replies are no longer checked until the next day. The header shows the day's spending.
+
+### Long calls
+
+No model call has a token cap (the model's own limit applies) and none has a timeout; a call waits until it answers or fails. Once a call has run 4 minutes the header shows **Force stop**. One press stops every call that has run 4 minutes or more and sends each again with `Answer now, without more thinking.` added at the end. Before sending again it checks what the call checked when it started: spending must have been recorded, and for every call but the reading the day's budget must not be spent (a reading instead compares, before each of its calls, the day's spending as it stood when the reading started plus what the reading has spent since). If a check refuses, nothing is sent and the call ends with that reason. A stopped call is listed in **Progress** as stopped by the operator, with its cost unknown.
 
 ### One tab per chat reads
 

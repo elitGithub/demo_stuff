@@ -16,6 +16,8 @@ const ScribeAdoption = Object.freeze({
         LeastSize: 1,
         LeastAmount: 0,
         LongestEmptyLine: 40,
+        NoCalls: 0,
+        ObjectType: 'object',
         NotFound: -1,
         Last: -1,
         Nothing: '',
@@ -435,6 +437,34 @@ const ScribeAdoption = Object.freeze({
 
     /**
      * @param {object} job
+     * @param {{ pass: string, system: string, user: string }} step
+     * @param {*} source
+     * @return {Promise<void>}
+     * @throws {Error}
+     */
+    async stopped(job, step, source) {
+        const settings = ScribeAdoption.Settings;
+        const given = source !== null && typeof source === settings.ObjectType;
+        const stopped = given && Number.isSafeInteger(source.stopped) ? source.stopped : settings.NoCalls;
+        for (let stop = settings.NoCalls; stop < stopped; stop++) {
+            job.calls++;
+            job.unpriced++;
+            await job.record(
+                Object.freeze({
+                    sequence: null,
+                    pass: step.pass,
+                    system: step.system,
+                    input: step.user,
+                    answer: null,
+                    readable: true,
+                    stopped: true,
+                }),
+            );
+        }
+    },
+
+    /**
+     * @param {object} job
      * @param {{ pass: string, origin: string, first: number|null, last: number|null, system: string, user: string, messages: readonly object[], state: object, notes: readonly object[], questions: readonly object[] }} step
      * @return {Promise<Readonly<{ stop: string, problem: string|null, spent: number, calls: number, unpriced: number }>|null>}
      * @throws {Error}
@@ -449,7 +479,14 @@ const ScribeAdoption = Object.freeze({
             return ScribeAdoption.finish(job, stops.Budget, null);
         }
         job.calls++;
-        const answer = await job.ask(step.system, step.user);
+        let answer = null;
+        try {
+            answer = await job.ask(step.system, step.user);
+        } catch (error) {
+            await ScribeAdoption.stopped(job, step, error);
+            throw error;
+        }
+        await ScribeAdoption.stopped(job, step, answer);
         if (ScribeAdoption.amount(answer.cost)) {
             job.spent += answer.cost;
         } else {

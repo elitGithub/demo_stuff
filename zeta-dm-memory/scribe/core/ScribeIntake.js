@@ -29,20 +29,6 @@ const ScribeIntake = Object.freeze({
         /**
          * @return {RegExp}
          */
-        get OwnLead() {
-            return /^[\p{Zs}\t]*(?:@:[\p{Zs}\t]*)?/u;
-        },
-
-        /**
-         * @return {RegExp}
-         */
-        get OwnFollow() {
-            return /^(?:[\p{Zs}\t]|$)/u;
-        },
-
-        /**
-         * @return {RegExp}
-         */
         get LineBreakParts() {
             return /(\r?\n)/;
         },
@@ -104,9 +90,7 @@ const ScribeIntake = Object.freeze({
      * @return {boolean}
      */
     own(text) {
-        const settings = ScribeIntake.Settings;
-        const rest = text.replace(settings.OwnLead, settings.Nothing);
-        return rest.startsWith(settings.OwnMarker) && settings.OwnFollow.test(rest.slice(settings.OwnMarker.length));
+        return ScribeText.reminderLine(text);
     },
 
     /**
@@ -125,6 +109,7 @@ const ScribeIntake = Object.freeze({
             id: raw.id,
             position: index + 1,
             fromPlayer: raw.sender.type === settings.PlayerSender,
+            edited: raw.edited === true,
             blocks: raw.contents.filter((block) => block.type === settings.TextType),
         }));
 
@@ -262,10 +247,14 @@ const ScribeIntake = Object.freeze({
             const original = message.blocks
                 .map((block) => [block.speakerName, block.position, block.text].join(settings.Newline))
                 .join(settings.Newline);
+            const posted = message.fromPlayer ? message.blocks.map((block) => block.text).join(settings.Newline) : null;
             return Object.freeze({
                 id: message.id,
                 position: message.position,
                 fromPlayer: message.fromPlayer,
+                edited: message.edited,
+                submission: posted === null ? null : ScribeText.submission(posted),
+                completeSubmission: posted === null ? null : ScribeText.submission(posted, true),
                 blocks: Object.freeze(blocks),
                 text: lines.join(settings.Newline),
                 fingerprint: ScribeText.fingerprint(original),

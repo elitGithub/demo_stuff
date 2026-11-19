@@ -126,6 +126,8 @@ export default class PanelHarness {
         this.questions = [];
         this.downloads = [];
         this.handle = null;
+        this.callDue = false;
+        this.forceStops = 0;
     }
 
     /**
@@ -137,6 +139,19 @@ export default class PanelHarness {
             keeper: this.keeper,
             live: this.live,
             cloud: this.cloud,
+            calls: Object.freeze({
+                /**
+                 * @return {boolean}
+                 */
+                due: () => this.callDue,
+
+                /**
+                 * @return {void}
+                 */
+                stop: () => {
+                    this.forceStops++;
+                },
+            }),
             storage: this.storage,
             /**
              * @param {string} text

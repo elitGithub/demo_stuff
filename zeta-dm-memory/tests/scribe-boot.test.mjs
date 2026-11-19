@@ -359,10 +359,19 @@ function standIns(timers) {
                 afterView: null,
                 reads: [],
                 went: [],
+                profiles: 0,
             };
             world.order.push(`live ${options.roomId}`);
             world.lives.push(record);
             const live = {
+                /**
+                 * @return {Promise<string>}
+                 */
+                profile: () => {
+                    record.profiles++;
+                    return Promise.resolve(`the profile held for ${record.roomId}`);
+                },
+
                 /**
                  * @return {{ ready: string|null }}
                  */
@@ -1050,6 +1059,79 @@ test('the watcher is installed before anything else', async () => {
     assert.equal(plain.page.fetchCalls[1].receiver === plain.page, true);
     assert.equal(plain.page.fetchCalls[1].values[1].headers.Authorization, TOKEN);
     plain.boot.stop();
+    run.boot.stop();
+});
+
+test('the story and the profile are read through the page fetch, a cloned init and the current token', async () => {
+    const cloned = [];
+    /**
+     * @param {*} value
+     * @return {*}
+     */
+    const clone = (value) => {
+        const copy = JSON.parse(JSON.stringify(value));
+        cloned.push(copy);
+        return copy;
+    };
+    const run = harness({ clone });
+    run.world.plans.push(HOLD);
+    start(run);
+    await settle();
+    const keeperOptions = run.world.keepers[0].options;
+    assert.equal(typeof keeperOptions.profile, 'function');
+    assert.equal(await keeperOptions.profile(), null);
+    run.world.keepers[0].finish();
+    await settle();
+    await run.page.fetch(`${API}/v1/users/me`, { headers: { Authorization: TOKEN } });
+    const served = new Map([
+        ['/v1/rooms/harbour', { id: 'harbour', plotId: 'p 1' }],
+        ['/v1/plots/p%201', { characters: [{ name: 'Mavan the Gray', description: 'An old wizard.' }, { name: '' }] }],
+        ['/v1/rooms/harbour/user-plot-chat-profiles/me', { description: 'Orla is a sellsword.' }],
+    ]);
+    /**
+     * @param {string} url
+     * @return {Promise<object>}
+     */
+    run.page.answer = (url) => {
+        const path = new URL(url).pathname;
+        return Promise.resolve(
+            served.has(path) ? FakeZeta.reply(200, JSON.stringify(served.get(path))) : FakeZeta.reply(404, 'No'),
+        );
+    };
+    const options = run.world.lives[0].options;
+    const before = run.page.fetchCalls.length;
+    const story = await options.story();
+    assert.deepEqual(JSON.parse(JSON.stringify(story)), {
+        characters: [{ name: 'Mavan the Gray', description: 'An old wizard.' }],
+    });
+    const storyReads = run.page.fetchCalls.slice(before);
+    assert.deepEqual(
+        storyReads.map((call) => call.values[0]),
+        [`${API}/v1/rooms/harbour`, `${API}/v1/plots/p%201`],
+    );
+    for (const call of storyReads) {
+        assert.equal(call.receiver === run.page, true);
+        assert.equal(cloned.includes(call.values[1]), true);
+        assert.equal(call.values[1].headers.Authorization, TOKEN);
+    }
+    const renewed = 'Bearer RENEWEDRENEWEDRENEWED';
+    await run.page.fetch(`${API}/v1/users/me`, { headers: { Authorization: renewed } });
+    const after = run.page.fetchCalls.length;
+    assert.equal(await options.profile(), 'Orla is a sellsword.');
+    const profileReads = run.page.fetchCalls.slice(after);
+    assert.equal(profileReads.length, 1);
+    assert.equal(profileReads[0].values[0], `${API}/v1/rooms/harbour/user-plot-chat-profiles/me`);
+    assert.equal(profileReads[0].receiver === run.page, true);
+    assert.equal(cloned.includes(profileReads[0].values[1]), true);
+    assert.equal(profileReads[0].values[1].headers.Authorization, renewed);
+    await run.page.fetch(`${API}/v1/users/me`, { headers: { Authorization: TOKEN } });
+    const again = run.page.fetchCalls.length;
+    await options.story();
+    const tokens = run.page.fetchCalls.slice(again).map((call) => call.values[1].headers.Authorization);
+    assert.deepEqual(tokens, [TOKEN, TOKEN]);
+    assert.equal(run.world.lives[0].profiles, 0);
+    assert.equal(await keeperOptions.profile(), 'the profile held for harbour');
+    assert.equal(run.world.lives[0].profiles, 1);
     run.boot.stop();
 });
 

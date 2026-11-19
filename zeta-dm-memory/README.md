@@ -58,11 +58,36 @@ The list defaults to 25 items and accepts a limit from 1 to 50. Omit `after` for
 
 Room IDs are 1–512 UTF-8 bytes, start with `/`, and exclude whitespace, control characters, backslashes, `?`, and `#`. Notes preserve valid Unicode and whitespace up to 65,536 UTF-8 bytes. PUT bodies can contain at most 524,288 bytes. The API applies a shared limit of 180 authenticated, valid requests per UTC minute and returns `429` with `Retry-After` when full.
 
+### Scribe routes
+
+The scribe keeps each room's `settings`, `book` and `live` record here, under the same key and room-ID rules. The Worker stores and returns the text without reading it. Each kind is committed as a numbered revision of 1 to 10 parts. One browser at a time holds a room's lease; only the holder may stage parts and commit.
+
+| Request | Query | Body | Success | Refusals beyond 400, 401, 413, 415, 429, 503 |
+| --- | --- | --- | --- | --- |
+| `GET /v1/scribe` | `roomId`, `browser`, `day` | none | `200 { roomId, heads: [{ kind, revision, parts, updatedAt }], spent: { day, sum, mine }, lease, asks: [{ id, browser, action, createdAt }], now }` | none |
+| `GET /v1/scribe/part` | `roomId`, `kind`, `revision`, `part` | none | `200`, the raw text, `text/plain; charset=utf-8` | `404 part_not_found` |
+| `PUT /v1/scribe/part` | the four above and `browser` | raw text, `text/plain; charset=utf-8` | `200 { kind, revision, part, digest }` | `409 lease_lost`, `409 revision_conflict` |
+| `POST /v1/scribe/commit` | `roomId` | `{ browser, kinds: [{ kind, expectedRevision, revision, digests: [hex] }], done: [id] }` | `200 { heads: [...] }` | `409 lease_lost`, `409 revision_conflict`, `409 parts_missing` |
+| `POST /v1/scribe/spend` | `roomId` | `{ browser, day, total }` | `200 { day, sum, mine }` | none |
+| `POST /v1/scribe/lease` | `roomId` | `{ browser, want }`, `want` one of `None`, `Waiting`, `Asked` | `200 { held, lease, asks, now }` | none |
+| `DELETE /v1/scribe/lease` | `roomId`, `browser` | none | `200 { released, lease, now }` | none |
+| `POST /v1/scribe/ask` | `roomId` | `{ browser, id, action: {...} }` | `201 { id }`, or `200 { id }` for a repeated ID | `409 asks_full` |
+
+Each query name appears exactly once, with no others. `kind` is `settings`, `book` or `live`. Browser and ask IDs are 16–64 characters of `A–Z`, `a–z`, `0–9` and `-`. `day` is a real calendar date written `YYYY-MM-DD`, so `2026-02-29` is refused. `revision` is a safe integer from 1, `part` runs from 0 to 9, and in a query both are plain digits without a leading zero. JSON revisions follow the notes rules: `1.0` and `1e0` are 1.
+
+`lease` is `{ browser, expiresAt, wanted, asked }` or `null`; `expiresAt` and `now` are Worker milliseconds since the epoch. `POST /v1/scribe/lease` takes the lease for 90 seconds when it is free, expired or already this browser's, and answers the waiting asks with it. Otherwise `Waiting` or `Asked` records that this browser wants it (`asked` is true for `Asked`), and the want lapses 90 seconds after it was last sent. `DELETE` hands the lease straight to a live want, or frees it.
+
+`PUT /v1/scribe/part` stages one part of a revision above the committed one; a part is at most 1,200,000 bytes and 400,000 UTF-16 code units, holds no U+0000, and reads back byte for byte. Its answer's `digest` is the lowercase hex SHA-256 of the part's bytes. A commit names, for each of one to three kinds, the committed revision it expects (0 for none), the next revision and the digests of its parts in order (one to ten), and lands every kind or none: only when every named part is staged with the named digest, so parts another browser or an older request left behind are never published. `409 lease_lost` means another browser holds the lease, `409 revision_conflict` that a head moved, and `409 parts_missing` that a named part was never staged or holds other text; send the parts again. A commit answers `200` whether it creates or replaces. A `503` from a commit means its outcome is unknown, since the heads may already have moved: read the heads again before retrying it. `done` names up to 20 asks the reader applied; the commit removes them.
+
+`POST /v1/scribe/spend` keeps this browser's running total for the day, between 0 and 1,000,000, only when it is higher than the stored one, so repeats are harmless; `sum` is every browser's total for that day and `mine` this browser's. `POST /v1/scribe/ask` queues one JSON object of at most 8,192 UTF-8 bytes for the reading browser, at most 20 per room; asks come back oldest first, `action` as the stored JSON text.
+
+The scribe's JSON bodies are at most 16,384 bytes; the notes PUT keeps its 524,288. The scribe routes have their own limit of 600 requests per UTC minute, beside the notes limit of 180, so neither starves the other. Rows of older revisions and abandoned staging are removed at the next commit; `scribe_spent` keeps one small row per room, day and browser.
+
 ## Deploy through the Cloudflare dashboard
 
 1. Confirm the existing Worker is on the Free plan, with its D1 database bound as `DB` and its existing Worker Secret named `DM_API_KEY`.
-2. Open that database's D1 Console and run the reviewed [schema.sql](schema.sql).
-3. Open the Worker's **Edit Code** view. Replace the Hello World module with [worker.mjs](worker.mjs), preserve both bindings, and deploy.
+2. Open that database's D1 Console and run the whole reviewed [schema.sql](schema.sql). It is safe to run again on a database that already holds the notes tables: every statement is `IF NOT EXISTS`, so a second run only adds the six `scribe_*` tables and leaves the notes untouched.
+3. Open the Worker's **Edit Code** view. Replace the Hello World module, or the earlier version, with [worker.mjs](worker.mjs), preserve both bindings, and deploy. The `DB` binding and the `DM_API_KEY` secret are unchanged.
 4. Open a protected route in the browser without credentials. Expect `401`. Run the authenticated checks below against your Worker origin.
 
 The dashboard flow uses the existing account and bindings. It requires no CLI, account API token, Git connection, payment entry, or additional binding. Keep the key in the Worker Secret and out of URLs, files, output, and screenshots.
@@ -163,6 +188,117 @@ try {
 }
 ```
 
+After deploying the scribe routes, run this second block the same way. It uses one unique fictional room and two fictional browser IDs, about 20 requests, and finishes in seconds; the hand-off check needs browser B's want to be under 90 seconds old. Its rows remain in storage, as the notes checks' rows do.
+
+```powershell
+$origin = [uri](Read-Host 'Enter your HTTPS Worker origin')
+if (!$origin.IsAbsoluteUri -or $origin.Scheme -ne 'https' -or $origin.UserInfo -or
+    $origin.AbsolutePath -ne '/' -or $origin.Query -or $origin.Fragment) {
+    throw 'Enter the HTTPS origin without credentials, a path, a query, or a fragment.'
+}
+$base = $origin.GetLeftPart([System.UriPartial]::Authority)
+$key = Read-Host 'Enter DM_API_KEY' -AsSecureString
+$room = '/rooms/verification-' + [guid]::NewGuid().ToString('N') + '-scribe'
+$roomQuery = '?roomId=' + [uri]::EscapeDataString($room)
+$browserA = [guid]::NewGuid().ToString()
+$browserB = [guid]::NewGuid().ToString()
+$day = [DateTime]::UtcNow.ToString('yyyy-MM-dd', [Globalization.CultureInfo]::InvariantCulture)
+$request = @{ SkipHttpErrorCheck = $true; MaximumRedirection = 0 }
+$bearer = @{ Authentication = 'Bearer'; Token = $key }
+
+function Assert-ScribeCheck([bool]$Condition, [string]$Check) {
+    if (!$Condition) { throw "Check failed - $Check" }
+}
+
+function Send-ScribeJson([string]$Path, [hashtable]$Body) {
+    $json = $Body | ConvertTo-Json -Compress -Depth 5
+    Invoke-WebRequest @request @bearer -Uri ($base + $Path + $roomQuery) -Method Post `
+        -ContentType 'application/json' -Body $json
+}
+
+function Send-ScribePart([string]$Browser, [byte[]]$Bytes) {
+    $uri = $base + '/v1/scribe/part' + $roomQuery + '&kind=book&revision=1&part=0&browser=' + $Browser
+    Invoke-WebRequest @request @bearer -Uri $uri -Method Put -ContentType 'text/plain; charset=utf-8' -Body $Bytes
+}
+
+function Get-ScribeCode($Response) {
+    ($Response.Content | ConvertFrom-Json).error.code
+}
+
+try {
+    $headsUri = $base + '/v1/scribe' + $roomQuery + '&browser=' + $browserA + '&day=' + $day
+    $empty = Invoke-WebRequest @request @bearer -Uri $headsUri
+    $emptyView = $empty.Content | ConvertFrom-Json
+    Assert-ScribeCheck ($empty.StatusCode -eq 200 -and $emptyView.roomId -ceq $room -and
+        @($emptyView.heads).Count -eq 0 -and $null -eq $emptyView.lease) 'new room has no heads and no lease'
+
+    $take = Send-ScribeJson '/v1/scribe/lease' @{ browser = $browserA; want = 'None' }
+    $taken = $take.Content | ConvertFrom-Json
+    Assert-ScribeCheck ($take.StatusCode -eq 200 -and $taken.held -and
+        $taken.lease.browser -ceq $browserA) 'browser A takes the lease'
+    $want = Send-ScribeJson '/v1/scribe/lease' @{ browser = $browserB; want = 'Asked' }
+    $wanting = $want.Content | ConvertFrom-Json
+    Assert-ScribeCheck ($want.StatusCode -eq 200 -and !$wanting.held -and
+        $wanting.lease.wanted -ceq $browserB) 'browser B asks for the lease'
+    $renew = Send-ScribeJson '/v1/scribe/lease' @{ browser = $browserA; want = 'None' }
+    $renewed = $renew.Content | ConvertFrom-Json
+    Assert-ScribeCheck ($renew.StatusCode -eq 200 -and $renewed.held -and
+        $renewed.lease.wanted -ceq $browserB -and $renewed.lease.asked) 'browser A sees the asked want'
+
+    $part = 'Fictional part ' + [char]0x00E9 + ' ' + [char]::ConvertFromUtf32(0x10348)
+    $partBytes = [Text.Encoding]::UTF8.GetBytes($part)
+    $intruder = Send-ScribePart $browserB $partBytes
+    Assert-ScribeCheck ($intruder.StatusCode -eq 409 -and
+        (Get-ScribeCode $intruder) -ceq 'lease_lost') 'browser B cannot stage'
+    $staged = Send-ScribePart $browserA $partBytes
+    $partDigest = [Convert]::ToHexString([Security.Cryptography.SHA256]::HashData($partBytes)).ToLowerInvariant()
+    Assert-ScribeCheck ($staged.StatusCode -eq 200 -and
+        ($staged.Content | ConvertFrom-Json).digest -ceq $partDigest) 'browser A stages a part and gets its digest'
+    $commitBody = @{
+        browser = $browserA
+        kinds = @(@{ kind = 'book'; expectedRevision = 0; revision = 1; digests = @($partDigest) })
+        done = @()
+    }
+    $commit = Send-ScribeJson '/v1/scribe/commit' $commitBody
+    $committed = $commit.Content | ConvertFrom-Json
+    Assert-ScribeCheck ($commit.StatusCode -eq 200 -and @($committed.heads).Count -eq 1 -and
+        $committed.heads[0].kind -ceq 'book' -and $committed.heads[0].revision -eq 1) 'browser A commits revision 1'
+
+    $read = Invoke-WebRequest @request @bearer -Uri ($base + '/v1/scribe/part' + $roomQuery +
+        '&kind=book&revision=1&part=0')
+    $readHex = [Convert]::ToHexString($read.RawContentStream.ToArray())
+    Assert-ScribeCheck ($read.StatusCode -eq 200 -and
+        [string]$read.Headers['Content-Type'] -ceq 'text/plain; charset=utf-8' -and
+        $readHex -ceq [Convert]::ToHexString($partBytes)) 'part reads back byte for byte'
+    $stale = Send-ScribeJson '/v1/scribe/commit' $commitBody
+    Assert-ScribeCheck ($stale.StatusCode -eq 409 -and
+        (Get-ScribeCode $stale) -ceq 'revision_conflict') 'second commit expecting 0 returns 409'
+
+    foreach ($spend in @(@($browserA, 0.25), @($browserA, 0.25), @($browserA, 0.1), @($browserB, 0.5))) {
+        $spent = Send-ScribeJson '/v1/scribe/spend' @{ browser = $spend[0]; day = $day; total = $spend[1] }
+        Assert-ScribeCheck ($spent.StatusCode -eq 200) 'spend accepted'
+    }
+    $heads = Invoke-WebRequest @request @bearer -Uri $headsUri
+    $view = $heads.Content | ConvertFrom-Json
+    Assert-ScribeCheck ($heads.StatusCode -eq 200 -and $view.spent.mine -eq 0.25 -and
+        $view.spent.sum -eq 0.75) 'browser A spent 0.25 of 0.75'
+
+    $release = Invoke-WebRequest @request @bearer -Method Delete -Uri ($base + '/v1/scribe/lease' + $roomQuery +
+        '&browser=' + $browserA)
+    $released = $release.Content | ConvertFrom-Json
+    Assert-ScribeCheck ($release.StatusCode -eq 200 -and $released.released -and
+        $released.lease.browser -ceq $browserB) 'browser A hands the lease to B'
+    $retake = Send-ScribeJson '/v1/scribe/lease' @{ browser = $browserA; want = 'None' }
+    $retaken = $retake.Content | ConvertFrom-Json
+    Assert-ScribeCheck ($retake.StatusCode -eq 200 -and !$retaken.held -and
+        $retaken.lease.browser -ceq $browserB) 'browser A no longer holds the lease'
+    'Hosted scribe checks passed.'
+} finally {
+    $bearer.Clear()
+    $key.Dispose()
+}
+```
+
 ## Verify locally
 
 Use Node.js 24 from this directory. The Worker and tests require no package installation.
@@ -170,8 +306,8 @@ Use Node.js 24 from this directory. The Worker and tests require no package inst
 | Command | Authorization and coverage |
 | --- | --- |
 | `node --check worker.mjs` | Database-free syntax check |
-| `node --test tests/http.test.mjs` | Database-free HTTP, validation, and bound-statement control flow with a scripted adapter |
-| `node --test tests/sqlite.test.mjs` | Operator execution or exact-command approval required. Runs the production SQL in isolated in-memory SQLite databases with controlled request interleavings. |
+| `node --test tests/http.test.mjs` | Database-free HTTP, validation, and bound-statement control flow of the notes and scribe routes with a scripted adapter |
+| `node --test tests/sqlite.test.mjs` | Operator execution or exact-command approval required. Runs the production SQL of the notes and scribe routes in isolated in-memory SQLite databases with controlled request interleavings. |
 
 The SQLite suite exercises real SQL and controlled scheduling in one process. Cloudflare's distributed runtime and D1 response behavior require the hosted checks. See the [verification record](docs/verification/api-verification.md).
 
@@ -261,5 +397,7 @@ Run the tests one file at a time, for example `node --test tests/scribe-whole.te
 ## Limits and provenance
 
 This is a single-owner API for the Free plan. Accepted requests write the rate counter before the room operation. Platform quota exhaustion can interrupt service, including with Cloudflare-generated responses outside the API error format. Each room stores its current notes only. Provider-managed backups are separate from application history. No plan upgrades are automated.
+
+The scribe routes count against the account's shared 100,000 Worker requests a day, beside the notes routes. Every accepted scribe request writes its rate counter, and staged parts, commits, spends, leases and asks write rows against D1's 100,000 rows written a day. Every scribe table has a primary-key index, and D1 counts each index write as a row written, so each staged part, each head a commit writes, each part its sweep deletes, and each spend, lease and ask costs about two rows written.
 
 The Worker, schema, and fixtures were authored for this project. Test notes and endpoints are fictional. The package uses no image assets or third-party runtime packages. [Cloudflare Worker secrets](https://developers.cloudflare.com/workers/configuration/secrets/), [D1 prepared statements](https://developers.cloudflare.com/d1/worker-api/prepared-statements/), [Workers limits](https://developers.cloudflare.com/workers/platform/limits/), [D1 pricing and quotas](https://developers.cloudflare.com/d1/platform/pricing/).

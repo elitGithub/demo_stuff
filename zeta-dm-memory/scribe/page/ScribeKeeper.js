@@ -91,6 +91,7 @@ const ScribeKeeper = Object.freeze({
             BadAnchor: 'The argument is not valid: anchor',
             BadOperations: 'The argument is not valid: operations',
             BadClaim: 'The argument is not valid: claim',
+            BadProfile: 'The argument is not valid: profile',
         }),
         Flight: Object.freeze({
             PullOpen: 'Pulling the chat: ',
@@ -1408,10 +1409,12 @@ const ScribeKeeper = Object.freeze({
         let result = null;
         try {
             job.recorded = ScribeStore.spent(keeper.storage, keeper.roomId, keeper.clock.today());
+            const profile = keeper.profile === null ? null : await keeper.profile();
             result = await ScribeAdoption.run({
                 messages: chosen,
                 notes,
                 player: keeper.intake.player,
+                profile,
                 log: book.log,
                 size,
                 budget: keeper.settings.budget,
@@ -2240,7 +2243,7 @@ const ScribeKeeper = Object.freeze({
     },
 
     /**
-     * @param {{ storage: { get: Function, set: Function, remove: Function, list: Function }, roomId: string, tabId: string, zeta: { history: Function, newest: Function }, ask: Function, clock: { now: Function, today: Function }, notify: Function, claim?: () => boolean }} options
+     * @param {{ storage: { get: Function, set: Function, remove: Function, list: Function }, roomId: string, tabId: string, zeta: { history: Function, newest: Function }, ask: Function, clock: { now: Function, today: Function }, notify: Function, claim?: () => boolean, profile?: () => Promise<string|null> }} options
      * @return {Promise<Readonly<object>>}
      * @throws {Error}
      */
@@ -2251,6 +2254,10 @@ const ScribeKeeper = Object.freeze({
         if (claim !== null && typeof claim !== settings.FunctionType) {
             throw new Error(settings.Messages.BadClaim);
         }
+        const profile = options.profile === undefined || options.profile === null ? null : options.profile;
+        if (profile !== null && typeof profile !== settings.FunctionType) {
+            throw new Error(settings.Messages.BadProfile);
+        }
         const keeper = {
             storage,
             roomId,
@@ -2260,6 +2267,7 @@ const ScribeKeeper = Object.freeze({
             clock,
             notify,
             claim,
+            profile,
             phase: ScribeKeeper.Phase.Loading,
             reader: false,
             closed: false,

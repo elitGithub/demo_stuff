@@ -200,6 +200,7 @@ const scenes = [
 const promptLines = [
     'You are the Pedant: a proofreader for an ongoing adult fiction roleplay between consenting adult characters. You never write story.',
     'You receive PLAYER CHARACTER, a LEDGER of established facts (each with an id like F12, its subject, its category and its text), a list of what certain speakers DO NOT KNOW, the RECENT MESSAGES before them, the messages SINCE THE BOOK WAS LAST READ, one REPLY from the storyteller, and NAME CANDIDATES: words in the REPLY that look like known names, each line giving the name, the word of that name it looks like, and the word in the REPLY.',
+    "PLAYER CHARACTER PROFILE is the player's own description of their character; trust it for that character.",
     'Find where the REPLY disagrees with the LEDGER, where a speaker uses something they do not know, which NAME CANDIDATES are misspellings, where the REPLY does not fit what the messages above establish, and what the characters wear and look like now.',
     '',
     'Answer with these five blocks, each starting with its === line. Leave a block out if it has nothing. Write nothing else.',
@@ -646,6 +647,36 @@ test('the input shows the ledger and who does not know', () => {
         'DOES NOT KNOW:\n(none)',
         'SINCE THE BOOK WAS LAST READ:\n(none)',
     ]);
+});
+
+test('the chat profile follows the player character when it was read, and is left out when not', async () => {
+    const { state } = book();
+    const reply = at(50);
+    const profile = 'Orla is a sellsword from the north.\nShe owes Brandt a crossing.';
+    const plainText = ScribePedant.input(state, 'Orla', reply, [reply], [], story);
+    assert.equal(ScribePedant.input(state, 'Orla', reply, [reply], [], story, null), plainText);
+    assert.equal(plainText.includes('PLAYER CHARACTER PROFILE:'), false);
+    const profiled = ScribePedant.input(state, 'Orla', reply, [reply], [], story, profile);
+    assert.equal(profiled.startsWith(`PLAYER CHARACTER:\nOrla\n\nPLAYER CHARACTER PROFILE:\n${profile}\n\nLEDGER:\n`), true);
+    assert.equal(profiled.replace(`PLAYER CHARACTER PROFILE:\n${profile}\n\n`, ''), plainText);
+    const asked = [];
+    /**
+     * @param {string} prompt
+     * @param {string} input
+     * @return {Promise<{ text: string, cost: number }>}
+     */
+    const ask = async (prompt, input) => {
+        asked.push(input);
+        return { text: '=== CONTRADICTIONS\n(none)', cost: 0 };
+    };
+    const request = { state, player: 'Orla', message: reply, unread: [reply], messages: story, ask };
+    await ScribePedant.review({ ...request, profile });
+    await ScribePedant.review({ ...request, profile: null });
+    await ScribePedant.review(request);
+    assert.equal(asked[0].includes(`PLAYER CHARACTER PROFILE:\n${profile}\n\nLEDGER:\n`), true);
+    assert.equal(asked[0].replace(`PLAYER CHARACTER PROFILE:\n${profile}\n\n`, ''), asked[1]);
+    assert.equal(asked[1], asked[2]);
+    assert.equal(asked[1].includes('PLAYER CHARACTER PROFILE:'), false);
 });
 
 test('the answer is read', () => {

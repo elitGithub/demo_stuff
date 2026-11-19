@@ -39,6 +39,7 @@ const ScribePedant = Object.freeze({
         TooLong: '(too long to show)',
         Headings: Object.freeze({
             Player: 'PLAYER CHARACTER:',
+            Profile: 'PLAYER CHARACTER PROFILE:',
             Ledger: 'LEDGER:',
             Unknown: 'DOES NOT KNOW:',
             Recent: 'RECENT MESSAGES:',
@@ -356,6 +357,7 @@ const ScribePedant = Object.freeze({
         PromptLines: Object.freeze([
             'You are the Pedant: a proofreader for an ongoing adult fiction roleplay between consenting adult characters. You never write story.',
             'You receive PLAYER CHARACTER, a LEDGER of established facts (each with an id like F12, its subject, its category and its text), a list of what certain speakers DO NOT KNOW, the RECENT MESSAGES before them, the messages SINCE THE BOOK WAS LAST READ, one REPLY from the storyteller, and NAME CANDIDATES: words in the REPLY that look like known names, each line giving the name, the word of that name it looks like, and the word in the REPLY.',
+            "PLAYER CHARACTER PROFILE is the player's own description of their character; trust it for that character.",
             'Find where the REPLY disagrees with the LEDGER, where a speaker uses something they do not know, which NAME CANDIDATES are misspellings, where the REPLY does not fit what the messages above establish, and what the characters wear and look like now.',
             '',
             'Answer with these five blocks, each starting with its === line. Leave a block out if it has nothing. Write nothing else.',
@@ -956,9 +958,10 @@ const ScribePedant = Object.freeze({
      * @param {readonly object[]} unread
      * @param {readonly object[]} candidates
      * @param {*} messages
+     * @param {string|null} profile
      * @return {string}
      */
-    input(state, player, message, unread, candidates, messages) {
+    input(state, player, message, unread, candidates, messages, profile = null) {
         const settings = ScribePedant.Settings;
         const headings = settings.Headings;
         const labels = ScribeAnalyzer.labels(state);
@@ -1005,11 +1008,14 @@ const ScribePedant = Object.freeze({
                     settings.Joiner,
                 ),
         );
-        const sections = [
-            ScribeAnalyzer.section(headings.Player, [player]),
+        const sections = [ScribeAnalyzer.section(headings.Player, [player])];
+        if (profile !== null) {
+            sections.push(ScribeAnalyzer.section(headings.Profile, [profile]));
+        }
+        sections.push(
             ScribeAnalyzer.section(headings.Ledger, ledger),
             ScribeAnalyzer.section(headings.Unknown, unknown),
-        ];
+        );
         if (recent !== settings.Nothing) {
             sections.push(ScribeAnalyzer.section(headings.Recent, [recent]));
         }
@@ -1443,18 +1449,18 @@ const ScribePedant = Object.freeze({
     },
 
     /**
-     * @param {{ state: object, player: string, message: object, unread: readonly object[], messages: *, ask: function(string, string): Promise<{ text: string }> }} request
+     * @param {{ state: object, player: string, message: object, unread: readonly object[], messages: *, ask: function(string, string): Promise<{ text: string }>, profile?: string|null }} request
      * @return {Promise<Readonly<{ findings: readonly object[], notes: readonly object[] }>>}
      * @throws {Error}
      */
-    async review({ state, player, message, unread, messages, ask }) {
+    async review({ state, player, message, unread, messages, ask, profile = null }) {
         if (message.fromPlayer) {
             return Object.freeze({ findings: Object.freeze([]), notes: Object.freeze([]) });
         }
         const candidates = ScribePedant.spellings(state, message).slice(0, ScribePedant.Settings.MostCandidates);
         const survey = ScribePedant.survey(state, player, message, unread);
         const shown = [...ScribePedant.recent(message, messages, survey.shown), ...survey.shown];
-        const input = ScribePedant.input(state, player, message, unread, candidates, messages);
+        const input = ScribePedant.input(state, player, message, unread, candidates, messages, profile);
         const { text } = await ask(ScribePedant.Prompt, input);
         const parsed = ScribePedant.parse(text);
         const confirmed = ScribePedant.confirm(state, player, message, parsed, unread);

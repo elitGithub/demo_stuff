@@ -14,7 +14,6 @@ const ScribeLive = Object.freeze({
         DismissedKept: 500,
         CheckedKept: 8,
         NotesKept: 100,
-        AnswersKept: 16,
         FirstMost: 5,
         FirstFinding: 0,
         FirstEpoch: 0,
@@ -25,6 +24,9 @@ const ScribeLive = Object.freeze({
         NoCount: 0,
         Last: -1,
         Nothing: '',
+        Space: ' ',
+        Fulfilled: 'fulfilled',
+        Uncast: Object.freeze({ characters: null, profile: null, notice: null }),
         StoppedPhase: 'Stopped',
         DoneStop: 'Done',
         ObjectType: 'object',
@@ -51,6 +53,8 @@ const ScribeLive = Object.freeze({
             NoBook: 'No book yet: adopt this chat first.',
             NotRead: 'The book has not finished its first reading.',
             LongEdit: 'A reminder may be at most 2,000 bytes; nothing was saved.',
+            StoryUnread: "The story's characters could not be read, so every character counts as custom: ",
+            ProfileUnread: 'The chat profile could not be read, so it is left out of the calls: ',
             Budget: "The day's budget is spent: replies are not checked and no new reminder is made until tomorrow.",
         }),
         NothingAppended: Object.freeze({
@@ -501,8 +505,11 @@ const ScribeLive = Object.freeze({
         record.led = record.ready !== null && ScribeLive.isTexts(saved.led) ? [...saved.led] : [];
         const basis = saved.basis;
         const sound =
-            ScribeLive.isObject(basis) && Number.isSafeInteger(basis.revision) && ScribeLive.isTexts(basis.first);
-        record.basis = sound ? { revision: basis.revision, first: [...basis.first] } : null;
+            ScribeLive.isObject(basis) &&
+            Number.isSafeInteger(basis.revision) &&
+            ScribeLive.isTexts(basis.first) &&
+            ScribeLive.isText(basis.notes);
+        record.basis = sound ? { revision: basis.revision, first: [...basis.first], notes: basis.notes } : null;
         record.edited = ScribeLive.edited(saved.edited);
         record.forced = saved.forced === true;
         record.sends = Number.isSafeInteger(saved.sends) && saved.sends >= settings.NoSends ? saved.sends : settings.NoSends;
@@ -641,7 +648,6 @@ const ScribeLive = Object.freeze({
             live.excluded = [];
             live.understood = null;
             live.appended = ScribeLive.Settings.NothingAppended;
-            live.answers = [];
             ScribeLive.changed(live);
         }
         try {
@@ -795,15 +801,29 @@ const ScribeLive = Object.freeze({
     },
 
     /**
-     * @param {{ revision: number, first: string[] }|null} basis
+     * @param {readonly object[]} notes
+     * @return {string}
+     */
+    marked(notes) {
+        return ScribeText.fingerprint(JSON.stringify(notes));
+    },
+
+    /**
+     * @param {{ revision: number, first: string[], notes: string }|null} basis
      * @param {object|null} reminded
      * @param {object|null} now
      * @param {readonly object[]} findings
+     * @param {readonly object[]} notes
      * @param {object} state
      * @return {boolean}
      */
-    holds(basis, reminded, now, findings, state) {
-        if (basis === null || state.revision !== basis.revision || !ScribeScene.same(reminded, now)) {
+    holds(basis, reminded, now, findings, notes, state) {
+        const differs =
+            basis === null ||
+            state.revision !== basis.revision ||
+            !ScribeScene.same(reminded, now) ||
+            ScribeLive.marked(notes) !== basis.notes;
+        if (differs) {
             return false;
         }
         const first = ScribeLive.first(findings, state);
@@ -829,7 +849,14 @@ const ScribeLive = Object.freeze({
         const record = live.record;
         return (
             record.ready !== null &&
-            ScribeLive.holds(record.basis, record.reminded, record.now, record.findings, view.state)
+            ScribeLive.holds(
+                record.basis,
+                record.reminded,
+                record.now,
+                record.findings,
+                ScribeLive.standing(record.notes, view),
+                view.state,
+            )
         );
     },
 
@@ -844,55 +871,89 @@ const ScribeLive = Object.freeze({
 
     /**
      * @param {object} live
+     * @return {Promise<Readonly<{ characters: readonly object[]|null, profile: string|null, notice: string|null }>>}
+     */
+    cast(live) {
+        const settings = ScribeLive.Settings;
+        const messages = settings.Messages;
+        if (live.cast !== null) {
+            return Promise.resolve(live.cast);
+        }
+        if (live.casting !== null) {
+            return live.casting;
+        }
+        const reads = [live.story, live.profile].map(
+            /**
+             * @param {() => Promise<*>} read
+             * @return {Promise<*>}
+             */
+            async (read) => read(),
+        );
+        live.casting = Promise.allSettled(reads).then(
+            /**
+             * @param {Array<{ status: string, value?: *, reason?: * }>} settled
+             * @return {Readonly<{ characters: readonly object[]|null, profile: string|null, notice: string|null }>}
+             */
+            (settled) => {
+                const [story, profile] = settled;
+                live.casting = null;
+                const failed = [story, profile].filter(
+                    /**
+                     * @param {{ status: string }} result
+                     * @return {boolean}
+                     */
+                    (result) => result.status !== settings.Fulfilled,
+                );
+                const unseen = failed.some(
+                    /**
+                     * @param {{ reason: * }} result
+                     * @return {boolean}
+                     */
+                    (result) => ScribeLive.words(result.reason) === ZetaSource.Settings.Messages.NoLogin,
+                );
+                if (live.closed || unseen) {
+                    return settings.Uncast;
+                }
+                const read = story.status === settings.Fulfilled;
+                const profiled = profile.status === settings.Fulfilled;
+                const notices = [];
+                if (!read) {
+                    notices.push(messages.StoryUnread + ScribeLive.words(story.reason));
+                }
+                if (!profiled) {
+                    notices.push(messages.ProfileUnread + ScribeLive.words(profile.reason));
+                }
+                live.cast = Object.freeze({
+                    characters: read ? story.value.characters : null,
+                    profile: profiled ? profile.value : null,
+                    notice: notices.length === settings.NoCount ? null : notices.join(settings.Space),
+                });
+                return live.cast;
+            },
+        );
+        return live.casting;
+    },
+
+    /**
+     * @param {object} live
      * @param {Readonly<object>} view
      * @param {object|null} now
      * @param {readonly object[]} findings
-     * @param {{ failure: string|null }} noted
-     * @return {Promise<{ composed: Readonly<{ text: string, led: readonly string[] }>|null, basis: { revision: number, first: string[] } }>}
+     * @param {readonly object[]} notes
+     * @return {Promise<{ composed: Readonly<{ text: string, led: readonly string[] }>|null, basis: { revision: number, first: string[], notes: string } }>}
      */
-    async remind(live, view, now, findings, noted) {
-        const settings = ScribeLive.Settings;
+    async remind(live, view, now, findings, notes) {
         const first = ScribeLive.first(findings, view.state);
-        const basis = { revision: view.state.revision, first };
-        const asked = ScribeLive.asker(live, settings.Roles.Scribe, noted);
-        /**
-         * @param {string} system
-         * @param {string} user
-         * @return {Promise<{ text: string, cost: * }>}
-         * @throws {Error}
-         */
-        const ask = async (system, user) => {
-            const request = JSON.stringify([system, user]);
-            const known = live.answers.find(
-                /**
-                 * @param {{ request: string }} entry
-                 * @return {boolean}
-                 */
-                (entry) => entry.request === request,
-            );
-            if (known !== undefined) {
-                return known.answer;
-            }
-            const answer = await asked(system, user);
-            live.answers = [
-                ...live.answers.filter(
-                    /**
-                     * @param {{ request: string }} entry
-                     * @return {boolean}
-                     */
-                    (entry) => entry.request !== request,
-                ),
-                { request, answer },
-            ].slice(-settings.AnswersKept);
-            return answer;
-        };
-        const composed = await ScribeReminder.compose({
+        const given = ScribeLive.standing(notes, view);
+        const basis = { revision: view.state.revision, first, notes: ScribeLive.marked(given) };
+        const cast = await ScribeLive.cast(live);
+        const composed = ScribeReminder.compose({
             state: view.state,
             now,
             player: view.player,
-            recent: view.messages.slice(-settings.Recent),
             unread: view.unread,
-            ask,
+            notes: given,
+            characters: cast.characters,
             first: [...first],
         });
         return { composed, basis };
@@ -900,7 +961,7 @@ const ScribeLive = Object.freeze({
 
     /**
      * @param {object} record
-     * @param {{ composed: Readonly<{ text: string, led: readonly string[] }>|null, basis: { revision: number, first: string[] } }|null} made
+     * @param {{ composed: Readonly<{ text: string, led: readonly string[] }>|null, basis: { revision: number, first: string[], notes: string } }|null} made
      * @return {void}
      */
     keep(record, made) {
@@ -961,13 +1022,16 @@ const ScribeLive = Object.freeze({
         let notes = null;
         if (remembered === undefined) {
             const sceneNoted = { failure: null };
+            let profile = null;
             try {
+                profile = (await ScribeLive.cast(live)).profile;
                 found = await ScribeScene.now({
                     state: view.state,
                     player: view.player,
                     messages: view.messages,
                     previous,
                     ask: ScribeLive.asker(live, roles.Scribe, sceneNoted),
+                    profile,
                 });
             } catch (error) {
                 live.problem = ScribeLive.words(error);
@@ -985,6 +1049,7 @@ const ScribeLive = Object.freeze({
                     unread: view.unread,
                     messages: view.messages,
                     ask: ScribeLive.asker(live, roles.Pedant, pedantNoted),
+                    profile,
                 });
                 raised = reviewed.findings;
                 notes = reviewed.notes;
@@ -1016,16 +1081,17 @@ const ScribeLive = Object.freeze({
             remembered !== undefined,
         );
         let made = null;
-        const remindNoted = { failure: null };
         try {
-            const due = record.edited === null && ScribeLive.due(record, view);
-            if (due) {
-                made = await ScribeLive.remind(live, view, now, draft, remindNoted);
+            if (record.edited === null && ScribeLive.due(record, view)) {
+                const drafted =
+                    notes === null
+                        ? record.notes
+                        : ScribeLive.noted(ScribeLive.standing(record.notes, view), notes, message);
+                made = await ScribeLive.remind(live, view, now, draft, drafted);
             }
         } catch (error) {
             live.problem = ScribeLive.words(error);
         }
-        ScribeLive.report(live, remindNoted);
         if (!ScribeLive.current(live, epoch)) {
             return;
         }
@@ -1087,7 +1153,14 @@ const ScribeLive = Object.freeze({
             made.composed !== null &&
             record.edited === null &&
             ScribeLive.due(record, latest) &&
-            ScribeLive.holds(made.basis, now, record.now, record.findings, latest.state);
+            ScribeLive.holds(
+                made.basis,
+                now,
+                record.now,
+                record.findings,
+                ScribeLive.standing(record.notes, latest),
+                latest.state,
+            );
         if (ready) {
             ScribeLive.keep(record, made);
         } else if (
@@ -1117,17 +1190,15 @@ const ScribeLive = Object.freeze({
         }
         const epoch = live.epoch;
         const now = record.now;
-        const noted = { failure: null };
         let made = null;
         try {
-            made = await ScribeLive.remind(live, view, now, record.findings, noted);
+            made = await ScribeLive.remind(live, view, now, record.findings, record.notes);
         } catch (error) {
             live.problem = ScribeLive.words(error);
         }
         if (!ScribeLive.current(live, epoch) || !ScribeLive.trusted(live)) {
             return;
         }
-        ScribeLive.report(live, noted);
         const latest = live.keeper.view();
         if (made === null || made.composed === null) {
             if (record.ready !== null && !ScribeLive.fresh(live, latest)) {
@@ -1135,7 +1206,14 @@ const ScribeLive = Object.freeze({
             }
         } else if (
             ScribeLive.due(record, latest) &&
-            ScribeLive.holds(made.basis, now, record.now, record.findings, latest.state)
+            ScribeLive.holds(
+                made.basis,
+                now,
+                record.now,
+                record.findings,
+                ScribeLive.standing(record.notes, latest),
+                latest.state,
+            )
         ) {
             ScribeLive.keep(record, made);
         }
@@ -1174,24 +1252,29 @@ const ScribeLive = Object.freeze({
             }
             const epoch = live.epoch;
             const now = record.now;
-            const noted = { failure: null };
             let made = null;
             try {
-                made = await ScribeLive.remind(live, live.keeper.view(), now, record.findings, noted);
+                made = await ScribeLive.remind(live, live.keeper.view(), now, record.findings, record.notes);
             } catch (error) {
                 live.problem = ScribeLive.words(error);
             }
             if (!ScribeLive.current(live, epoch) || !ScribeLive.trusted(live)) {
                 return;
             }
-            ScribeLive.report(live, noted);
             const latest = live.keeper.view();
             const kept =
                 made !== null &&
                 made.composed !== null &&
                 record.edited === null &&
                 ScribeLive.due(record, latest) &&
-                ScribeLive.holds(made.basis, now, record.now, record.findings, latest.state);
+                ScribeLive.holds(
+                    made.basis,
+                    now,
+                    record.now,
+                    record.findings,
+                    ScribeLive.standing(record.notes, latest),
+                    latest.state,
+                );
             if (kept) {
                 ScribeLive.keep(record, made);
             }
@@ -1837,6 +1920,7 @@ const ScribeLive = Object.freeze({
             ),
             suggestion: record.suggestion,
             offer: live.offer,
+            notice: live.cast === null ? null : live.cast.notice,
             understood:
                 understood === null
                     ? null
@@ -1936,6 +2020,11 @@ const ScribeLive = Object.freeze({
             force: () => ScribeLive.force(live),
 
             /**
+             * @return {Promise<string|null>}
+             */
+            profile: async () => (await ScribeLive.cast(live)).profile,
+
+            /**
              * @return {Promise<void>}
              */
             suggest: () => ScribeLive.suggest(live),
@@ -1980,11 +2069,11 @@ const ScribeLive = Object.freeze({
     },
 
     /**
-     * @param {{ keeper: { view: Function, rule: Function, file: Function, preview: Function }, storage: { get: Function, set: Function, remove: Function, list: Function }, roomId: string, ask: Function, clock: object, notify: Function }} options
+     * @param {{ keeper: { view: Function, rule: Function, file: Function, preview: Function }, storage: { get: Function, set: Function, remove: Function, list: Function }, roomId: string, ask: Function, clock: object, notify: Function, story: () => Promise<object>, profile: () => Promise<string> }} options
      * @return {Readonly<object>}
      */
     open(options) {
-        const { keeper, storage, roomId, ask, notify } = options;
+        const { keeper, storage, roomId, ask, notify, story, profile } = options;
         const settings = ScribeLive.Settings;
         const live = {
             keeper,
@@ -1992,6 +2081,10 @@ const ScribeLive = Object.freeze({
             roomId,
             ask,
             notify,
+            story,
+            profile,
+            cast: null,
+            casting: null,
             record: null,
             problem: null,
             shown: null,
@@ -2001,7 +2094,6 @@ const ScribeLive = Object.freeze({
             epoch: settings.FirstEpoch,
             running: null,
             waiting: null,
-            answers: [],
             refreshing: false,
             appended: settings.NothingAppended,
             offer: null,

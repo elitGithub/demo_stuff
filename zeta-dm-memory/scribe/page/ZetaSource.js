@@ -23,6 +23,19 @@ const ZetaSource = Object.freeze({
         LastSuccess: 299,
         RoomsPath: '/v1/rooms/',
         MessagesPath: '/messages',
+        PlotsPath: '/v1/plots/',
+        ProfilePath: '/user-plot-chat-profiles/me',
+        PlotIdPaths: Object.freeze([Object.freeze(['plotId']), Object.freeze(['plot', 'id'])]),
+        ProfileTextPaths: Object.freeze([
+            Object.freeze(['description']),
+            Object.freeze(['content']),
+            Object.freeze(['profile']),
+            Object.freeze(['profile', 'description']),
+        ]),
+        CharactersField: 'characters',
+        NameField: 'name',
+        DescriptionField: 'description',
+        LongestProfile: 2000,
         QueryMark: '?',
         LimitName: 'limit',
         CursorName: 'cursor',
@@ -71,6 +84,8 @@ const ZetaSource = Object.freeze({
             NoPause: 'Could not pause between requests',
             NoLogin: 'No login seen yet',
             NoRoom: 'No chat is open',
+            NoPlot: 'Zeta named no story for this chat',
+            NoProfile: 'Zeta gave no profile text for this chat',
         }),
     }),
 
@@ -519,21 +534,15 @@ const ZetaSource = Object.freeze({
     },
 
     /**
-     * @param {{ fetch: Function, token: string, roomId: string, pause: (milliseconds: number) => Promise<void> }} request
-     * @param {string|null} cursor
-     * @return {Promise<{ messages: object[], nextCursor: string|null, skipped: number }>}
+     * @param {{ fetch: Function, token: string, pause: (milliseconds: number) => Promise<void> }} request
+     * @param {string} path
+     * @return {Promise<{ status: number, body: * }>}
      * @throws {Error}
      */
-    async exchange(request, cursor) {
+    async get(request, path) {
         const settings = ZetaSource.Settings;
         const words = settings.Messages;
-        const query = new URLSearchParams();
-        query.set(settings.LimitName, String(settings.PageSize));
-        if (cursor !== null) {
-            query.set(settings.CursorName, cursor);
-        }
-        const room = encodeURIComponent(request.roomId);
-        const address = `${settings.ApiOrigin}${settings.RoomsPath}${room}${settings.MessagesPath}${settings.QueryMark}${query.toString()}`;
+        const address = `${settings.ApiOrigin}${path}`;
         const send = request.fetch;
 
         /**
@@ -584,6 +593,29 @@ const ZetaSource = Object.freeze({
         } catch {
             body = null;
         }
+        return { status: answered.status, body };
+    },
+
+    /**
+     * @param {{ fetch: Function, token: string, roomId: string, pause: (milliseconds: number) => Promise<void> }} request
+     * @param {string|null} cursor
+     * @return {Promise<{ messages: object[], nextCursor: string|null, skipped: number }>}
+     * @throws {Error}
+     */
+    async exchange(request, cursor) {
+        const settings = ZetaSource.Settings;
+        const words = settings.Messages;
+        const query = new URLSearchParams();
+        query.set(settings.LimitName, String(settings.PageSize));
+        if (cursor !== null) {
+            query.set(settings.CursorName, cursor);
+        }
+        const room = encodeURIComponent(request.roomId);
+        const answered = await ZetaSource.get(
+            request,
+            `${settings.RoomsPath}${room}${settings.MessagesPath}${settings.QueryMark}${query.toString()}`,
+        );
+        const body = answered.body;
         if (!ZetaSource.isObject(body) || !Array.isArray(body.messages)) {
             throw ZetaSource.failure(words.Shape, answered.status, false);
         }
@@ -614,12 +646,12 @@ const ZetaSource = Object.freeze({
     },
 
     /**
-     * @param {{ fetch: Function, token: string, roomId: string, pause: (milliseconds: number) => Promise<void> }} request
-     * @param {string|null} cursor
-     * @return {Promise<{ messages: object[], nextCursor: string|null, skipped: number }>}
+     * @param {{ pause: (milliseconds: number) => Promise<void> }} request
+     * @param {() => Promise<*>} read
+     * @return {Promise<*>}
      * @throws {Error}
      */
-    async page(request, cursor) {
+    async retried(request, read) {
         const settings = ZetaSource.Settings;
         let failed = null;
         for (let number = settings.FirstTry; number <= settings.Tries; number++) {
@@ -627,7 +659,7 @@ const ZetaSource = Object.freeze({
                 await ZetaSource.wait(request, settings.RetryPauseMs * (number - settings.FirstTry));
             }
             try {
-                return await ZetaSource.exchange(request, cursor);
+                return await read();
             } catch (error) {
                 if (error.retryable !== true) {
                     throw error;
@@ -636,6 +668,130 @@ const ZetaSource = Object.freeze({
             }
         }
         throw failed;
+    },
+
+    /**
+     * @param {{ fetch: Function, token: string, roomId: string, pause: (milliseconds: number) => Promise<void> }} request
+     * @param {string|null} cursor
+     * @return {Promise<{ messages: object[], nextCursor: string|null, skipped: number }>}
+     * @throws {Error}
+     */
+    async page(request, cursor) {
+        return ZetaSource.retried(
+            request,
+            /**
+             * @return {Promise<{ messages: object[], nextCursor: string|null, skipped: number }>}
+             */
+            () => ZetaSource.exchange(request, cursor),
+        );
+    },
+
+    /**
+     * @param {*} body
+     * @param {readonly string[]} path
+     * @return {*}
+     */
+    at(body, path) {
+        let value = body;
+        for (const name of path) {
+            if (!ZetaSource.isObject(value) || !Object.hasOwn(value, name)) {
+                return null;
+            }
+            value = value[name];
+        }
+        return value;
+    },
+
+    /**
+     * @param {*} body
+     * @return {string|null}
+     */
+    plotOf(body) {
+        const settings = ZetaSource.Settings;
+        for (const path of settings.PlotIdPaths) {
+            const value = ZetaSource.at(body, path);
+            const finite = typeof value === settings.NumberType && Number.isFinite(value);
+            if (finite || ZetaSource.filled(value)) {
+                return String(value);
+            }
+        }
+        return null;
+    },
+
+    /**
+     * @param {{ fetch: Function, token: string|null, roomId: string|null, pause: Function }} request
+     * @return {Promise<Readonly<{ characters: ReadonlyArray<Readonly<{ name: string, description: string }>> }>>}
+     * @throws {Error}
+     */
+    async story(request) {
+        const settings = ZetaSource.Settings;
+        const words = settings.Messages;
+        ZetaSource.ready(request);
+        const room = await ZetaSource.retried(
+            request,
+            /**
+             * @return {Promise<{ status: number, body: * }>}
+             */
+            () => ZetaSource.get(request, settings.RoomsPath + encodeURIComponent(request.roomId)),
+        );
+        const plot = ZetaSource.plotOf(room.body);
+        if (plot === null) {
+            throw ZetaSource.failure(words.NoPlot, room.status, false);
+        }
+        const read = await ZetaSource.retried(
+            request,
+            /**
+             * @return {Promise<{ status: number, body: * }>}
+             */
+            () => ZetaSource.get(request, settings.PlotsPath + encodeURIComponent(plot)),
+        );
+        const listed = ZetaSource.at(read.body, [settings.CharactersField]);
+        if (!Array.isArray(listed)) {
+            throw ZetaSource.failure(words.Shape, read.status, false);
+        }
+        const characters = [];
+        for (const item of listed) {
+            if (!ZetaSource.isObject(item) || !ZetaSource.filled(item[settings.NameField])) {
+                continue;
+            }
+            const description = item[settings.DescriptionField];
+            characters.push(
+                Object.freeze({
+                    name: item[settings.NameField],
+                    description: typeof description === settings.StringType ? description : settings.Nothing,
+                }),
+            );
+        }
+        return Object.freeze({ characters: Object.freeze(characters) });
+    },
+
+    /**
+     * @param {{ fetch: Function, token: string|null, roomId: string|null, pause: Function }} request
+     * @return {Promise<string>}
+     * @throws {Error}
+     */
+    async profile(request) {
+        const settings = ZetaSource.Settings;
+        ZetaSource.ready(request);
+        const read = await ZetaSource.retried(
+            request,
+            /**
+             * @return {Promise<{ status: number, body: * }>}
+             */
+            () =>
+                ZetaSource.get(
+                    request,
+                    settings.RoomsPath + encodeURIComponent(request.roomId) + settings.ProfilePath,
+                ),
+        );
+        for (const path of settings.ProfileTextPaths) {
+            const value = ZetaSource.at(read.body, path);
+            const text = typeof value === settings.StringType ? value.trim() : settings.Nothing;
+            if (text !== settings.Nothing) {
+                return Array.from(text).slice(0, settings.LongestProfile).join(settings.Nothing);
+            }
+        }
+        throw ZetaSource.failure(settings.Messages.NoProfile, read.status, false);
     },
 
     /**

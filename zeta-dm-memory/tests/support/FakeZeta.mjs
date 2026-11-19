@@ -9,6 +9,10 @@ export default class FakeZeta {
 
     static MostRequests = 20;
 
+    static Plot = 'plot-1';
+
+    static Profile = 'Orla is a sellsword from the northern marches.';
+
     /**
      * @param {object[]} messages
      * @param {string} room
@@ -18,6 +22,9 @@ export default class FakeZeta {
         this.messages = messages;
         this.room = room;
         this.token = token;
+        this.plot = FakeZeta.Plot;
+        this.characters = [];
+        this.profile = FakeZeta.Profile;
         this.repeat = null;
         this.endless = false;
         this.perPage = null;
@@ -141,11 +148,26 @@ export default class FakeZeta {
             return FakeZeta.reply(429, 'Too many requests.');
         }
         const address = new URL(url);
-        if (address.origin !== FakeZeta.Origin || address.pathname !== `/v1/rooms/${encodeURIComponent(this.room)}/messages`) {
+        const room = `/v1/rooms/${encodeURIComponent(this.room)}`;
+        const plot = this.plot === null ? null : `/v1/plots/${encodeURIComponent(this.plot)}`;
+        const story = {
+            [room]: () => (this.plot === null ? null : { id: this.room, plotId: this.plot }),
+            [`${room}/user-plot-chat-profiles/me`]: () =>
+                this.profile === null ? null : { roomId: this.room, description: this.profile },
+        };
+        if (plot !== null) {
+            story[plot] = () => ({ id: this.plot, characters: this.characters });
+        }
+        const known = address.pathname === `${room}/messages` || Object.hasOwn(story, address.pathname);
+        if (address.origin !== FakeZeta.Origin || !known) {
             return FakeZeta.reply(404, 'No such room.');
         }
         if (options?.headers?.Authorization !== this.token) {
             return FakeZeta.reply(401, 'Login required.');
+        }
+        if (Object.hasOwn(story, address.pathname)) {
+            const body = story[address.pathname]();
+            return body === null ? FakeZeta.reply(404, 'Nothing here.') : FakeZeta.reply(200, JSON.stringify(body));
         }
         const limit = this.perPage === null ? Number(address.searchParams.get('limit')) : this.perPage;
         const cursor = address.searchParams.get('cursor');

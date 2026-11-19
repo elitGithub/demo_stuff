@@ -104,6 +104,7 @@ const ScribePanel = Object.freeze({
             ForceReason: 'scribe-force-reason',
             ForceOutcome: 'scribe-force-outcome',
             ReminderOutcome: 'scribe-reminder-outcome',
+            Story: 'scribe-story',
             OfferText: 'scribe-offer-text',
             OfferActions: 'scribe-offer-actions',
             OfferOutcome: 'scribe-offer-outcome',
@@ -2049,7 +2050,17 @@ const ScribePanel = Object.freeze({
                 true,
             );
             pulled.hidden = true;
-            section.append(controls, ScribePanel.outlet(panel, 'ControlsOutcome', outlets.Controls), pulled);
+            const story = ScribePanel.stale(
+                panel,
+                ScribePanel.own(
+                    panel,
+                    'Story',
+                    ScribePanel.make(panel, tags.Paragraph, settings.Nothing, classes.Meta),
+                ),
+                true,
+            );
+            story.hidden = true;
+            section.append(controls, ScribePanel.outlet(panel, 'ControlsOutcome', outlets.Controls), story, pulled);
             ScribePanel.pager(panel, settings.Lists.Lines, ScribePanel.group(panel, section, words.LinesHeading));
             ScribePanel.pager(panel, settings.Lists.Calls, ScribePanel.group(panel, section, words.CallsHeading));
         },
@@ -2229,6 +2240,7 @@ const ScribePanel = Object.freeze({
                 forced: heard.forced ?? false,
                 forceBlock: heard.forceBlock ?? null,
                 suggestion: heard.suggestion ?? null,
+                notice: heard.notice ?? null,
             };
         } catch (error) {
             ScribePanel.lockAll(panel);
@@ -3729,14 +3741,17 @@ const ScribePanel = Object.freeze({
         /**
          * @param {object} panel
          * @param {object} view
+         * @param {object} live
          * @return {void}
          */
-        Progress(panel, view) {
+        Progress(panel, view, live) {
             const settings = ScribePanel.Settings;
             const words = settings.Words;
             const parts = panel.parts;
             parts.Adopt.hidden =
                 !view.booked || [ScribeKeeper.Phase.NoBook, ScribeKeeper.Phase.Loading].includes(view.phase);
+            parts.Story.hidden = live.notice === null;
+            ScribePanel.write(parts.Story, live.notice ?? settings.Nothing);
             const pulled = view.pulled;
             let line = pulled === null && !view.reader ? words.NoPullHere : settings.Nothing;
             if (pulled !== null) {

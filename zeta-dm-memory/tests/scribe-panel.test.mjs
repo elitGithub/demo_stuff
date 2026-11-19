@@ -1791,6 +1791,36 @@ test('export hands over the saved chat', async () => {
     assert.deepEqual(panel.keeper.calls, []);
 });
 
+test('the Progress tab says when the story or the profile could not be read', async () => {
+    const notice =
+        "The story's characters could not be read, so every character counts as custom: Zeta answered HTTP 404";
+    const panel = mounted(disputedBook(), { live: liveView([], { notice }) });
+    await panel.tab('Progress');
+    const story = panel.byId('scribe-story');
+    assert.equal(story.hidden, false);
+    assert.equal(story.textContent, notice);
+    assert.equal(story.tagName, 'P');
+    const controls = panel.byId('scribe-pull').parent;
+    const order = controls.parent.children;
+    assert.equal(order.indexOf(story) > order.indexOf(controls), true);
+    panel.live.current = liveView([], { notice: null });
+    panel.redraw();
+    assert.equal(panel.byId('scribe-story').hidden, true);
+    assert.equal(panel.text('scribe-story'), '');
+    panel.live.current = liveView([]);
+    panel.redraw();
+    assert.equal(panel.byId('scribe-story').hidden, true);
+    panel.live.current = liveView([], { notice: `${notice} <b>bold</b>` });
+    panel.redraw();
+    assert.equal(panel.text('scribe-story'), `${notice} <b>bold</b>`);
+    assert.equal(panel.byId('scribe-story').children.length, 0);
+    await panel.tab('Findings');
+    assert.equal(panel.byId('scribe-story').parent.hidden, true);
+    const quiet = mounted(disputedBook());
+    await quiet.tab('Progress');
+    assert.equal(quiet.byId('scribe-story').hidden, true);
+});
+
 test('lists are paged at twenty', async () => {
     const lines = Array.from({ length: 45 }, (unused, index) => `Lantern ${index + 1} | item`);
     const log = readTo(apply(ScribeLog.create(), answer({ SUBJECTS: lines }), 1, 1), 40);

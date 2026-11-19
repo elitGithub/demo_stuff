@@ -34,9 +34,14 @@ const FRAME_ORIGIN = 'https://frame.pingpong.ai';
 const BRIDGE = 'scribe-bridge';
 const BRIDGE_READ = 'GM_getValue("scribe-bridge", null)';
 const OFFICE = 'Day 1 | The ledger office | private | present: Halvard, Mirelle | They settle the debt\nCHANGED: yes';
-const OPENING = '[Scribe] Day 1, "The harbour market", public. Present: Halvard, Mirelle, and 1 other.';
-const HAIR = 'Mirelle, hair: "black, worn in a braid".';
+const LOOKS =
+    'Mirelle: brown eyes, black hair, worn in a braid, short and broad-shouldered, a scar across her left palm.';
+const PARTY = 'The party: a stranger asks after Oswin.';
+const FIRST_READY = `[Scribe] ${LOOKS} ${PARTY}`;
+const HAIR = '[Scribe] Mirelle has black hair, worn in a braid.';
+const LOOKS_LEFT = 'Mirelle: brown eyes, short and broad-shouldered, a scar across her left palm.';
 const OLD_HAIR = 'black, worn in a braid';
+const APRON = 'an ink-stained apron';
 const NEW_HAIR = 'black, cut short';
 const GOES_FIRST = "The book's value goes first in the next reminder, if this room may hear it.";
 const WENT_OUT = "The book's value went out in a reminder.";
@@ -86,7 +91,6 @@ const PROMPTS = new Map([
     [REFERENCE.ScribeAnalyzer.AnswersPrompt, 'Answers'],
     [REFERENCE.ScribeScene.Prompt, 'Scene'],
     [REFERENCE.ScribePedant.Prompt, 'Pedant'],
-    [REFERENCE.ScribeReminder.ChoosePrompt, 'Choose'],
     [REFERENCE.ScribeMuse.SuggestPrompt, 'Suggest'],
 ]);
 
@@ -152,7 +156,6 @@ const COSTS = Object.freeze({
     Notes: 0.04,
     Scene: 0.01,
     Pedant: 0.02,
-    Choose: 0.005,
     Suggest: 0.03,
 });
 
@@ -243,15 +246,6 @@ function pedantAnswer(user) {
  * @param {string} user
  * @return {string}
  */
-function chooseAnswer(user) {
-    const numbers = [...user.matchAll(/^(\d+)\. /gm)].map((match) => match[1]).slice(0, 3);
-    return numbers.length === 0 ? 'USE: none' : `USE: ${numbers.join(', ')}`;
-}
-
-/**
- * @param {string} user
- * @return {string}
- */
 function notesAnswer(user) {
     const cited = /^\[#(\d+)\] /m.exec(user);
     return cited === null ? '=== FACTS' : `=== FACTS\nMirelle | belonging | ${COMPASS} | #${cited[1]}`;
@@ -263,7 +257,6 @@ const ANSWERS = Object.freeze({
     Notes: notesAnswer,
     Scene: sceneAnswer,
     Pedant: pedantAnswer,
-    Choose: chooseAnswer,
     Suggest: () => `LINE: ${RIDER}`,
 });
 
@@ -683,8 +676,9 @@ test('2. a chat opens', async () => {
     assert.equal(first === 'Loading the chat...' || first.startsWith('Pulling the chat'), true, first);
     await until(walk, 'step 2: the chat to be pulled', () => tab.panel.headline().startsWith('No book for this chat yet'), 15000);
     assert.equal(tab.panel.headline(), 'No book for this chat yet: 91 messages.');
-    const reads = walk.site.scribeRequests();
+    const reads = walk.site.pageRequests();
     assert.equal(reads.length, 3);
+    assert.equal(walk.site.scribeRequests().length, 3);
     for (const read of reads) {
         assert.equal(read.method, 'GET');
         assert.equal(read.authorization, WholeSite.Token);
@@ -796,9 +790,8 @@ test('4. while the book is first read, only the Analyzer is asked; then the newe
     const after = seen.slice(last + 1).map((entry) => entry.role);
     assert.equal(after.filter((role) => role === 'Scene').length, 1);
     assert.equal(after.filter((role) => role === 'Pedant').length, 1);
-    assert.equal(after.filter((role) => role === 'Choose').length <= 1, true);
     assert.deepEqual(
-        after.filter((role) => !['Scene', 'Pedant', 'Choose'].includes(role)),
+        after.filter((role) => !['Scene', 'Pedant'].includes(role)),
         [],
     );
     assert.equal(seen[last + 1].ready, null);
@@ -806,10 +799,11 @@ test('4. while the book is first read, only the Analyzer is asked; then the newe
     assert.deepEqual(queued(tab), []);
     assert.equal(tab.panel.byId('scribe-reminder').value, '');
     assert.equal(tab.panel.byId('scribe-force').disabled, false);
+    const asked = walk.model.calls.length;
     await forceReminder(walk, tab);
     const ready = stored(walk, 'live').ready;
-    assert.equal(ready.startsWith(`${OPENING} `), true, ready);
-    assert.equal(ready.includes('Present: 3 people'), false);
+    assert.equal(ready, FIRST_READY);
+    assert.equal(walk.model.calls.length, asked);
     assert.deepEqual(queued(tab), [`Reminder: ${ready}`]);
     assert.equal(tab.panel.byId('scribe-reminder').value, ready);
     assert.deepEqual(tab.panel.rowTexts('queued'), []);
@@ -820,8 +814,7 @@ test('4. the first message after adopting carries a reminder built from the book
     const ready = stored(walk, 'live').ready;
     const went = await send(walk, tab, 'I look around.');
     assert.equal(went, `I look around.\n@: ${ready}`);
-    assert.equal(went.startsWith(`I look around.\n@: ${OPENING} `), true, went);
-    assert.equal(went.includes('Present: 3 people'), false);
+    assert.equal(went, `I look around.\n@: ${FIRST_READY}`);
 });
 
 test('4. without the press nothing goes before the count, and at the count the next reply makes one', async () => {
@@ -888,7 +881,7 @@ test('5. a reload keeps everything', async () => {
 test('6. a new reply arrives', async () => {
     const { walk, tab } = await adopted('2');
     const from = walk.model.calls.length;
-    const reads = walk.site.scribeRequests().length;
+    const reads = walk.site.pageRequests().length;
     await arrive(walk, tab, ASKED, REPLY);
     await until(
         walk,
@@ -897,7 +890,7 @@ test('6. a new reply arrives', async () => {
         TICK_MS * 2,
     );
     await quiet(walk, 'step 6: after the check');
-    const pulled = walk.site.scribeRequests().slice(reads);
+    const pulled = walk.site.pageRequests().slice(reads);
     assert.equal(pulled.length > 0, true);
     assert.equal(new URL(pulled[0].url).searchParams.get('cursor'), null);
     assert.equal(asked(walk, 'Scene', from), 1);
@@ -905,18 +898,86 @@ test('6. a new reply arrives', async () => {
     assert.equal(asked(walk, 'Story', from), 0);
     const pedant = walk.model.calls.slice(from).find((call) => call.role === 'Pedant');
     assert.equal(pedant.user.includes('REPLY (#93):'), true);
+    const profiled = `PLAYER CHARACTER PROFILE:\n${WholeSite.Profile}`;
+    for (const role of ['Story', 'Scene', 'Pedant']) {
+        const calls = walk.model.calls.filter((call) => call.role === role);
+        assert.equal(calls.length > 0, true, role);
+        assert.equal(calls.every((call) => call.user.includes(profiled)), true, role);
+    }
+    const story = walk.site
+        .scribeRequests()
+        .filter((request) => !WholeSite.paged(request.url))
+        .map((request) => new URL(request.url).pathname)
+        .sort();
+    assert.deepEqual(story, [
+        '/v1/plots/plot-harbour',
+        '/v1/rooms/harbour',
+        '/v1/rooms/harbour/user-plot-chat-profiles/me',
+    ]);
+    tab.panel.tab('Progress');
+    assert.equal(tab.panel.byId('scribe-story').hidden, true);
+    tab.panel.tab('Findings');
     const ready = stored(walk, 'live').ready;
     const rows = queued(tab);
     assert.equal(rows.length, 1);
     assert.equal(rows[0], `Reminder: ${ready}`);
     assert.equal(ready.startsWith('[Scribe] '), true);
-    assert.equal(ready.startsWith(`${OPENING} ${HAIR}`), true, ready);
+    assert.equal(ready, `${HAIR} ${LOOKS_LEFT} ${PARTY}`);
     const findings = findingRows(tab);
     assert.equal(findings.length, 1);
     const texts = tab.panel.walk(findings[0]).map((element) => element.ownText);
     assert.equal(texts.includes('The reply contradicts the book'), true);
     assert.equal(texts.includes(GOES_FIRST), true);
     assert.deepEqual(tab.panel.buttonTexts(findings[0]), ['Dismiss', 'Rule it...']);
+});
+
+test('6. a story character is told only what the chat added, and an unreadable story says so once', async () => {
+    const told = world();
+    told.site.rooms.get(ROOM).zeta.characters = [
+        { name: 'Mirelle', description: 'A money-changer with brown eyes and black hair worn in a braid.' },
+    ];
+    const tab = await opened(told);
+    await saveKey(told, tab);
+    await adopt(told, tab, '2');
+    await forceReminder(told, tab);
+    assert.equal(
+        stored(told, 'live').ready,
+        `[Scribe] Mirelle: short and broad-shouldered, a scar across her left palm. ${PARTY}`,
+    );
+    tab.panel.tab('Progress');
+    assert.equal(tab.panel.byId('scribe-story').hidden, true);
+
+    const unread = world();
+    const zeta = unread.site.rooms.get(ROOM).zeta;
+    zeta.characters = told.site.rooms.get(ROOM).zeta.characters;
+    zeta.plot = null;
+    zeta.profile = null;
+    const lost = await opened(unread);
+    await saveKey(unread, lost);
+    await adopt(unread, lost, '2');
+    await forceReminder(unread, lost);
+    assert.equal(stored(unread, 'live').ready, FIRST_READY);
+    await arrive(unread, lost, ASKED, REPLY);
+    await until(
+        unread,
+        'the reply after an unreadable story to be checked',
+        () => stored(unread, 'live')?.seen?.id === unread.site.messages.at(-1).id,
+        TICK_MS * 2,
+    );
+    await quiet(unread, 'after the reply with an unreadable story');
+    lost.panel.tab('Progress');
+    assert.equal(lost.panel.byId('scribe-story').hidden, false);
+    assert.equal(
+        lost.panel.text('scribe-story'),
+        "The story's characters could not be read, so every character counts as custom: Zeta answered HTTP 404 " +
+            'The chat profile could not be read, so it is left out of the calls: Zeta answered HTTP 404',
+    );
+    const story = unread.site.scribeRequests().filter((request) => !WholeSite.paged(request.url));
+    assert.deepEqual(
+        story.map((request) => new URL(request.url).pathname).sort(),
+        ['/v1/rooms/harbour', '/v1/rooms/harbour/user-plot-chat-profiles/me'],
+    );
+    assert.equal(unread.model.calls.some((call) => call.user.includes('PLAYER CHARACTER PROFILE:')), false);
 });
 
 test('7. sending', async () => {
@@ -1034,11 +1095,7 @@ test('10. a ruling', async () => {
     await until(walk, 'step 10: the ruling to be saved', () => tab.panel.rows('made').length === 1, 5000);
     await quiet(walk, 'step 10: after the ruling');
     const roles = rolesSince(walk, from);
-    assert.equal(roles.filter((role) => role === 'Choose').length <= 1, true);
-    assert.deepEqual(
-        roles.filter((role) => role !== 'Choose'),
-        [],
-    );
+    assert.deepEqual(roles, []);
     tab.panel.tab('Rulings');
     assert.equal(tab.panel.rows('conflicts').length, 0);
     assert.equal(tab.panel.rowTexts('made')[0].includes('Pin'), true);
@@ -1069,9 +1126,8 @@ test('9. an edited old message', async () => {
         ['1-30'],
     );
     const roles = rolesSince(walk, from);
-    assert.equal(roles.filter((role) => role === 'Choose').length <= 1, true);
     assert.deepEqual(
-        roles.filter((role) => role !== 'Story' && role !== 'Choose'),
+        roles.filter((role) => role !== 'Story'),
         [],
     );
     assert.equal(tab.panel.headline(), 'Up to date: 90 of 91 read.');
@@ -1109,9 +1165,8 @@ test('11. telling the scribe', async () => {
     assert.equal(walk.site.requests.filter((request) => request.method !== 'GET').length, posts);
     const roles = rolesSince(walk, from);
     assert.equal(roles.filter((role) => role === 'Notes').length, 1);
-    assert.equal(roles.filter((role) => role === 'Choose').length <= 1, true);
     assert.deepEqual(
-        roles.filter((role) => role !== 'Notes' && role !== 'Choose'),
+        roles.filter((role) => role !== 'Notes'),
         [],
     );
 });
@@ -1388,7 +1443,7 @@ test('16. starting the book over', async () => {
     tab.panel.button(tab.panel.byId('scribe-offer-actions'), 'Use').click();
     await settle();
     const oldReady = stored(walk, 'live').ready;
-    assert.equal(oldReady.includes(OLD_HAIR), true, oldReady);
+    assert.equal(oldReady.startsWith(`${HAIR} `), true, oldReady);
     assert.deepEqual(queued(tab), [`Reminder: ${oldReady}`, `Suggestion: ${RIDER}`]);
     const oldFindings = findingRows(tab).map((row) => row.textContent);
     assert.equal(oldFindings.length, 1);
@@ -1413,14 +1468,14 @@ test('16. starting the book over', async () => {
     );
     assert.equal(asked(walk, 'Scene', from), 1);
     assert.equal(asked(walk, 'Pedant', from), 1);
-    assert.equal(asked(walk, 'Choose', from) <= 1, true);
+    assert.equal(asked(walk, 'Unknown', from), 0);
     const live = stored(walk, 'live');
     assert.equal(live.suggestion, null);
     const newReady = live.ready;
     assert.equal(typeof newReady, 'string');
     assert.equal(newReady === oldReady, false);
-    assert.equal(newReady.startsWith(`${OPENING} Mirelle, hair: "${NEW_HAIR}".`), true, newReady);
-    assert.equal(newReady.includes(OLD_HAIR), false);
+    assert.equal(newReady, `[Scribe] Mirelle has black hair, cut short. ${LOOKS_LEFT} ${PARTY}`);
+    assert.equal(newReady.includes('worn in a braid'), false);
     assert.deepEqual(queued(tab), [`Reminder: ${newReady}`]);
     const newFindings = findingRows(tab).map((row) => row.textContent);
     assert.equal(newFindings.some((text) => text.includes(OLD_HAIR)), false);
@@ -1428,7 +1483,7 @@ test('16. starting the book over', async () => {
     assert.equal(newFindings[0].includes(NEW_HAIR), true);
     const went = await send(walk, tab, 'I begin again.');
     assert.equal(went.includes(oldReady), false);
-    assert.equal(went.includes(OLD_HAIR), false);
+    assert.equal(went.includes('worn in a braid'), false);
     assert.equal(went.includes(RIDER), false);
     assert.equal(went, `I begin again.\n@: ${newReady}`);
 });
@@ -1517,7 +1572,7 @@ async function checkedWhileFolded(walk, tab, label) {
     assert.equal(asked(walk, 'Story', from), 0);
     const live = stored(walk, 'live');
     assert.equal(typeof live.ready, 'string');
-    assert.equal(live.ready.startsWith(`${OPENING} ${HAIR}`), true, live.ready);
+    assert.equal(live.ready, `${HAIR} ${LOOKS_LEFT} ${PARTY}`);
     assert.deepEqual(plain(live.findings.map((finding) => [finding.kind, finding.said, finding.status])), [['Contradiction', 'red as rust', 'Open']]);
     assert.equal(tab.panel.text('scribe-badge'), '1 to rule, 1 finding');
     assert.equal(tab.panel.byId('scribe-badge').hidden, false);
@@ -1629,8 +1684,8 @@ test('20. two chats in two tabs of one window, the first hidden: each reads its 
     assert.equal(other.panel.headline(), 'Up to date: 60 of 63 read.');
     const hiddenReady = stored(walk, 'live').ready;
     const visibleReady = stored(walk, 'live', QUARRY).ready;
-    assert.equal(hiddenReady.startsWith(`${OPENING} ${HAIR}`), true, hiddenReady);
-    assert.equal(visibleReady.startsWith(`${OPENING} ${HAIR}`), true, visibleReady);
+    assert.equal(hiddenReady, `${HAIR} ${LOOKS_LEFT} ${PARTY}`);
+    assert.equal(visibleReady.startsWith(`${HAIR} `), true, visibleReady);
     assert.deepEqual(plain(stored(walk, 'live').findings.map((finding) => [finding.message, finding.status])), [['MESSAGE-93', 'Open']]);
     assert.deepEqual(plain(stored(walk, 'live', QUARRY).findings.map((finding) => [finding.message, finding.status])), [['MESSAGE-63', 'Open']]);
     const went = await send(walk, other, 'I nod.');
@@ -2126,9 +2181,9 @@ test('F5. forged arms to the frame change nothing', async () => {
  * @return {Promise<number>}
  */
 async function afterTick(walk, most) {
-    const before = walk.site.scribeRequests().length;
-    await until(walk, 'a tick of the reading tab', () => walk.site.scribeRequests().length > before, most);
-    return walk.site.scribeRequests().length;
+    const before = walk.site.pageRequests().length;
+    await until(walk, 'a tick of the reading tab', () => walk.site.pageRequests().length > before, most);
+    return walk.site.pageRequests().length;
 }
 
 test('F5. a script-made message event on the top page tells nothing and causes no tick', async () => {
@@ -2146,14 +2201,14 @@ test('F5. a script-made message event on the top page tells nothing and causes n
         data: { zetaScribe: 1, kind: 'sent', seq: last, ready: true, suggestion: false },
     });
     await pass(walk, 3000);
-    assert.equal(walk.site.scribeRequests().length, reads);
+    assert.equal(walk.site.pageRequests().length, reads);
     assert.equal(stored(walk, 'live').ready, ready);
     assert.equal(stored(walk, 'live').sends, sends);
     assert.deepEqual(plain(stored(walk, 'live').findings.map((finding) => finding.status)), ['Open']);
     assert.deepEqual(tab.logs, []);
     tab.frame.toTop.postMessage({ zetaScribe: 1, kind: 'sent', seq: last, ready: false, suggestion: false }, TOP_ORIGIN);
     await pass(walk, 1000);
-    assert.equal(walk.site.scribeRequests().length > reads, true);
+    assert.equal(walk.site.pageRequests().length > reads, true);
     assert.equal(stored(walk, 'live').ready, ready);
 });
 
@@ -2196,6 +2251,7 @@ test('F5. arms posted to the frame by a script in the top page change nothing an
 async function moved(walk, tab) {
     const old = stored(walk, 'live').ready;
     walk.model.answers.Scene = () => OFFICE;
+    walk.model.answers.Pedant = () => `=== NOW\nMirelle | wearing | ${APRON}`;
     await arrive(walk, tab, 'I follow Mirelle inside.', [['Narrator', 'Mirelle leads Halvard into the ledger office.']]);
     await until(
         walk,
@@ -2213,7 +2269,7 @@ test('F9. a chat frame hidden while the reminder changes appends the present rem
     tab.frameShown(false);
     const present = await moved(walk, tab);
     assert.equal(typeof present, 'string');
-    assert.equal(present.includes('"The ledger office"'), true, present);
+    assert.equal(present.includes(`Mirelle wears ${APRON}; brown eyes`), true, present);
     assert.equal(present === old, false);
     assert.equal(armsTo(walk, tab).at(-1).ready, present);
     tab.frameShown(true);
@@ -2277,21 +2333,21 @@ test("F10. leaving one chat for another: the second chat's messages never carry 
     await forceReminder(walk, tab);
     const first = stored(walk, 'live').ready;
     assert.equal(typeof first, 'string');
-    assert.equal(first.includes(OLD_HAIR), true, first);
+    assert.equal(first.includes('black hair, worn in a braid'), true, first);
     const harbourArm = armsTo(walk, tab).at(-1);
     assert.equal(harbourArm.ready, first);
     const mark = walk.posts.length;
     tab.go(`/rooms/${QUARRY}`);
     await until(walk, 'step F10: the second chat to be open again', () => tab.panel.headline().startsWith('Up to date: 60 of'), TICK_MS * 2);
     await quiet(walk, 'step F10: back in the second chat');
-    const reads = walk.site.scribeRequests().length;
+    const reads = walk.site.pageRequests().length;
     const reported = walk.posts.length;
     tab.frame.toTop.postMessage({ zetaScribe: 1, kind: 'sent', seq: harbourArm.seq, ready: true, suggestion: false }, TOP_ORIGIN);
     await pass(walk, 2000);
     const late = walk.posts.slice(reported).filter((post) => post.fromLabel === `${tab.name}/frame`);
     assert.equal(late.length, 1);
     assert.equal(late[0].delivered, true);
-    assert.equal(walk.site.scribeRequests().length > reads, true);
+    assert.equal(walk.site.pageRequests().length > reads, true);
     assert.deepEqual(tab.logs, []);
     assert.deepEqual(tab.frame.logs, []);
     const after = plain(stored(walk, 'live', QUARRY));
@@ -2307,7 +2363,7 @@ test("F10. leaving one chat for another: the second chat's messages never carry 
     assert.equal(since.every((arm) => arm.ready !== first), true);
     const went = await send(walk, tab, 'I climb the quarry path.');
     assert.equal(went.includes(first), false);
-    assert.equal(went.includes(OLD_HAIR), false);
+    assert.equal(went.includes('worn in a braid'), false);
 });
 
 test('F6. leaving the chat disarms the frame, and returning arms it again', async () => {

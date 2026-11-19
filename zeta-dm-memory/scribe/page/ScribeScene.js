@@ -28,6 +28,7 @@ const ScribeScene = Object.freeze({
         Last: -1,
         Headings: Object.freeze({
             Player: 'PLAYER CHARACTER:',
+            Profile: 'PLAYER CHARACTER PROFILE:',
             Subjects: 'SUBJECTS:',
             Scene: 'LAST KNOWN SCENE:',
         }),
@@ -90,6 +91,7 @@ const ScribeScene = Object.freeze({
             'Messages are numbered [#n]. Lines marked (player) are spoken or done by the player\'s character. "Narrator" is the storyteller\'s narration, not a character.',
             '',
             'You receive PLAYER CHARACTER, SUBJECTS (everyone and everything known so far), LAST KNOWN SCENE and the RECENT MESSAGES.',
+            "PLAYER CHARACTER PROFILE is the player's own description of their character; trust it for that character.",
             '',
             'Answer with exactly two lines and nothing else:',
             '',
@@ -149,9 +151,10 @@ const ScribeScene = Object.freeze({
      * @param {string} player
      * @param {readonly object[]} messages
      * @param {object|null} previous
+     * @param {string|null} profile
      * @return {string}
      */
-    input(state, player, messages, previous) {
+    input(state, player, messages, previous, profile = null) {
         const settings = ScribeScene.Settings;
         const headings = settings.Headings;
         const subjects = [];
@@ -223,8 +226,10 @@ const ScribeScene = Object.freeze({
             settings.MessagesTo +
             recent.at(settings.Last).position +
             settings.MessagesClose;
+        const profiled = profile === null ? [] : [ScribeScene.section(headings.Profile, [profile])];
         return [
             ScribeScene.section(headings.Player, [player]),
+            ...profiled,
             ScribeScene.section(headings.Subjects, subjects),
             ScribeScene.section(headings.Scene, scenes),
             ScribeScene.section(heading, [ScribeIntake.transcript(recent)]),
@@ -492,16 +497,17 @@ const ScribeScene = Object.freeze({
     },
 
     /**
-     * @param {{ state: object, player: string, messages: readonly object[], previous: object|null, ask: function(string, string): Promise<{ text: string }> }} request
+     * @param {{ state: object, player: string, messages: readonly object[], previous: object|null, ask: function(string, string): Promise<{ text: string }>, profile?: string|null }} request
      * @return {Promise<Readonly<object>|null>}
      */
-    async now({ state, player, messages, previous, ask }) {
+    async now({ state, player, messages, previous, ask, profile = null }) {
         if (messages.length === 0) {
             return null;
         }
         let text = null;
         try {
-            text = (await ask(ScribeScene.Prompt, ScribeScene.input(state, player, messages, previous))).text;
+            const input = ScribeScene.input(state, player, messages, previous, profile);
+            text = (await ask(ScribeScene.Prompt, input)).text;
         } catch {
             return null;
         }

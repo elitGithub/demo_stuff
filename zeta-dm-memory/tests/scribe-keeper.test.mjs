@@ -300,6 +300,9 @@ async function opened(chat, model, extra = {}) {
     if (extra.claim !== undefined) {
         options.claim = extra.claim;
     }
+    if (extra.profile !== undefined) {
+        options.profile = extra.profile;
+    }
     const opening = ScribeKeeper.open(options);
     assert.equal(await returns(opening), true, 'open never resolved');
     holder.keeper = await opening;
@@ -1415,6 +1418,79 @@ test("an injected claim replaces the store's", async () => {
             claim: 'yes',
         }),
         { message: 'The argument is not valid: claim' },
+    );
+});
+
+test('the chat profile is asked for before each reading and goes to the reading model', async () => {
+    const profile = 'Orla is a sellsword from the north.';
+    /**
+     * @param {(() => Promise<string|null>)|undefined} given
+     * @return {Promise<{ users: string[], asked: number, keeper: object }>}
+     */
+    const read = async (given) => {
+        const model = analyst();
+        const users = [];
+        const counted = { asked: 0 };
+        const watched = {
+            /**
+             * @param {string} role
+             * @param {string} system
+             * @param {string} user
+             * @return {Promise<{ text: string, cost: number }>}
+             */
+            ask: async (role, system, user) => {
+                users.push(user);
+                return model.ask(role, system, user);
+            },
+        };
+        const extra =
+            given === undefined
+                ? {}
+                : {
+                      /**
+                       * @return {Promise<string|null>}
+                       */
+                      profile: async () => {
+                          counted.asked++;
+                          return given();
+                      },
+                  };
+        const { keeper } = await opened(new FakeChat(100), watched, extra);
+        await keeper.adopt({});
+        await keeper.tick();
+        return { users, asked: counted.asked, keeper };
+    };
+    const heading = `\n\nPLAYER CHARACTER PROFILE:\n${profile}\n\nSUBJECTS:`;
+    const told = await read(async () => profile);
+    assert.equal(told.users.length >= 3, true);
+    assert.equal(told.users.every((user) => user.includes(heading)), true);
+    assert.equal(told.asked >= 1, true);
+    assert.equal(told.keeper.view().phase, 'Idle');
+    const untold = await read(async () => null);
+    const bare = await read(undefined);
+    assert.equal(untold.users.length, told.users.length);
+    assert.equal(untold.users.some((user) => user.includes('PLAYER CHARACTER PROFILE:')), false);
+    assert.deepEqual(untold.users, bare.users);
+    assert.deepEqual(
+        told.users.map((user) => user.replace(`PLAYER CHARACTER PROFILE:\n${profile}\n\n`, '')),
+        bare.users,
+    );
+    const chat = new FakeChat(100);
+    await assert.rejects(
+        ScribeKeeper.open({
+            storage: new FakeStorage(),
+            roomId: ROOM,
+            tabId: 'tab-9',
+            zeta: chat.zeta('tab-9'),
+            ask: analyst().ask,
+            clock: clockAt(),
+            /**
+             * @return {void}
+             */
+            notify: () => {},
+            profile: 'Orla',
+        }),
+        { message: 'The argument is not valid: profile' },
     );
 });
 

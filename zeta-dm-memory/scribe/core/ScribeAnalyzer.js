@@ -9,6 +9,7 @@ const ScribeAnalyzer = Object.freeze({
         Nobody: 'nobody',
         Headings: Object.freeze({
             Player: 'PLAYER CHARACTER:',
+            Profile: 'PLAYER CHARACTER PROFILE:',
             Subjects: 'SUBJECTS:',
             Ledger: 'LEDGER:',
             Scenes: 'LAST SCENES:',
@@ -101,6 +102,7 @@ const ScribeAnalyzer = Object.freeze({
             'The book is a list of single facts. Each has an id like F12, a subject, a category, a statement and the message number that established it. You never rewrite the book. You only add facts, and say when the story has changed or ended one.',
             '',
             'You receive PLAYER CHARACTER, SUBJECTS (everyone and everything that has an entry), LEDGER (the facts now in force for the subjects named in the new messages), LAST SCENES, NIGHTS, OPEN THREADS and the NEW MESSAGES.',
+            "PLAYER CHARACTER PROFILE is the player's own description of their character; trust it for that character.",
             'In the LEDGER each fact ends with (#n), the message that established it, or (owner) when the player added it by hand. After that it may be marked pinned, hidden, or (check: the other side has changed).',
             '',
             'Answer with these blocks, in this order, each starting with its === line. Leave a block out if it has nothing. Write nothing else: no headings, no remarks, no notes inside or between blocks.',
@@ -571,9 +573,10 @@ const ScribeAnalyzer = Object.freeze({
      * @param {object} state
      * @param {string} player
      * @param {readonly object[]} stretch
+     * @param {string|null} profile
      * @return {string}
      */
-    input(state, player, stretch) {
+    input(state, player, stretch, profile = null) {
         const settings = ScribeAnalyzer.Settings;
         const headings = settings.Headings;
         const first = stretch[0].position;
@@ -645,8 +648,12 @@ const ScribeAnalyzer = Object.freeze({
                 (thread) => thread.id + settings.Colon + thread.text,
             );
         const messages = settings.MessagesOpen + first + settings.MessagesTo + last + settings.MessagesClose;
+        const [named, ...known] = ScribeAnalyzer.opening(state, player, transcript, first, last);
+        const profiled = profile === null ? [] : [ScribeAnalyzer.section(headings.Profile, [profile])];
         return [
-            ...ScribeAnalyzer.opening(state, player, transcript, first, last),
+            named,
+            ...profiled,
+            ...known,
             ScribeAnalyzer.section(headings.Scenes, scenes),
             ScribeAnalyzer.section(headings.Nights, nights),
             ScribeAnalyzer.section(headings.Threads, threads),

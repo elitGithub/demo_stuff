@@ -441,6 +441,30 @@ test('code decides whether the scene changed', async () => {
     assert.equal(reordered.changed, false);
 });
 
+test('the chat profile follows the player character when it was read, and is left out when not', async () => {
+    const profile = 'Orla is a sellsword from the north.';
+    const plainText = ScribeScene.input(state, 'Orla', thirty, null);
+    assert.equal(ScribeScene.input(state, 'Orla', thirty, null, null), plainText);
+    assert.equal(plainText.includes('PLAYER CHARACTER PROFILE:'), false);
+    const profiled = ScribeScene.input(state, 'Orla', thirty, null, profile);
+    assert.equal(profiled.startsWith(`PLAYER CHARACTER:\nOrla\n\nPLAYER CHARACTER PROFILE:\n${profile}\n\nSUBJECTS:\n`), true);
+    assert.equal(profiled.replace(`PLAYER CHARACTER PROFILE:\n${profile}\n\n`, ''), plainText);
+    const asked = [];
+    /**
+     * @param {string} prompt
+     * @param {string} input
+     * @return {Promise<{ text: string, cost: number }>}
+     */
+    const ask = async (prompt, input) => {
+        asked.push(input);
+        return { text: `${SCENE_LINE}\nCHANGED: no`, cost: 0 };
+    };
+    await ScribeScene.now({ state, player: 'Orla', messages: thirty, previous: null, ask, profile });
+    await ScribeScene.now({ state, player: 'Orla', messages: thirty, previous: null, ask, profile: null });
+    await ScribeScene.now({ state, player: 'Orla', messages: thirty, previous: null, ask });
+    assert.deepEqual(asked, [profiled, plainText, plainText]);
+});
+
 test('an answer that cannot be read changes nothing', async () => {
     let calls = 0;
     /**
@@ -508,6 +532,11 @@ test('the prompt is exact', () => {
         .replace(/what is going on.*$/, 'They argue');
     assert.deepEqual(plain(ScribeScene.parse(filled)), { ...SCENE, summary: 'They argue', changed: null });
     assert.ok(lines.includes('CHANGED: yes or no'));
+    const received = lines.findIndex((line) => line.startsWith('You receive PLAYER CHARACTER,'));
+    assert.equal(
+        lines[received + 1],
+        "PLAYER CHARACTER PROFILE is the player's own description of their character; trust it for that character.",
+    );
     assert.equal(ScribeScene.Settings.Recent, 20);
 });
 

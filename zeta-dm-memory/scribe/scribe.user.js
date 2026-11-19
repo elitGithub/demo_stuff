@@ -4763,6 +4763,7 @@ const ScribeAnalyzer = Object.freeze({
         Nobody: 'nobody',
         Headings: Object.freeze({
             Player: 'PLAYER CHARACTER:',
+            Profile: 'PLAYER CHARACTER PROFILE:',
             Subjects: 'SUBJECTS:',
             Ledger: 'LEDGER:',
             Scenes: 'LAST SCENES:',
@@ -4855,6 +4856,7 @@ const ScribeAnalyzer = Object.freeze({
             'The book is a list of single facts. Each has an id like F12, a subject, a category, a statement and the message number that established it. You never rewrite the book. You only add facts, and say when the story has changed or ended one.',
             '',
             'You receive PLAYER CHARACTER, SUBJECTS (everyone and everything that has an entry), LEDGER (the facts now in force for the subjects named in the new messages), LAST SCENES, NIGHTS, OPEN THREADS and the NEW MESSAGES.',
+            "PLAYER CHARACTER PROFILE is the player's own description of their character; trust it for that character.",
             'In the LEDGER each fact ends with (#n), the message that established it, or (owner) when the player added it by hand. After that it may be marked pinned, hidden, or (check: the other side has changed).',
             '',
             'Answer with these blocks, in this order, each starting with its === line. Leave a block out if it has nothing. Write nothing else: no headings, no remarks, no notes inside or between blocks.',
@@ -5325,9 +5327,10 @@ const ScribeAnalyzer = Object.freeze({
      * @param {object} state
      * @param {string} player
      * @param {readonly object[]} stretch
+     * @param {string|null} profile
      * @return {string}
      */
-    input(state, player, stretch) {
+    input(state, player, stretch, profile = null) {
         const settings = ScribeAnalyzer.Settings;
         const headings = settings.Headings;
         const first = stretch[0].position;
@@ -5399,8 +5402,12 @@ const ScribeAnalyzer = Object.freeze({
                 (thread) => thread.id + settings.Colon + thread.text,
             );
         const messages = settings.MessagesOpen + first + settings.MessagesTo + last + settings.MessagesClose;
+        const [named, ...known] = ScribeAnalyzer.opening(state, player, transcript, first, last);
+        const profiled = profile === null ? [] : [ScribeAnalyzer.section(headings.Profile, [profile])];
         return [
-            ...ScribeAnalyzer.opening(state, player, transcript, first, last),
+            named,
+            ...profiled,
+            ...known,
             ScribeAnalyzer.section(headings.Scenes, scenes),
             ScribeAnalyzer.section(headings.Nights, nights),
             ScribeAnalyzer.section(headings.Threads, threads),
@@ -5899,6 +5906,7 @@ const ScribeAdoption = Object.freeze({
             Messages: 'messages is not a list.',
             Notes: 'notes is not a list.',
             Player: 'player is not a string.',
+            Profile: 'profile is neither a string nor null.',
             Log: 'log is not an object.',
             Size: 'size is not a positive whole number.',
         }),
@@ -5982,6 +5990,10 @@ const ScribeAdoption = Object.freeze({
         }
         if (typeof options.player !== 'string') {
             return problems.Player;
+        }
+        const profile = options.profile;
+        if (profile !== undefined && profile !== null && typeof profile !== 'string') {
+            return problems.Profile;
         }
         if (options.log === null || typeof options.log !== 'object') {
             return problems.Log;
@@ -6101,7 +6113,7 @@ const ScribeAdoption = Object.freeze({
     },
 
     /**
-     * @param {{ messages: readonly object[], notes: readonly object[], player: string, log: object, size: number, budget: number, spent: number, ask: Function, save: Function, record: Function, progress: Function, paused: Function }} options
+     * @param {{ messages: readonly object[], notes: readonly object[], player: string, profile?: string|null, log: object, size: number, budget: number, spent: number, ask: Function, save: Function, record: Function, progress: Function, paused: Function }} options
      * @return {Promise<Readonly<{ stop: string, problem: string|null, spent: number, calls: number, unpriced: number }>>}
      */
     async run(options) {
@@ -6226,7 +6238,7 @@ const ScribeAdoption = Object.freeze({
                     first,
                     last,
                     system: ScribeAnalyzer.Prompt,
-                    user: ScribeAnalyzer.input(state, job.player, stretch),
+                    user: ScribeAnalyzer.input(state, job.player, stretch, job.profile),
                     messages: stretch,
                     state,
                     notes: [],
@@ -7032,6 +7044,19 @@ const ZetaSource = Object.freeze({
         LastSuccess: 299,
         RoomsPath: '/v1/rooms/',
         MessagesPath: '/messages',
+        PlotsPath: '/v1/plots/',
+        ProfilePath: '/user-plot-chat-profiles/me',
+        PlotIdPaths: Object.freeze([Object.freeze(['plotId']), Object.freeze(['plot', 'id'])]),
+        ProfileTextPaths: Object.freeze([
+            Object.freeze(['description']),
+            Object.freeze(['content']),
+            Object.freeze(['profile']),
+            Object.freeze(['profile', 'description']),
+        ]),
+        CharactersField: 'characters',
+        NameField: 'name',
+        DescriptionField: 'description',
+        LongestProfile: 2000,
         QueryMark: '?',
         LimitName: 'limit',
         CursorName: 'cursor',
@@ -7080,6 +7105,8 @@ const ZetaSource = Object.freeze({
             NoPause: 'Could not pause between requests',
             NoLogin: 'No login seen yet',
             NoRoom: 'No chat is open',
+            NoPlot: 'Zeta named no story for this chat',
+            NoProfile: 'Zeta gave no profile text for this chat',
         }),
     }),
 
@@ -7528,21 +7555,15 @@ const ZetaSource = Object.freeze({
     },
 
     /**
-     * @param {{ fetch: Function, token: string, roomId: string, pause: (milliseconds: number) => Promise<void> }} request
-     * @param {string|null} cursor
-     * @return {Promise<{ messages: object[], nextCursor: string|null, skipped: number }>}
+     * @param {{ fetch: Function, token: string, pause: (milliseconds: number) => Promise<void> }} request
+     * @param {string} path
+     * @return {Promise<{ status: number, body: * }>}
      * @throws {Error}
      */
-    async exchange(request, cursor) {
+    async get(request, path) {
         const settings = ZetaSource.Settings;
         const words = settings.Messages;
-        const query = new URLSearchParams();
-        query.set(settings.LimitName, String(settings.PageSize));
-        if (cursor !== null) {
-            query.set(settings.CursorName, cursor);
-        }
-        const room = encodeURIComponent(request.roomId);
-        const address = `${settings.ApiOrigin}${settings.RoomsPath}${room}${settings.MessagesPath}${settings.QueryMark}${query.toString()}`;
+        const address = `${settings.ApiOrigin}${path}`;
         const send = request.fetch;
 
         /**
@@ -7593,6 +7614,29 @@ const ZetaSource = Object.freeze({
         } catch {
             body = null;
         }
+        return { status: answered.status, body };
+    },
+
+    /**
+     * @param {{ fetch: Function, token: string, roomId: string, pause: (milliseconds: number) => Promise<void> }} request
+     * @param {string|null} cursor
+     * @return {Promise<{ messages: object[], nextCursor: string|null, skipped: number }>}
+     * @throws {Error}
+     */
+    async exchange(request, cursor) {
+        const settings = ZetaSource.Settings;
+        const words = settings.Messages;
+        const query = new URLSearchParams();
+        query.set(settings.LimitName, String(settings.PageSize));
+        if (cursor !== null) {
+            query.set(settings.CursorName, cursor);
+        }
+        const room = encodeURIComponent(request.roomId);
+        const answered = await ZetaSource.get(
+            request,
+            `${settings.RoomsPath}${room}${settings.MessagesPath}${settings.QueryMark}${query.toString()}`,
+        );
+        const body = answered.body;
         if (!ZetaSource.isObject(body) || !Array.isArray(body.messages)) {
             throw ZetaSource.failure(words.Shape, answered.status, false);
         }
@@ -7623,12 +7667,12 @@ const ZetaSource = Object.freeze({
     },
 
     /**
-     * @param {{ fetch: Function, token: string, roomId: string, pause: (milliseconds: number) => Promise<void> }} request
-     * @param {string|null} cursor
-     * @return {Promise<{ messages: object[], nextCursor: string|null, skipped: number }>}
+     * @param {{ pause: (milliseconds: number) => Promise<void> }} request
+     * @param {() => Promise<*>} read
+     * @return {Promise<*>}
      * @throws {Error}
      */
-    async page(request, cursor) {
+    async retried(request, read) {
         const settings = ZetaSource.Settings;
         let failed = null;
         for (let number = settings.FirstTry; number <= settings.Tries; number++) {
@@ -7636,7 +7680,7 @@ const ZetaSource = Object.freeze({
                 await ZetaSource.wait(request, settings.RetryPauseMs * (number - settings.FirstTry));
             }
             try {
-                return await ZetaSource.exchange(request, cursor);
+                return await read();
             } catch (error) {
                 if (error.retryable !== true) {
                     throw error;
@@ -7645,6 +7689,130 @@ const ZetaSource = Object.freeze({
             }
         }
         throw failed;
+    },
+
+    /**
+     * @param {{ fetch: Function, token: string, roomId: string, pause: (milliseconds: number) => Promise<void> }} request
+     * @param {string|null} cursor
+     * @return {Promise<{ messages: object[], nextCursor: string|null, skipped: number }>}
+     * @throws {Error}
+     */
+    async page(request, cursor) {
+        return ZetaSource.retried(
+            request,
+            /**
+             * @return {Promise<{ messages: object[], nextCursor: string|null, skipped: number }>}
+             */
+            () => ZetaSource.exchange(request, cursor),
+        );
+    },
+
+    /**
+     * @param {*} body
+     * @param {readonly string[]} path
+     * @return {*}
+     */
+    at(body, path) {
+        let value = body;
+        for (const name of path) {
+            if (!ZetaSource.isObject(value) || !Object.hasOwn(value, name)) {
+                return null;
+            }
+            value = value[name];
+        }
+        return value;
+    },
+
+    /**
+     * @param {*} body
+     * @return {string|null}
+     */
+    plotOf(body) {
+        const settings = ZetaSource.Settings;
+        for (const path of settings.PlotIdPaths) {
+            const value = ZetaSource.at(body, path);
+            const finite = typeof value === settings.NumberType && Number.isFinite(value);
+            if (finite || ZetaSource.filled(value)) {
+                return String(value);
+            }
+        }
+        return null;
+    },
+
+    /**
+     * @param {{ fetch: Function, token: string|null, roomId: string|null, pause: Function }} request
+     * @return {Promise<Readonly<{ characters: ReadonlyArray<Readonly<{ name: string, description: string }>> }>>}
+     * @throws {Error}
+     */
+    async story(request) {
+        const settings = ZetaSource.Settings;
+        const words = settings.Messages;
+        ZetaSource.ready(request);
+        const room = await ZetaSource.retried(
+            request,
+            /**
+             * @return {Promise<{ status: number, body: * }>}
+             */
+            () => ZetaSource.get(request, settings.RoomsPath + encodeURIComponent(request.roomId)),
+        );
+        const plot = ZetaSource.plotOf(room.body);
+        if (plot === null) {
+            throw ZetaSource.failure(words.NoPlot, room.status, false);
+        }
+        const read = await ZetaSource.retried(
+            request,
+            /**
+             * @return {Promise<{ status: number, body: * }>}
+             */
+            () => ZetaSource.get(request, settings.PlotsPath + encodeURIComponent(plot)),
+        );
+        const listed = ZetaSource.at(read.body, [settings.CharactersField]);
+        if (!Array.isArray(listed)) {
+            throw ZetaSource.failure(words.Shape, read.status, false);
+        }
+        const characters = [];
+        for (const item of listed) {
+            if (!ZetaSource.isObject(item) || !ZetaSource.filled(item[settings.NameField])) {
+                continue;
+            }
+            const description = item[settings.DescriptionField];
+            characters.push(
+                Object.freeze({
+                    name: item[settings.NameField],
+                    description: typeof description === settings.StringType ? description : settings.Nothing,
+                }),
+            );
+        }
+        return Object.freeze({ characters: Object.freeze(characters) });
+    },
+
+    /**
+     * @param {{ fetch: Function, token: string|null, roomId: string|null, pause: Function }} request
+     * @return {Promise<string>}
+     * @throws {Error}
+     */
+    async profile(request) {
+        const settings = ZetaSource.Settings;
+        ZetaSource.ready(request);
+        const read = await ZetaSource.retried(
+            request,
+            /**
+             * @return {Promise<{ status: number, body: * }>}
+             */
+            () =>
+                ZetaSource.get(
+                    request,
+                    settings.RoomsPath + encodeURIComponent(request.roomId) + settings.ProfilePath,
+                ),
+        );
+        for (const path of settings.ProfileTextPaths) {
+            const value = ZetaSource.at(read.body, path);
+            const text = typeof value === settings.StringType ? value.trim() : settings.Nothing;
+            if (text !== settings.Nothing) {
+                return Array.from(text).slice(0, settings.LongestProfile).join(settings.Nothing);
+            }
+        }
+        throw ZetaSource.failure(settings.Messages.NoProfile, read.status, false);
     },
 
     /**
@@ -8670,6 +8838,7 @@ const ScribeKeeper = Object.freeze({
             BadAnchor: 'The argument is not valid: anchor',
             BadOperations: 'The argument is not valid: operations',
             BadClaim: 'The argument is not valid: claim',
+            BadProfile: 'The argument is not valid: profile',
         }),
         Flight: Object.freeze({
             PullOpen: 'Pulling the chat: ',
@@ -9987,10 +10156,12 @@ const ScribeKeeper = Object.freeze({
         let result = null;
         try {
             job.recorded = ScribeStore.spent(keeper.storage, keeper.roomId, keeper.clock.today());
+            const profile = keeper.profile === null ? null : await keeper.profile();
             result = await ScribeAdoption.run({
                 messages: chosen,
                 notes,
                 player: keeper.intake.player,
+                profile,
                 log: book.log,
                 size,
                 budget: keeper.settings.budget,
@@ -10819,7 +10990,7 @@ const ScribeKeeper = Object.freeze({
     },
 
     /**
-     * @param {{ storage: { get: Function, set: Function, remove: Function, list: Function }, roomId: string, tabId: string, zeta: { history: Function, newest: Function }, ask: Function, clock: { now: Function, today: Function }, notify: Function, claim?: () => boolean }} options
+     * @param {{ storage: { get: Function, set: Function, remove: Function, list: Function }, roomId: string, tabId: string, zeta: { history: Function, newest: Function }, ask: Function, clock: { now: Function, today: Function }, notify: Function, claim?: () => boolean, profile?: () => Promise<string|null> }} options
      * @return {Promise<Readonly<object>>}
      * @throws {Error}
      */
@@ -10830,6 +11001,10 @@ const ScribeKeeper = Object.freeze({
         if (claim !== null && typeof claim !== settings.FunctionType) {
             throw new Error(settings.Messages.BadClaim);
         }
+        const profile = options.profile === undefined || options.profile === null ? null : options.profile;
+        if (profile !== null && typeof profile !== settings.FunctionType) {
+            throw new Error(settings.Messages.BadProfile);
+        }
         const keeper = {
             storage,
             roomId,
@@ -10839,6 +11014,7 @@ const ScribeKeeper = Object.freeze({
             clock,
             notify,
             claim,
+            profile,
             phase: ScribeKeeper.Phase.Loading,
             reader: false,
             closed: false,
@@ -10938,6 +11114,7 @@ const ScribeScene = Object.freeze({
         Last: -1,
         Headings: Object.freeze({
             Player: 'PLAYER CHARACTER:',
+            Profile: 'PLAYER CHARACTER PROFILE:',
             Subjects: 'SUBJECTS:',
             Scene: 'LAST KNOWN SCENE:',
         }),
@@ -11000,6 +11177,7 @@ const ScribeScene = Object.freeze({
             'Messages are numbered [#n]. Lines marked (player) are spoken or done by the player\'s character. "Narrator" is the storyteller\'s narration, not a character.',
             '',
             'You receive PLAYER CHARACTER, SUBJECTS (everyone and everything known so far), LAST KNOWN SCENE and the RECENT MESSAGES.',
+            "PLAYER CHARACTER PROFILE is the player's own description of their character; trust it for that character.",
             '',
             'Answer with exactly two lines and nothing else:',
             '',
@@ -11059,9 +11237,10 @@ const ScribeScene = Object.freeze({
      * @param {string} player
      * @param {readonly object[]} messages
      * @param {object|null} previous
+     * @param {string|null} profile
      * @return {string}
      */
-    input(state, player, messages, previous) {
+    input(state, player, messages, previous, profile = null) {
         const settings = ScribeScene.Settings;
         const headings = settings.Headings;
         const subjects = [];
@@ -11133,8 +11312,10 @@ const ScribeScene = Object.freeze({
             settings.MessagesTo +
             recent.at(settings.Last).position +
             settings.MessagesClose;
+        const profiled = profile === null ? [] : [ScribeScene.section(headings.Profile, [profile])];
         return [
             ScribeScene.section(headings.Player, [player]),
+            ...profiled,
             ScribeScene.section(headings.Subjects, subjects),
             ScribeScene.section(headings.Scene, scenes),
             ScribeScene.section(heading, [ScribeIntake.transcript(recent)]),
@@ -11402,16 +11583,17 @@ const ScribeScene = Object.freeze({
     },
 
     /**
-     * @param {{ state: object, player: string, messages: readonly object[], previous: object|null, ask: function(string, string): Promise<{ text: string }> }} request
+     * @param {{ state: object, player: string, messages: readonly object[], previous: object|null, ask: function(string, string): Promise<{ text: string }>, profile?: string|null }} request
      * @return {Promise<Readonly<object>|null>}
      */
-    async now({ state, player, messages, previous, ask }) {
+    async now({ state, player, messages, previous, ask, profile = null }) {
         if (messages.length === 0) {
             return null;
         }
         let text = null;
         try {
-            text = (await ask(ScribeScene.Prompt, ScribeScene.input(state, player, messages, previous))).text;
+            const input = ScribeScene.input(state, player, messages, previous, profile);
+            text = (await ask(ScribeScene.Prompt, input)).text;
         } catch {
             return null;
         }
@@ -11436,89 +11618,273 @@ const ScribeScene = Object.freeze({
 });
 /** @file scribe/page/ScribeReminder.js */
 const ScribeReminder = Object.freeze({
-    Kind: Object.freeze({
-        Fact: 'Fact',
-        Knows: 'Knows',
-        Unknown: 'Unknown',
+    Part: Object.freeze({
+        Correction: 'Correction',
+        Wearing: 'Wearing',
+        Secret: 'Secret',
+        Filed: 'Filed',
+        Looks: 'Looks',
+        Job: 'Job',
+        Place: 'Place',
+    }),
+
+    Shape: Object.freeze({
+        Look: 'Look',
+        State: 'State',
+        Where: 'Where',
+        Named: 'Named',
+        Thing: 'Thing',
+        Passing: 'Passing',
+        Owned: 'Owned',
+        Habit: 'Habit',
+        Past: 'Past',
     }),
 
     Settings: Object.freeze({
-        MaxBytes: 600,
-        MostOpening: 200,
-        MostChosen: 8,
-        RecentShown: 10,
+        MaxBytes: 1000,
         LongestText: 200,
-        LongestPlace: 60,
-        LongestCategory: 30,
+        MostPlaces: 2,
         LongestLabel: 60,
         MostLabelWords: 4,
         FewestTestedWords: 3,
         FewestLetters: 3,
-        MostPlaceBytes: 80,
+        NotFound: -1,
         NormalForm: 'NFKC',
         WrittenForm: 'NFC',
         ListWord: 'and',
         Article: 'the',
         Slash: '/',
-        LookAlikeQuotes: String.fromCodePoint(
-            0x2ba,
-            0x2ee,
-            0x5f4,
-            0x2033,
-            0x2036,
-            0x275d,
-            0x275e,
-            0x3003,
-            0x1f676,
-            0x1f677,
-            0x1f678,
-        ),
-        ListGroup: 1,
         Nothing: '',
         Space: ' ',
-        Newline: '\n',
-        BlankLine: '\n\n',
-        Apostrophe: "'",
-        Quote: '"',
-        Comma: ', ',
-        Colon: ': ',
-        Joiner: ' | ',
-        FullStop: '.',
-        NumberClose: '. ',
-        And: ' and ',
-        AndCount: ', and ',
-        OneOther: ' other',
-        ManyOthers: ' others',
-        OnePerson: ' person',
-        ManyPeople: ' people',
-        Toward: 'toward ',
-        Day: 'Day ',
-        Present: 'Present: ',
-        ScenePresent: 'present: ',
-        Nobody: 'nobody',
-        OnlyOpen: 'Of those here only ',
-        KnowsOne: ' knows this about ',
-        KnowsMany: ' know this about ',
-        OthersDoNot: ', the others do not: ',
-        KeepsSecret: ' keeps this secret and no one here knows it: ',
-        NoOneKnows: 'No one here knows this about ',
-        NotWhole: 'No one here knows the whole of this about ',
-        PartOpen: '; only ',
-        PartOne: ' knows a part of it: ',
-        PartMany: ' know a part of it: ',
-        NothingOfIt: '; the others know nothing of it',
-        Headings: Object.freeze({
-            Scene: 'SCENE:',
-            Entries: 'ENTRIES:',
-            Recent: 'RECENT MESSAGES:',
+        LooksCategories: Object.freeze(['age', 'eyes', 'hair', 'build', 'skin', 'appearance', 'feature']),
+        PlaceCategories: Object.freeze(['location', 'appearance', 'feature']),
+        FiledOrigins: Object.freeze(['Operator', 'Notes']),
+        LightWords: Object.freeze([
+            'a',
+            'an',
+            'the',
+            'and',
+            'or',
+            'with',
+            'of',
+            'in',
+            'on',
+            'at',
+            'to',
+            'for',
+            'from',
+            'by',
+            'her',
+            'his',
+            'their',
+            'its',
+            'is',
+            'are',
+            'has',
+            'have',
+            'very',
+        ]),
+        LookClauses: Object.freeze({
+            age: Object.freeze({
+                prefix: 'aged ',
+                suffix: '',
+                nouns: Object.freeze(['age', 'old', 'year', 'years']),
+                adjectives: Object.freeze(['aged']),
+                counted: true,
+            }),
+            eyes: Object.freeze({
+                prefix: '',
+                suffix: ' eyes',
+                nouns: Object.freeze(['eye', 'eyes']),
+                adjectives: Object.freeze(['eyed']),
+                counted: false,
+            }),
+            hair: Object.freeze({
+                prefix: '',
+                suffix: ' hair',
+                nouns: Object.freeze(['hair']),
+                adjectives: Object.freeze(['haired', 'bald', 'balding']),
+                counted: false,
+            }),
+            skin: Object.freeze({
+                prefix: '',
+                suffix: ' skin',
+                nouns: Object.freeze(['skin']),
+                adjectives: Object.freeze(['skinned']),
+                counted: false,
+            }),
         }),
-
-        /**
-         * @return {RegExp}
-         */
-        get LineBreak() {
-            return /\r?\n/;
-        },
+        Shapes: Object.freeze({
+            age: 'Look',
+            eyes: 'Look',
+            hair: 'Look',
+            skin: 'Look',
+            kind: 'State',
+            status: 'State',
+            role: 'State',
+            build: 'State',
+            location: 'Where',
+            aka: 'Named',
+            title: 'Named',
+            appearance: 'Thing',
+            feature: 'Thing',
+            condition: 'Passing',
+            belonging: 'Owned',
+            trait: 'Habit',
+            ability: 'Habit',
+            rule: 'Habit',
+            background: 'Past',
+        }),
+        Called: Object.freeze({ aka: 'is also called ', title: 'is titled ' }),
+        Is: 'is ',
+        Has: 'has ',
+        Was: 'was ',
+        IsAt: 'is at ',
+        IsIn: 'is in ',
+        Leads: Object.freeze([
+            'is',
+            'are',
+            'was',
+            'were',
+            'has',
+            'had',
+            'have',
+            'can',
+            'cannot',
+            'could',
+            'will',
+            'would',
+            'may',
+            'might',
+            'must',
+            'should',
+            'does',
+            'did',
+            'doesn',
+            'didn',
+            'isn',
+            'wasn',
+            'hasn',
+            'won',
+            'always',
+            'never',
+            'often',
+            'usually',
+            'sometimes',
+            'rarely',
+            'seldom',
+            'wears',
+            'wore',
+        ]),
+        Determiners: Object.freeze([
+            'a',
+            'an',
+            'the',
+            'his',
+            'her',
+            'their',
+            'its',
+            'my',
+            'our',
+            'your',
+            'some',
+            'several',
+            'many',
+            'few',
+            'no',
+            'every',
+            'each',
+            'both',
+            'this',
+            'that',
+            'these',
+            'those',
+        ]),
+        Prepositions: Object.freeze([
+            'in',
+            'at',
+            'on',
+            'under',
+            'inside',
+            'outside',
+            'behind',
+            'beside',
+            'near',
+            'by',
+            'with',
+            'without',
+            'among',
+            'between',
+            'across',
+            'around',
+            'above',
+            'below',
+            'over',
+            'into',
+            'onto',
+            'from',
+            'toward',
+            'towards',
+            'within',
+            'beyond',
+            'through',
+            'of',
+            'to',
+            'for',
+            'about',
+            'against',
+            'along',
+            'after',
+            'before',
+            'during',
+            'until',
+            'upon',
+        ]),
+        Joiners: Object.freeze(['and', 'or', 'but']),
+        NumberWords: Object.freeze([
+            'one',
+            'two',
+            'three',
+            'four',
+            'five',
+            'six',
+            'seven',
+            'eight',
+            'nine',
+            'ten',
+            'eleven',
+            'twelve',
+            'thirteen',
+            'fourteen',
+            'fifteen',
+            'sixteen',
+            'seventeen',
+            'eighteen',
+            'nineteen',
+            'twenty',
+            'thirty',
+            'forty',
+            'fifty',
+            'sixty',
+            'seventy',
+            'eighty',
+            'ninety',
+            'hundred',
+        ]),
+        Toward: 'toward ',
+        Last: -1,
+        Wears: ' wears ',
+        Secretly: ' secretly ',
+        OnlyOpen: '; only ',
+        KnowsOne: ' knows.',
+        KnowMany: ' know.',
+        NoOneElse: '; no one else here knows.',
+        Party: 'The party: ',
+        Semicolon: '; ',
+        Colon: ': ',
+        Comma: ', ',
+        And: ' and ',
+        FullStop: '.',
 
         /**
          * @return {RegExp}
@@ -11539,13 +11905,6 @@ const ScribeReminder = Object.freeze({
          */
         get Invisible() {
             return /[\p{Cf}\p{Default_Ignorable_Code_Point}]/gu;
-        },
-
-        /**
-         * @return {RegExp}
-         */
-        get QuotationMarks() {
-            return /[\p{Quotation_Mark}--[\u{27}\u{2019}]]/gv;
         },
 
         /**
@@ -11593,13 +11952,6 @@ const ScribeReminder = Object.freeze({
         /**
          * @return {RegExp}
          */
-        get CategoryCharacters() {
-            return /^[\p{Lu}\p{Ll}\p{Lt}0-9 '\u{2019}-]+$/u;
-        },
-
-        /**
-         * @return {RegExp}
-         */
         get LabelCharacters() {
             return /^[\p{Lu}\p{Ll}\p{Lt}\p{Mn}0-9 '\u{2019}-]+$/u;
         },
@@ -11607,59 +11959,45 @@ const ScribeReminder = Object.freeze({
         /**
          * @return {RegExp}
          */
-        get AnswerDress() {
-            return /^[\s*>`-]+|[\s*>`-]+$/gu;
+        get WearingLead() {
+            return /^(?:(?:is|are)\s+)?(?:wears|wearing)\s+/iu;
         },
 
         /**
          * @return {RegExp}
          */
-        get UseHead() {
-            return /^use\**[:\u{FF1A}]\s*\**\s*(.*)$/iu;
+        get ClauseBreak() {
+            return /[,;(]/u;
         },
 
         /**
          * @return {RegExp}
          */
-        get NoneList() {
-            return /^none\.?$/iu;
+        get Numeral() {
+            return /^\p{N}/u;
         },
 
         /**
          * @return {RegExp}
          */
-        get NumberList() {
-            return /^\[?\s*#?\d+(?:(?:\s|,|;|(?<!\p{L})and(?!\p{L}))+#?\d+)*\s*\]?\.?$/iu;
+        get Plural() {
+            return /\p{L}[^isu]s$/u;
         },
 
         /**
          * @return {RegExp}
          */
-        get Digits() {
-            return /\d+/g;
+        get PresentVerb() {
+            return /\p{L}[^aiosu]s$/u;
         },
 
-        PromptLines: Object.freeze([
-            'You help a storyteller keep an ongoing adult fiction roleplay consistent. You never write story.',
-            'You receive the SCENE as it stands, a numbered list of ENTRIES that are known to be true, and the RECENT MESSAGES.',
-            'Choose the entries the storyteller most needs to be reminded of for this scene: what bears on what is happening now.',
-            'Answer with one line and nothing else:',
-            '',
-            'USE: 3, 7, 12',
-            '',
-            'Rules.',
-            '1. Use only numbers from ENTRIES. At most 8.',
-            '2. Prefer entries about what someone here knows or does not know, then lasting facts the recent messages touch on.',
-            '3. If nothing is worth reminding, answer USE: none',
-        ]),
+        /**
+         * @return {RegExp}
+         */
+        get Progressive() {
+            return /\p{L}{2}ing$/u;
+        },
     }),
-
-    /**
-     * @return {string}
-     */
-    get ChoosePrompt() {
-        return ScribeReminder.Settings.PromptLines.join(ScribeReminder.Settings.Newline);
-    },
 
     /**
      * @param {string} text
@@ -11675,28 +12013,18 @@ const ScribeReminder = Object.freeze({
 
     /**
      * @param {string} text
-     * @param {number} longest
      * @return {string|null}
      */
-    quoted(text, longest) {
+    guarded(text) {
         const settings = ScribeReminder.Settings;
-        const lookAlikes = Array.from(settings.LookAlikeQuotes);
-        const said = Array.from(
-            ScribeReminder.clean(text, settings.WrittenForm)
-                .replace(settings.TrailingMarks, settings.Nothing)
-                .replace(settings.QuotationMarks, settings.Apostrophe)
-                .replace(settings.Backslashes, settings.Slash),
-            /**
-             * @param {string} character
-             * @return {string}
-             */
-            (character) => (lookAlikes.includes(character) ? settings.Apostrophe : character),
-        ).join(settings.Nothing);
+        const said = ScribeReminder.clean(text, settings.WrittenForm)
+            .replace(settings.TrailingMarks, settings.Nothing)
+            .replace(settings.Backslashes, settings.Slash);
         const fits =
             said !== settings.Nothing &&
             !settings.Frame.test(said.normalize(settings.NormalForm)) &&
-            Array.from(said).length <= longest;
-        return fits ? settings.Quote + said + settings.Quote : null;
+            Array.from(said).length <= settings.LongestText;
+        return fits ? said : null;
     },
 
     /**
@@ -11732,10 +12060,10 @@ const ScribeReminder = Object.freeze({
     named(persons) {
         const labels = persons.map(
             /**
-             * @param {{ subject: string|null, label: string|null }} person
+             * @param {{ label: string|null }} person
              * @return {string|null}
              */
-            (person) => (person.subject === null || person.label === null ? null : ScribeReminder.printed(person.label)),
+            (person) => (person.label === null ? null : ScribeReminder.printed(person.label)),
         );
         const counts = new Map();
         for (const label of labels) {
@@ -11762,30 +12090,51 @@ const ScribeReminder = Object.freeze({
      */
     namesakes(state, player) {
         const wanted = ScribeText.normaliseName(player);
-        return Object.freeze(
-            state.subjects
-                .filter(
+        const words = ScribeReminder.wordsOf(player);
+        const standing = state.subjects.filter(
+            /**
+             * @param {{ mergedInto: string|null }} subject
+             * @return {boolean}
+             */
+            (subject) => subject.mergedInto === null,
+        );
+        const exact = standing.filter(
+            /**
+             * @param {{ label: string, name: string, aka: readonly string[] }} subject
+             * @return {boolean}
+             */
+            (subject) =>
+                [subject.label, subject.name, ...subject.aka].some(
                     /**
-                     * @param {{ label: string, name: string, aka: readonly string[], mergedInto: string|null }} subject
+                     * @param {string} name
                      * @return {boolean}
                      */
-                    (subject) =>
-                        subject.mergedInto === null &&
-                        [subject.label, subject.name, ...subject.aka].some(
-                            /**
-                             * @param {string} name
-                             * @return {boolean}
-                             */
-                            (name) => ScribeText.normaliseName(name) === wanted,
-                        ),
-                )
-                .map(
-                    /**
-                     * @param {{ id: string }} subject
-                     * @return {string}
-                     */
-                    (subject) => subject.id,
+                    (name) => ScribeText.normaliseName(name) === wanted,
                 ),
+        );
+        const close = standing.filter(
+            /**
+             * @param {{ kind: string, label: string, name: string }} subject
+             * @return {boolean}
+             */
+            (subject) =>
+                subject.kind === ScribeCategory.SubjectKinds.Character &&
+                [subject.label, subject.name].some(
+                    /**
+                     * @param {string} name
+                     * @return {boolean}
+                     */
+                    (name) => ScribeReminder.begins(ScribeReminder.wordsOf(name), words),
+                ),
+        );
+        return Object.freeze(
+            (exact.length > 0 ? exact : close).map(
+                /**
+                 * @param {{ id: string }} subject
+                 * @return {string}
+                 */
+                (subject) => subject.id,
+            ),
         );
     },
 
@@ -11793,7 +12142,7 @@ const ScribeReminder = Object.freeze({
      * @param {object} state
      * @param {{ present: ReadonlyArray<{ subject: string|null, label: string }> }} now
      * @param {string} player
-     * @return {ReadonlyArray<Readonly<{ subject: string|null, label: string|null }>>}
+     * @return {ReadonlyArray<Readonly<{ subject: string|null, label: string|null, own: string|null }>>}
      */
     people(state, now, player) {
         const settings = ScribeReminder.Settings;
@@ -11835,7 +12184,7 @@ const ScribeReminder = Object.freeze({
         /**
          * @param {Map<string, Set<string>>} index
          * @param {string} key
-         * @param {string} owner
+         * @param {string|null} owner
          * @return {boolean}
          */
         const elsewhere = (index, key, owner) => {
@@ -11845,16 +12194,17 @@ const ScribeReminder = Object.freeze({
         const playerKey = keyOf(player);
         const article = ScribeText.normaliseName(settings.Article);
         /**
-         * @param {string} subject
-         * @return {string|null}
+         * @param {string|null} printed
+         * @param {string|null} subject
+         * @return {{ label: string|null, own: string|null }}
          */
-        const allowed = (subject) => {
-            const printed = books.has(subject) ? ScribeReminder.printed(books.get(subject)) : null;
+        const allowed = (printed, subject) => {
             if (printed === null) {
-                return null;
+                return { label: null, own: null };
             }
             const key = ScribeText.normaliseName(printed);
-            const taken = elsewhere(names, key, subject) || (key === playerKey && subject !== self);
+            const mine = subject !== null && subject === self;
+            const taken = elsewhere(names, key, subject) || (key === playerKey && !mine);
             const tested = printed.split(settings.Space).length >= settings.FewestTestedWords;
             const speaks =
                 tested &&
@@ -11872,7 +12222,10 @@ const ScribeReminder = Object.freeze({
                         );
                     },
                 );
-            return taken || speaks ? null : printed;
+            return {
+                label: taken || speaks ? null : printed,
+                own: taken || (speaks && subject === null) ? null : printed,
+            };
         };
         const found = [];
         const seen = new Set();
@@ -11882,74 +12235,453 @@ const ScribeReminder = Object.freeze({
                 const key = ScribeText.normaliseName(person.label);
                 if (!strangers.has(key)) {
                     strangers.add(key);
-                    found.push({ subject: null, label: null });
+                    found.push({ subject: null, ...allowed(ScribeReminder.printed(person.label), null) });
                 }
                 continue;
             }
             const subject = ScribeKnowledge.survivor(state, person.subject);
             if (!seen.has(subject)) {
                 seen.add(subject);
-                found.push({ subject, label: allowed(subject) });
+                const printed = books.has(subject) ? ScribeReminder.printed(books.get(subject)) : null;
+                found.push({ subject, ...allowed(printed, subject) });
             }
         }
         const labels = ScribeReminder.named(found);
+        const owns = ScribeReminder.named(
+            found.map(
+                /**
+                 * @param {{ subject: string|null, own: string|null }} person
+                 * @return {{ subject: string|null, label: string|null }}
+                 */
+                (person) => ({ subject: person.subject, label: person.own }),
+            ),
+        );
         return Object.freeze(
             found.map(
                 /**
                  * @param {{ subject: string|null }} person
                  * @param {number} index
-                 * @return {Readonly<{ subject: string|null, label: string|null }>}
+                 * @return {Readonly<{ subject: string|null, label: string|null, own: string|null }>}
                  */
-                (person, index) => Object.freeze({ subject: person.subject, label: labels[index] }),
+                (person, index) => Object.freeze({ subject: person.subject, label: labels[index], own: owns[index] }),
             ),
         );
     },
 
     /**
-     * @param {object} state
-     * @param {{ present: ReadonlyArray<{ subject: string|null, label: string }> }} now
-     * @param {string} player
-     * @param {readonly object[]} unread
-     * @return {ReadonlyArray<Readonly<{ number: number, kind: string, subject: string, fact: string, line: string }>>}
+     * @param {string} name
+     * @return {string[]}
      */
-    candidates(state, now, player, unread) {
+    wordsOf(name) {
+        return ScribeText.normaliseName(name).split(ScribeReminder.Settings.Space);
+    },
+
+    /**
+     * @param {readonly string[]} first
+     * @param {readonly string[]} second
+     * @return {boolean}
+     */
+    begins(first, second) {
+        const shorter = first.length <= second.length ? first : second;
+        const longer = shorter === first ? second : first;
+        return shorter.every(
+            /**
+             * @param {string} word
+             * @param {number} index
+             * @return {boolean}
+             */
+            (word, index) => word === longer[index],
+        );
+    },
+
+    /**
+     * @param {readonly object[]} notes
+     * @param {{ keys: readonly string[], label: string|null }} person
+     * @param {string} kind
+     * @param {ReadonlyArray<{ keys: readonly string[] }>} present
+     * @param {function(string, object): boolean} foreign
+     * @return {object|null}
+     */
+    noteOf(notes, person, kind, present, foreign) {
+        let found = null;
+        for (const note of notes) {
+            if (note.kind !== kind) {
+                continue;
+            }
+            const key = ScribeText.normaliseName(note.name);
+            const words = ScribeReminder.wordsOf(note.name);
+            /**
+             * @param {{ keys: readonly string[] }} other
+             * @return {boolean}
+             */
+            const near = (other) =>
+                other.keys.some(
+                    /**
+                     * @param {string} name
+                     * @return {boolean}
+                     */
+                    (name) => ScribeReminder.begins(ScribeReminder.wordsOf(name), words),
+                );
+            /**
+             * @param {{ keys: readonly string[] }} other
+             * @return {boolean}
+             */
+            const same = (other) => other.keys.includes(key);
+            const free = person.keys.some(
+                /**
+                 * @param {string} name
+                 * @return {boolean}
+                 */
+                (name) => {
+                    const form = ScribeReminder.wordsOf(name);
+                    const shared = form.length < words.length ? name : key;
+                    return ScribeReminder.begins(form, words) && !foreign(ScribeText.normaliseName(shared), person);
+                },
+            );
+            const exact = same(person) && present.filter(same).length === 1;
+            const close = person.label !== null && !same(person) && free && present.filter(near).length === 1;
+            if ((exact || close) && (found === null || note.position > found.position)) {
+                found = note;
+            }
+        }
+        return found;
+    },
+
+    /**
+     * @param {object} state
+     * @param {string} subject
+     * @param {*} characters
+     * @return {string|null}
+     */
+    writer(state, subject, characters) {
+        if (!Array.isArray(characters)) {
+            return null;
+        }
+        const record = state.subjects.find(
+            /**
+             * @param {{ id: string }} candidate
+             * @return {boolean}
+             */
+            (candidate) => candidate.id === subject,
+        );
+        if (record === undefined || record.kind !== ScribeCategory.SubjectKinds.Character) {
+            return null;
+        }
+        const forms = [record.label, record.name, ...record.aka];
+        const keys = forms.map(
+            /**
+             * @param {string} form
+             * @return {string}
+             */
+            (form) => ScribeText.normaliseName(form),
+        );
+        let found = null;
+        for (const character of characters) {
+            if (keys.includes(ScribeText.normaliseName(character.name))) {
+                return character.description;
+            }
+            const words = ScribeReminder.wordsOf(character.name);
+            const near = forms.some(
+                /**
+                 * @param {string} form
+                 * @return {boolean}
+                 */
+                (form) => ScribeReminder.begins(ScribeReminder.wordsOf(form), words),
+            );
+            if (found === null && near) {
+                found = character.description;
+            }
+        }
+        return found;
+    },
+
+    /**
+     * @param {string} text
+     * @return {string[]}
+     */
+    content(text) {
+        const light = ScribeReminder.Settings.LightWords;
+        return ScribeText.words(text).filter(
+            /**
+             * @param {string} word
+             * @return {boolean}
+             */
+            (word) => !light.includes(word),
+        );
+    },
+
+    /**
+     * @param {readonly string[]} sought
+     * @param {readonly string[]} words
+     * @return {number[]}
+     */
+    within(sought, words) {
+        const starts = [];
+        for (let index = 0; sought.length > 0 && index + sought.length <= words.length; index++) {
+            const matched = sought.every(
+                /**
+                 * @param {string} word
+                 * @param {number} offset
+                 * @return {boolean}
+                 */
+                (word, offset) => word === words[index + offset],
+            );
+            if (matched) {
+                starts.push(index);
+            }
+        }
+        return starts;
+    },
+
+    /**
+     * @param {string} text
+     * @param {string} description
+     * @return {boolean}
+     */
+    added(text, description) {
+        const sought = ScribeReminder.content(text);
+        return sought.length > 0 && ScribeReminder.within(sought, ScribeReminder.content(description)).length === 0;
+    },
+
+    /**
+     * @param {string} text
+     * @param {readonly string[]} phrases
+     * @return {boolean}
+     */
+    restates(text, phrases) {
+        const words = ScribeReminder.content(text);
+        const covered = new Set();
+        for (const phrase of phrases) {
+            const sought = ScribeReminder.content(phrase);
+            for (const start of ScribeReminder.within(sought, words)) {
+                for (let offset = 0; offset < sought.length; offset++) {
+                    covered.add(start + offset);
+                }
+            }
+        }
+        return covered.size === words.length;
+    },
+
+    /**
+     * @param {string} text
+     * @return {string[]}
+     */
+    tokens(text) {
         const settings = ScribeReminder.Settings;
-        const kinds = ScribeReminder.Kind;
-        const relation = ScribeCategory.Settings.RelationCategory;
+        return text.split(settings.Space).map(
+            /**
+             * @param {string} token
+             * @return {string}
+             */
+            (token) => {
+                const [word = settings.Nothing] = ScribeText.words(token);
+                return word;
+            },
+        );
+    },
+
+    /**
+     * @param {string} text
+     * @return {string}
+     */
+    head(text) {
+        const settings = ScribeReminder.Settings;
+        const cut = text.search(settings.ClauseBreak);
+        return (cut === settings.NotFound ? text : text.slice(0, cut)).trimEnd();
+    },
+
+    /**
+     * @param {string} text
+     * @return {boolean}
+     */
+    linked(text) {
+        return ScribeReminder.tokens(text).some(
+            /**
+             * @param {string} token
+             * @return {boolean}
+             */
+            (token) => ScribeReminder.Settings.Prepositions.includes(token),
+        );
+    },
+
+    /**
+     * @param {string} word
+     * @return {boolean}
+     */
+    counted(word) {
+        const settings = ScribeReminder.Settings;
+        return settings.Numeral.test(word) || settings.NumberWords.includes(word);
+    },
+
+    /**
+     * @param {string} category
+     * @param {string} text
+     * @return {string}
+     */
+    looked(category, text) {
+        const settings = ScribeReminder.Settings;
+        if (!Object.hasOwn(settings.LookClauses, category)) {
+            return text;
+        }
+        const clause = settings.LookClauses[category];
+        const marked = ScribeText.words(text).some(
+            /**
+             * @param {string} word
+             * @return {boolean}
+             */
+            (word) => clause.nouns.includes(word) || clause.adjectives.includes(word),
+        );
+        const head = ScribeReminder.head(text);
+        const [first] = ScribeReminder.tokens(head);
+        const counted = ScribeReminder.counted(first);
+        const bare = clause.counted
+            ? counted
+            : !counted && !settings.Determiners.includes(first) && !ScribeReminder.linked(head);
+        if (marked || !bare || head === settings.Nothing) {
+            return text;
+        }
+        return clause.prefix + head + clause.suffix + text.slice(head.length);
+    },
+
+    /**
+     * @param {string} category
+     * @param {string} text
+     * @return {string}
+     */
+    stated(category, text) {
+        const settings = ScribeReminder.Settings;
+        const shapes = ScribeReminder.Shape;
+        const shape = Object.hasOwn(settings.Shapes, category) ? settings.Shapes[category] : shapes.Habit;
+        const tokens = ScribeReminder.tokens(text);
+        const [first] = tokens;
+        const single = tokens.length === 1;
+        const second = single ? settings.Nothing : tokens[1];
+        const named = settings.Determiners.includes(first) || ScribeReminder.counted(first);
+        const opening = settings.Prepositions.includes(first) || settings.Progressive.test(first);
+        const loose = single || settings.Prepositions.includes(second) || settings.Joiners.includes(second);
+        const acting = settings.PresentVerb.test(first);
+        if (shape === shapes.Named) {
+            return settings.Called[category] + text;
+        }
+        if (shape === shapes.Look) {
+            const look = ScribeReminder.looked(category, text);
+            const clause = settings.LookClauses[category];
+            const adjective = ScribeText.words(text).some(
+                /**
+                 * @param {string} word
+                 * @return {boolean}
+                 */
+                (word) => clause.adjectives.includes(word),
+            );
+            const noun = look !== text || named || clause.nouns.includes(first);
+            const being = clause.counted || (!noun && (adjective || ScribeReminder.linked(ScribeReminder.head(text))));
+            return (being ? settings.Is : settings.Has) + look;
+        }
+        if (settings.Leads.includes(first)) {
+            return text;
+        }
+        if (shape === shapes.Past) {
+            return named || opening ? settings.Was + text : text;
+        }
+        if (opening) {
+            return settings.Is + text;
+        }
+        if (shape === shapes.Owned) {
+            return settings.Has + text;
+        }
+        if (shape === shapes.Where) {
+            return acting ? text : settings.IsAt + text;
+        }
+        if (shape === shapes.State) {
+            return acting ? text : settings.Is + text;
+        }
+        if (named) {
+            return settings.Has + text;
+        }
+        if (shape === shapes.Habit) {
+            return acting ? text : settings.Is + text;
+        }
+        if (settings.Plural.test(first)) {
+            return single && shape === shapes.Passing ? settings.IsIn + text : settings.Has + text;
+        }
+        return loose ? settings.Is + text : settings.Has + text;
+    },
+
+    /**
+     * @param {{ state: object, now: ?object, player: string, unread: *, notes: *, characters: *, first: * }} request
+     * @return {Readonly<{ text: string, led: readonly string[] }>|null}
+     */
+    compose({ state, now, player, unread, notes, characters, first }) {
+        const settings = ScribeReminder.Settings;
+        const parts = ScribeReminder.Part;
+        const kinds = ScribePedant.Note;
         const everyone = ScribeKnowledge.Everyone;
+        const relation = ScribeCategory.Settings.RelationCategory;
+        const wanted = Array.isArray(first) ? first : [];
         const namesakes = ScribeReminder.namesakes(state, player);
         const self = namesakes.length === 1 ? namesakes[0] : null;
-        const heard = self === null ? now.present : [...now.present, { subject: self, label: settings.Nothing }];
-        const present = ScribeReminder.people(state, { present: heard }, player);
+        const seen = now === null ? [] : now.present;
+        const heard = self === null ? seen : [...seen, { subject: self, label: settings.Nothing }];
+        const records = new Map();
+        const owners = new Map();
+        const holders = new Map();
+        for (const subject of state.subjects) {
+            const owner = subject.mergedInto === null ? subject.id : subject.mergedInto;
+            records.set(subject.id, subject);
+            owners.set(subject.id, owner);
+            for (const name of [subject.label, subject.name, ...subject.aka]) {
+                const key = ScribeText.normaliseName(name);
+                const held = holders.get(key) ?? new Set();
+                held.add(owner);
+                holders.set(key, held);
+            }
+        }
+        const playerKey = ScribeText.normaliseName(player);
+        /**
+         * @param {string} key
+         * @param {{ subject: string|null, self: boolean }} person
+         * @return {boolean}
+         */
+        const foreign = (key, person) => {
+            const held = holders.get(key);
+            const other = held !== undefined && (held.size > 1 || !held.has(person.subject));
+            return other || (key === playerKey && !person.self);
+        };
+        const present = ScribeReminder.people(state, { present: heard }, player).map(
+            /**
+             * @param {{ subject: string|null, label: string|null, own: string|null }} person
+             * @return {{ subject: string|null, label: string|null, own: string|null, keys: string[], self: boolean }}
+             */
+            (person) => {
+                const record = person.subject === null ? undefined : records.get(person.subject);
+                const mine = person.subject !== null && person.subject === self;
+                const forms = [
+                    ...(person.own === null ? [] : [person.own]),
+                    ...(record === undefined ? [] : [record.label, record.name, ...record.aka]),
+                    ...(mine ? [player] : []),
+                ];
+                const keys = [
+                    ...new Set(
+                        forms.map(
+                            /**
+                             * @param {string} form
+                             * @return {string}
+                             */
+                            (form) => ScribeText.normaliseName(form),
+                        ),
+                    ),
+                ];
+                return { subject: person.subject, label: person.label, own: person.own, keys, self: mine };
+            },
+        );
+        const inRoom = new Set();
         const names = new Map();
         for (const person of present) {
             if (person.subject !== null) {
+                inRoom.add(person.subject);
                 names.set(person.subject, person.label);
             }
         }
-        const room = present.filter(
-            /**
-             * @param {{ subject: string|null }} person
-             * @return {boolean}
-             */
-            (person) => self === null || person.subject !== self,
-        );
-        const owners = room.filter(
-            /**
-             * @param {{ subject: string|null }} person
-             * @return {boolean}
-             */
-            (person) => person.subject !== null,
-        );
-        const inRoom = new Set(
-            owners.map(
-                /**
-                 * @param {{ subject: string }} person
-                 * @return {string}
-                 */
-                (person) => person.subject,
-            ),
-        );
         const contested = new Set();
         for (const conflict of state.conflicts) {
             contested.add(conflict.established);
@@ -11958,8 +12690,13 @@ const ScribeReminder = Object.freeze({
             }
         }
         const byId = new Map();
+        const factsOf = new Map();
         for (const fact of state.facts) {
             byId.set(fact.id, fact);
+            const owner = owners.get(fact.subject);
+            const listed = factsOf.get(owner) ?? [];
+            listed.push(fact);
+            factsOf.set(owner, listed);
         }
         const thinner = new Map();
         for (const refinement of state.refinements) {
@@ -11967,15 +12704,57 @@ const ScribeReminder = Object.freeze({
         }
         /**
          * @param {object} fact
-         * @return {object[]}
+         * @return {boolean}
          */
-        const chainOf = (fact) => {
-            const chain = [];
+        const quarrel = (fact) => {
             for (let wording = fact; wording !== undefined; wording = thinner.get(wording.id)) {
-                chain.push(wording);
+                if (contested.has(wording.id)) {
+                    return true;
+                }
             }
-            return chain;
+            return false;
         };
+        /**
+         * @param {object} fact
+         * @return {boolean}
+         */
+        const veiled = (fact) => fact.hidden && fact.widened !== everyone;
+        /**
+         * @param {object} fact
+         * @return {boolean}
+         */
+        const usable = (fact) => {
+            const kind = ScribeReplay.kindOf(fact.category);
+            const changing = kind === ScribeCategory.Kind.Moving || kind === ScribeCategory.Kind.Passing;
+            const target = fact.target === null ? null : ScribeKnowledge.survivor(state, fact.target);
+            const aimed = fact.category !== relation || (target !== null && inRoom.has(target));
+            return (
+                fact.status === ScribeReplay.Status.InForce &&
+                !(changing && unread.length > 0) &&
+                aimed &&
+                !quarrel(fact)
+            );
+        };
+        /**
+         * @param {object} fact
+         * @return {string|null}
+         */
+        const clause = (fact) => {
+            const text = ScribeReminder.guarded(fact.text);
+            if (text === null) {
+                return null;
+            }
+            if (fact.category === relation) {
+                const target = names.get(ScribeKnowledge.survivor(state, fact.target));
+                return target === null ? null : settings.Toward + target + settings.Colon + text;
+            }
+            return ScribeReminder.stated(fact.category, text);
+        };
+        /**
+         * @param {object} fact
+         * @return {string}
+         */
+        const joint = (fact) => (veiled(fact) && fact.category !== relation ? settings.Secretly : settings.Space);
         /**
          * @param {{ subject: string|null }} person
          * @param {object} fact
@@ -11986,417 +12765,366 @@ const ScribeReminder = Object.freeze({
                 ? ScribeKnowledge.audience(state, fact) === everyone
                 : ScribeKnowledge.knows(state, person.subject, fact);
         /**
-         * @param {object} fact
-         * @return {boolean}
+         * @param {readonly string[]} labels
+         * @return {string}
          */
-        const usable = (fact) => {
-            const kind = ScribeReplay.kindOf(fact.category);
-            const changing = kind === ScribeCategory.Kind.Moving || kind === ScribeCategory.Kind.Passing;
-            const target = fact.target === null ? null : ScribeKnowledge.survivor(state, fact.target);
-            const aimed = fact.category !== relation || (target !== null && (inRoom.has(target) || target === self));
-            const quarrel = chainOf(fact).some(
+        const listed = (labels) =>
+            labels.length === 1
+                ? labels[0]
+                : labels.slice(0, settings.Last).join(settings.Comma) + settings.And + labels.at(settings.Last);
+        /**
+         * @param {{ subject: string|null }} person
+         * @return {object[]}
+         */
+        const factsAbout = (person) => (person.subject === null ? [] : (factsOf.get(person.subject) ?? []));
+        /**
+         * @param {object} person
+         * @param {object} fact
+         * @return {{ tail: string|null, everyone: boolean }}
+         */
+        const audience = (person, fact) => {
+            const watching = present.filter(
                 /**
-                 * @param {{ id: string }} wording
+                 * @param {object} other
                  * @return {boolean}
                  */
-                (wording) => contested.has(wording.id),
+                (other) => other !== person,
             );
-            return fact.status === ScribeReplay.Status.InForce && !(changing && unread.length > 0) && aimed && !quarrel;
-        };
-        /**
-         * @param {object} fact
-         * @return {string|null}
-         */
-        const statement = (fact) => {
-            const text = ScribeReminder.quoted(fact.text, settings.LongestText);
-            const category = ScribeReminder.clean(fact.category, settings.NormalForm);
-            const plain =
-                settings.CategoryCharacters.test(category) && Array.from(category).length <= settings.LongestCategory;
-            if (text === null || !plain) {
-                return null;
-            }
-            if (fact.category !== relation) {
-                return category + settings.Colon + text;
-            }
-            const target = names.get(ScribeKnowledge.survivor(state, fact.target));
-            return target === null ? null : settings.Toward + target + settings.Colon + text;
-        };
-        /**
-         * @param {ReadonlyArray<{ label: string|null }>} people
-         * @return {string|null}
-         */
-        const listed = (people) => {
-            const labels = people.map(
+            const knowers = watching.filter(
                 /**
-                 * @param {{ label: string|null }} person
+                 * @param {object} other
+                 * @return {boolean}
+                 */
+                (other) => knowing(other, fact),
+            );
+            const unnamed = knowers.some(
+                /**
+                 * @param {{ label: string|null }} knower
+                 * @return {boolean}
+                 */
+                (knower) => knower.label === null,
+            );
+            const labels = knowers.map(
+                /**
+                 * @param {{ label: string|null }} knower
                  * @return {string|null}
                  */
-                (person) => person.label,
+                (knower) => knower.label,
             );
-            if (labels.includes(null)) {
-                return null;
-            }
-            const last = labels.pop();
-            return labels.length === 0 ? last : labels.join(settings.Comma) + settings.And + last;
+            const verb = labels.length === 1 ? settings.KnowsOne : settings.KnowMany;
+            const tail = labels.length === 0 ? settings.NoOneElse : settings.OnlyOpen + listed(labels) + verb;
+            return { tail: unnamed ? null : tail, everyone: knowers.length === watching.length };
         };
-        const offered = [];
-        /**
-         * @param {string} kind
-         * @param {string} subject
-         * @param {string} fact
-         * @param {string} line
-         * @return {void}
-         */
-        const offer = (kind, subject, fact, line) => {
-            offered.push(Object.freeze({ number: offered.length + 1, kind, subject, fact, line }));
-        };
-        const playerLabel = self === null ? null : names.get(self);
-        if (playerLabel !== null && room.length > 0) {
-            const wordings = new Map();
-            for (const person of owners) {
-                const known = new Set();
-                for (const fact of ScribeKnowledge.about(state, person.subject, self).facts) {
-                    known.add(fact.id);
-                }
-                wordings.set(person.subject, known);
-            }
-            for (const fact of state.facts) {
-                if (fact.subject !== self || !usable(fact)) {
-                    continue;
-                }
-                const holders = room.filter(
-                    /**
-                     * @param {{ subject: string|null }} person
-                     * @return {boolean}
-                     */
-                    (person) => knowing(person, fact),
-                );
-                if (holders.length === room.length) {
-                    continue;
-                }
-                const placed = new Set(holders);
-                const groups = [];
-                for (const wording of chainOf(fact).slice(1)) {
-                    const people = room.filter(
-                        /**
-                         * @param {{ subject: string|null }} person
-                         * @return {boolean}
-                         */
-                        (person) =>
-                            !placed.has(person) &&
-                            (person.subject === null
-                                ? ScribeKnowledge.audience(state, wording) === everyone
-                                : wordings.get(person.subject).has(wording.id)),
-                    );
-                    for (const person of people) {
-                        placed.add(person);
-                    }
-                    if (people.length > 0) {
-                        groups.push({ wording, people });
-                    }
-                }
-                const parts = groups.map(
-                    /**
-                     * @param {{ wording: object, people: ReadonlyArray<{ label: string|null }> }} group
-                     * @return {string|null}
-                     */
-                    (group) => {
-                        const knowers = listed(group.people);
-                        const thin = statement(group.wording);
-                        const verb = group.people.length === 1 ? settings.PartOne : settings.PartMany;
-                        return knowers === null || thin === null ? null : settings.PartOpen + knowers + verb + thin;
-                    },
-                );
-                const said = statement(fact);
-                const knowers = holders.length === 0 ? settings.Nothing : listed(holders);
-                if (said === null || knowers === null || parts.includes(null)) {
-                    continue;
-                }
-                let line = settings.NoOneKnows + playerLabel + settings.Colon + said;
-                if (holders.length > 0) {
-                    const verb = holders.length === 1 ? settings.KnowsOne : settings.KnowsMany;
-                    const tail = groups.length === 0 ? settings.OthersDoNot : settings.Colon;
-                    line = settings.OnlyOpen + knowers + verb + playerLabel + tail + said;
-                } else if (groups.length > 0) {
-                    line = settings.NotWhole + playerLabel + settings.Colon + said;
-                } else if (fact.hidden && fact.widened !== everyone) {
-                    line = playerLabel + settings.KeepsSecret + said;
-                }
-                const ending = groups.length > 0 && placed.size < room.length ? settings.NothingOfIt : settings.Nothing;
-                const kind = holders.length === 0 ? kinds.Unknown : kinds.Knows;
-                offer(kind, self, fact.id, line + parts.join(settings.Nothing) + ending);
-            }
-        }
-        for (const owner of self === null ? owners : [...owners, { subject: self, label: playerLabel }]) {
-            if (owner.label === null) {
-                continue;
-            }
-            for (const fact of state.facts) {
-                const open = !fact.hidden || fact.widened === everyone;
-                if (fact.subject !== owner.subject || !open || !usable(fact)) {
-                    continue;
-                }
-                const told =
-                    room.every(
-                        /**
-                         * @param {{ subject: string|null }} person
-                         * @return {boolean}
-                         */
-                        (person) => knowing(person, fact),
-                    ) &&
-                    namesakes.every(
-                        /**
-                         * @param {string} namesake
-                         * @return {boolean}
-                         */
-                        (namesake) => ScribeKnowledge.knows(state, namesake, fact),
-                    );
-                const said = statement(fact);
-                if (told && said !== null) {
-                    const joiner = fact.category === relation ? settings.Space : settings.Comma;
-                    offer(kinds.Fact, owner.subject, fact.id, owner.label + joiner + said);
-                }
-            }
-        }
-        return Object.freeze(offered);
-    },
-
-    /**
-     * @param {{ day: number, place: string, reach: string, present: ReadonlyArray<{ label: string }>, summary: string }} now
-     * @param {ReadonlyArray<{ number: number, line: string }>} candidates
-     * @param {readonly object[]} recent
-     * @return {string}
-     */
-    chooseInput(now, candidates, recent) {
-        const settings = ScribeReminder.Settings;
-        const headings = settings.Headings;
-        const labels = now.present.map(
-            /**
-             * @param {{ label: string }} person
-             * @return {string}
-             */
-            (person) => ScribeIntake.collapse(person.label),
-        );
-        const scene = [
-            settings.Day + now.day,
-            ScribeIntake.collapse(now.place),
-            now.reach.toLowerCase(),
-            settings.ScenePresent + (labels.length === 0 ? settings.Nobody : labels.join(settings.Comma)),
-            ScribeIntake.collapse(now.summary),
-        ].join(settings.Joiner);
-        const entries = candidates.map(
-            /**
-             * @param {{ number: number, line: string }} candidate
-             * @return {string}
-             */
-            (candidate) => candidate.number + settings.NumberClose + candidate.line,
-        );
-        return [
-            headings.Scene + settings.Newline + scene,
-            [headings.Entries, ...entries].join(settings.Newline),
-            headings.Recent + settings.Newline + ScribeIntake.transcript(recent.slice(-settings.RecentShown)),
-        ].join(settings.BlankLine);
-    },
-
-    /**
-     * @param {*} text
-     * @param {ReadonlyArray<{ number: number }>} candidates
-     * @return {readonly object[]|null}
-     */
-    chosen(text, candidates) {
-        const settings = ScribeReminder.Settings;
-        if (typeof text !== 'string') {
-            return null;
-        }
-        const lines = text.split(settings.LineBreak).map(
-            /**
-             * @param {string} line
-             * @return {string}
-             */
-            (line) => line.replace(settings.AnswerDress, settings.Nothing),
-        );
-        for (const [index, line] of lines.entries()) {
-            const head = line.match(settings.UseHead);
-            if (head === null) {
-                continue;
-            }
-            let listed = head[settings.ListGroup];
-            if (listed === settings.Nothing) {
-                const next = lines.slice(index + 1).find(
-                    /**
-                     * @param {string} later
-                     * @return {boolean}
-                     */
-                    (later) => later !== settings.Nothing,
-                );
-                listed = next === undefined ? settings.Nothing : next;
-            }
-            if (settings.NoneList.test(listed)) {
-                return Object.freeze([]);
-            }
-            if (!settings.NumberList.test(listed)) {
-                continue;
-            }
-            const numbers = new Set();
-            for (const [digits] of listed.matchAll(settings.Digits)) {
-                numbers.add(Number(digits));
-            }
-            const kept = candidates
-                .filter(
-                    /**
-                     * @param {{ number: number }} candidate
-                     * @return {boolean}
-                     */
-                    (candidate) => numbers.has(candidate.number),
-                )
-                .slice(0, settings.MostChosen);
-            return kept.length === 0 ? null : Object.freeze(kept);
-        }
-        return null;
-    },
-
-    /**
-     * @param {{ day: number, place: string, reach: string, present: ReadonlyArray<{ subject: string|null, label: string|null }> }} now
-     * @param {ReadonlyArray<{ line: string }>} entries
-     * @return {Readonly<{ text: string, used: readonly object[] }>}
-     */
-    fit(now, entries) {
-        const settings = ScribeReminder.Settings;
-        const labels = ScribeReminder.named(now.present);
-        const shown = labels.filter(
-            /**
-             * @param {string|null} label
-             * @return {boolean}
-             */
-            (label) => label !== null,
-        );
-        /**
-         * @param {number} kept
-         * @return {string}
-         */
-        const list = (kept) => {
-            const counted = labels.length - kept;
-            if (kept === 0) {
-                if (counted === 0) {
-                    return settings.Nobody;
-                }
-                return counted + (counted === 1 ? settings.OnePerson : settings.ManyPeople);
-            }
-            const names = shown.slice(0, kept).join(settings.Comma);
-            if (counted === 0) {
-                return names;
-            }
-            return names + settings.AndCount + counted + (counted === 1 ? settings.OneOther : settings.ManyOthers);
-        };
-        /**
-         * @param {string|null} place
-         * @param {number} kept
-         * @return {string}
-         */
-        const open = (place, kept) =>
-            ScribeIntake.Settings.OwnMarker +
-            settings.Space +
-            settings.Day +
-            now.day +
-            settings.Comma +
-            (place === null ? settings.Nothing : place + settings.Comma) +
-            now.reach.toLowerCase() +
-            settings.FullStop +
-            settings.Space +
-            settings.Present +
-            list(kept) +
-            settings.FullStop;
-        const written = ScribeReminder.quoted(now.place, settings.LongestPlace);
-        const place = written === null || ScribeText.bytes(written) > settings.MostPlaceBytes ? null : written;
-        let kept = shown.length;
-        let text = open(place, kept);
-        while (kept > 0 && ScribeText.bytes(text) > settings.MostOpening) {
-            kept--;
-            text = open(place, kept);
-        }
-        if (ScribeText.bytes(text) > settings.MostOpening) {
-            text = open(null, kept);
-        }
-        const used = [];
-        for (const entry of entries) {
-            const longer = text + settings.Space + entry.line + settings.FullStop;
-            if (ScribeText.bytes(longer) <= settings.MaxBytes) {
-                text = longer;
-                used.push(entry);
-            }
-        }
-        return Object.freeze({ text, used: Object.freeze(used) });
-    },
-
-    /**
-     * @param {{ day: number, place: string, reach: string, present: ReadonlyArray<{ subject: string|null, label: string|null }> }} now
-     * @param {ReadonlyArray<{ line: string }>} entries
-     * @return {string}
-     */
-    write(now, entries) {
-        return ScribeReminder.fit(now, entries).text;
-    },
-
-    /**
-     * @param {{ state: object, now: object|null, player: string, recent: readonly object[], unread: readonly object[], ask: function(string, string): Promise<{ text: string }>, first?: * }} request
-     * @return {Promise<Readonly<{ text: string, used: readonly object[], led: readonly string[] }>|null>}
-     */
-    async compose({ state, now, player, recent, unread, ask, first }) {
-        const settings = ScribeReminder.Settings;
-        if (now === null) {
-            return null;
-        }
-        const wanted = Array.isArray(first) ? first : [];
-        const offered = ScribeReminder.candidates(state, now, player, unread);
-        const scene = Object.freeze({ ...now, present: ScribeReminder.people(state, now, player) });
-        const leading = [];
+        const pieces = [];
+        const said = new Set();
         for (const id of wanted) {
-            const found = offered.find(
+            const fact = byId.get(id);
+            if (fact === undefined || said.has(id) || !usable(fact)) {
+                continue;
+            }
+            const owner = owners.get(fact.subject);
+            const person = present.find(
                 /**
-                 * @param {{ fact: string }} candidate
+                 * @param {{ subject: string|null }} candidate
                  * @return {boolean}
                  */
-                (candidate) => candidate.fact === id,
+                (candidate) => candidate.subject === owner,
             );
-            if (found !== undefined && !leading.includes(found) && leading.length < settings.MostChosen) {
-                leading.push(found);
+            const words = clause(fact);
+            if (person === undefined || person.label === null || words === null || (veiled(fact) && person.self)) {
+                continue;
+            }
+            const tail = veiled(fact) ? audience(person, fact).tail : settings.FullStop;
+            if (tail !== null) {
+                said.add(id);
+                const text = person.label + joint(fact) + words + tail;
+                pieces.push({ part: parts.Correction, person, fact: id, text });
             }
         }
-        const rest = offered.filter(
+        for (const person of present) {
+            const note =
+                person.own === null ? null : ScribeReminder.noteOf(notes, person, kinds.Wearing, present, foreign);
+            const worn = note === null ? null : note.text.replace(settings.WearingLead, settings.Nothing);
+            const text = worn === null ? null : ScribeReminder.guarded(worn);
+            if (text !== null) {
+                pieces.push({ part: parts.Wearing, person, fact: null, text });
+            }
+        }
+        const others = present.filter(
             /**
-             * @param {object} candidate
+             * @param {{ self: boolean, label: string|null }} person
              * @return {boolean}
              */
-            (candidate) => !leading.includes(candidate),
+            (person) => !person.self && person.label !== null,
         );
-        const places = settings.MostChosen - leading.length;
-        let picked = rest.slice(0, places);
-        if (places > 0 && rest.length > places) {
-            const input = ScribeReminder.chooseInput(now, rest, recent);
-            let text;
-            try {
-                text = (await ask(ScribeReminder.ChoosePrompt, input)).text;
-            } catch {
-                text = null;
+        for (const person of others) {
+            for (const fact of factsAbout(person)) {
+                if (said.has(fact.id) || !veiled(fact) || !usable(fact)) {
+                    continue;
+                }
+                const known = audience(person, fact);
+                const words = clause(fact);
+                if (known.everyone || known.tail === null || words === null) {
+                    continue;
+                }
+                said.add(fact.id);
+                const text = person.label + joint(fact) + words + known.tail;
+                pieces.push({ part: parts.Secret, person, fact: null, text });
             }
-            const chosen = ScribeReminder.chosen(text, rest);
-            picked = chosen === null ? rest.slice(0, places) : chosen.slice(0, places);
         }
-        const fitted = ScribeReminder.fit(scene, [...leading, ...picked]);
-        const led = [];
-        for (const id of wanted) {
-            const said = fitted.used.some(
+        for (const person of others) {
+            for (const fact of factsAbout(person)) {
+                const filed = settings.FiledOrigins.includes(fact.origin);
+                if (said.has(fact.id) || veiled(fact) || !filed || !usable(fact)) {
+                    continue;
+                }
+                const words = clause(fact);
+                if (words !== null) {
+                    said.add(fact.id);
+                    const text = person.label + settings.Space + words + settings.FullStop;
+                    pieces.push({ part: parts.Filed, person, fact: null, text });
+                }
+            }
+        }
+        const shown = present.filter(
+            /**
+             * @param {{ self: boolean, own: string|null }} person
+             * @return {boolean}
+             */
+            (person) => !person.self && person.own !== null,
+        );
+        for (const person of shown) {
+            const description =
+                person.subject === null ? null : ScribeReminder.writer(state, person.subject, characters);
+            const standing = factsAbout(person).filter(
                 /**
-                 * @param {{ fact: string }} candidate
+                 * @param {object} fact
                  * @return {boolean}
                  */
-                (candidate) => candidate.fact === id,
+                (fact) =>
+                    settings.LooksCategories.includes(fact.category) &&
+                    fact.status === ScribeReplay.Status.InForce &&
+                    !veiled(fact),
             );
-            if (said && !led.includes(id)) {
-                led.push(id);
+            const note = ScribeReminder.noteOf(notes, person, kinds.Looks, present, foreign);
+            const newest =
+                note !== null &&
+                standing.every(
+                    /**
+                     * @param {{ position: number }} fact
+                     * @return {boolean}
+                     */
+                    (fact) => fact.position < note.position,
+                );
+            const items = [];
+            const spoken = [];
+            for (const category of settings.LooksCategories) {
+                const facts = standing
+                    .filter(
+                        /**
+                         * @param {object} fact
+                         * @return {boolean}
+                         */
+                        (fact) => fact.category === category && usable(fact),
+                    )
+                    .sort(
+                        /**
+                         * @param {{ position: number }} earlier
+                         * @param {{ position: number }} later
+                         * @return {number}
+                         */
+                        (earlier, later) => earlier.position - later.position,
+                    );
+                for (const fact of facts) {
+                    const text = ScribeReminder.guarded(fact.text);
+                    if (text === null) {
+                        continue;
+                    }
+                    const look = ScribeReminder.looked(category, text);
+                    if (said.has(fact.id)) {
+                        spoken.push(look);
+                    } else if (!newest && (description === null || ScribeReminder.added(look, description))) {
+                        items.push(look);
+                        spoken.push(look);
+                    }
+                }
+            }
+            const text = note === null ? null : ScribeReminder.guarded(note.text);
+            const fits = text !== null && (description === null || ScribeReminder.added(text, description));
+            if (fits && !ScribeReminder.restates(text, spoken)) {
+                items.push(text);
+            }
+            if (items.length > 0) {
+                pieces.push({ part: parts.Looks, person, fact: null, text: items.join(settings.Comma) });
             }
         }
-        return Object.freeze({ text: fitted.text, used: fitted.used, led: Object.freeze(led) });
+        const places = [];
+        for (const subject of state.subjects) {
+            if (subject.mergedInto === null && subject.kind === ScribeCategory.SubjectKinds.Place) {
+                places.push(subject);
+            }
+        }
+        const threads = [];
+        for (const thread of state.threads) {
+            const text = thread.closed === null ? ScribeReminder.guarded(thread.text) : null;
+            if (text !== null) {
+                threads.push({ text, position: thread.position });
+            }
+        }
+        threads.sort(
+            /**
+             * @param {{ position: number }} earlier
+             * @param {{ position: number }} later
+             * @return {number}
+             */
+            (earlier, later) => later.position - earlier.position,
+        );
+        const forms = [];
+        for (const place of places) {
+            for (const form of [place.label, place.name, ...place.aka]) {
+                forms.push({ place, sought: ScribeText.words(form) });
+            }
+        }
+        forms.sort(
+            /**
+             * @param {{ sought: readonly string[] }} longer
+             * @param {{ sought: readonly string[] }} shorter
+             * @return {number}
+             */
+            (longer, shorter) => shorter.sought.length - longer.sought.length,
+        );
+        let job = null;
+        let visited = [];
+        for (const thread of threads) {
+            const words = ScribeText.words(thread.text);
+            const claimed = new Set();
+            const earliest = new Map();
+            for (const { place, sought } of forms) {
+                for (const start of ScribeReminder.within(sought, words)) {
+                    const span = [];
+                    for (let offset = 0; offset < sought.length; offset++) {
+                        span.push(start + offset);
+                    }
+                    const free = span.every(
+                        /**
+                         * @param {number} index
+                         * @return {boolean}
+                         */
+                        (index) => !claimed.has(index),
+                    );
+                    if (free) {
+                        for (const index of span) {
+                            claimed.add(index);
+                        }
+                        earliest.set(place, Math.min(start, earliest.get(place) ?? start));
+                    }
+                }
+            }
+            const named = Array.from(
+                earliest,
+                /**
+                 * @param {Array<object|number>} entry
+                 * @return {{ place: object, earliest: number }}
+                 */
+                ([place, index]) => ({ place, earliest: index }),
+            );
+            if (named.length > 0) {
+                job = thread;
+                visited = named.sort(
+                    /**
+                     * @param {{ earliest: number }} before
+                     * @param {{ earliest: number }} after
+                     * @return {number}
+                     */
+                    (before, after) => before.earliest - after.earliest,
+                );
+                break;
+            }
+        }
+        if (job === null && threads.length > 0) {
+            job = threads[0];
+        }
+        if (job !== null) {
+            const text = settings.Party + job.text + settings.FullStop;
+            pieces.push({ part: parts.Job, person: null, fact: null, text });
+        }
+        let described = 0;
+        for (const { place } of visited) {
+            const label = ScribeReminder.guarded(place.label);
+            let newest = null;
+            for (const fact of factsOf.get(place.id) ?? []) {
+                const fitting =
+                    settings.PlaceCategories.includes(fact.category) &&
+                    fact.status === ScribeReplay.Status.InForce &&
+                    !veiled(fact) &&
+                    !quarrel(fact) &&
+                    ScribeReminder.guarded(fact.text) !== null;
+                if (fitting && (newest === null || fact.position > newest.position)) {
+                    newest = fact;
+                }
+            }
+            if (described < settings.MostPlaces && label !== null && newest !== null) {
+                described++;
+                const text = label + settings.Colon + ScribeReminder.guarded(newest.text) + settings.FullStop;
+                pieces.push({ part: parts.Place, person: null, fact: null, text });
+            }
+        }
+        /**
+         * @param {readonly object[]} kept
+         * @return {string}
+         */
+        const render = (kept) => {
+            const sentences = [];
+            for (const piece of kept) {
+                /**
+                 * @param {string} part
+                 * @return {object|undefined}
+                 */
+                const sibling = (part) =>
+                    kept.find(
+                        /**
+                         * @param {{ part: string, person: object|null }} other
+                         * @return {boolean}
+                         */
+                        (other) => other.part === part && other.person === piece.person,
+                    );
+                if (piece.part === parts.Wearing) {
+                    const looks = sibling(parts.Looks);
+                    const tail = looks === undefined ? settings.Nothing : settings.Semicolon + looks.text;
+                    sentences.push(piece.person.own + settings.Wears + piece.text + tail + settings.FullStop);
+                } else if (piece.part !== parts.Looks) {
+                    sentences.push(piece.text);
+                } else if (sibling(parts.Wearing) === undefined) {
+                    sentences.push(piece.person.own + settings.Colon + piece.text + settings.FullStop);
+                }
+            }
+            return ScribeIntake.Settings.OwnMarker + settings.Space + sentences.join(settings.Space);
+        };
+        const kept = [...pieces];
+        let text = render(kept);
+        while (kept.length > 0 && ScribeText.bytes(text) > settings.MaxBytes) {
+            kept.pop();
+            text = render(kept);
+        }
+        if (kept.length === 0) {
+            return null;
+        }
+        const led = kept
+            .filter(
+                /**
+                 * @param {{ part: string }} piece
+                 * @return {boolean}
+                 */
+                (piece) => piece.part === parts.Correction,
+            )
+            .map(
+                /**
+                 * @param {{ fact: string }} piece
+                 * @return {string}
+                 */
+                (piece) => piece.fact,
+            );
+        return Object.freeze({ text, led: Object.freeze(led) });
     },
 });
 /** @file scribe/page/ScribePedant.js */
@@ -12441,6 +13169,7 @@ const ScribePedant = Object.freeze({
         TooLong: '(too long to show)',
         Headings: Object.freeze({
             Player: 'PLAYER CHARACTER:',
+            Profile: 'PLAYER CHARACTER PROFILE:',
             Ledger: 'LEDGER:',
             Unknown: 'DOES NOT KNOW:',
             Recent: 'RECENT MESSAGES:',
@@ -12758,6 +13487,7 @@ const ScribePedant = Object.freeze({
         PromptLines: Object.freeze([
             'You are the Pedant: a proofreader for an ongoing adult fiction roleplay between consenting adult characters. You never write story.',
             'You receive PLAYER CHARACTER, a LEDGER of established facts (each with an id like F12, its subject, its category and its text), a list of what certain speakers DO NOT KNOW, the RECENT MESSAGES before them, the messages SINCE THE BOOK WAS LAST READ, one REPLY from the storyteller, and NAME CANDIDATES: words in the REPLY that look like known names, each line giving the name, the word of that name it looks like, and the word in the REPLY.',
+            "PLAYER CHARACTER PROFILE is the player's own description of their character; trust it for that character.",
             'Find where the REPLY disagrees with the LEDGER, where a speaker uses something they do not know, which NAME CANDIDATES are misspellings, where the REPLY does not fit what the messages above establish, and what the characters wear and look like now.',
             '',
             'Answer with these five blocks, each starting with its === line. Leave a block out if it has nothing. Write nothing else.',
@@ -13358,9 +14088,10 @@ const ScribePedant = Object.freeze({
      * @param {readonly object[]} unread
      * @param {readonly object[]} candidates
      * @param {*} messages
+     * @param {string|null} profile
      * @return {string}
      */
-    input(state, player, message, unread, candidates, messages) {
+    input(state, player, message, unread, candidates, messages, profile = null) {
         const settings = ScribePedant.Settings;
         const headings = settings.Headings;
         const labels = ScribeAnalyzer.labels(state);
@@ -13407,11 +14138,14 @@ const ScribePedant = Object.freeze({
                     settings.Joiner,
                 ),
         );
-        const sections = [
-            ScribeAnalyzer.section(headings.Player, [player]),
+        const sections = [ScribeAnalyzer.section(headings.Player, [player])];
+        if (profile !== null) {
+            sections.push(ScribeAnalyzer.section(headings.Profile, [profile]));
+        }
+        sections.push(
             ScribeAnalyzer.section(headings.Ledger, ledger),
             ScribeAnalyzer.section(headings.Unknown, unknown),
-        ];
+        );
         if (recent !== settings.Nothing) {
             sections.push(ScribeAnalyzer.section(headings.Recent, [recent]));
         }
@@ -13845,18 +14579,18 @@ const ScribePedant = Object.freeze({
     },
 
     /**
-     * @param {{ state: object, player: string, message: object, unread: readonly object[], messages: *, ask: function(string, string): Promise<{ text: string }> }} request
+     * @param {{ state: object, player: string, message: object, unread: readonly object[], messages: *, ask: function(string, string): Promise<{ text: string }>, profile?: string|null }} request
      * @return {Promise<Readonly<{ findings: readonly object[], notes: readonly object[] }>>}
      * @throws {Error}
      */
-    async review({ state, player, message, unread, messages, ask }) {
+    async review({ state, player, message, unread, messages, ask, profile = null }) {
         if (message.fromPlayer) {
             return Object.freeze({ findings: Object.freeze([]), notes: Object.freeze([]) });
         }
         const candidates = ScribePedant.spellings(state, message).slice(0, ScribePedant.Settings.MostCandidates);
         const survey = ScribePedant.survey(state, player, message, unread);
         const shown = [...ScribePedant.recent(message, messages, survey.shown), ...survey.shown];
-        const input = ScribePedant.input(state, player, message, unread, candidates, messages);
+        const input = ScribePedant.input(state, player, message, unread, candidates, messages, profile);
         const { text } = await ask(ScribePedant.Prompt, input);
         const parsed = ScribePedant.parse(text);
         const confirmed = ScribePedant.confirm(state, player, message, parsed, unread);
@@ -14811,7 +15545,6 @@ const ScribeLive = Object.freeze({
         DismissedKept: 500,
         CheckedKept: 8,
         NotesKept: 100,
-        AnswersKept: 16,
         FirstMost: 5,
         FirstFinding: 0,
         FirstEpoch: 0,
@@ -14822,6 +15555,9 @@ const ScribeLive = Object.freeze({
         NoCount: 0,
         Last: -1,
         Nothing: '',
+        Space: ' ',
+        Fulfilled: 'fulfilled',
+        Uncast: Object.freeze({ characters: null, profile: null, notice: null }),
         StoppedPhase: 'Stopped',
         DoneStop: 'Done',
         ObjectType: 'object',
@@ -14848,6 +15584,8 @@ const ScribeLive = Object.freeze({
             NoBook: 'No book yet: adopt this chat first.',
             NotRead: 'The book has not finished its first reading.',
             LongEdit: 'A reminder may be at most 2,000 bytes; nothing was saved.',
+            StoryUnread: "The story's characters could not be read, so every character counts as custom: ",
+            ProfileUnread: 'The chat profile could not be read, so it is left out of the calls: ',
             Budget: "The day's budget is spent: replies are not checked and no new reminder is made until tomorrow.",
         }),
         NothingAppended: Object.freeze({
@@ -15298,8 +16036,11 @@ const ScribeLive = Object.freeze({
         record.led = record.ready !== null && ScribeLive.isTexts(saved.led) ? [...saved.led] : [];
         const basis = saved.basis;
         const sound =
-            ScribeLive.isObject(basis) && Number.isSafeInteger(basis.revision) && ScribeLive.isTexts(basis.first);
-        record.basis = sound ? { revision: basis.revision, first: [...basis.first] } : null;
+            ScribeLive.isObject(basis) &&
+            Number.isSafeInteger(basis.revision) &&
+            ScribeLive.isTexts(basis.first) &&
+            ScribeLive.isText(basis.notes);
+        record.basis = sound ? { revision: basis.revision, first: [...basis.first], notes: basis.notes } : null;
         record.edited = ScribeLive.edited(saved.edited);
         record.forced = saved.forced === true;
         record.sends = Number.isSafeInteger(saved.sends) && saved.sends >= settings.NoSends ? saved.sends : settings.NoSends;
@@ -15438,7 +16179,6 @@ const ScribeLive = Object.freeze({
             live.excluded = [];
             live.understood = null;
             live.appended = ScribeLive.Settings.NothingAppended;
-            live.answers = [];
             ScribeLive.changed(live);
         }
         try {
@@ -15592,15 +16332,29 @@ const ScribeLive = Object.freeze({
     },
 
     /**
-     * @param {{ revision: number, first: string[] }|null} basis
+     * @param {readonly object[]} notes
+     * @return {string}
+     */
+    marked(notes) {
+        return ScribeText.fingerprint(JSON.stringify(notes));
+    },
+
+    /**
+     * @param {{ revision: number, first: string[], notes: string }|null} basis
      * @param {object|null} reminded
      * @param {object|null} now
      * @param {readonly object[]} findings
+     * @param {readonly object[]} notes
      * @param {object} state
      * @return {boolean}
      */
-    holds(basis, reminded, now, findings, state) {
-        if (basis === null || state.revision !== basis.revision || !ScribeScene.same(reminded, now)) {
+    holds(basis, reminded, now, findings, notes, state) {
+        const differs =
+            basis === null ||
+            state.revision !== basis.revision ||
+            !ScribeScene.same(reminded, now) ||
+            ScribeLive.marked(notes) !== basis.notes;
+        if (differs) {
             return false;
         }
         const first = ScribeLive.first(findings, state);
@@ -15626,7 +16380,14 @@ const ScribeLive = Object.freeze({
         const record = live.record;
         return (
             record.ready !== null &&
-            ScribeLive.holds(record.basis, record.reminded, record.now, record.findings, view.state)
+            ScribeLive.holds(
+                record.basis,
+                record.reminded,
+                record.now,
+                record.findings,
+                ScribeLive.standing(record.notes, view),
+                view.state,
+            )
         );
     },
 
@@ -15641,55 +16402,89 @@ const ScribeLive = Object.freeze({
 
     /**
      * @param {object} live
+     * @return {Promise<Readonly<{ characters: readonly object[]|null, profile: string|null, notice: string|null }>>}
+     */
+    cast(live) {
+        const settings = ScribeLive.Settings;
+        const messages = settings.Messages;
+        if (live.cast !== null) {
+            return Promise.resolve(live.cast);
+        }
+        if (live.casting !== null) {
+            return live.casting;
+        }
+        const reads = [live.story, live.profile].map(
+            /**
+             * @param {() => Promise<*>} read
+             * @return {Promise<*>}
+             */
+            async (read) => read(),
+        );
+        live.casting = Promise.allSettled(reads).then(
+            /**
+             * @param {Array<{ status: string, value?: *, reason?: * }>} settled
+             * @return {Readonly<{ characters: readonly object[]|null, profile: string|null, notice: string|null }>}
+             */
+            (settled) => {
+                const [story, profile] = settled;
+                live.casting = null;
+                const failed = [story, profile].filter(
+                    /**
+                     * @param {{ status: string }} result
+                     * @return {boolean}
+                     */
+                    (result) => result.status !== settings.Fulfilled,
+                );
+                const unseen = failed.some(
+                    /**
+                     * @param {{ reason: * }} result
+                     * @return {boolean}
+                     */
+                    (result) => ScribeLive.words(result.reason) === ZetaSource.Settings.Messages.NoLogin,
+                );
+                if (live.closed || unseen) {
+                    return settings.Uncast;
+                }
+                const read = story.status === settings.Fulfilled;
+                const profiled = profile.status === settings.Fulfilled;
+                const notices = [];
+                if (!read) {
+                    notices.push(messages.StoryUnread + ScribeLive.words(story.reason));
+                }
+                if (!profiled) {
+                    notices.push(messages.ProfileUnread + ScribeLive.words(profile.reason));
+                }
+                live.cast = Object.freeze({
+                    characters: read ? story.value.characters : null,
+                    profile: profiled ? profile.value : null,
+                    notice: notices.length === settings.NoCount ? null : notices.join(settings.Space),
+                });
+                return live.cast;
+            },
+        );
+        return live.casting;
+    },
+
+    /**
+     * @param {object} live
      * @param {Readonly<object>} view
      * @param {object|null} now
      * @param {readonly object[]} findings
-     * @param {{ failure: string|null }} noted
-     * @return {Promise<{ composed: Readonly<{ text: string, led: readonly string[] }>|null, basis: { revision: number, first: string[] } }>}
+     * @param {readonly object[]} notes
+     * @return {Promise<{ composed: Readonly<{ text: string, led: readonly string[] }>|null, basis: { revision: number, first: string[], notes: string } }>}
      */
-    async remind(live, view, now, findings, noted) {
-        const settings = ScribeLive.Settings;
+    async remind(live, view, now, findings, notes) {
         const first = ScribeLive.first(findings, view.state);
-        const basis = { revision: view.state.revision, first };
-        const asked = ScribeLive.asker(live, settings.Roles.Scribe, noted);
-        /**
-         * @param {string} system
-         * @param {string} user
-         * @return {Promise<{ text: string, cost: * }>}
-         * @throws {Error}
-         */
-        const ask = async (system, user) => {
-            const request = JSON.stringify([system, user]);
-            const known = live.answers.find(
-                /**
-                 * @param {{ request: string }} entry
-                 * @return {boolean}
-                 */
-                (entry) => entry.request === request,
-            );
-            if (known !== undefined) {
-                return known.answer;
-            }
-            const answer = await asked(system, user);
-            live.answers = [
-                ...live.answers.filter(
-                    /**
-                     * @param {{ request: string }} entry
-                     * @return {boolean}
-                     */
-                    (entry) => entry.request !== request,
-                ),
-                { request, answer },
-            ].slice(-settings.AnswersKept);
-            return answer;
-        };
-        const composed = await ScribeReminder.compose({
+        const given = ScribeLive.standing(notes, view);
+        const basis = { revision: view.state.revision, first, notes: ScribeLive.marked(given) };
+        const cast = await ScribeLive.cast(live);
+        const composed = ScribeReminder.compose({
             state: view.state,
             now,
             player: view.player,
-            recent: view.messages.slice(-settings.Recent),
             unread: view.unread,
-            ask,
+            notes: given,
+            characters: cast.characters,
             first: [...first],
         });
         return { composed, basis };
@@ -15697,7 +16492,7 @@ const ScribeLive = Object.freeze({
 
     /**
      * @param {object} record
-     * @param {{ composed: Readonly<{ text: string, led: readonly string[] }>|null, basis: { revision: number, first: string[] } }|null} made
+     * @param {{ composed: Readonly<{ text: string, led: readonly string[] }>|null, basis: { revision: number, first: string[], notes: string } }|null} made
      * @return {void}
      */
     keep(record, made) {
@@ -15758,13 +16553,16 @@ const ScribeLive = Object.freeze({
         let notes = null;
         if (remembered === undefined) {
             const sceneNoted = { failure: null };
+            let profile = null;
             try {
+                profile = (await ScribeLive.cast(live)).profile;
                 found = await ScribeScene.now({
                     state: view.state,
                     player: view.player,
                     messages: view.messages,
                     previous,
                     ask: ScribeLive.asker(live, roles.Scribe, sceneNoted),
+                    profile,
                 });
             } catch (error) {
                 live.problem = ScribeLive.words(error);
@@ -15782,6 +16580,7 @@ const ScribeLive = Object.freeze({
                     unread: view.unread,
                     messages: view.messages,
                     ask: ScribeLive.asker(live, roles.Pedant, pedantNoted),
+                    profile,
                 });
                 raised = reviewed.findings;
                 notes = reviewed.notes;
@@ -15813,16 +16612,17 @@ const ScribeLive = Object.freeze({
             remembered !== undefined,
         );
         let made = null;
-        const remindNoted = { failure: null };
         try {
-            const due = record.edited === null && ScribeLive.due(record, view);
-            if (due) {
-                made = await ScribeLive.remind(live, view, now, draft, remindNoted);
+            if (record.edited === null && ScribeLive.due(record, view)) {
+                const drafted =
+                    notes === null
+                        ? record.notes
+                        : ScribeLive.noted(ScribeLive.standing(record.notes, view), notes, message);
+                made = await ScribeLive.remind(live, view, now, draft, drafted);
             }
         } catch (error) {
             live.problem = ScribeLive.words(error);
         }
-        ScribeLive.report(live, remindNoted);
         if (!ScribeLive.current(live, epoch)) {
             return;
         }
@@ -15884,7 +16684,14 @@ const ScribeLive = Object.freeze({
             made.composed !== null &&
             record.edited === null &&
             ScribeLive.due(record, latest) &&
-            ScribeLive.holds(made.basis, now, record.now, record.findings, latest.state);
+            ScribeLive.holds(
+                made.basis,
+                now,
+                record.now,
+                record.findings,
+                ScribeLive.standing(record.notes, latest),
+                latest.state,
+            );
         if (ready) {
             ScribeLive.keep(record, made);
         } else if (
@@ -15914,17 +16721,15 @@ const ScribeLive = Object.freeze({
         }
         const epoch = live.epoch;
         const now = record.now;
-        const noted = { failure: null };
         let made = null;
         try {
-            made = await ScribeLive.remind(live, view, now, record.findings, noted);
+            made = await ScribeLive.remind(live, view, now, record.findings, record.notes);
         } catch (error) {
             live.problem = ScribeLive.words(error);
         }
         if (!ScribeLive.current(live, epoch) || !ScribeLive.trusted(live)) {
             return;
         }
-        ScribeLive.report(live, noted);
         const latest = live.keeper.view();
         if (made === null || made.composed === null) {
             if (record.ready !== null && !ScribeLive.fresh(live, latest)) {
@@ -15932,7 +16737,14 @@ const ScribeLive = Object.freeze({
             }
         } else if (
             ScribeLive.due(record, latest) &&
-            ScribeLive.holds(made.basis, now, record.now, record.findings, latest.state)
+            ScribeLive.holds(
+                made.basis,
+                now,
+                record.now,
+                record.findings,
+                ScribeLive.standing(record.notes, latest),
+                latest.state,
+            )
         ) {
             ScribeLive.keep(record, made);
         }
@@ -15971,24 +16783,29 @@ const ScribeLive = Object.freeze({
             }
             const epoch = live.epoch;
             const now = record.now;
-            const noted = { failure: null };
             let made = null;
             try {
-                made = await ScribeLive.remind(live, live.keeper.view(), now, record.findings, noted);
+                made = await ScribeLive.remind(live, live.keeper.view(), now, record.findings, record.notes);
             } catch (error) {
                 live.problem = ScribeLive.words(error);
             }
             if (!ScribeLive.current(live, epoch) || !ScribeLive.trusted(live)) {
                 return;
             }
-            ScribeLive.report(live, noted);
             const latest = live.keeper.view();
             const kept =
                 made !== null &&
                 made.composed !== null &&
                 record.edited === null &&
                 ScribeLive.due(record, latest) &&
-                ScribeLive.holds(made.basis, now, record.now, record.findings, latest.state);
+                ScribeLive.holds(
+                    made.basis,
+                    now,
+                    record.now,
+                    record.findings,
+                    ScribeLive.standing(record.notes, latest),
+                    latest.state,
+                );
             if (kept) {
                 ScribeLive.keep(record, made);
             }
@@ -16634,6 +17451,7 @@ const ScribeLive = Object.freeze({
             ),
             suggestion: record.suggestion,
             offer: live.offer,
+            notice: live.cast === null ? null : live.cast.notice,
             understood:
                 understood === null
                     ? null
@@ -16733,6 +17551,11 @@ const ScribeLive = Object.freeze({
             force: () => ScribeLive.force(live),
 
             /**
+             * @return {Promise<string|null>}
+             */
+            profile: async () => (await ScribeLive.cast(live)).profile,
+
+            /**
              * @return {Promise<void>}
              */
             suggest: () => ScribeLive.suggest(live),
@@ -16777,11 +17600,11 @@ const ScribeLive = Object.freeze({
     },
 
     /**
-     * @param {{ keeper: { view: Function, rule: Function, file: Function, preview: Function }, storage: { get: Function, set: Function, remove: Function, list: Function }, roomId: string, ask: Function, clock: object, notify: Function }} options
+     * @param {{ keeper: { view: Function, rule: Function, file: Function, preview: Function }, storage: { get: Function, set: Function, remove: Function, list: Function }, roomId: string, ask: Function, clock: object, notify: Function, story: () => Promise<object>, profile: () => Promise<string> }} options
      * @return {Readonly<object>}
      */
     open(options) {
-        const { keeper, storage, roomId, ask, notify } = options;
+        const { keeper, storage, roomId, ask, notify, story, profile } = options;
         const settings = ScribeLive.Settings;
         const live = {
             keeper,
@@ -16789,6 +17612,10 @@ const ScribeLive = Object.freeze({
             roomId,
             ask,
             notify,
+            story,
+            profile,
+            cast: null,
+            casting: null,
             record: null,
             problem: null,
             shown: null,
@@ -16798,7 +17625,6 @@ const ScribeLive = Object.freeze({
             epoch: settings.FirstEpoch,
             running: null,
             waiting: null,
-            answers: [],
             refreshing: false,
             appended: settings.NothingAppended,
             offer: null,
@@ -19008,6 +19834,7 @@ const ScribePanel = Object.freeze({
             ForceReason: 'scribe-force-reason',
             ForceOutcome: 'scribe-force-outcome',
             ReminderOutcome: 'scribe-reminder-outcome',
+            Story: 'scribe-story',
             OfferText: 'scribe-offer-text',
             OfferActions: 'scribe-offer-actions',
             OfferOutcome: 'scribe-offer-outcome',
@@ -20953,7 +21780,17 @@ const ScribePanel = Object.freeze({
                 true,
             );
             pulled.hidden = true;
-            section.append(controls, ScribePanel.outlet(panel, 'ControlsOutcome', outlets.Controls), pulled);
+            const story = ScribePanel.stale(
+                panel,
+                ScribePanel.own(
+                    panel,
+                    'Story',
+                    ScribePanel.make(panel, tags.Paragraph, settings.Nothing, classes.Meta),
+                ),
+                true,
+            );
+            story.hidden = true;
+            section.append(controls, ScribePanel.outlet(panel, 'ControlsOutcome', outlets.Controls), story, pulled);
             ScribePanel.pager(panel, settings.Lists.Lines, ScribePanel.group(panel, section, words.LinesHeading));
             ScribePanel.pager(panel, settings.Lists.Calls, ScribePanel.group(panel, section, words.CallsHeading));
         },
@@ -21133,6 +21970,7 @@ const ScribePanel = Object.freeze({
                 forced: heard.forced ?? false,
                 forceBlock: heard.forceBlock ?? null,
                 suggestion: heard.suggestion ?? null,
+                notice: heard.notice ?? null,
             };
         } catch (error) {
             ScribePanel.lockAll(panel);
@@ -22633,14 +23471,17 @@ const ScribePanel = Object.freeze({
         /**
          * @param {object} panel
          * @param {object} view
+         * @param {object} live
          * @return {void}
          */
-        Progress(panel, view) {
+        Progress(panel, view, live) {
             const settings = ScribePanel.Settings;
             const words = settings.Words;
             const parts = panel.parts;
             parts.Adopt.hidden =
                 !view.booked || [ScribeKeeper.Phase.NoBook, ScribeKeeper.Phase.Loading].includes(view.phase);
+            parts.Story.hidden = live.notice === null;
+            ScribePanel.write(parts.Story, live.notice ?? settings.Nothing);
             const pulled = view.pulled;
             let line = pulled === null && !view.reader ? words.NoPullHere : settings.Nothing;
             if (pulled !== null) {
@@ -25194,6 +26035,11 @@ const ScribeBoot = Object.freeze({
                 clock: environment.clock,
 
                 /**
+                 * @return {Promise<string|null>}
+                 */
+                profile: async () => (session.live === null ? null : session.live.profile()),
+
+                /**
                  * @param {{ kind: string, message?: * }} event
                  * @return {void}
                  */
@@ -25255,6 +26101,17 @@ const ScribeBoot = Object.freeze({
                  */
                 ask: (role, system, user) => ScribeBoot.counted(session, role, system, user),
                 clock: environment.clock,
+
+                /**
+                 * @return {Promise<object>}
+                 */
+                story: () => ZetaSource.story({ fetch, token: ScribeBoot.token(boot), roomId: session.roomId, pause }),
+
+                /**
+                 * @return {Promise<string>}
+                 */
+                profile: () =>
+                    ZetaSource.profile({ fetch, token: ScribeBoot.token(boot), roomId: session.roomId, pause }),
 
                 /**
                  * @return {void}

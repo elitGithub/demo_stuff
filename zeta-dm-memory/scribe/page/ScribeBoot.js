@@ -1489,6 +1489,11 @@ const ScribeBoot = Object.freeze({
                 clock: environment.clock,
 
                 /**
+                 * @return {Promise<string|null>}
+                 */
+                profile: async () => (session.live === null ? null : session.live.profile()),
+
+                /**
                  * @param {{ kind: string, message?: * }} event
                  * @return {void}
                  */
@@ -1550,6 +1555,17 @@ const ScribeBoot = Object.freeze({
                  */
                 ask: (role, system, user) => ScribeBoot.counted(session, role, system, user),
                 clock: environment.clock,
+
+                /**
+                 * @return {Promise<object>}
+                 */
+                story: () => ZetaSource.story({ fetch, token: ScribeBoot.token(boot), roomId: session.roomId, pause }),
+
+                /**
+                 * @return {Promise<string>}
+                 */
+                profile: () =>
+                    ZetaSource.profile({ fetch, token: ScribeBoot.token(boot), roomId: session.roomId, pause }),
 
                 /**
                  * @return {void}

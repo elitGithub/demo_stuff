@@ -607,6 +607,21 @@ test('sections are in order', () => {
     );
 });
 
+test('the chat profile follows the player character when it was read, and is left out when not', () => {
+    const state = richBook();
+    const messages = storyWith({ 60: 'Mirelle waves.' }).slice(59, 62);
+    const plainText = ScribeAnalyzer.input(state, 'Orla', messages);
+    assert.equal(ScribeAnalyzer.input(state, 'Orla', messages, null), plainText);
+    assert.equal(plainText.includes('PLAYER CHARACTER PROFILE:'), false);
+    const profile = 'Orla is a sellsword from the north.\nShe carries a scarred shield.';
+    const profiled = ScribeAnalyzer.input(state, 'Orla', messages, profile);
+    assert.equal(profiled.startsWith(`PLAYER CHARACTER:\nOrla\n\nPLAYER CHARACTER PROFILE:\n${profile}\n\nSUBJECTS:\n`), true);
+    assert.equal(profiled.replace(`PLAYER CHARACTER PROFILE:\n${profile}\n\n`, ''), plainText);
+    assert.equal(ScribeAnalyzer.Settings.Headings.Profile, 'PLAYER CHARACTER PROFILE:');
+    const notes = [{ text: 'Mirelle is tired', position: 12 }];
+    assert.equal(ScribeAnalyzer.notesInput(state, 'Orla', notes).includes('PLAYER CHARACTER PROFILE:'), false);
+});
+
 test('the notes input lists numbered notes', () => {
     const log = ScribeLog.create();
     const state = apply(
@@ -1152,8 +1167,8 @@ test('the prompts are exact', () => {
             ScribeAnalyzer.Prompt,
             '14. QUESTIONS. When the story leaves something unclear and a guess would matter (does she like him or love him; is this the same man as before), write no fact for it. Ask the player one short question instead. At most two questions per stretch.',
             14,
-            8917,
-            'df46b4f3',
+            9023,
+            'f6a85e0d',
         ],
         [
             ScribeAnalyzer.NotesPrompt,
@@ -1184,6 +1199,13 @@ test('the prompts are exact', () => {
         assert.equal(/ $/m.test(prompt), false);
         assert.deepEqual([prompt.length, ScribeText.fingerprint(prompt)], [length, fingerprint]);
     }
+    const profiled =
+        "PLAYER CHARACTER PROFILE is the player's own description of their character; trust it for that character.";
+    const lines = ScribeAnalyzer.Prompt.split('\n');
+    const received = lines.findIndex((line) => line.startsWith('You receive PLAYER CHARACTER,'));
+    assert.equal(lines[received + 1], profiled);
+    assert.equal(ScribeAnalyzer.NotesPrompt.includes('PLAYER CHARACTER PROFILE'), false);
+    assert.equal(ScribeAnalyzer.AnswersPrompt.includes('PLAYER CHARACTER PROFILE'), false);
 });
 
 test('selection is quick on a long text', () => {

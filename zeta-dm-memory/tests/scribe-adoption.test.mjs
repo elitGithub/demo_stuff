@@ -247,6 +247,7 @@ async function adopt(chosen = {}) {
         messages: book.messages,
         notes: book.notes,
         player: book.player,
+        profile: chosen.profile,
         log: context.log,
         size: chosen.size ?? 40,
         budget: chosen.budget ?? 100,
@@ -1317,6 +1318,8 @@ test('bad arguments stop before any call', async () => {
         [{ messages: twice }, 'Two messages share the id MESSAGE-1.'],
         [{ notes: null }, 'notes is not a list.'],
         [{ player: 7 }, 'player is not a string.'],
+        [{ profile: 7 }, 'profile is neither a string nor null.'],
+        [{ profile: { text: 'Orla' } }, 'profile is neither a string nor null.'],
         [{ log: null }, 'log is not an object.'],
         [{ log: 'the book' }, 'log is not an object.'],
         [{ size: Number.POSITIVE_INFINITY }, 'size is not a positive whole number.'],
@@ -1347,6 +1350,28 @@ test('bad arguments stop before any call', async () => {
     }
     assert.deepEqual(plain(await ScribeAdoption.run({})), ended('Failed', 'messages is not a list.', 0, 0));
     await assert.doesNotReject(ScribeAdoption.run());
+});
+
+test('the chat profile goes to every story reading and to no other pass', async () => {
+    const profile = 'Orla is a sellsword from the north.';
+    const read = await adopt({ campaign: notedCampaign, profile });
+    const passes = [...new Set(read.calls.map((call) => call.pass))].sort();
+    assert.deepEqual(passes, ['Notes', 'Story']);
+    for (const call of read.calls) {
+        const carries = call.user.includes(`PLAYER CHARACTER:\nOrla\n\nPLAYER CHARACTER PROFILE:\n${profile}\n\nSUBJECTS:`);
+        assert.equal(carries, call.pass === 'Story', call.pass);
+    }
+    const bare = await adopt({ campaign: notedCampaign });
+    const empty = await adopt({ campaign: notedCampaign, profile: null });
+    assert.deepEqual(
+        bare.calls.map((call) => call.user),
+        empty.calls.map((call) => call.user),
+    );
+    assert.equal(bare.calls.some((call) => call.user.includes('PLAYER CHARACTER PROFILE:')), false);
+    assert.deepEqual(
+        read.calls.map((call) => call.user.replace(`PLAYER CHARACTER PROFILE:\n${profile}\n\n`, '')),
+        bare.calls.map((call) => call.user),
+    );
 });
 
 test('callbacks may be asynchronous', async () => {

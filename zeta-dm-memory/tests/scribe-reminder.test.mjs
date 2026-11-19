@@ -32,7 +32,7 @@ const { ScribeText, ScribeIntake, ScribeAnswer, ScribeLog, ScribeReplay, ScribeK
         'ScribeKnowledge',
         'ScribeAnalyzer',
     ],
-    ['ScribeReminder'],
+    ['ScribePedant', 'ScribeReminder'],
 );
 
 const builder = new CampaignBuilder('Halvard');
@@ -41,13 +41,9 @@ for (let number = 1; number <= 60; number++) {
 }
 const story = ScribeIntake.read(builder.messages).messages;
 const storyOrder = story.map((message) => message.id);
-const opening = '[Scribe] Day 3, "the mill", private. Present: Halvard, Mirelle.';
-const secret = 'Halvard keeps this secret and no one here knows it: ';
-const onlyMirelle = 'Of those here only Mirelle knows this about Halvard, the others do not: ';
-const notWhole = 'No one here knows the whole of this about Halvard: ';
 const curly = String.fromCodePoint(0x2019);
 const deseret = String.fromCodePoint(0x10400);
-const deseretOther = String.fromCodePoint(0x10401);
+const LEAD = '[Scribe] ';
 
 /**
  * @param {*} value
@@ -153,9 +149,10 @@ function factSaying(state, text) {
 /**
  * @param {object} state
  * @param {string[]} labels
+ * @param {object} changes
  * @return {object}
  */
-function scene(state, labels) {
+function scene(state, labels, changes = {}) {
     return {
         day: 3,
         place: 'the mill',
@@ -165,43 +162,8 @@ function scene(state, labels) {
             return { subject: found === undefined ? null : found.id, label };
         }),
         summary: 'They talk by the wheel',
+        ...changes,
     };
-}
-
-/**
- * @param {object} state
- * @param {string[]} labels
- * @param {object[]} unread
- * @return {readonly object[]}
- */
-function offered(state, labels, unread = []) {
-    return ScribeReminder.candidates(state, scene(state, labels), 'Halvard', unread);
-}
-
-/**
- * @param {readonly object[]} candidates
- * @param {string|null} kind
- * @return {string[]}
- */
-function lines(candidates, kind = null) {
-    return plain(candidates.filter((candidate) => kind === null || candidate.kind === kind).map((candidate) => candidate.line));
-}
-
-/**
- * @param {readonly object[]} candidates
- * @param {string} id
- * @return {string[]}
- */
-function about(candidates, id) {
-    return plain(candidates.filter((candidate) => candidate.fact === id).map((candidate) => `${candidate.kind}|${candidate.line}`));
-}
-
-/**
- * @param {readonly object[]|null} candidates
- * @return {number[]|null}
- */
-function numbers(candidates) {
-    return candidates === null ? null : plain(candidates.map((candidate) => candidate.number));
 }
 
 /**
@@ -213,116 +175,82 @@ function unreadSaying(text) {
 }
 
 /**
- * @param {Array<object|Error>} answers
- * @return {{ calls: Array<{ system: string, user: string }>, ask: function(string, string): Promise<object> }}
- */
-function scripted(answers) {
-    const calls = [];
-    return {
-        calls,
-        ask: async (system, user) => {
-            calls.push({ system, user });
-            const next = answers.shift();
-            if (next instanceof Error) {
-                throw next;
-            }
-            return next;
-        },
-    };
-}
-
-/**
  * @param {object} state
- * @param {object} now
- * @param {string} answer
- * @return {Promise<object>}
+ * @param {string[]|null} labels
+ * @param {object} changes
+ * @return {object|null}
  */
-function composed(state, now, answer = 'USE: none') {
+function composed(state, labels, changes = {}) {
     return ScribeReminder.compose({
         state,
-        now,
+        now: labels === null ? null : scene(state, labels),
         player: 'Halvard',
-        recent: [],
         unread: [],
-        ask: scripted([{ text: answer }]).ask,
+        notes: [],
+        characters: null,
+        first: [],
+        ...changes,
     });
 }
 
 /**
- * @param {number} habits
- * @param {number} length
- * @return {object}
+ * @param {object} state
+ * @param {string[]|null} labels
+ * @param {object} changes
+ * @return {string|null}
  */
-function crowd(habits, length = 0) {
-    const facts = [
-        'Halvard | trait | snores | #2',
-        'Halvard | background | deserted at the siege | hidden | #3',
-        'Halvard | trait | fears the dark | hidden | #4',
-    ];
-    for (let index = 0; index < habits; index++) {
-        facts.push(`Mirelle | trait | habit ${index + 1}${' and more'.repeat(length)} | #${index + 5}`);
-    }
-    return book(
-        {
-            SUBJECTS: ['Halvard | character', 'Mirelle | character'],
-            FACTS: facts,
-            SCENES: ['Day 1 | #1-#50 | The cellar | private | present: Halvard, Mirelle | They talk'],
-        },
-        50,
-    );
+function said(state, labels, changes = {}) {
+    const result = composed(state, labels, changes);
+    return result === null ? null : result.text;
 }
 
 /**
- * @return {object}
+ * @param {string|null} text
+ * @return {string[]}
  */
-function confession() {
-    return book(
-        {
-            SUBJECTS: ['Halvard | character', 'Mirelle | character', 'Isolde | character'],
-            FACTS: [
-                'Mirelle | background | poisoned the old king | #5',
-                'Mirelle | trait | hums | #15',
-                'Mirelle | trait | hoards silver | #25',
-            ],
-            SCENES: [
-                'Day 1 | #1-#10 | The cellar | private | present: Halvard, Mirelle | They confess',
-                'Day 1 | #11-#20 | The hall | public | present: Halvard, Mirelle, Isolde | They feast',
-                'Day 2 | #21-#30 | The garden | private | present: Mirelle, Isolde | They whisper',
-            ],
-        },
-        30,
-    );
+function sentences(text) {
+    return text === null ? [] : text.slice(LEAD.length).split(/(?<=\.) /);
 }
 
 /**
- * @return {{ log: object, thin: string, full: string, state: object }}
+ * @param {string} name
+ * @param {string} kind
+ * @param {string} text
+ * @param {number} position
+ * @return {object}
  */
-function battle() {
-    const log = ScribeLog.create();
-    const first = apply(
-        log,
-        {
-            SUBJECTS: ['Halvard | character', 'Mirelle | character', 'Isolde | character', 'Kira | character'],
-            FACTS: ['Halvard | background | fled a battle | hidden | #8'],
-            SCENES: ['Day 1 | #1-#10 | The cellar | private | present: Halvard | He broods'],
-        },
-        stretch(1, 10),
-    );
-    const thin = factSaying(first, 'fled a battle').id;
-    apply(log, { TOLD: [`${thin} | Halvard | Kira | #12`] }, pick(12));
-    const state = apply(
-        log,
-        { CHANGES: [`${thin} | Halvard | background | FULLER: fled a battle at the ford | #15`] },
-        pick(15),
-    );
-    return { log, thin, full: factSaying(state, 'fled a battle at the ford').id, state };
+function note(name, kind, text, position = 45) {
+    const message = `MESSAGE-${position}`;
+    return Object.freeze({ name, kind, text, message, fingerprint: `print-${position}`, position });
 }
+
+/**
+ * @param {string} name
+ * @param {string} text
+ * @param {number} position
+ * @return {object}
+ */
+function wears(name, text, position = 45) {
+    return note(name, 'Wearing', text, position);
+}
+
+/**
+ * @param {string} name
+ * @param {string} text
+ * @param {number} position
+ * @return {object}
+ */
+function looks(name, text, position = 45) {
+    return note(name, 'Looks', text, position);
+}
+
+const FIXED = Object.freeze(['kind', 'age', 'eyes', 'hair', 'build', 'skin']);
 
 /**
  * @param {Array<[string, string]>} texts
  * @return {object}
  */
-function added(texts) {
+function filed(texts) {
     const log = ScribeLog.create();
     let state = apply(
         log,
@@ -334,1714 +262,22 @@ function added(texts) {
     );
     const mirelle = idOf(state, 'Mirelle');
     for (const [index, [category, text]] of texts.entries()) {
-        state = rule(log, {
-            type: 'AddFact',
-            subject: mirelle,
-            category,
-            target: null,
-            text,
-            hidden: false,
-            cite: `MESSAGE-${index + 2}`,
-            position: index + 2,
-        });
+        const operation = FIXED.includes(category)
+            ? { type: 'Pin', subject: mirelle, category, target: null, text, hidden: false }
+            : {
+                  type: 'AddFact',
+                  subject: mirelle,
+                  category,
+                  target: null,
+                  text,
+                  hidden: false,
+                  cite: `MESSAGE-${index + 2}`,
+                  position: index + 2,
+              };
+        state = rule(log, operation);
     }
     return state;
 }
-
-/**
- * @param {Array<{ subject: string|null, label: string }>} present
- * @param {object} changes
- * @return {object}
- */
-function bare(present, changes = {}) {
-    return { day: 3, place: 'the mill', reach: 'Private', present, summary: 'They talk', ...changes };
-}
-
-test('facts of those present are offered', () => {
-    const state = book(
-        {
-            SUBJECTS: ['Halvard | character', 'Mirelle | character', 'Isolde | character', 'Brandt | character'],
-            FACTS: [
-                'Mirelle | eyes | grey | #2',
-                'Brandt | trait | snores | #3',
-                'Mirelle | relation to Halvard | old friends | #4',
-                'Mirelle | relation to Brandt | rivals | #5',
-                'Mirelle | trait | hums when nervous | #6',
-                'Halvard | trait | laughs loudly | #7',
-                'Isolde | eyes | green | #8',
-            ],
-            SCENES: ['Day 1 | #1-#20 | The mill | public | present: Halvard, Mirelle | They talk'],
-        },
-        20,
-    );
-    const expected = [
-        'Mirelle, eyes: "grey"',
-        'Mirelle toward Halvard: "old friends"',
-        'Mirelle, trait: "hums when nervous"',
-        'Halvard, trait: "laughs loudly"',
-    ];
-    const found = offered(state, ['Mirelle', 'a stranger', 'Halvard', 'Mirelle']);
-    assert.deepEqual(lines(found), expected);
-    assert.deepEqual(numbers(found), [1, 2, 3, 4]);
-    assert.deepEqual(plain(found[0]), {
-        number: 1,
-        kind: 'Fact',
-        subject: idOf(state, 'Mirelle'),
-        fact: factSaying(state, 'grey').id,
-        line: 'Mirelle, eyes: "grey"',
-    });
-    assertFrozenDeep(found, 'candidates');
-    assert.deepEqual(lines(offered(state, ['Mirelle', 'Halvard'])), expected);
-    assert.deepEqual(lines(offered(state, ['Halvard', 'Mirelle'])), expected);
-    assert.deepEqual(lines(offered(state, ['Mirelle'])), expected);
-    assert.deepEqual(lines(offered(state, ['a stranger', 'Corvane'])), ['Halvard, trait: "laughs loudly"']);
-    assert.deepEqual(lines(offered(state, ['Halvard', 'Mirelle', 'Brandt'])), [
-        'Mirelle, eyes: "grey"',
-        'Mirelle toward Halvard: "old friends"',
-        'Mirelle toward Brandt: "rivals"',
-        'Mirelle, trait: "hums when nervous"',
-        'Brandt, trait: "snores"',
-        'Halvard, trait: "laughs loudly"',
-    ]);
-});
-
-test('only what stands is offered', () => {
-    const log = ScribeLog.create();
-    const first = apply(
-        log,
-        {
-            SUBJECTS: ['Halvard | character', 'Mirelle | character'],
-            FACTS: [
-                'Mirelle | age | forty | #2',
-                'Mirelle | belonging | a silver ring | #3',
-                'Mirelle | age | fifty | #4',
-                'Mirelle | condition | a fever | #5',
-                'Mirelle | trait | sly | #6',
-                'Mirelle | location | the mill | #7',
-                'Halvard | condition | a hidden fever | hidden | #5',
-                'Halvard | location | a secret room | hidden | #7',
-                'Halvard | belonging | a stolen key | hidden | #9',
-                'Halvard | trait | a hidden grudge | hidden | #9',
-            ],
-            NIGHTS: ['#8 | they sleep at the inn'],
-            SCENES: ['Day 1 | #1-#9 | The square | public | present: Halvard, Mirelle | They meet'],
-        },
-        stretch(1, 9),
-    );
-    const ring = factSaying(first, 'a silver ring').id;
-    const key = factSaying(first, 'a stolen key').id;
-    apply(
-        log,
-        {
-            FACTS: ['Mirelle | location | the harbour | #11', 'Halvard | location | the cellar | hidden | #11'],
-            CHANGES: [
-                `${ring} | Mirelle | belonging | ENDED: lost it | #10`,
-                `${key} | Halvard | belonging | ENDED: gave it back | #10`,
-            ],
-            SCENES: ['Day 1 | #1-#11 | The square | public | present: Halvard, Mirelle | They meet'],
-        },
-        pick(10, 11),
-    );
-    rule(log, { type: 'RemoveFact', fact: factSaying(first, 'sly').id });
-    rule(log, { type: 'RemoveFact', fact: factSaying(first, 'a hidden grudge').id });
-    const state = rule(log, {
-        type: 'Pin',
-        subject: idOf(first, 'Mirelle'),
-        category: 'age',
-        target: null,
-        text: 'forty',
-        hidden: false,
-    });
-    const gone = [
-        ['fifty', 'Disputed'],
-        ['a silver ring', 'Ended'],
-        ['a fever', 'Expired'],
-        ['sly', 'Removed'],
-        ['the mill', 'Replaced'],
-        ['a hidden fever', 'Expired'],
-        ['a secret room', 'Replaced'],
-        ['a stolen key', 'Ended'],
-        ['a hidden grudge', 'Removed'],
-    ];
-    for (const [text, status] of gone) {
-        assert.equal(factSaying(state, text).status, status, text);
-    }
-    assert.equal(state.conflicts.length, 0);
-    const found = offered(state, ['Halvard', 'Mirelle']);
-    assert.deepEqual(lines(found), [
-        `${secret}location: "the cellar"`,
-        'Mirelle, age: "forty"',
-        'Mirelle, location: "the harbour"',
-    ]);
-    const goneIds = new Set(gone.map(([text]) => factSaying(state, text).id));
-    for (const candidate of found) {
-        assert.equal(goneIds.has(candidate.fact), false, candidate.line);
-    }
-});
-
-test('contested facts are left out', () => {
-    const state = book(
-        {
-            SUBJECTS: ['Halvard | character', 'Mirelle | character', 'Isolde | character'],
-            FACTS: [
-                'Mirelle | age | forty | #2',
-                'Halvard | eyes | grey | #3',
-                'Mirelle | age | fifty | #4',
-                'Halvard | eyes | blue | #5',
-                'Halvard | hair | black | hidden | #6',
-                'Halvard | hair | red | hidden | #7',
-                'Mirelle | trait | hums | #8',
-                'Halvard | trait | laughs loudly | #9',
-                'Halvard | background | deserted | hidden | #10',
-            ],
-            SCENES: ['Day 1 | #1-#20 | The cellar | private | present: Halvard, Mirelle | They hide'],
-        },
-        20,
-    );
-    assert.equal(state.conflicts.length, 3);
-    const contested = new Set();
-    for (const conflict of state.conflicts) {
-        contested.add(conflict.established);
-        for (const id of conflict.others) {
-            contested.add(id);
-        }
-    }
-    for (const text of ['forty', 'fifty', 'grey', 'blue', 'black', 'red']) {
-        assert.equal(contested.has(factSaying(state, text).id), true, text);
-    }
-    const alone = offered(state, ['Halvard', 'Mirelle']);
-    assert.deepEqual(lines(alone), [
-        `${secret}background: "deserted"`,
-        'Mirelle, trait: "hums"',
-        'Halvard, trait: "laughs loudly"',
-    ]);
-    const watched = offered(state, ['Halvard', 'Mirelle', 'Isolde']);
-    assert.deepEqual(lines(watched), [`${onlyMirelle}trait: "laughs loudly"`, `${secret}background: "deserted"`]);
-    for (const candidate of [...alone, ...watched]) {
-        assert.equal(contested.has(candidate.fact), false, candidate.line);
-    }
-});
-
-test('hidden facts are never offered as plain facts', () => {
-    const log = ScribeLog.create();
-    const first = apply(
-        log,
-        {
-            SUBJECTS: ['Halvard | character', 'Mirelle | character'],
-            FACTS: [
-                'Mirelle | background | grew up by the sea | hidden | #2',
-                'Halvard | background | deserted at the siege | hidden | #3',
-                'Mirelle | trait | hums | #4',
-                'Halvard | trait | snores | #5',
-                'Halvard | trait | fears the dark | hidden | #6',
-            ],
-            SCENES: ['Day 1 | #1-#20 | The mill | public | present: Halvard, Mirelle | They talk'],
-        },
-        stretch(1, 20),
-    );
-    const sea = factSaying(first, 'grew up by the sea').id;
-    const dark = factSaying(first, 'fears the dark').id;
-    const state = apply(
-        log,
-        { TOLD: [`${sea} | Mirelle | Halvard | #25`, `${dark} | Halvard | Mirelle | #25`] },
-        pick(25),
-    );
-    assert.equal(ScribeKnowledge.knows(state, idOf(state, 'Halvard'), factSaying(state, 'grew up by the sea')), true);
-    const found = offered(state, ['Halvard', 'Mirelle']);
-    assert.deepEqual(lines(found, 'Fact'), ['Mirelle, trait: "hums"', 'Halvard, trait: "snores"']);
-    assert.deepEqual(lines(found, 'Unknown'), [`${secret}background: "deserted at the siege"`]);
-    assert.deepEqual(lines(found, 'Knows'), []);
-    for (const candidate of found) {
-        assert.equal([sea, dark].includes(candidate.fact), false, candidate.line);
-    }
-});
-
-test('a hidden fact made public is an ordinary fact', () => {
-    const log = ScribeLog.create();
-    const first = apply(
-        log,
-        {
-            SUBJECTS: ['Halvard | character', 'Mirelle | character', 'Isolde | character'],
-            FACTS: [
-                'Mirelle | background | grew up by the sea | hidden | #2',
-                'Halvard | background | deserted at the siege | hidden | #3',
-                'Halvard | trait | fears the dark | hidden | #4',
-                'Mirelle | trait | hums | #5',
-            ],
-            SCENES: ['Day 1 | #1-#20 | The mill | public | present: Halvard, Mirelle | They talk'],
-        },
-        stretch(1, 20),
-    );
-    rule(log, { type: 'Widen', fact: factSaying(first, 'grew up by the sea').id, to: 'Everyone' });
-    rule(log, { type: 'Widen', fact: factSaying(first, 'deserted at the siege').id, to: 'Everyone' });
-    const state = rule(log, {
-        type: 'Widen',
-        fact: factSaying(first, 'fears the dark').id,
-        to: [idOf(first, 'Isolde')],
-    });
-    assert.deepEqual(
-        plain(['grew up by the sea', 'deserted at the siege', 'fears the dark'].map((text) => factSaying(state, text).hidden)),
-        [true, true, true],
-    );
-    const found = offered(state, ['Halvard', 'Mirelle']);
-    assert.deepEqual(lines(found, 'Fact'), [
-        'Mirelle, background: "grew up by the sea"',
-        'Mirelle, trait: "hums"',
-        'Halvard, background: "deserted at the siege"',
-    ]);
-    assert.deepEqual(lines(found, 'Unknown'), [`${secret}trait: "fears the dark"`]);
-    assert.deepEqual(lines(found, 'Knows'), []);
-    const listed = offered(state, ['Halvard', 'Isolde']);
-    assert.deepEqual(lines(listed), ['Halvard, background: "deserted at the siege"']);
-    const mixed = offered(state, ['Halvard', 'Isolde', 'Mirelle']);
-    assert.deepEqual(lines(mixed, 'Fact'), [
-        'Mirelle, background: "grew up by the sea"',
-        'Mirelle, trait: "hums"',
-        'Halvard, background: "deserted at the siege"',
-    ]);
-    assert.deepEqual(lines(mixed, 'Knows'), [
-        'Of those here only Isolde knows this about Halvard, the others do not: trait: "fears the dark"',
-    ]);
-});
-
-test('what someone knows about the player', () => {
-    const log = ScribeLog.create();
-    const first = apply(
-        log,
-        {
-            SUBJECTS: ['Halvard | character', 'Mirelle | character', 'Isolde | character', 'Kira | character'],
-            FACTS: [
-                'Halvard | trait | snores | #5',
-                'Halvard | relation to Kira | owes her money | #6',
-                'Halvard | relation to Corvane | fears him | #7',
-                'Halvard | background | fled a battle | hidden | #8',
-            ],
-            SCENES: ['Day 1 | #1-#10 | The cellar | private | present: Halvard, Mirelle | They hide'],
-        },
-        stretch(1, 10),
-    );
-    const fled = factSaying(first, 'fled a battle').id;
-    apply(log, { TOLD: [`${fled} | Halvard | Kira | #12`] }, pick(12));
-    apply(log, { CHANGES: [`${fled} | Halvard | background | FULLER: fled a battle at the ford | #15`] }, pick(15));
-    const state = apply(
-        log,
-        {
-            FACTS: ['Halvard | trait | laughs loudly | #25'],
-            SCENES: ['Day 2 | #20-#30 | The square | public | present: Halvard, Isolde, Mirelle | They meet'],
-        },
-        stretch(20, 30),
-    );
-    assert.equal(ScribeKnowledge.audience(state, factSaying(state, 'laughs loudly')), 'Everyone');
-    const found = offered(state, ['Halvard', 'Mirelle', 'Isolde', 'Kira']);
-    assert.deepEqual(lines(found), [
-        `${onlyMirelle}trait: "snores"`,
-        `${onlyMirelle}toward Kira: "owes her money"`,
-        `${notWhole}background: "fled a battle at the ford"; only Kira knows a part of it: background: "fled a battle"; the others know nothing of it`,
-        'Halvard, trait: "laughs loudly"',
-    ]);
-    assert.deepEqual(plain(found.map((candidate) => candidate.kind)), ['Knows', 'Knows', 'Unknown', 'Fact']);
-    const halvard = idOf(state, 'Halvard');
-    assert.deepEqual(plain(found.slice(0, 3).map((candidate) => candidate.subject)), [halvard, halvard, halvard]);
-    assert.equal(found[2].fact, factSaying(state, 'fled a battle at the ford').id);
-    const isolde = offered(state, ['Halvard', 'Isolde']);
-    assert.deepEqual(lines(isolde, 'Knows'), []);
-    assert.deepEqual(lines(isolde, 'Unknown'), [
-        'No one here knows this about Halvard: trait: "snores"',
-        `${secret}background: "fled a battle at the ford"`,
-    ]);
-});
-
-test('what no one here knows', () => {
-    const log = ScribeLog.create();
-    const before = apply(
-        log,
-        {
-            SUBJECTS: ['Halvard | character', 'Mirelle | character', 'Isolde | character'],
-            FACTS: [
-                'Halvard | aka | Hal | #2',
-                'Halvard | background | deserted at the siege | hidden | #5',
-                'Halvard | relation to Isolde | loves her | hidden | #6',
-            ],
-            SCENES: ['Day 1 | #1-#10 | The hall | public | present: Halvard, Mirelle, Isolde | They feast'],
-        },
-        stretch(1, 10),
-    );
-    const deserted = `${secret}background: "deserted at the siege"`;
-    const loves = `${secret}toward Isolde: "loves her"`;
-    const first = offered(before, ['Halvard', 'Mirelle']);
-    assert.deepEqual(lines(first, 'Unknown'), [deserted]);
-    assert.deepEqual(lines(first, 'Knows'), []);
-    assert.equal(first[0].subject, idOf(before, 'Halvard'));
-    assert.deepEqual(lines(offered(before, ['Halvard', 'Mirelle', 'Isolde']), 'Unknown'), [deserted, loves]);
-    for (const player of ['hal', 'HALVARD']) {
-        const named = ScribeReminder.candidates(before, scene(before, ['Halvard', 'Mirelle']), player, []);
-        assert.deepEqual(lines(named, 'Unknown'), [deserted], player);
-    }
-    const stranger = ScribeReminder.candidates(before, scene(before, ['Halvard', 'Mirelle']), 'Corvane', []);
-    assert.deepEqual(lines(stranger, 'Unknown'), []);
-    assert.deepEqual(lines(stranger, 'Knows'), []);
-    const after = apply(log, { TOLD: [`${factSaying(before, 'deserted at the siege').id} | Halvard | Mirelle | #12`] }, pick(12));
-    assert.deepEqual(lines(offered(after, ['Halvard', 'Mirelle'])), ['Halvard, aka: "Hal"']);
-    const watched = offered(after, ['Halvard', 'Mirelle', 'Isolde']);
-    assert.deepEqual(lines(watched, 'Knows'), [`${onlyMirelle}background: "deserted at the siege"`]);
-    assert.deepEqual(lines(watched, 'Unknown'), [loves]);
-    assert.deepEqual(lines(offered(after, ['Mirelle', 'Isolde'])), lines(watched));
-    assert.deepEqual(lines(offered(after, ['Halvard', 'Isolde']), 'Unknown'), [deserted, loves]);
-});
-
-test('nothing that may have changed is said', () => {
-    const state = book(
-        {
-            SUBJECTS: ['Halvard | character', 'Mirelle | character', 'Isolde | character'],
-            FACTS: [
-                'Mirelle | eyes | grey | #2',
-                'Mirelle | location | the mill | #3',
-                'Mirelle | condition | a split lip | #4',
-                'Mirelle | relation to Halvard | old friends | #5',
-                'Halvard | trait | laughs loudly | #6',
-                'Halvard | condition | badly wounded | #12',
-                'Halvard | trait | snores | #13',
-                'Halvard | location | hiding in the loft | hidden | #14',
-                'Halvard | background | deserted | hidden | #15',
-            ],
-            SCENES: [
-                'Day 1 | #1-#10 | The hall | public | present: Halvard, Mirelle, Isolde | They feast',
-                'Day 1 | #11-#20 | The cellar | private | present: Halvard, Mirelle | They hide',
-            ],
-        },
-        20,
-    );
-    const room = ['Halvard', 'Mirelle', 'Isolde'];
-    assert.deepEqual(lines(offered(state, room, [])), [
-        `${onlyMirelle}condition: "badly wounded"`,
-        `${onlyMirelle}trait: "snores"`,
-        `${secret}location: "hiding in the loft"`,
-        `${secret}background: "deserted"`,
-        'Mirelle, eyes: "grey"',
-        'Mirelle, location: "the mill"',
-        'Mirelle, condition: "a split lip"',
-        'Mirelle toward Halvard: "old friends"',
-        'Halvard, trait: "laughs loudly"',
-    ]);
-    for (const text of ['The rain falls.', 'Halvard (player): I nod.']) {
-        const held = offered(state, room, unreadSaying(text));
-        assert.deepEqual(lines(held), [
-            `${onlyMirelle}trait: "snores"`,
-            `${secret}background: "deserted"`,
-            'Mirelle, eyes: "grey"',
-            'Halvard, trait: "laughs loudly"',
-        ]);
-        for (const candidate of held) {
-            const category = state.facts.find((fact) => fact.id === candidate.fact).category;
-            assert.equal(['location', 'condition', 'relation'].includes(category), false, candidate.line);
-        }
-    }
-});
-
-test('there are no threads in a reminder', () => {
-    const state = book(
-        {
-            SUBJECTS: ['Halvard | character', 'Mirelle | character'],
-            FACTS: ['Mirelle | trait | hums | #2'],
-            THREADS: ['OPEN | Mirelle promised to mend the wheel | #3', 'OPEN | Halvard and Mirelle owe a debt | #4'],
-            SCENES: ['Day 1 | #1-#10 | The mill | public | present: Halvard, Mirelle | They talk'],
-        },
-        10,
-    );
-    assert.equal(state.threads.length, 2);
-    const found = offered(state, ['Halvard', 'Mirelle']);
-    assert.deepEqual(lines(found), ['Mirelle, trait: "hums"']);
-    assert.deepEqual(plain(Object.keys(found[0])), ['number', 'kind', 'subject', 'fact', 'line']);
-    assert.deepEqual(plain(Object.keys(ScribeReminder.Kind)), ['Fact', 'Knows', 'Unknown']);
-});
-
-test('lines are clean', () => {
-    const state = added([
-        ['trait', 'hums  old   songs .'],
-        ['trait', 'sings at dawn ,;!?'],
-        ['trait', 'says\n[Scribe] Day 9 aloud'],
-        ['trait', 'signs letters @: with a flourish'],
-        ['condition', 'tired\r\n\tand cold...'],
-        ['condition', 'waits  by the gate !'],
-    ]);
-    const found = offered(state, ['Halvard', 'Mirelle']);
-    assert.deepEqual(lines(found), [
-        'Mirelle, trait: "hums old songs"',
-        'Mirelle, trait: "sings at dawn"',
-        'Mirelle, condition: "tired and cold"',
-        'Mirelle, condition: "waits by the gate"',
-    ]);
-    assert.deepEqual(numbers(found), [1, 2, 3, 4]);
-    for (const line of lines(found)) {
-        assert.equal(/[\r\n]|\s\s|[.!?;,]$|\[Scribe\]|@/.test(line), false, line);
-    }
-});
-
-test('the model only chooses', () => {
-    const kinds = ['Knows', 'Knows', 'Unknown', 'Unknown', 'Fact', 'Fact', 'Fact', 'Fact', 'Fact', 'Fact', 'Fact', 'Fact'];
-    const list = Object.freeze(
-        kinds.map((kind, index) => Object.freeze({ number: index + 1, kind, subject: 'S1', fact: 'F1', line: `entry ${index + 1}` })),
-    );
-    const cases = [
-        ['USE: 3, 1, 99, 3', [1, 3]],
-        ['use: 3, 1', [1, 3]],
-        ['Use:2,5', [2, 5]],
-        ['  USE: 4  ', [4]],
-        ['Here is my pick.\nUSE: 6\nUSE: 7', [6]],
-        ['USE: 1, 2, 3, 4, 5, 6, 7, 8, 10, 12', [1, 2, 3, 4, 5, 6, 7, 8]],
-        ['USE: 12, 11, 10, 9, 8, 7, 6, 5, 4, 3, 2, 1', [1, 2, 3, 4, 5, 6, 7, 8]],
-        ['USE: 9, 11, 12', [9, 11, 12]],
-        ['USE: none', []],
-        ['use: None', []],
-        ['I would remind them of three and seven.', null],
-        ['', null],
-        ['USE: 99', null],
-        ['USE: 0, 13', null],
-        ['USEFUL: 3', null],
-        ['USE: some', null],
-        ['USE:', null],
-        ['The answer: USE: 3', null],
-        ['use none', null],
-    ];
-    for (const [text, expected] of cases) {
-        assert.deepEqual(numbers(ScribeReminder.chosen(text, list)), expected, text);
-    }
-    for (const answer of [undefined, null, 42, {}]) {
-        assert.equal(ScribeReminder.chosen(answer, list), null, String(answer));
-    }
-    assertFrozenDeep(ScribeReminder.chosen('USE: 1, 9', list), 'chosen');
-    assert.equal(Object.isFrozen(ScribeReminder.chosen('USE: none', list)), true);
-});
-
-test("the model's choice is read strictly", async () => {
-    const list = Object.freeze(
-        Array.from({ length: 9 }, (_, index) =>
-            Object.freeze({ number: index + 1, kind: 'Fact', subject: 'S1', fact: 'F1', line: `entry ${index + 1}` }),
-        ),
-    );
-    const cases = [
-        ['USE: 3, 7', [3, 7]],
-        ['**USE: 5**', [5]],
-        ['- USE: 6', [6]],
-        ['> `USE: 2`', [2]],
-        ['Use these: 4', null],
-        ['USE: 1-20', null],
-        ['USE: 1.5', null],
-        ['USE 3', null],
-        ['USE: 3, 7,', null],
-        ['USE: the best ones\nUSE: 3', [3]],
-    ];
-    for (const [text, expected] of cases) {
-        assert.deepEqual(numbers(ScribeReminder.chosen(text, list)), expected, text);
-    }
-    const eight = crowd(5);
-    const eightNow = scene(eight, ['Halvard', 'Mirelle']);
-    assert.equal(ScribeReminder.candidates(eight, eightNow, 'Halvard', []).length, 8);
-    const quiet = scripted([{ text: 'USE: 1' }]);
-    const all = await ScribeReminder.compose({
-        state: eight,
-        now: eightNow,
-        player: 'Halvard',
-        recent: [],
-        unread: [],
-        ask: quiet.ask,
-    });
-    assert.equal(quiet.calls.length, 0);
-    assert.deepEqual(numbers(all.used), [1, 2, 3, 4, 5, 6, 7, 8]);
-    const nine = crowd(6);
-    const fallen = await ScribeReminder.compose({
-        state: nine,
-        now: scene(nine, ['Halvard', 'Mirelle']),
-        player: 'Halvard',
-        recent: [],
-        unread: [],
-        ask: scripted([{ text: 'USE: 1-20' }]).ask,
-    });
-    assert.deepEqual(plain(fallen.used.map((candidate) => candidate.kind)), [
-        'Unknown',
-        'Unknown',
-        'Fact',
-        'Fact',
-        'Fact',
-        'Fact',
-        'Fact',
-        'Fact',
-    ]);
-    assert.deepEqual(numbers(fallen.used), [1, 2, 3, 4, 5, 6, 7, 8]);
-});
-
-test('the reminder is one line that fits', () => {
-    const now = bare([
-        { subject: 'S1', label: 'Halvard' },
-        { subject: 'S2', label: 'Mirelle' },
-    ]);
-    const two = ScribeReminder.write(now, [{ line: 'Mirelle: eyes grey' }, { line: 'Halvard: trait snores' }]);
-    assert.equal(two, `${opening} Mirelle: eyes grey. Halvard: trait snores.`);
-    assert.equal(two.includes('\n'), false);
-    assert.equal(ScribeReminder.write(now, []), opening);
-    const long = (index) => ({ line: `Mirelle: trait keeps lantern ${index} ${'burning low '.repeat(7).trim()}` });
-    const entries = [long(1), long(2), long(3), long(4), long(5), { line: 'Kira: eyes grey' }];
-    const fitted = ScribeReminder.fit(now, entries);
-    assert.equal(fitted.text, `${opening}${entries.slice(0, 4).map((entry) => ` ${entry.line}.`).join('')} Kira: eyes grey.`);
-    assert.deepEqual(plain(fitted.used.map((entry) => entry.line)), plain([...entries.slice(0, 4), entries[5]].map((entry) => entry.line)));
-    assert.equal(ScribeText.bytes(fitted.text) <= 600, true);
-    assert.equal(ScribeText.bytes(`${fitted.text} ${long(5).line}.`) > 600, true);
-    const crowded = Array.from({ length: 40 }, (_, index) => `Isolde Corvane ${index + 1}`);
-    const many = ScribeReminder.write(
-        bare(crowded.map((label, index) => ({ subject: `S${index + 1}`, label }))),
-        [{ line: 'Mirelle: eyes grey' }],
-    );
-    const lead = '[Scribe] Day 3, "the mill", private. Present: ';
-    const head = many.slice(0, many.indexOf(' Mirelle: eyes grey.'));
-    assert.equal(many.endsWith(' Mirelle: eyes grey.'), true);
-    assert.equal(ScribeText.bytes(head) <= 200, true);
-    const counted = head.match(/, and (\d+) others\.$/);
-    const names = head.slice(lead.length, head.length - counted[0].length).split(', ');
-    assert.deepEqual(names, crowded.slice(0, names.length));
-    assert.equal(Number(counted[1]), 40 - names.length);
-    const longer = `${lead}${crowded.slice(0, names.length + 1).join(', ')}, and ${39 - names.length} others.`;
-    assert.equal(ScribeText.bytes(longer) > 200, true);
-    const accentA = { line: `Mirelle: trait ${'ü'.repeat(200)}` };
-    const accentB = { line: `Mirelle: eyes ${'é'.repeat(60)}` };
-    const accented = ScribeReminder.write(now, [accentA, accentB]);
-    assert.equal(accented, `${opening} ${accentA.line}.`);
-    assert.equal(`${accented} ${accentB.line}.`.length < 600, true);
-    assert.equal(ScribeReminder.write(now, [{ line: `Mirelle: trait ${'ü'.repeat(280)}` }]), opening);
-    const noBreak = String.fromCodePoint(0xa0);
-    assert.equal(
-        ScribeReminder.write(
-            bare(
-                [
-                    { subject: 'S1', label: `Halvard  the${noBreak}Bold` },
-                    { subject: 'S2', label: 'Mirelle' },
-                ],
-                { place: `the${noBreak} mill ` },
-            ),
-            [],
-        ),
-        '[Scribe] Day 3, "the mill", private. Present: Halvard the Bold, Mirelle.',
-    );
-    assert.equal(ScribeReminder.write(bare([]), []), '[Scribe] Day 3, "the mill", private. Present: nobody.');
-});
-
-test('compose asks only when there is a choice', async () => {
-    const recent = story.slice(0, 12);
-    const small = crowd(1);
-    const smallNow = scene(small, ['Halvard', 'Mirelle']);
-    const smallOffered = ScribeReminder.candidates(small, smallNow, 'Halvard', []);
-    assert.deepEqual(lines(smallOffered), [
-        `${secret}background: "deserted at the siege"`,
-        `${secret}trait: "fears the dark"`,
-        'Mirelle, trait: "habit 1"',
-        'Halvard, trait: "snores"',
-    ]);
-    const quiet = scripted([{ text: 'USE: 1' }]);
-    const smallResult = await ScribeReminder.compose({
-        state: small,
-        now: smallNow,
-        player: 'Halvard',
-        recent,
-        unread: [],
-        ask: quiet.ask,
-    });
-    assert.equal(quiet.calls.length, 0);
-    assert.deepEqual(numbers(smallResult.used), [1, 2, 3, 4]);
-    assert.equal(smallResult.text, ScribeReminder.write(smallNow, smallOffered));
-    assert.deepEqual(plain(smallResult.led), []);
-    assertFrozenDeep(smallResult, 'result');
-
-    const many = crowd(17);
-    const manyNow = scene(many, ['Halvard', 'Mirelle']);
-    const manyOffered = ScribeReminder.candidates(many, manyNow, 'Halvard', []);
-    assert.equal(manyOffered.length, 20);
-    assert.deepEqual(plain(manyOffered.slice(0, 3).map((candidate) => candidate.kind)), ['Unknown', 'Unknown', 'Fact']);
-    const asked = scripted([{ text: 'USE: 9, 2, 19' }]);
-    const chosen = await ScribeReminder.compose({
-        state: many,
-        now: manyNow,
-        player: 'Halvard',
-        recent,
-        unread: [],
-        ask: asked.ask,
-    });
-    assert.equal(asked.calls.length, 1);
-    assert.equal(asked.calls[0].system, ScribeReminder.ChoosePrompt);
-    assert.equal(asked.calls[0].user, ScribeReminder.chooseInput(manyNow, manyOffered, recent));
-    assert.deepEqual(numbers(chosen.used), [2, 9, 19]);
-    assert.equal(chosen.text, ScribeReminder.write(manyNow, chosen.used));
-    assertFrozenDeep(chosen, 'chosen');
-
-    const fallbacks = [{ text: 'Let me think about it.' }, new Error('the model is down'), null, { text: 7 }, { text: 'USE: 99' }];
-    for (const answer of fallbacks) {
-        const failing = scripted([answer]);
-        const result = await ScribeReminder.compose({
-            state: many,
-            now: manyNow,
-            player: 'Halvard',
-            recent,
-            unread: [],
-            ask: failing.ask,
-        });
-        assert.equal(failing.calls.length, 1);
-        assert.deepEqual(numbers(result.used), [1, 2, 3, 4, 5, 6, 7, 8], String(answer));
-        assert.equal(result.text, ScribeReminder.write(manyNow, result.used));
-    }
-
-    const wordy = crowd(17, 12);
-    const wordyNow = scene(wordy, ['Halvard', 'Mirelle']);
-    const wordyResult = await ScribeReminder.compose({
-        state: wordy,
-        now: wordyNow,
-        player: 'Halvard',
-        recent,
-        unread: [],
-        ask: scripted([{ text: 'nothing useful' }]).ask,
-    });
-    const wordyOffered = ScribeReminder.candidates(wordy, wordyNow, 'Halvard', []);
-    const usedNumbers = numbers(wordyResult.used);
-    assert.equal(usedNumbers.length >= 3 && usedNumbers.length < 8, true, String(usedNumbers));
-    assert.deepEqual(usedNumbers.slice(0, 2), [1, 2]);
-    assert.equal(wordyResult.text, ScribeReminder.write(wordyNow, wordyResult.used));
-    assert.equal(ScribeText.bytes(wordyResult.text) <= 600, true);
-    for (const candidate of wordyOffered.slice(0, 8)) {
-        const kept = usedNumbers.includes(candidate.number);
-        assert.equal(wordyResult.text.includes(` ${candidate.line}.`), kept, candidate.line);
-        if (!kept) {
-            assert.equal(ScribeText.bytes(`${wordyResult.text} ${candidate.line}.`) > 600, true, candidate.line);
-        }
-    }
-
-    const idle = scripted([{ text: 'USE: 1' }]);
-    const nothing = await ScribeReminder.compose({
-        state: many,
-        now: null,
-        player: 'Halvard',
-        recent,
-        unread: [],
-        ask: idle.ask,
-    });
-    assert.equal(nothing, null);
-    assert.equal(idle.calls.length, 0);
-});
-
-test('the choose input and prompt are exact', () => {
-    const now = bare(
-        [
-            { subject: 'S1', label: 'Halvard' },
-            { subject: 'S2', label: 'Mirelle' },
-            { subject: null, label: 'a stranger' },
-        ],
-        { summary: 'They talk by the wheel' },
-    );
-    const candidates = [
-        { number: 1, line: 'Mirelle: eyes grey' },
-        { number: 2, line: `${onlyMirelle}trait snores` },
-    ];
-    const lastTen = Array.from(
-        { length: 10 },
-        (_, index) => `[#${index + 3}] Narrator: The tale goes on, line ${index + 3}.`,
-    ).join('\n\n');
-    assert.equal(
-        ScribeReminder.chooseInput(now, candidates, story.slice(0, 12)),
-        'SCENE:\nDay 3 | the mill | private | present: Halvard, Mirelle, a stranger | They talk by the wheel\n\n' +
-            `ENTRIES:\n1. Mirelle: eyes grey\n2. ${onlyMirelle}trait snores\n\n` +
-            `RECENT MESSAGES:\n${lastTen}`,
-    );
-    assert.equal(
-        ScribeReminder.chooseInput({ ...now, reach: 'Public', present: [] }, candidates.slice(0, 1), story.slice(0, 2)),
-        'SCENE:\nDay 3 | the mill | public | present: nobody | They talk by the wheel\n\n' +
-            'ENTRIES:\n1. Mirelle: eyes grey\n\n' +
-            'RECENT MESSAGES:\n[#1] Narrator: The tale goes on, line 1.\n\n[#2] Narrator: The tale goes on, line 2.',
-    );
-    const prompt = [
-        'You help a storyteller keep an ongoing adult fiction roleplay consistent. You never write story.',
-        'You receive the SCENE as it stands, a numbered list of ENTRIES that are known to be true, and the RECENT MESSAGES.',
-        'Choose the entries the storyteller most needs to be reminded of for this scene: what bears on what is happening now.',
-        'Answer with one line and nothing else:',
-        '',
-        'USE: 3, 7, 12',
-        '',
-        'Rules.',
-        '1. Use only numbers from ENTRIES. At most 8.',
-        '2. Prefer entries about what someone here knows or does not know, then lasting facts the recent messages touch on.',
-        '3. If nothing is worth reminding, answer USE: none',
-    ].join('\n');
-    assert.equal(ScribeReminder.ChoosePrompt, prompt);
-    assert.equal(ScribeReminder.ChoosePrompt.startsWith('You help a storyteller keep'), true);
-    assert.equal(ScribeReminder.ChoosePrompt.endsWith('answer USE: none'), true);
-    assert.equal(ScribeReminder.ChoosePrompt.match(/^\d+\. /gm).length, 3);
-    assert.equal(ScribeReminder.Settings.MaxBytes, 600);
-    assert.equal(ScribeReminder.Settings.MostChosen, 8);
-    assert.deepEqual(plain(ScribeReminder.Kind), { Fact: 'Fact', Knows: 'Knows', Unknown: 'Unknown' });
-});
-
-test('nothing is leaked by construction', () => {
-    const log = ScribeLog.create();
-    const first = apply(
-        log,
-        {
-            SUBJECTS: [
-                'Halvard | character',
-                'Mirelle | character',
-                'Isolde | character',
-                'Brandt | character',
-                'Kira | character',
-            ],
-            FACTS: [
-                'Halvard | background | deserted at the siege | hidden | #3',
-                'Mirelle | trait | steals from the till | hidden | #4',
-                'Isolde | background | was once a spy | hidden | #5',
-                'Halvard | trait | snores | #6',
-                'Mirelle | eyes | grey | #7',
-                'Halvard | trait | hums old songs | #14',
-                'Halvard | relation to Kira | owes her money | #15',
-                'Kira | trait | laughs loudly | #16',
-            ],
-            SCENES: [
-                'Day 1 | #1-#10 | The cellar | private | present: Halvard, Mirelle, Isolde | They hide',
-                'Day 1 | #11-#20 | The loft | private | present: Halvard, Brandt | They plan',
-            ],
-        },
-        stretch(1, 20),
-    );
-    const deserted = factSaying(first, 'deserted at the siege').id;
-    const state = apply(log, { TOLD: [`${deserted} | Halvard | Mirelle | #25`] }, pick(25));
-    const halvard = idOf(state, 'Halvard');
-    const cast = ['Halvard', 'Mirelle', 'Isolde', 'Brandt', 'Kira'];
-    const byId = new Map(state.facts.map((fact) => [fact.id, fact]));
-    const seen = { Fact: 0, Knows: 0, Unknown: 0 };
-    for (let mask = 0; mask < 2 ** cast.length; mask++) {
-        const labels = cast.filter((_, index) => (mask & (2 ** index)) !== 0);
-        const others = labels.filter((label) => label !== 'Halvard');
-        for (const candidate of offered(state, labels)) {
-            const where = `${labels.join(',')}: ${candidate.line}`;
-            const fact = byId.get(candidate.fact);
-            const knowers = others.filter((label) => ScribeKnowledge.knows(state, idOf(state, label), fact));
-            seen[candidate.kind]++;
-            assert.equal(fact.hidden && fact.widened !== 'Everyone' && fact.subject !== halvard, false, where);
-            assert.equal(/steals from the till|was once a spy/.test(candidate.line), false, where);
-            if (candidate.kind === 'Fact') {
-                assert.equal(knowers.length === others.length, true, where);
-                assert.equal(ScribeKnowledge.knows(state, halvard, fact), true, where);
-            }
-            if (candidate.kind === 'Knows') {
-                const start = 'Of those here only '.length;
-                const named = candidate.line.slice(start, candidate.line.indexOf(' know', start)).split(/, | and /);
-                assert.deepEqual(named, knowers, where);
-                assert.equal(knowers.length < others.length, true, where);
-            }
-            if (candidate.kind === 'Unknown') {
-                assert.deepEqual(knowers, [], where);
-                assert.equal(others.length > 0, true, where);
-            }
-        }
-    }
-    assert.equal(seen.Fact > 0 && seen.Knows > 0 && seen.Unknown > 0, true, JSON.stringify(seen));
-});
-
-test('a private confession is not stated in front of others', () => {
-    const state = confession();
-    assert.deepEqual(lines(offered(state, ['Halvard', 'Mirelle', 'Isolde']), 'Fact'), ['Mirelle, trait: "hums"']);
-    assert.deepEqual(lines(offered(state, ['Mirelle', 'Isolde']), 'Fact'), ['Mirelle, trait: "hums"']);
-    assert.deepEqual(lines(offered(state, ['Halvard', 'Mirelle']), 'Fact'), [
-        'Mirelle, background: "poisoned the old king"',
-        'Mirelle, trait: "hums"',
-    ]);
-    assert.deepEqual(lines(offered(state, ['Halvard', 'Isolde']), 'Fact'), []);
-    assert.equal(ScribeKnowledge.knows(state, idOf(state, 'Isolde'), factSaying(state, 'hoards silver')), true);
-    assert.equal(ScribeKnowledge.knows(state, idOf(state, 'Halvard'), factSaying(state, 'hoards silver')), false);
-});
-
-test('a stranger knows only what everyone knows', () => {
-    const state = confession();
-    assert.deepEqual(lines(offered(state, ['Halvard', 'Mirelle', 'a stranger']), 'Fact'), ['Mirelle, trait: "hums"']);
-    assert.deepEqual(lines(offered(state, ['Halvard', 'Mirelle']), 'Fact'), [
-        'Mirelle, background: "poisoned the old king"',
-        'Mirelle, trait: "hums"',
-    ]);
-});
-
-test('one knower does not remove the warning', () => {
-    const log = ScribeLog.create();
-    const first = apply(
-        log,
-        {
-            SUBJECTS: [
-                'Halvard | character',
-                'Mirelle | character',
-                'Isolde | character',
-                'Brandt | character',
-                'Kira | character',
-            ],
-            FACTS: ['Halvard | background | deserted at the siege | hidden | #5', 'Halvard | trait | snores | #7'],
-            SCENES: [
-                'Day 1 | #1-#10 | The hall | public | present: Halvard, Mirelle, Isolde, Brandt | They feast',
-                'Day 1 | #6-#8 | The alcove | private | present: Halvard, Mirelle | They whisper',
-            ],
-        },
-        stretch(1, 10),
-    );
-    const id = factSaying(first, 'deserted at the siege').id;
-    const snores = factSaying(first, 'snores').id;
-    const said = 'background: "deserted at the siege"';
-    const toMirelle = apply(log, { TOLD: [`${id} | Halvard | Mirelle | #12`] }, pick(12));
-    const watched = offered(toMirelle, ['Halvard', 'Mirelle', 'Isolde', 'Brandt']);
-    assert.deepEqual(about(watched, id), [`Knows|${onlyMirelle}${said}`]);
-    assert.deepEqual(about(watched, snores), [`Knows|${onlyMirelle}trait: "snores"`]);
-    const unaware = offered(toMirelle, ['Halvard', 'Isolde', 'Brandt']);
-    assert.deepEqual(about(unaware, id), [`Unknown|${secret}${said}`]);
-    assert.deepEqual(about(unaware, snores), ['Unknown|No one here knows this about Halvard: trait: "snores"']);
-    assert.deepEqual(about(offered(toMirelle, ['Halvard', 'Mirelle']), id), []);
-    const toKira = apply(log, { TOLD: [`${id} | Halvard | Kira | #14`] }, pick(14));
-    assert.deepEqual(about(offered(toKira, ['Halvard', 'Mirelle', 'Isolde', 'Brandt', 'Kira']), id), [
-        `Knows|Of those here only Mirelle and Kira know this about Halvard, the others do not: ${said}`,
-    ]);
-    const toIsolde = apply(log, { TOLD: [`${id} | Halvard | Isolde | #16`] }, pick(16));
-    assert.deepEqual(about(offered(toIsolde, ['Halvard', 'Mirelle', 'Isolde', 'Brandt', 'Kira']), id), [
-        `Knows|Of those here only Mirelle, Isolde and Kira know this about Halvard, the others do not: ${said}`,
-    ]);
-});
-
-test('a thinner wording is said as such', () => {
-    const { thin, full, state } = battle();
-    const found = offered(state, ['Halvard', 'Kira', 'Isolde']);
-    assert.deepEqual(about(found, full), [
-        `Unknown|${notWhole}background: "fled a battle at the ford"; only Kira knows a part of it: background: "fled a battle"; the others know nothing of it`,
-    ]);
-    assert.deepEqual(about(found, thin), []);
-    assert.equal(found.length, 1);
-});
-
-test('a part known to some is said with what the others know', () => {
-    const { log, thin, full, state } = battle();
-    const ford = 'background: "fled a battle at the ford"';
-    const night = 'background: "fled a battle at the ford by night"';
-    const part = 'background: "fled a battle"';
-    assert.deepEqual(lines(offered(state, ['Halvard', 'Kira', 'Isolde'])), [
-        `${notWhole}${ford}; only Kira knows a part of it: ${part}; the others know nothing of it`,
-    ]);
-    assert.deepEqual(lines(offered(state, ['Halvard', 'Kira'])), [`${notWhole}${ford}; only Kira knows a part of it: ${part}`]);
-    const toMirelle = apply(log, { TOLD: [`${full} | Halvard | Mirelle | #18`] }, pick(18));
-    assert.deepEqual(lines(offered(toMirelle, ['Halvard', 'Mirelle', 'Kira', 'Isolde'])), [
-        `Of those here only Mirelle knows this about Halvard: ${ford}; only Kira knows a part of it: ${part}; the others know nothing of it`,
-    ]);
-    assert.deepEqual(lines(offered(toMirelle, ['Halvard', 'Mirelle', 'Kira'])), [
-        `Of those here only Mirelle knows this about Halvard: ${ford}; only Kira knows a part of it: ${part}`,
-    ]);
-    const refined = apply(
-        log,
-        { CHANGES: [`${full} | Halvard | background | FULLER: fled a battle at the ford by night | #20`] },
-        pick(20),
-    );
-    assert.deepEqual(lines(offered(refined, ['Halvard', 'Mirelle', 'Kira', 'Isolde'])), [
-        `${notWhole}${night}; only Mirelle knows a part of it: ${ford}; only Kira knows a part of it: ${part}; the others know nothing of it`,
-    ]);
-    const toIsolde = apply(log, { TOLD: [`${thin} | Halvard | Isolde | #22`] }, pick(22));
-    assert.deepEqual(lines(offered(toIsolde, ['Halvard', 'Kira', 'Isolde'])), [
-        `${notWhole}${night}; only Kira and Isolde know a part of it: ${part}`,
-    ]);
-    assert.deepEqual(lines(offered(toIsolde, ['Halvard', 'Kira', 'Isolde', 'a stranger'])), [
-        `${notWhole}${night}; only Kira and Isolde know a part of it: ${part}; the others know nothing of it`,
-    ]);
-});
-
-test('the warnings are written first and kept', async () => {
-    const eight = crowd(5);
-    const now = scene(eight, ['Halvard', 'Mirelle']);
-    const found = ScribeReminder.candidates(eight, now, 'Halvard', []);
-    assert.equal(found.length, 8);
-    assert.deepEqual(plain(found.map((candidate) => candidate.kind)), [
-        'Unknown',
-        'Unknown',
-        'Fact',
-        'Fact',
-        'Fact',
-        'Fact',
-        'Fact',
-        'Fact',
-    ]);
-    const written = await composed(eight, now);
-    const first = written.text.indexOf(`${secret}background: "deserted at the siege".`);
-    assert.equal(first, opening.length + 1);
-    assert.equal(
-        written.text.indexOf(`${secret}trait: "fears the dark".`) < written.text.indexOf('Mirelle, trait: "habit 1".'),
-        true,
-    );
-    const tight = crowd(5, 12);
-    const tightResult = await composed(tight, scene(tight, ['Halvard', 'Mirelle']));
-    assert.deepEqual(numbers(tightResult.used).slice(0, 2), [1, 2]);
-    assert.equal(tightResult.used.length < 8, true);
-    assert.equal(tightResult.text.includes(`${secret}trait: "fears the dark".`), true);
-    const short = ScribeReminder.fit(scene(eight, ['Halvard', 'Mirelle']), [
-        { line: `Mirelle, trait: "${'h'.repeat(600)}"` },
-        { line: 'Mirelle, eyes: "grey"' },
-        { line: 'Halvard, trait: "snores"' },
-    ]);
-    assert.equal(short.text, `${opening} Mirelle, eyes: "grey". Halvard, trait: "snores".`);
-    assert.deepEqual(plain(short.used.map((entry) => entry.line)), ['Mirelle, eyes: "grey"', 'Halvard, trait: "snores"']);
-});
-
-test('the opening names the room', async () => {
-    const log = ScribeLog.create();
-    const first = apply(
-        log,
-        {
-            SUBJECTS: ['Halvard | character', 'Hal | character', 'Kira | character', 'Kiki | character', 'Isolde | character'],
-            FACTS: ['Halvard | background | deserted at the siege | hidden | #5'],
-            SCENES: ['Day 1 | #1-#10 | The hall | public | present: Halvard, Kira, Isolde | They feast'],
-        },
-        stretch(1, 10),
-    );
-    const told = apply(log, { TOLD: [`${factSaying(first, 'deserted at the siege').id} | Halvard | Kiki | #12`] }, pick(12));
-    const before = scene(told, ['Halvard', 'Hal', 'Kiki', 'Kira', 'Isolde', 'a guard', 'A Guard']);
-    rule(log, { type: 'Merge', from: idOf(told, 'Kiki'), into: idOf(told, 'Kira') });
-    const merged = rule(log, { type: 'Merge', from: idOf(told, 'Hal'), into: idOf(told, 'Halvard') });
-    const result = await composed(merged, before);
-    assert.equal(
-        result.text,
-        '[Scribe] Day 3, "the mill", private. Present: Halvard, Kira, Isolde, and 1 other. ' +
-            'Of those here only Kira knows this about Halvard, the others do not: background: "deserted at the siege".',
-    );
-    const underAlias = await composed(merged, scene(told, ['Hal', 'Isolde']));
-    assert.equal(underAlias.text.startsWith('[Scribe] Day 3, "the mill", private. Present: Halvard, Isolde. '), true);
-    assert.deepEqual(plain(ScribeReminder.people(merged, before, 'Halvard').map((person) => person.label)), [
-        'Halvard',
-        'Kira',
-        'Isolde',
-        null,
-    ]);
-});
-
-test('one match or none', () => {
-    const state = book(
-        {
-            SUBJECTS: ['Hal | character', 'Halvard | character', 'Mirelle | character'],
-            FACTS: [
-                'Halvard | aka | Hal | #2',
-                'Hal | background | drowned his brother | hidden | #4',
-                'Halvard | background | deserted at the siege | hidden | #5',
-                'Mirelle | trait | hums | #6',
-            ],
-            SCENES: ['Day 1 | #1-#10 | The hall | public | present: Halvard, Hal, Mirelle | They feast'],
-        },
-        10,
-    );
-    assert.deepEqual(plain(state.subjects.find((subject) => subject.label === 'Halvard').aka), ['Hal']);
-    assert.equal(ScribeReminder.namesakes(state, 'Hal').length, 2);
-    const found = ScribeReminder.candidates(state, scene(state, ['Halvard', 'Hal', 'Mirelle']), 'Hal', []);
-    assert.deepEqual(lines(found), ['Halvard, aka: "Hal"', 'Mirelle, trait: "hums"']);
-    assert.equal(lines(found).some((line) => /drowned|deserted/.test(line)), false);
-});
-
-test('a player not found still guards', () => {
-    const state = book(
-        {
-            SUBJECTS: ['Hal (the ferryman) | character', 'Halvard | character', 'Mirelle | character', 'Isolde | character'],
-            NAMES: ['Hal | Halvard | #2'],
-            FACTS: ['Mirelle | background | poisoned the old king | #6', 'Mirelle | trait | hums | #15'],
-            SCENES: [
-                'Day 1 | #1-#10 | The vault | private | present: Mirelle, Isolde | They plot',
-                'Day 1 | #11-#20 | The hall | public | present: Mirelle, Isolde | They feast',
-            ],
-        },
-        20,
-    );
-    assert.equal(ScribeReminder.namesakes(state, 'Hal').length, 2);
-    const found = ScribeReminder.candidates(state, scene(state, ['Mirelle', 'Isolde']), 'Hal', []);
-    assert.deepEqual(lines(found), ['Mirelle, trait: "hums"']);
-});
-
-test('ordinary text is kept', async () => {
-    const texts = [
-        'studied under Dr. Venn at the college',
-        'Sister of the Order of St. Orla',
-        'about 5 ft. 4 and slender',
-        'lives at No. 7 Harrow Row',
-        'the Kings Road, near mile 3.5',
-        'quotes scripture, e.g. the Book of Ash',
-    ];
-    const state = added(texts.map((text) => ['trait', text]));
-    assert.deepEqual(lines(offered(state, ['Halvard', 'Mirelle'])), texts.map((text) => `Mirelle, trait: "${text}"`));
-    const oswin = `Oswin (Tamsin${curly}s uncle)`;
-    const labelled = book(
-        {
-            SUBJECTS: ['Halvard | character', 'Dr. Venn | character', `${oswin} | character`],
-            FACTS: ['Dr. Venn | trait | quiet | #2', `${oswin} | trait | gruff | #3`],
-            SCENES: ['Day 1 | #1-#10 | The hall | public | present: Halvard | They feast'],
-        },
-        10,
-    );
-    const now = scene(labelled, ['Halvard', 'Dr. Venn', oswin]);
-    assert.deepEqual(lines(ScribeReminder.candidates(labelled, now, 'Halvard', [])), [
-        'Dr Venn, trait: "quiet"',
-        'Oswin, trait: "gruff"',
-    ]);
-    const result = await composed(labelled, now);
-    assert.equal(
-        result.text,
-        '[Scribe] Day 3, "the mill", private. Present: Halvard, Dr Venn, Oswin. Dr Venn, trait: "quiet". Oswin, trait: "gruff".',
-    );
-});
-
-test("the chooser's answer is read as a model writes it", async () => {
-    const list = Object.freeze(
-        Array.from({ length: 14 }, (_, index) =>
-            Object.freeze({ number: index + 1, kind: 'Fact', subject: 'S1', fact: 'F1', line: `entry ${index + 1}` }),
-        ),
-    );
-    const read = [
-        'USE: 3, 7, 12.',
-        'USE: 3 7 12',
-        'USE: [3, 7, 12]',
-        '**USE:** 3, 7, 12',
-        'USE: #3, #7, #12',
-        'USE: 3, 7 and 12',
-        `USE${String.fromCodePoint(0xff1a)}3, 7, 12`,
-        'USE: 3; 7; 12',
-        'USE:\n3, 7, 12',
-        'USE:\n\n- 3, 7, 12',
-    ];
-    for (const text of read) {
-        assert.deepEqual(numbers(ScribeReminder.chosen(text, list)), [3, 7, 12], text);
-    }
-    assert.deepEqual(numbers(ScribeReminder.chosen('USE: None.', list)), []);
-    for (const text of ['USE: 1-20', 'USE: 1.5', 'USE: 3, 7, 12 (the secrets first)', 'Answer: USE: 3', 'USE 3']) {
-        assert.equal(ScribeReminder.chosen(text, list), null, text);
-    }
-    const many = crowd(17);
-    const now = scene(many, ['Halvard', 'Mirelle']);
-    const asked = scripted([{ text: 'USE: None.' }]);
-    const result = await ScribeReminder.compose({
-        state: many,
-        now,
-        player: 'Halvard',
-        recent: [],
-        unread: [],
-        ask: asked.ask,
-    });
-    assert.equal(asked.calls.length, 1);
-    assert.deepEqual(plain(result.used), []);
-    assert.equal(result.text, opening);
-});
-
-test('lengths are counted in code points', () => {
-    const state = added([
-        ['trait', deseret.repeat(128)],
-        ['trait', deseretOther.repeat(201)],
-    ]);
-    assert.equal(deseret.repeat(128).length, 256);
-    assert.deepEqual(lines(offered(state, ['Halvard', 'Mirelle'])), [`Mirelle, trait: "${deseret.repeat(128)}"`]);
-});
-
-test('a contested value is never said, in any wording', () => {
-    const log = ScribeLog.create();
-    const first = apply(
-        log,
-        {
-            SUBJECTS: ['Halvard | character', 'Mirelle | character', 'Isolde | character'],
-            FACTS: ['Halvard | age | thirty | #3', 'Halvard | trait | snores | #4'],
-            SCENES: ['Day 1 | #1-#10 | The cellar | private | present: Halvard, Mirelle | They hide'],
-        },
-        stretch(1, 10),
-    );
-    const thirty = factSaying(first, 'thirty').id;
-    const state = apply(
-        log,
-        {
-            CHANGES: [`${thirty} | Halvard | age | FULLER: thirty winters | #12`],
-            FACTS: ['Halvard | age | forty-one | #20'],
-            SCENES: ['Day 1 | #11-#20 | The study | private | present: Halvard, Isolde | They read'],
-        },
-        stretch(11, 20),
-    );
-    const wordings = ['thirty', 'thirty winters', 'forty-one'].map((text) => factSaying(state, text).id);
-    assert.equal(state.conflicts.length, 1);
-    assert.equal(state.conflicts[0].established, wordings[1]);
-    assert.deepEqual(plain(state.conflicts[0].others), [wordings[2]]);
-    assert.equal(factSaying(state, 'thirty').status, 'Replaced');
-    for (const room of [['Halvard', 'Mirelle', 'Isolde'], ['Halvard', 'Mirelle'], ['Halvard', 'Isolde']]) {
-        const found = offered(state, room);
-        assert.equal(found.length > 0, true, room.join(','));
-        for (const candidate of found) {
-            assert.equal(wordings.includes(candidate.fact), false, candidate.line);
-            assert.equal(/thirty|forty/.test(candidate.line), false, candidate.line);
-        }
-    }
-});
-
-test('a fact of the player known to some is not stated plainly', () => {
-    const state = book(
-        {
-            SUBJECTS: ['Halvard | character', 'Mirelle | character', 'Isolde | character'],
-            FACTS: ['Halvard | trait | snores | #5'],
-            SCENES: ['Day 1 | #1-#10 | The cellar | private | present: Halvard, Mirelle | They hide'],
-        },
-        10,
-    );
-    const watched = offered(state, ['Halvard', 'Mirelle', 'Isolde']);
-    assert.deepEqual(lines(watched), [`${onlyMirelle}trait: "snores"`]);
-    assert.deepEqual(lines(watched, 'Fact'), []);
-    const alone = offered(state, ['Halvard', 'Mirelle']);
-    assert.deepEqual(lines(alone), ['Halvard, trait: "snores"']);
-    assert.deepEqual(plain(alone.map((candidate) => candidate.kind)), ['Fact']);
-});
-
-test('a relation needs its target in the room', () => {
-    const state = book(
-        {
-            SUBJECTS: [
-                'Halvard | character',
-                'Mirelle | character',
-                'Isolde | character',
-                'Kira | character',
-                'Brandt | character',
-            ],
-            FACTS: [
-                'Halvard | relation to Kira | owes her money | #5',
-                'Halvard | relation to Corvane | fears him | #6',
-                'Halvard | relation to Brandt | hates him | hidden | #7',
-                'Mirelle | relation to Brandt | rivals | #15',
-                'Mirelle | relation to Halvard | old friends | #16',
-            ],
-            SCENES: [
-                'Day 1 | #1-#10 | The cellar | private | present: Halvard, Mirelle | They hide',
-                'Day 1 | #11-#20 | The hall | public | present: Halvard, Mirelle, Brandt | They feast',
-            ],
-        },
-        20,
-    );
-    assert.equal(factSaying(state, 'fears him').target, null);
-    assert.deepEqual(lines(offered(state, ['Halvard', 'Mirelle', 'Isolde'])), ['Mirelle toward Halvard: "old friends"']);
-    assert.deepEqual(lines(offered(state, ['Halvard', 'Mirelle', 'Isolde', 'Kira', 'Brandt'])), [
-        `${onlyMirelle}toward Kira: "owes her money"`,
-        `${secret}toward Brandt: "hates him"`,
-        'Mirelle toward Brandt: "rivals"',
-        'Mirelle toward Halvard: "old friends"',
-    ]);
-});
-
-test('the player is one subject or none', () => {
-    const ferry = book(
-        {
-            SUBJECTS: ['Hal (the ferryman) | character', 'Halvard | character', 'Mirelle | character'],
-            NAMES: ['Hal | Halvard | #3'],
-            FACTS: [
-                'Hal (the ferryman) | background | drowned his brother | hidden | #4',
-                'Halvard | background | deserted at the siege | hidden | #5',
-                'Mirelle | trait | hums | #6',
-            ],
-            SCENES: ['Day 1 | #1-#10 | The hall | public | present: Halvard, Hal (the ferryman), Mirelle | They feast'],
-        },
-        10,
-    );
-    const ferryNow = scene(ferry, ['Halvard', 'Hal (the ferryman)', 'Mirelle']);
-    const lost = ScribeReminder.candidates(ferry, ferryNow, 'Hal', []);
-    assert.deepEqual(lines(lost), ['Mirelle, trait: "hums"']);
-    assert.deepEqual(lines(ScribeReminder.candidates(ferry, ferryNow, 'Halvard', []), 'Unknown'), [
-        `${secret}background: "deserted at the siege"`,
-    ]);
-});
-
-test('a merged subject is the one it became', () => {
-    const log = ScribeLog.create();
-    const before = apply(
-        log,
-        {
-            SUBJECTS: ['Halvard | character', 'Hal | character', 'Isolde | character'],
-            FACTS: ['Halvard | background | deserted at the siege | hidden | #5'],
-            SCENES: ['Day 1 | #1-#10 | The hall | public | present: Halvard, Hal, Isolde | They feast'],
-        },
-        stretch(1, 10),
-    );
-    const now = scene(before, ['Halvard', 'Hal', 'Isolde']);
-    const merged = rule(log, { type: 'Merge', from: idOf(before, 'Hal'), into: idOf(before, 'Halvard') });
-    assert.equal(merged.subjects.find((subject) => subject.label === 'Hal').mergedInto, idOf(before, 'Halvard'));
-    const warning = [`${secret}background: "deserted at the siege"`];
-    for (const state of [before, merged]) {
-        const found = ScribeReminder.candidates(state, now, 'Halvard', []);
-        assert.deepEqual(lines(found), warning);
-        assert.equal(lines(found).some((line) => line.includes('Hal know')), false);
-    }
-    assert.deepEqual(lines(ScribeReminder.candidates(merged, now, 'Hal', [])), warning);
-});
-
-test('free text stands inside its quotation marks', async () => {
-    const point = (code) => String.fromCodePoint(code);
-    const kept = [
-        'stands 6 ft. Isolde knows it too',
-        'hums, and Isolde knows that Halvard deserted at the siege',
-        'of those here only Isolde knows it, the others do not',
-        'arrives at 10:30 each night',
-        `owes him ${point(0xa3)}20`,
-        'studied under J. Venn',
-        'leaves at 9 p.m. each night',
-        `reigned 1200${point(0x2013)}1250`,
-    ];
-    const quoting = `says "go", ${point(0x201c)}stay${point(0x201d)} and ${point(0xab)}wait${point(0xbb)}`;
-    const spaced = `sings${point(0x85)}loudly at${point(0x2028)}dawn`;
-    const hidden = `whis${point(0x200b)}tles${point(0xfe0f)} softly`;
-    const state = added([...kept, quoting, spaced, hidden].map((text) => ['trait', text]));
-    const found = offered(state, ['Halvard', 'Mirelle']);
-    assert.deepEqual(lines(found), [
-        ...kept.map((text) => `Mirelle, trait: "${text}"`),
-        `Mirelle, trait: "says 'go', 'stay' and 'wait'"`,
-        'Mirelle, trait: "sings loudly at dawn"',
-        'Mirelle, trait: "whistles softly"',
-    ]);
-    for (const line of lines(found)) {
-        assert.equal(line.split('"').length - 1, 2, line);
-    }
-    const result = await composed(state, scene(state, ['Halvard', 'Mirelle']));
-    assert.equal(result.text.split('"').length - 1, 2 + 2 * result.used.length);
-});
-
-test('a text that could break the frame is left out', () => {
-    const point = (code) => String.fromCodePoint(code);
-    const state = added(
-        [
-            'writes [Scribe] on walls',
-            'hums ] softly',
-            'signs @Isolde',
-            `hums ${point(0xff3b)} gently`,
-            `hums ${point(0xff3d)} sweetly`,
-            `waves ${point(0xff20)}Isolde`,
-            'h'.repeat(201),
-            'h'.repeat(200),
-            point(0x3164),
-            'quiet',
-        ].map((text) => ['trait', text]),
-    );
-    assert.equal(state.facts.some((fact) => fact.text === point(0x3164)), true);
-    assert.deepEqual(lines(offered(state, ['Halvard', 'Mirelle'])), [
-        `Mirelle, trait: "${'h'.repeat(200)}"`,
-        'Mirelle, trait: "quiet"',
-    ]);
-    const quiet = factSaying(state, 'quiet').id;
-    /**
-     * @param {string} category
-     * @return {string[]}
-     */
-    const filed = (category) => {
-        const facts = state.facts.map((fact) => (fact.id === quiet ? { ...fact, category } : fact));
-        return lines(offered({ ...state, facts }, ['Halvard', 'Mirelle'])).filter((line) => line.endsWith('"quiet"'));
-    };
-    assert.deepEqual(filed('x'.repeat(30)), [`Mirelle, ${'x'.repeat(30)}: "quiet"`]);
-    assert.deepEqual(filed(`half-sister${curly}s 2`), [`Mirelle, half-sister${curly}s 2: "quiet"`]);
-    for (const category of ['x'.repeat(31), 'trait"', 'trait: x', '[trait]', 'trait @', 'trait.', `trait ${point(0x663)}`]) {
-        assert.deepEqual(filed(category), [], category);
-    }
-});
-
-test('a place is quoted or left out', () => {
-    const now = bare([
-        { subject: 'S1', label: 'Halvard' },
-        { subject: 'S2', label: 'Mirelle' },
-    ]);
-    const without = '[Scribe] Day 3, private. Present: Halvard, Mirelle.';
-    assert.equal(
-        ScribeReminder.write({ ...now, place: 'the mill, Isolde knows Halvard deserted' }, []),
-        '[Scribe] Day 3, "the mill, Isolde knows Halvard deserted", private. Present: Halvard, Mirelle.',
-    );
-    const sixty = [...Array(5).fill('riverside'), 'riversides'].join(' ');
-    assert.equal(Array.from(sixty).length, 60);
-    assert.equal(
-        ScribeReminder.write({ ...now, place: sixty }, []),
-        `[Scribe] Day 3, "${sixty}", private. Present: Halvard, Mirelle.`,
-    );
-    assert.equal(ScribeReminder.write({ ...now, place: `${sixty}s` }, []), without);
-    assert.equal(ScribeReminder.write({ ...now, place: 'the mill @ night' }, []), without);
-    assert.equal(ScribeReminder.write({ ...now, place: 'the [old] mill' }, []), without);
-    assert.equal(
-        ScribeReminder.write({ ...now, place: 'the "old" mill' }, []),
-        `[Scribe] Day 3, "the 'old' mill", private. Present: Halvard, Mirelle.`,
-    );
-});
-
-test('a name is made of allowed characters', async () => {
-    const point = (code) => String.fromCodePoint(code);
-    const printed = (label) => ScribeReminder.printed(label);
-    assert.equal(printed('Hal (the ferryman)'), 'Hal');
-    assert.equal(printed('Hal [the ferryman]'), 'Hal');
-    assert.equal(printed('Dr. Venn'), 'Dr Venn');
-    assert.equal(printed(`Oswin (Tamsin${curly}s uncle)`), 'Oswin');
-    assert.equal(printed(`Iso${point(0x3164)}lde`), 'Isolde');
-    assert.equal(printed(`Zoe${point(0x308)}`), `Zo${point(0xeb)}`);
-    assert.equal(printed(`O${curly}Brien-Hale`), `O${curly}Brien-Hale`);
-    assert.equal(printed('a b c d'), 'a b c d');
-    assert.equal(printed('x'.repeat(60)), 'x'.repeat(60));
-    assert.equal(printed("O'Brien"), "O'Brien");
-    assert.equal(printed(`Kira${point(0x331)}`), `Kira${point(0x331)}`);
-    assert.equal(printed(`${point(0x1f88)}gathe`), `${point(0x1f88)}gathe`);
-    const refused = [
-        'Mirelle, Isolde',
-        'Venn: the elder',
-        `Kira ${point(0x663)}`,
-        point(0x92a, 0x94d, 0x930, 0x93f, 0x92f, 0x93e),
-        'a b c d e',
-        'x'.repeat(61),
-        'Brandt and Sons',
-        'Brandt AND Sons',
-        'Brandt & Sons',
-        'Hal (the ferryman',
-        'Halvard the Bold!',
-        '',
-    ];
-    for (const label of refused) {
-        assert.equal(printed(label), null, label);
-    }
-    const state = book(
-        {
-            SUBJECTS: ['Halvard | character', 'Dr. Venn | character', 'Hal (the ferryman) | character', 'Mirelle, Isolde | group'],
-            FACTS: ['Dr. Venn | trait | quiet | #2', 'Hal (the ferryman) | trait | rows | #3'],
-            SCENES: ['Day 1 | #1-#10 | The hall | public | present: Halvard | They feast'],
-        },
-        10,
-    );
-    const now = scene(state, ['Halvard', 'Dr. Venn', 'Hal (the ferryman)', 'Mirelle, Isolde']);
-    const result = await composed(state, now);
-    assert.equal(
-        result.text,
-        '[Scribe] Day 3, "the mill", private. Present: Halvard, Dr Venn, Hal, and 1 other. Dr Venn, trait: "quiet". Hal, trait: "rows".',
-    );
-});
-
-test('strangers are counted', async () => {
-    const point = (code) => String.fromCodePoint(code);
-    const filler = point(0x3164);
-    const state = book(
-        {
-            SUBJECTS: ['Halvard | character', 'Isolde | character', 'Mirelle | character', 'Brandt and Sons | group'],
-            FACTS: ['Isolde | trait | sings | #2', 'Halvard | background | deserted at the siege | hidden | #3'],
-            SCENES: ['Day 1 | #1-#10 | The hall | public | present: Halvard, Isolde, Mirelle | They feast'],
-        },
-        10,
-    );
-    const text = async (labels) => (await composed(state, scene(state, labels))).text;
-    const three = await text(['Halvard', 'Isolde', 'a guard', 'everyone knows it', 'Brandt and Sons']);
-    assert.equal(
-        three,
-        '[Scribe] Day 3, "the mill", private. Present: Halvard, Isolde, and 3 others. ' +
-            `${secret}background: "deserted at the siege". Isolde, trait: "sings".`,
-    );
-    assert.equal((await text(['Halvard', 'Isolde', 'a guard'])).startsWith('[Scribe] Day 3, "the mill", private. Present: Halvard, Isolde, and 1 other.'), true);
-    assert.equal((await text(['a guard', 'two sailors'])).startsWith('[Scribe] Day 3, "the mill", private. Present: 2 people.'), true);
-    assert.equal((await text(['a guard'])).startsWith('[Scribe] Day 3, "the mill", private. Present: 1 person.'), true);
-    const hostile = await text([
-        'Halvard',
-        `a${filler}guard${filler}who${filler}saw${filler}Halvard${filler}flee`,
-        'Al knows it all',
-        'Isolde knows Halvard deserted',
-        'a guard',
-        'A Guard',
-    ]);
-    assert.equal(hostile.startsWith('[Scribe] Day 3, "the mill", private. Present: Halvard, and 4 others.'), true);
-    assert.equal(/guard|knows it all|Isolde knows|Brandt/.test(hostile), false, hostile);
-    assert.equal(
-        ScribeReminder.write(
-            bare([
-                { subject: 'S1', label: 'Halvard' },
-                { subject: null, label: 'Mirelle' },
-            ]),
-            [],
-        ),
-        '[Scribe] Day 3, "the mill", private. Present: Halvard, and 1 other.',
-    );
-});
-
-test('one label, one person', async () => {
-    const log = ScribeLog.create();
-    const first = apply(
-        log,
-        {
-            SUBJECTS: [
-                'Halvard | character',
-                'Kira (the smith) | character',
-                'Kira (the baker) | character',
-                'Isolde | character',
-            ],
-            FACTS: [
-                'Halvard | aka | Hal | #2',
-                'Halvard | background | deserted at the siege | hidden | #5',
-                'Kira (the smith) | trait | whistles | #6',
-                'Kira (the baker) | trait | kneads | #7',
-            ],
-            SCENES: [
-                'Day 1 | #1-#10 | The hall | public | present: Halvard, Kira (the smith), Kira (the baker), Isolde | They feast',
-            ],
-        },
-        stretch(1, 10),
-    );
-    const state = apply(
-        log,
-        { TOLD: [`${factSaying(first, 'deserted at the siege').id} | Halvard | Kira (the smith) | #12`] },
-        pick(12),
-    );
-    assert.equal(ScribeReminder.namesakes(state, 'Hal').length, 1);
-    /**
-     * @param {object} now
-     * @return {Promise<object>}
-     */
-    const asHal = (now) =>
-        ScribeReminder.compose({ state, now, player: 'Hal', recent: [], unread: [], ask: scripted([]).ask });
-    const twins = scene(state, ['Halvard', 'Kira (the smith)', 'Kira (the baker)', 'Isolde']);
-    const found = ScribeReminder.candidates(state, twins, 'Hal', []);
-    assert.deepEqual(lines(found), ['Halvard, aka: "Hal"']);
-    assert.equal(
-        (await asHal(twins)).text,
-        '[Scribe] Day 3, "the mill", private. Present: Halvard, Isolde, and 2 others. Halvard, aka: "Hal".',
-    );
-    const alone = scene(state, ['Halvard', 'Kira (the smith)', 'Isolde']);
-    assert.deepEqual(lines(ScribeReminder.candidates(state, alone, 'Hal', [])), ['Halvard, aka: "Hal"']);
-    assert.deepEqual(lines(ScribeReminder.candidates(state, scene(state, ['Isolde']), 'Hal', [])), [
-        `${secret}background: "deserted at the siege"`,
-        'Halvard, aka: "Hal"',
-    ]);
-    /**
-     * @param {string[]} labels
-     * @return {string}
-     */
-    const opened = (labels) =>
-        ScribeReminder.write(
-            bare(labels.map((label, index) => ({ subject: `S${index + 1}`, label }))),
-            [],
-        );
-    assert.equal(opened(['Kira', 'Isolde', 'Kira']), '[Scribe] Day 3, "the mill", private. Present: Isolde, and 2 others.');
-    assert.equal(opened(['Kira', 'KIRA']), '[Scribe] Day 3, "the mill", private. Present: 2 people.');
-    assert.equal(
-        opened(['Kira (the smith)', `Kira${curly}s`, "Kira's"]),
-        '[Scribe] Day 3, "the mill", private. Present: Kira, and 2 others.',
-    );
-    assert.equal(opened(['Kira', 'Isolde']), '[Scribe] Day 3, "the mill", private. Present: Kira, Isolde.');
-});
-
-test('no line names someone it cannot name', () => {
-    const log = ScribeLog.create();
-    const first = apply(
-        log,
-        {
-            SUBJECTS: [
-                'Halvard | character',
-                'Isolde | character',
-                'Dr! Venn | character',
-                'Brandt | character',
-                'Brandt and Sons | group',
-            ],
-            FACTS: ['Halvard | background | deserted at the siege | hidden | #5'],
-            SCENES: ['Day 1 | #1-#10 | The hall | public | present: Halvard, Isolde, Brandt | They feast'],
-        },
-        stretch(1, 10),
-    );
-    const id = factSaying(first, 'deserted at the siege').id;
-    const state = apply(
-        log,
-        { TOLD: [`${id} | Halvard | Dr! Venn | #12`, `${id} | Halvard | Brandt and Sons | #12`] },
-        pick(12),
-    );
-    for (const room of [
-        ['Halvard', 'Dr! Venn', 'Isolde'],
-        ['Halvard', 'Brandt', 'Brandt and Sons', 'Isolde'],
-        ['Halvard', 'Dr! Venn'],
-    ]) {
-        const found = offered(state, room);
-        assert.deepEqual(about(found, id), [], room.join(','));
-        assert.equal(lines(found).some((line) => /someone|Brandt and Sons|null/.test(line)), false, room.join(','));
-    }
-    assert.deepEqual(about(offered(state, ['Halvard', 'Isolde']), id), [`Unknown|${secret}background: "deserted at the siege"`]);
-    const told = ScribeLog.create();
-    apply(
-        told,
-        {
-            SUBJECTS: ['Halvard | character', 'Mirelle | character', 'Isolde | character'],
-            FACTS: ['Halvard | background | fled a battle | #5'],
-            SCENES: ['Day 1 | #1-#10 | The hall | public | present: Halvard, Mirelle, Isolde | They feast'],
-        },
-        stretch(1, 10),
-    );
-    const fled = factSaying(ScribeReplay.run(told, storyOrder), 'fled a battle').id;
-    const fuller = apply(
-        told,
-        {
-            CHANGES: [`${fled} | Halvard | background | FULLER: fled a battle at the ford | #15`],
-            SCENES: ['Day 1 | #11-#20 | The cellar | private | present: Halvard, Mirelle | They hide'],
-        },
-        stretch(11, 20),
-    );
-    const full = factSaying(fuller, 'fled a battle at the ford').id;
-    assert.deepEqual(about(offered(fuller, ['Halvard', 'Mirelle', 'Isolde', 'a guard']), full), []);
-    assert.deepEqual(about(offered(fuller, ['Halvard', 'Mirelle', 'Isolde']), full), [
-        'Knows|Of those here only Mirelle knows this about Halvard: background: "fled a battle at the ford"; only Isolde knows a part of it: background: "fled a battle"',
-    ]);
-});
-
-test('no line for the player without a name', () => {
-    const state = book(
-        {
-            SUBJECTS: ['Halvard the Bold! | character', 'Mirelle | character', 'Isolde | character'],
-            FACTS: [
-                'Halvard the Bold! | background | deserted at the siege | hidden | #5',
-                'Halvard the Bold! | trait | snores | #6',
-                'Mirelle | trait | hums | #7',
-            ],
-            SCENES: ['Day 1 | #1-#10 | The hall | public | present: Halvard the Bold!, Mirelle, Isolde | They feast'],
-        },
-        10,
-    );
-    assert.equal(ScribeReminder.namesakes(state, 'Halvard the Bold!').length, 1);
-    const found = ScribeReminder.candidates(
-        state,
-        scene(state, ['Halvard the Bold!', 'Mirelle', 'Isolde']),
-        'Halvard the Bold!',
-        [],
-    );
-    assert.deepEqual(lines(found), ['Mirelle, trait: "hums"']);
-    assert.equal(lines(found).some((line) => line.includes('null')), false);
-    assert.deepEqual(lines(found, 'Knows').concat(lines(found, 'Unknown')), []);
-});
-
-test('a crowded room still hears its entries', () => {
-    const crowded = Array.from({ length: 31 }, (_, index) => `Mirelle Tamsin ${index + 1}`);
-    const warning = `Of those here only Mirelle Tamsin 1 knows this about Halvard, the others do not: background: "deserted at the siege"`;
-    const result = ScribeReminder.fit(
-        bare(
-            crowded.map((label, index) => ({ subject: `S${index + 1}`, label })),
-            { place: 'the great hall', reach: 'Public' },
-        ),
-        [{ line: warning }],
-    );
-    assert.equal(result.text.endsWith(` ${warning}.`), true);
-    assert.equal(result.used.length, 1);
-    const head = result.text.slice(0, result.text.length - warning.length - 2);
-    assert.equal(ScribeText.bytes(head) <= 200, true);
-    const lead = '[Scribe] Day 3, "the great hall", public. Present: ';
-    const counted = head.match(/, and (\d+) others\.$/);
-    const names = head.slice(lead.length, head.length - counted[0].length).split(', ');
-    assert.deepEqual(names, crowded.slice(0, names.length));
-    assert.equal(names.length > 0, true);
-    assert.equal(Number(counted[1]), 31 - names.length);
-    assert.equal(
-        ScribeText.bytes(`${lead}${crowded.slice(0, names.length + 1).join(', ')}, and ${30 - names.length} others.`) > 200,
-        true,
-    );
-});
-
-test('a contradicted fact goes first', async () => {
-    const recent = story.slice(0, 12);
-    const state = crowd(9);
-    const now = scene(state, ['Halvard', 'Mirelle']);
-    const found = ScribeReminder.candidates(state, now, 'Halvard', []);
-    assert.equal(found.length, 12);
-    const ninth = found[8];
-    const asked = scripted([{ text: 'USE: 1, 2' }]);
-    const result = await ScribeReminder.compose({
-        state,
-        now,
-        player: 'Halvard',
-        recent,
-        unread: [],
-        ask: asked.ask,
-        first: [ninth.fact],
-    });
-    const rest = found.filter((candidate) => candidate !== ninth);
-    assert.equal(asked.calls.length, 1);
-    assert.equal(asked.calls[0].user, ScribeReminder.chooseInput(now, rest, recent));
-    const entries = asked.calls[0].user.split('\n').filter((line) => /^\d+\. /.test(line));
-    assert.equal(entries.length, 11);
-    assert.equal(entries.some((line) => line.startsWith('9. ')), false);
-    assert.equal(result.text.startsWith(`${opening} ${ninth.line}.`), true);
-    assert.deepEqual(numbers(result.used), [9, 1, 2]);
-    assert.deepEqual(plain(result.led), [ninth.fact]);
-    assertFrozenDeep(result, 'result');
-    const order = [12, 3, 3, 10, 1, 5, 7, 2, 11, 4];
-    const silent = scripted([{ text: 'USE: 1' }]);
-    const filled = await ScribeReminder.compose({
-        state,
-        now,
-        player: 'Halvard',
-        recent,
-        unread: [],
-        ask: silent.ask,
-        first: order.map((number) => found[number - 1].fact),
-    });
-    assert.equal(silent.calls.length, 0);
-    assert.deepEqual(numbers(filled.used), [12, 3, 10, 1, 5, 7, 2, 11]);
-    assert.deepEqual(plain(filled.led), [12, 3, 10, 1, 5, 7, 2, 11].map((number) => found[number - 1].fact));
-    const log = ScribeLog.create();
-    const long = apply(
-        log,
-        {
-            SUBJECTS: ['Halvard | character', 'Mirelle | character'],
-            FACTS: Array.from(
-                { length: 12 },
-                (_, index) => `Mirelle | trait | habit ${index + 1} ${String.fromCodePoint(0xe9).repeat(185)} | #${index + 2}`,
-            ),
-            SCENES: ['Day 1 | #1-#20 | The hall | public | present: Halvard, Mirelle | They feast'],
-        },
-        stretch(1, 20),
-    );
-    const longNow = { ...scene(long, ['Halvard', 'Mirelle']), place: 'ü'.repeat(60) };
-    const longFound = ScribeReminder.candidates(long, longNow, 'Halvard', []);
-    assert.equal(longFound.length, 12);
-    const full = await ScribeReminder.compose({
-        state: long,
-        now: longNow,
-        player: 'Halvard',
-        recent,
-        unread: [],
-        ask: scripted([{ text: 'USE: 1, 2' }]).ask,
-        first: [longFound[8].fact],
-    });
-    assert.deepEqual(numbers(full.used), [9]);
-    assert.deepEqual(plain(full.led), [longFound[8].fact]);
-    assert.equal(full.text.endsWith(` ${longFound[8].line}.`), true);
-    assert.equal(ScribeText.bytes(`${full.text} ${longFound[0].line}.`) > 600, true);
-});
-
-test('first makes nothing sayable', async () => {
-    const state = book(
-        {
-            SUBJECTS: ['Halvard | character', 'Mirelle | character', 'Isolde | character'],
-            FACTS: [
-                'Mirelle | background | poisoned the old king | hidden | #5',
-                'Mirelle | location | the mill | #6',
-                'Mirelle | trait | hums | #7',
-            ],
-            SCENES: ['Day 1 | #1-#10 | The hall | public | present: Halvard, Mirelle, Isolde | They feast'],
-        },
-        10,
-    );
-    const now = scene(state, ['Halvard', 'Mirelle', 'Isolde']);
-    const unread = unreadSaying('The rain falls.');
-    const request = { state, now, player: 'Halvard', recent: [], unread, ask: scripted([]).ask };
-    const plainResult = await ScribeReminder.compose(request);
-    const ids = [factSaying(state, 'poisoned the old king').id, factSaying(state, 'the mill').id, 'F999'];
-    const firstResult = await ScribeReminder.compose({ ...request, first: ids });
-    assert.equal(firstResult.text, plainResult.text);
-    assert.deepEqual(plain(firstResult.led), []);
-    assert.equal(firstResult.used.some((candidate) => ids.includes(candidate.fact)), false);
-    assert.equal(/poisoned|location/.test(firstResult.text), false);
-    assert.equal(firstResult.text.endsWith('Mirelle, trait: "hums".'), true);
-});
-
-test('the worst opening still leaves room', () => {
-    const place = deseret.repeat(60);
-    const result = ScribeReminder.fit(
-        bare(
-            [
-                { subject: 'S1', label: deseret.repeat(60) },
-                { subject: 'S2', label: deseretOther.repeat(60) },
-                { subject: null, label: 'a guard' },
-            ],
-            { day: Number.MAX_SAFE_INTEGER, place },
-        ),
-        [{ line: 'Mirelle, eyes: "grey"' }],
-    );
-    const head = `[Scribe] Day ${Number.MAX_SAFE_INTEGER}, private. Present: 3 people.`;
-    assert.equal(result.text, `${head} Mirelle, eyes: "grey".`);
-    assert.equal(ScribeText.bytes(head) <= 200, true);
-    assert.equal(ScribeText.bytes(result.text) <= 600, true);
-    assert.equal(ScribeReminder.printed(deseret.repeat(60)), deseret.repeat(60));
-    assert.equal(ScribeReminder.quoted(place, 60), `"${place}"`);
-});
 
 /**
  * @param {object} state
@@ -2053,7 +289,1136 @@ function labelsOf(state, labels, player = 'Halvard') {
     return plain(ScribeReminder.people(state, scene(state, labels), player).map((person) => person.label));
 }
 
-test('a longer label may not speak of someone else', async () => {
+/**
+ * @param {string} text
+ * @return {void}
+ */
+function assertFramed(text) {
+    assert.equal(text.startsWith(LEAD), true, text);
+    assert.equal(ScribeIntake.own(text), true, text);
+    assert.equal(/[\r\n\u2028\u2029]/.test(text), false, text);
+    assert.equal(/[\[\]@]/.test(text.slice(LEAD.length).normalize('NFKC')), false, text);
+    assert.equal(ScribeText.bytes(text) <= 1000, true, text);
+}
+
+/**
+ * @return {object}
+ */
+function frost() {
+    return book(
+        {
+            SUBJECTS: [
+                'Frost | character',
+                'Thessaly | character',
+                'Veyra | character',
+                'Selene | character',
+                'Mavan the Gray | character',
+                "Frost's apartment | place",
+                'Ashenmaw Ruins | place',
+            ],
+            FACTS: [
+                'Frost | background | knows a Malachai connected to the Staff of Elders | hidden | #3',
+                'Frost | eyes | blue-gray | #4',
+                'Thessaly | eyes | teal | #5',
+                'Thessaly | hair | silver | #6',
+                'Thessaly | build | tall | #7',
+                'Thessaly | condition | pajamas | #8',
+                'Mavan the Gray | hair | gray | #9',
+                'Mavan the Gray | feature | a fresh scar across his jaw | #10',
+                "Frost's apartment | appearance | a cramped loft above a tannery | #11",
+                'Ashenmaw Ruins | appearance | a broken tower over a flooded courtyard | #12',
+            ],
+            THREADS: [
+                'OPEN | Frost owes Selene a favour | #13',
+                'OPEN | the guild sent Frost and Mavan to the Ashenmaw Ruins job | #20',
+            ],
+            SCENES: [
+                "Day 1 | #1-#20 | Frost's apartment | private | present: Frost, Thessaly, Veyra, Selene | They wake",
+            ],
+        },
+        20,
+    );
+}
+
+const FROST_NOTES = Object.freeze([
+    wears('Frost', 'a travel cloak over leather armour', 40),
+    wears('Thessaly', 'a dented breastplate and a travel cloak', 41),
+    wears('Veyra', "a hunter's green coat", 42),
+    wears('Mavan the Gray', 'plate armour', 30),
+    wears('Mavan', 'a sleeping robe', 43),
+]);
+const MAVAN = Object.freeze([
+    Object.freeze({
+        name: 'Mavan the Gray',
+        description: 'An old wizard with long grey hair and a staff of ash wood.',
+    }),
+]);
+
+test("the operator's three reminders are rebuilt in plain sentences", () => {
+    const state = frost();
+    const asFrost = { player: 'Frost', notes: FROST_NOTES, characters: MAVAN };
+    const apartment = ScribeReminder.compose({
+        state,
+        now: { ...scene(state, ['Frost', 'Thessaly', 'Veyra', 'Selene']), day: 1, place: "Frost's apartment" },
+        unread: [],
+        first: [],
+        ...asFrost,
+    });
+    const alone = ScribeReminder.compose({
+        state,
+        now: { ...scene(state, ['Frost']), day: 1, place: "Frost's apartment" },
+        unread: [],
+        first: [],
+        ...asFrost,
+    });
+    const ruins = ScribeReminder.compose({
+        state,
+        now: {
+            ...scene(state, ['Frost', 'Mavan the Gray', 'Thessaly', 'Veyra', 'Selene']),
+            day: 2,
+            place: 'Ashenmaw Ruins',
+        },
+        unread: [],
+        first: [],
+        ...asFrost,
+    });
+    const job = 'The party: the guild sent Frost and Mavan to the Ashenmaw Ruins job.';
+    const ruinsLine = 'Ashenmaw Ruins: a broken tower over a flooded courtyard.';
+    assert.equal(
+        apartment.text,
+        '[Scribe] Frost wears a travel cloak over leather armour. ' +
+            'Thessaly wears a dented breastplate and a travel cloak; teal eyes, silver hair, tall. ' +
+            `Veyra wears a hunter's green coat. ${job} ${ruinsLine}`,
+    );
+    assert.equal(alone.text, `[Scribe] Frost wears a travel cloak over leather armour. ${job} ${ruinsLine}`);
+    assert.equal(
+        ruins.text,
+        '[Scribe] Frost wears a travel cloak over leather armour. ' +
+            'Mavan the Gray wears a sleeping robe; a fresh scar across his jaw. ' +
+            'Thessaly wears a dented breastplate and a travel cloak; teal eyes, silver hair, tall. ' +
+            `Veyra wears a hunter's green coat. ${job} ${ruinsLine}`,
+    );
+    for (const result of [apartment, alone, ruins]) {
+        const text = result.text;
+        assertFramed(text);
+        assert.deepEqual(plain(result.led), []);
+        assert.equal(/Day \d|Present:|private|public/.test(text), false, text);
+        assert.equal(/Frost's apartment|cramped loft/.test(text), false, text);
+        assert.equal(/Malachai|blue-gray|Frost (secretly|has|is) /.test(text), false, text);
+        const frostSentences = sentences(text).filter((sentence) => sentence.startsWith('Frost '));
+        assert.deepEqual(frostSentences, ['Frost wears a travel cloak over leather armour.'], text);
+        const labelled = /\b(age|eyes|hair|build|skin|appearance|feature|background|condition|trait|location):/;
+        assert.equal(labelled.test(text), false, text);
+        assert.equal(/pajamas/.test(text), false, text);
+        assert.equal(text.includes('"'), false, text);
+        assert.equal(/only .* know/.test(text), false, text);
+        assert.equal(text.includes(job), true, text);
+        assertFrozenDeep(result, 'result');
+    }
+    assert.equal(/plate armour|gray hair/.test(ruins.text), false, ruins.text);
+});
+
+test('a story character gets only what the chat added, and a custom one gets all of it', () => {
+    const state = book(
+        {
+            SUBJECTS: [
+                'Halvard | character',
+                'Mavan the Gray | character',
+                'Isolde | character',
+                'The Old Mill | place',
+            ],
+            FACTS: [
+                'Mavan the Gray | hair | gray | #2',
+                'Mavan the Gray | feature | a scar across his cheek | #3',
+                'Isolde | hair | grey | #4',
+                'Isolde | eyes | green | #5',
+            ],
+            SCENES: ['Day 1 | #1-#10 | The hall | public | present: Halvard, Mavan the Gray, Isolde | They feast'],
+        },
+        10,
+    );
+    const room = ['Halvard', 'Mavan the Gray', 'Isolde'];
+    const description = 'An old wizard with long grey hair and a staff.';
+    const story = [{ name: 'Mavan the Gray', description }];
+    const mavan = (characters, notes = []) =>
+        sentences(said(state, room, { characters, notes })).filter((sentence) => sentence.startsWith('Mavan'));
+    const both = ['Mavan the Gray: gray hair, a scar across his cheek.'];
+    assert.deepEqual(mavan(story), ['Mavan the Gray: a scar across his cheek.']);
+    assert.deepEqual(mavan(null), both);
+    assert.deepEqual(mavan([{ name: 'Mavan', description }]), ['Mavan the Gray: a scar across his cheek.']);
+    assert.deepEqual(mavan([{ name: 'Mava', description }]), both);
+    assert.deepEqual(mavan([{ name: 'Corvane', description }]), both);
+    assert.deepEqual(mavan([{ name: 'Mavan the Gray', description: '' }]), both);
+    assert.deepEqual(
+        sentences(said(state, room, { characters: story })).filter((sentence) => sentence.startsWith('Isolde')),
+        ['Isolde: green eyes, grey hair.'],
+    );
+    const inside = [looks('Mavan', 'long grey hair', 1), looks('Isolde', 'long grey hair', 1)];
+    assert.deepEqual(mavan(story, inside), ['Mavan the Gray: a scar across his cheek.']);
+    assert.deepEqual(mavan(null, inside), ['Mavan the Gray: gray hair, a scar across his cheek, long grey hair.']);
+    const custom = said(state, room, { characters: story, notes: inside });
+    assert.equal(custom.includes('Isolde: green eyes, grey hair, long grey hair.'), true, custom);
+    const scarred = [looks('Mavan the Gray', 'a burn on his hand', 1)];
+    assert.deepEqual(mavan(story, scarred), ['Mavan the Gray: a scar across his cheek, a burn on his hand.']);
+    assert.deepEqual(mavan(story, [looks('Mavan the Gray', 'long grey hair', 46)]), []);
+    assert.deepEqual(mavan(story, [looks('Mavan the Gray', 'a burn on his hand', 46)]), [
+        'Mavan the Gray: a burn on his hand.',
+    ]);
+    const mavanId = idOf(state, 'Mavan the Gray');
+    assert.equal(ScribeReminder.writer(state, mavanId, story), description);
+    assert.equal(ScribeReminder.writer(state, mavanId, null), null);
+    assert.equal(ScribeReminder.writer(state, mavanId, [{ name: 'Mava', description }]), null);
+    assert.equal(ScribeReminder.writer(state, idOf(state, 'Isolde'), story), null);
+    const mill = idOf(state, 'The Old Mill');
+    assert.equal(ScribeReminder.writer(state, mill, [{ name: 'The Old Mill', description }]), null);
+    assert.equal(
+        ScribeReminder.writer(state, mavanId, [
+            { name: 'Mavan', description: 'the first' },
+            { name: 'Mavan the Gray', description: 'the exact one' },
+        ]),
+        'the exact one',
+    );
+    assert.equal(ScribeReminder.added('gray', 'long grey hair'), false);
+    assert.equal(ScribeReminder.added('a scar', 'long grey hair'), true);
+    assert.equal(ScribeReminder.added('the and of', 'nothing'), false);
+    assert.equal(ScribeReminder.added('Long GREY hair', 'long grey hair'), false);
+});
+
+test('a story look counts as given only when the description holds its whole phrase', () => {
+    const state = book(
+        {
+            SUBJECTS: ['Halvard | character', 'Selene | character'],
+            FACTS: ['Selene | eyes | blue | #5', 'Selene | hair | short and black | #6', 'Selene | build | tall | #7'],
+            SCENES: ['Day 1 | #1-#20 | The hall | public | present: Halvard, Selene | They wake'],
+        },
+        20,
+    );
+    const description = 'Selene is a priestess with green eyes, long black hair and a short blue cloak. She is tall.';
+    const characters = [{ name: 'Selene', description }];
+    const told = said(state, ['Halvard', 'Selene'], { characters });
+    assert.equal(told, '[Scribe] Selene: blue eyes, short and black hair.');
+    assert.equal(said(state, ['Halvard', 'Selene']), '[Scribe] Selene: blue eyes, short and black hair, tall.');
+    assert.equal(ScribeReminder.added('blue eyes', description), true);
+    assert.equal(ScribeReminder.added('green eyes', description), false);
+    assert.equal(ScribeReminder.added('black hair', description), false);
+    assert.equal(ScribeReminder.added('short and black hair', description), true);
+    assert.equal(ScribeReminder.added('a short blue cloak', description), false);
+    assert.equal(ScribeReminder.added('a blue short cloak', description), true);
+    const matching = [{ name: 'Selene', description: 'Blue eyes and short, black hair; very tall.' }];
+    assert.equal(said(state, ['Halvard', 'Selene'], { characters: matching }), null);
+});
+
+test('a looks note newer than every book look stands alone, and an older one joins them', () => {
+    const state = book(
+        {
+            SUBJECTS: ['Halvard | character', 'Brandt | character', 'Thessaly | character'],
+            FACTS: [
+                'Brandt | hair | red | #7',
+                'Brandt | age | 42 | #8',
+                'Brandt | build | stocky | #9',
+                'Brandt | feature | a scar on his chin | hidden | #12',
+                'Thessaly | eyes | teal | #5',
+                'Thessaly | hair | silver | #6',
+            ],
+            SCENES: ['Day 1 | #1-#20 | The hall | public | present: Halvard, Brandt, Thessaly | They wake'],
+        },
+        20,
+    );
+    const secret = 'Brandt secretly has a scar on his chin; no one else here knows.';
+    const brandt = (position) =>
+        said(state, ['Halvard', 'Brandt'], { notes: [looks('Brandt', 'twenty, tall, with black hair', position)] });
+    assert.equal(brandt(45), `[Scribe] ${secret} Brandt: twenty, tall, with black hair.`);
+    assert.equal(brandt(10), `[Scribe] ${secret} Brandt: twenty, tall, with black hair.`);
+    assert.equal(brandt(9), `[Scribe] ${secret} Brandt: aged 42, red hair, stocky, twenty, tall, with black hair.`);
+    assert.equal(brandt(3), `[Scribe] ${secret} Brandt: aged 42, red hair, stocky, twenty, tall, with black hair.`);
+    assert.equal(said(state, ['Halvard', 'Brandt']), `[Scribe] ${secret} Brandt: aged 42, red hair, stocky.`);
+    const worn = said(state, ['Halvard', 'Brandt'], {
+        notes: [looks('Brandt', 'a shaved head', 45), wears('Brandt', 'a leather apron', 45)],
+    });
+    assert.equal(worn, `[Scribe] Brandt wears a leather apron; a shaved head. ${secret}`);
+    const both = said(state, ['Halvard', 'Brandt', 'Thessaly'], {
+        notes: [looks('Brandt', 'a shaved head', 45), looks('Thessaly', 'a silver circlet', 2)],
+    });
+    assert.equal(
+        both,
+        `[Scribe] ${secret} Brandt: a shaved head. Thessaly: teal eyes, silver hair, a silver circlet.`,
+    );
+});
+
+test('a looks note that restates the book is not said twice', () => {
+    const state = book(
+        {
+            SUBJECTS: ['Halvard | character', 'Thessaly | character'],
+            FACTS: ['Thessaly | eyes | teal | #5', 'Thessaly | hair | silver | #6'],
+            SCENES: ['Day 1 | #1-#20 | The hall | public | present: Halvard, Thessaly | They wake'],
+        },
+        20,
+    );
+    const thessaly = (text, position) =>
+        said(state, ['Halvard', 'Thessaly'], { notes: [looks('Thessaly', text, position)] });
+    assert.equal(thessaly('teal eyes and silver hair', 5), '[Scribe] Thessaly: teal eyes, silver hair.');
+    assert.equal(thessaly('Silver hair; teal eyes', 5), '[Scribe] Thessaly: teal eyes, silver hair.');
+    assert.equal(thessaly('teal eyes', 5), '[Scribe] Thessaly: teal eyes, silver hair.');
+    assert.equal(thessaly('teal eyes and silver hair', 45), '[Scribe] Thessaly: teal eyes and silver hair.');
+    assert.equal(
+        thessaly('silver eyes and teal hair', 5),
+        '[Scribe] Thessaly: teal eyes, silver hair, silver eyes and teal hair.',
+    );
+    assert.equal(thessaly('long silver hair', 5), '[Scribe] Thessaly: teal eyes, silver hair, long silver hair.');
+    const pinned = filed([['eyes', 'grey']]);
+    const restated = said(pinned, ['Halvard', 'Mirelle'], { notes: [looks('Mirelle', 'grey eyes', 45)] });
+    assert.equal(restated, '[Scribe] Mirelle has grey eyes.');
+    const added = said(pinned, ['Halvard', 'Mirelle'], { notes: [looks('Mirelle', 'grey eyes, a crooked nose', 45)] });
+    assert.equal(added, '[Scribe] Mirelle has grey eyes. Mirelle: grey eyes, a crooked nose.');
+});
+
+test('a secret says who here knows it, and only when someone here does not', () => {
+    const log = ScribeLog.create();
+    const first = apply(
+        log,
+        {
+            SUBJECTS: [
+                'Halvard | character',
+                'Mirelle | character',
+                'Isolde | character',
+                'Kira | character',
+                'Dr! Venn | character',
+            ],
+            FACTS: [
+                'Mirelle | background | poisoned the old king | hidden | #5',
+                'Mirelle | feature | a scar under her collar | hidden | #6',
+                'Mirelle | eyes | brown | #7',
+            ],
+            SCENES: ['Day 1 | #1-#10 | The hall | public | present: Halvard, Mirelle, Isolde, Kira | They feast'],
+        },
+        stretch(1, 10),
+    );
+    const king = factSaying(first, 'poisoned the old king').id;
+    const poisoned = (state, room, player = 'Halvard') =>
+        sentences(said(state, room, { player })).filter((sentence) => sentence.includes('poisoned'));
+    assert.deepEqual(poisoned(first, ['Halvard', 'Mirelle', 'Isolde']), [
+        'Mirelle secretly poisoned the old king; no one else here knows.',
+    ]);
+    const scar = sentences(said(first, ['Halvard', 'Mirelle', 'Isolde']));
+    assert.deepEqual(scar, [
+        'Mirelle secretly poisoned the old king; no one else here knows.',
+        'Mirelle secretly has a scar under her collar; no one else here knows.',
+        'Mirelle: brown eyes.',
+    ]);
+    const toHalvard = apply(log, { TOLD: [`${king} | Mirelle | Halvard | #12`] }, pick(12));
+    assert.deepEqual(poisoned(toHalvard, ['Halvard', 'Mirelle', 'Isolde']), [
+        'Mirelle secretly poisoned the old king; only Halvard knows.',
+    ]);
+    assert.deepEqual(poisoned(toHalvard, ['Mirelle', 'Isolde']), [
+        'Mirelle secretly poisoned the old king; only Halvard knows.',
+    ]);
+    const toIsolde = apply(log, { TOLD: [`${king} | Mirelle | Isolde | #14`] }, pick(14));
+    assert.deepEqual(poisoned(toIsolde, ['Halvard', 'Mirelle', 'Isolde', 'Kira']), [
+        'Mirelle secretly poisoned the old king; only Halvard and Isolde know.',
+    ]);
+    assert.deepEqual(poisoned(toIsolde, ['Halvard', 'Mirelle', 'Isolde']), []);
+    assert.deepEqual(poisoned(toIsolde, ['Halvard', 'Mirelle', 'Isolde', 'a guard']), [
+        'Mirelle secretly poisoned the old king; only Halvard and Isolde know.',
+    ]);
+    const toKira = apply(log, { TOLD: [`${king} | Mirelle | Kira | #16`] }, pick(16));
+    assert.deepEqual(poisoned(toKira, ['Halvard', 'Mirelle', 'Isolde', 'Kira', 'a guard']), [
+        'Mirelle secretly poisoned the old king; only Halvard, Isolde and Kira know.',
+    ]);
+    const toVenn = apply(log, { TOLD: [`${king} | Mirelle | Dr! Venn | #18`] }, pick(18));
+    assert.deepEqual(poisoned(toVenn, ['Halvard', 'Mirelle', 'Isolde', 'Kira', 'Dr! Venn', 'a guard']), []);
+    assert.deepEqual(poisoned(first, ['Mirelle'], 'Corvane'), []);
+    assert.deepEqual(poisoned(first, ['Mirelle', 'a guard'], 'Corvane'), [
+        'Mirelle secretly poisoned the old king; no one else here knows.',
+    ]);
+    for (const state of [first, toHalvard, toIsolde, toKira, toVenn]) {
+        const text = said(state, ['Halvard', 'Mirelle', 'Isolde', 'Kira']);
+        assert.equal(/: [^.]*scar|; [^.]*scar/.test(text), false, text);
+    }
+    const halvardSecret = book(
+        {
+            SUBJECTS: ['Halvard | character', 'Mirelle | character'],
+            FACTS: ['Halvard | background | deserted at the siege | hidden | #5'],
+            SCENES: ['Day 1 | #1-#10 | The hall | public | present: Halvard, Mirelle | They feast'],
+        },
+        10,
+    );
+    assert.equal(said(halvardSecret, ['Halvard', 'Mirelle']), null);
+});
+
+test('the cap drops places, the job, looks last first, filed facts, secrets, wearing, never a correction', () => {
+    const log = ScribeLog.create();
+    const first = apply(
+        log,
+        {
+            SUBJECTS: [
+                'Halvard | character',
+                'Mirelle | character',
+                'Isolde | character',
+                'Brandt | character',
+                'Ashby | place',
+                'Corvane Keep | place',
+            ],
+            FACTS: [
+                'Mirelle | age | 30 | #2',
+                'Mirelle | eyes | lookmir brown | #3',
+                'Isolde | eyes | lookiso green | #4',
+                'Brandt | build | lookbra broad and heavy | #5',
+                'Brandt | background | secretbra deserted the guard | hidden | #6',
+                'Ashby | appearance | placeone a village of grey stone | #7',
+                'Corvane Keep | appearance | placetwo a keep on a black crag | #8',
+            ],
+            THREADS: ['OPEN | jobword ride from Ashby to Corvane Keep before the snow | #9'],
+            SCENES: ['Day 1 | #1-#20 | The hall | public | present: Halvard, Mirelle, Isolde, Brandt | They feast'],
+        },
+        stretch(1, 20),
+    );
+    const state = rule(log, {
+        type: 'AddFact',
+        subject: idOf(first, 'Isolde'),
+        category: 'trait',
+        target: null,
+        text: 'hums when nervous filediso',
+        hidden: false,
+        cite: 'MESSAGE-21',
+        position: 21,
+    });
+    const age = factSaying(state, '30').id;
+    const notes = [
+        wears('Halvard', 'wearhal a long grey cloak with a fur collar over leather armour and riding boots', 41),
+        wears('Mirelle', 'wearmir a red dress with a laced bodice and a black shawl', 42),
+        wears('Isolde', 'weariso a green tunic belted with silver over grey breeches', 43),
+        wears('Brandt', 'wearbra a leather apron over a sweat-stained shirt', 44),
+    ];
+    const order = [
+        'placetwo',
+        'placeone',
+        'jobword',
+        'lookbra',
+        'lookiso',
+        'lookmir',
+        'filediso',
+        'secretbra',
+        'wearbra',
+        'weariso',
+        'wearmir',
+        'wearhal',
+    ];
+    const room = ['Halvard', 'Mirelle', 'Isolde', 'Brandt'];
+    const whole = composed(state, room, { notes, first: [age] });
+    assert.equal(
+        whole.text,
+        '[Scribe] Mirelle is aged 30. ' +
+            'Halvard wears wearhal a long grey cloak with a fur collar over leather armour and riding boots. ' +
+            'Mirelle wears wearmir a red dress with a laced bodice and a black shawl; lookmir brown eyes. ' +
+            'Isolde wears weariso a green tunic belted with silver over grey breeches; lookiso green eyes. ' +
+            'Brandt wears wearbra a leather apron over a sweat-stained shirt; lookbra broad and heavy. ' +
+            'Brandt secretly secretbra deserted the guard; no one else here knows. ' +
+            'Isolde hums when nervous filediso. ' +
+            'The party: jobword ride from Ashby to Corvane Keep before the snow. ' +
+            'Ashby: placeone a village of grey stone. Corvane Keep: placetwo a keep on a black crag.',
+    );
+    assert.deepEqual(plain(whole.led), [age]);
+    const gone = [];
+    let longest = 0;
+    for (let pad = 0; pad <= 198; pad++) {
+        const text = `30${deseret.repeat(pad)}`;
+        const facts = state.facts.map((fact) => (fact.id === age ? { ...fact, text } : fact));
+        const result = composed({ ...state, facts }, room, { notes, first: [age] });
+        assertFramed(result.text);
+        assert.deepEqual(plain(result.led), [age], String(pad));
+        assert.equal(result.text.startsWith(`[Scribe] Mirelle is aged 30${deseret.repeat(pad)}. `), true, String(pad));
+        longest = Math.max(longest, ScribeText.bytes(result.text));
+        for (const marker of order) {
+            const here = result.text.includes(marker);
+            if (!here && !gone.includes(marker)) {
+                gone.push(marker);
+            }
+            assert.equal(here, !gone.includes(marker), `${marker} came back at ${pad}`);
+        }
+        for (const person of ['Mirelle', 'Isolde', 'Brandt']) {
+            const marker = `look${person.slice(0, 3).toLowerCase()}`;
+            const wear = `wear${person.slice(0, 3).toLowerCase()}`;
+            if (result.text.includes(marker) && result.text.includes(wear)) {
+                assert.match(result.text, new RegExp(`${person} wears ${wear} [^.;]*; ${marker} [^.]*\\.`));
+            }
+        }
+    }
+    assert.deepEqual(gone, order.slice(0, 10));
+    assert.equal(longest > 990, true, String(longest));
+    const again = composed(state, room, { notes, first: [age] });
+    assert.deepEqual(plain(again), plain(whole));
+    const over = state.facts.map((fact) => (fact.id === age ? { ...fact, text: `30${deseret.repeat(199)}` } : fact));
+    assert.deepEqual(plain(composed({ ...state, facts: over }, room, { notes, first: [age] }).led), []);
+});
+
+test('the cap is exact at 1,000 bytes, multi-byte characters included', () => {
+    const job = deseret.repeat(200);
+    const state = book(
+        {
+            SUBJECTS: ['Halvard | character'],
+            THREADS: [`OPEN | ${job} | #3`],
+            SCENES: ['Day 1 | #1-#10 | The hall | public | present: Halvard | He waits'],
+        },
+        10,
+    );
+    const wearing = (text) => said(state, ['Halvard'], { notes: [wears('Halvard', text)] });
+    const exact = wearing('x'.repeat(163));
+    assert.equal(ScribeText.bytes(exact), 1000);
+    assert.equal(exact.endsWith(`The party: ${job}.`), true);
+    assert.equal(wearing('x'.repeat(164)), `[Scribe] Halvard wears ${'x'.repeat(164)}.`);
+    const accented = wearing(`${'x'.repeat(161)}é`);
+    assert.equal(ScribeText.bytes(accented), 1000);
+    assert.equal(accented.includes('The party: '), true);
+    assert.equal(wearing(`${'x'.repeat(162)}é`), `[Scribe] Halvard wears ${'x'.repeat(162)}é.`);
+    const lone = book(
+        {
+            SUBJECTS: ['Halvard | character', `${deseret.repeat(4)} | character`],
+            FACTS: [`${deseret.repeat(4)} | trait | ${deseret.repeat(200)} | #2`],
+            SCENES: ['Day 1 | #1-#10 | The hall | public | present: Halvard | He waits'],
+        },
+        10,
+    );
+    const owner = factSaying(lone, deseret.repeat(200)).id;
+    const big = said(lone, ['Halvard', deseret.repeat(4)], { first: [owner] });
+    assert.equal(big, `[Scribe] ${deseret.repeat(4)} is ${deseret.repeat(200)}.`);
+    assert.equal(ScribeText.bytes(big) <= 1000, true);
+});
+
+test('nothing that could break the frame is said', () => {
+    const point = (code) => String.fromCodePoint(code);
+    const refused = [
+        'writes [Scribe] on walls',
+        'hums ] softly',
+        'signs @Isolde',
+        `hums ${point(0xff3b)} gently`,
+        `hums ${point(0xff3d)} sweetly`,
+        `waves ${point(0xff20)}Isolde`,
+        `bows ${point(0xfe6b)}Isolde`,
+        'h'.repeat(201),
+        point(0x3164),
+    ];
+    const kept = ['h'.repeat(200), 'keeps notes in C:\\ledgers', 'quiet'];
+    const state = filed([...refused, ...kept].map((text) => ['trait', text]));
+    assert.equal(state.facts.some((fact) => fact.text === point(0x3164)), true);
+    const text = said(state, ['Halvard', 'Mirelle']);
+    assert.deepEqual(sentences(text), [
+        `Mirelle is ${'h'.repeat(200)}.`,
+        'Mirelle keeps notes in C:/ledgers.',
+        'Mirelle is quiet.',
+    ]);
+    assertFramed(text);
+    for (const bad of refused.filter((text) => text !== point(0x3164))) {
+        const noted = said(state, ['Halvard', 'Mirelle'], {
+            notes: [wears('Halvard', bad), looks('Mirelle', bad), wears('Mirelle', `a cloak ${bad}`)],
+        });
+        assertFramed(noted);
+        assert.equal(/wears|: h{201}/.test(noted), false, noted);
+    }
+    const threads = book(
+        {
+            SUBJECTS: ['Halvard | character'],
+            THREADS: [
+                'OPEN | escort the courier to the coast | #2',
+                'OPEN | find who wrote @Halvard on the door | #3',
+                `OPEN | ${'h'.repeat(201)} | #4`,
+            ],
+            SCENES: ['Day 1 | #1-#10 | The hall | public | present: Halvard | He waits'],
+        },
+        10,
+    );
+    assert.equal(said(threads, ['Halvard']), '[Scribe] The party: escort the courier to the coast.');
+    assert.equal(ScribeReminder.guarded('hums  old   songs .'), 'hums old songs');
+    assert.equal(ScribeReminder.guarded('tired\r\n\tand cold...'), 'tired and cold');
+    const spoken = `says "go" ${point(0x201c)}now${point(0x201d)}`;
+    assert.equal(ScribeReminder.guarded(spoken), spoken);
+    assert.equal(ScribeReminder.guarded(`whis${point(0x200b)}tles${point(0xfe0f)} softly`), 'whistles softly');
+    assert.equal(ScribeReminder.guarded(deseret.repeat(200)), deseret.repeat(200));
+    assert.equal(ScribeReminder.guarded(deseret.repeat(201)), null);
+    assert.equal(ScribeReminder.guarded(' .;, '), null);
+});
+
+test('no wearing note means no clothing, and the scene names a person the book does not know', () => {
+    const state = book(
+        {
+            SUBJECTS: ['Halvard | character', 'Mirelle | character', 'Isolde | character'],
+            FACTS: ['Mirelle | condition | in pajamas | #5', 'Mirelle | eyes | grey | #6'],
+            SCENES: ['Day 1 | #1-#10 | The hall | public | present: Halvard, Mirelle, Isolde | They feast'],
+        },
+        10,
+    );
+    assert.equal(said(state, ['Halvard', 'Mirelle', 'Isolde']), '[Scribe] Mirelle: grey eyes.');
+    const stranger = said(state, ['Halvard', 'Mirelle', 'Garrick'], {
+        notes: [wears('Garrick', 'a guardsman tabard'), looks('Garrick', 'a broken nose')],
+    });
+    assert.equal(stranger, '[Scribe] Garrick wears a guardsman tabard; a broken nose. Mirelle: grey eyes.');
+    assert.deepEqual(labelsOf(state, ['Halvard', 'Garrick', 'Dr! Venn', 'mirelle', 'HALVARD', 'Isolde knows it too']), [
+        'Halvard',
+        'Garrick',
+        null,
+        null,
+        null,
+        null,
+    ]);
+    for (const name of ['Dr! Venn', 'Isolde knows it too']) {
+        const text = said(state, ['Halvard', name], { notes: [wears(name, 'a cloak')] });
+        assert.equal(text, null, name);
+    }
+    assert.equal(
+        said(state, ['Halvard', 'Garrick', 'garrick'], { notes: [wears('Garrick', 'a cloak')] }),
+        '[Scribe] Garrick wears a cloak.',
+    );
+    assert.equal(said(state, ['Halvard', 'Mirelle'], { notes: [wears('Halvard', 'wearing a grey cloak')] }).startsWith(
+        '[Scribe] Halvard wears a grey cloak.',
+    ), true);
+});
+
+test('wearing notes are matched to the people here, newest first, across the forms the book knows', () => {
+    const state = book(
+        {
+            SUBJECTS: [
+                'Halvard | character',
+                'Mavan the Gray | character',
+                'Isolde | character',
+                'Kira Vell | character',
+                'Kira Moss | character',
+            ],
+            FACTS: ['Isolde | aka | Izzy | #2'],
+            SCENES: ['Day 1 | #1-#10 | The hall | public | present: Halvard, Mavan the Gray, Isolde | They feast'],
+        },
+        10,
+    );
+    const worn = (room, notes, player = 'Halvard') =>
+        sentences(said(state, room, { notes, player })).filter((sentence) => sentence.includes(' wears '));
+    const notes = [
+        wears('Mavan the Gray', 'plate armour', 10),
+        wears('Mavan', 'a sleeping robe', 12),
+        wears('Izzy', 'a riding coat', 13),
+        wears('isolde', 'a silk gown', 11),
+        wears('The Halvard', 'a grey cloak', 14),
+    ];
+    assert.deepEqual(worn(['Halvard', 'Mavan the Gray', 'Isolde'], notes), [
+        'Halvard wears a grey cloak.',
+        'Mavan the Gray wears a sleeping robe.',
+        'Isolde wears a riding coat.',
+    ]);
+    assert.deepEqual(worn(['Halvard', 'Mavan the Gray', 'Isolde'], notes.slice(0, 1)), [
+        'Mavan the Gray wears plate armour.',
+    ]);
+    const kiras = [wears('Kira', 'an apron', 20), wears('Kira Vell', 'a smock', 15)];
+    assert.deepEqual(worn(['Halvard', 'Kira Vell', 'Kira Moss'], kiras), ['Kira Vell wears a smock.']);
+    assert.deepEqual(worn(['Halvard', 'Kira Vell'], kiras), ['Kira Vell wears an apron.']);
+    assert.deepEqual(worn(['Mavan the Gray'], [wears('Hal', 'a grey cloak'), wears('Halvard', 'a blue cloak', 9)]), [
+        'Halvard wears a blue cloak.',
+    ]);
+    assert.deepEqual(worn(['Mavan the Gray', 'Isolde'], [wears('Orla', 'a hood')], 'Orla'), []);
+    const orla = book(
+        {
+            SUBJECTS: ['Orla | character', 'Isolde | character'],
+            SCENES: ['Day 1 | #1-#10 | The hall | public | present: Orla, Isolde | They feast'],
+        },
+        10,
+    );
+    assert.equal(
+        said(orla, ['Isolde'], { player: 'Orla', notes: [wears('Orla', 'a hood')] }),
+        '[Scribe] Orla wears a hood.',
+    );
+    assert.equal(said(orla, null, { player: 'Orla', notes: [wears('Orla', 'a hood')] }), '[Scribe] Orla wears a hood.');
+    assert.equal(said(orla, null, { player: 'Corvane', notes: [wears('Orla', 'a hood')] }), null);
+});
+
+test('a note goes to a present person by its exact name, and by a prefix only when no one else holds the name', () => {
+    const state = book(
+        {
+            SUBJECTS: [
+                'Halvard | character',
+                'Kira | character',
+                'Kira Vell | character',
+                'Mavan | character',
+                'Mavan the Gray | character',
+            ],
+            FACTS: ['Mavan the Gray | feature | a fresh scar across his jaw | #5'],
+            SCENES: ['Day 1 | #1-#20 | The hall | public | present: Halvard, Kira, Kira Vell | They wake'],
+        },
+        20,
+    );
+    const notes = [
+        wears('Kira Vell', 'a smock', 15),
+        wears('Kira', 'an apron', 20),
+        wears('Mavan the Gray', 'grey robes', 15),
+        wears('Mavan', 'a page uniform', 20),
+    ];
+    assert.equal(said(state, ['Halvard', 'Kira Vell'], { notes }), '[Scribe] Kira Vell wears a smock.');
+    assert.equal(
+        said(state, ['Halvard', 'Kira', 'Kira Vell'], { notes }),
+        '[Scribe] Kira wears an apron. Kira Vell wears a smock.',
+    );
+    assert.equal(said(state, ['Halvard', 'Kira Vell'], { notes: notes.slice(1, 2) }), null);
+    assert.equal(
+        said(state, ['Halvard', 'Mavan the Gray'], { notes }),
+        '[Scribe] Mavan the Gray wears grey robes; a fresh scar across his jaw.',
+    );
+    const frost = book(
+        {
+            SUBJECTS: ['Frost Hammer | character', 'Frost Valen | character', 'Isolde | character'],
+            FACTS: ['Isolde | eyes | green | #5'],
+            SCENES: ['Day 1 | #1-#20 | The hall | public | present: Frost Hammer, Isolde | They feast'],
+        },
+        20,
+    );
+    assert.equal(ScribeReminder.namesakes(frost, 'Frost').length, 2);
+    const unresolved = said(frost, ['Frost Hammer', 'Isolde'], {
+        player: 'Frost',
+        notes: [wears('Frost', 'a travel cloak over leather armour', 50), wears('Frost Hammer', 'a smith apron', 40)],
+    });
+    assert.equal(unresolved, '[Scribe] Frost Hammer wears a smith apron. Isolde: green eyes.');
+    const alone = said(frost, ['Frost Hammer', 'Isolde'], {
+        player: 'Frost',
+        notes: [wears('Frost', 'a travel cloak over leather armour', 50)],
+    });
+    assert.equal(alone, '[Scribe] Isolde: green eyes.');
+});
+
+test('a label that holds another subject name still carries its own clothing and looks', () => {
+    const state = book(
+        {
+            SUBJECTS: [
+                'Halvard | character',
+                'Mavan | character',
+                'Mavan the Gray | character',
+                'Thessaly | character',
+            ],
+            FACTS: [
+                'Mavan the Gray | feature | a fresh scar across his jaw | #5',
+                'Mavan the Gray | trait | hoards silver | hidden | #6',
+            ],
+            SCENES: ['Day 1 | #1-#20 | The hall | public | present: Halvard, Mavan the Gray, Thessaly | They wake'],
+        },
+        20,
+    );
+    const room = ['Halvard', 'Mavan the Gray', 'Thessaly'];
+    assert.deepEqual(labelsOf(state, room), ['Halvard', null, 'Thessaly']);
+    const notes = [
+        wears('Mavan the Gray', 'grey robes', 15),
+        wears('Thessaly', 'a dented breastplate', 16),
+        wears('Mavan', 'a page uniform', 20),
+    ];
+    assert.equal(
+        said(state, room, { notes }),
+        '[Scribe] Mavan the Gray wears grey robes; a fresh scar across his jaw. Thessaly wears a dented breastplate.',
+    );
+    assert.equal(said(state, room), '[Scribe] Mavan the Gray: a fresh scar across his jaw.');
+    const both = said(state, ['Halvard', 'Mavan', 'Mavan the Gray'], { notes });
+    assert.equal(
+        both,
+        '[Scribe] Mavan wears a page uniform. Mavan the Gray wears grey robes; a fresh scar across his jaw.',
+    );
+});
+
+test('the job is the newest open thread that names a place, with up to two of its places', () => {
+    const log = ScribeLog.create();
+    const first = apply(
+        log,
+        {
+            SUBJECTS: [
+                'Halvard | character',
+                'Ashby | place',
+                'Corvane Keep | place',
+                'the Salt Road | place',
+                'Brightwater | place',
+                'Mirelle | character',
+            ],
+            FACTS: [
+                'Ashby | appearance | a village of grey stone | #2',
+                'Ashby | location | on the river bend | #3',
+                'Corvane Keep | appearance | a keep on a black crag | #4',
+                'Corvane Keep | feature | a bridge of rope | hidden | #5',
+                'the Salt Road | trait | dusty | #6',
+                'Brightwater | location | by the lake | #7',
+            ],
+            THREADS: [
+                'OPEN | carry the letter through Brightwater | #8',
+                'OPEN | ride the Salt Road past Corvane Keep and Ashby to Brightwater | #10',
+                'OPEN | Mirelle owes a favour | #12',
+            ],
+            SCENES: ['Day 1 | #1-#20 | The hall | public | present: Halvard, Mirelle | They feast'],
+        },
+        stretch(1, 20),
+    );
+    assert.equal(
+        said(first, ['Halvard']),
+        '[Scribe] The party: ride the Salt Road past Corvane Keep and Ashby to Brightwater. ' +
+            'Corvane Keep: a keep on a black crag. Ashby: on the river bend.',
+    );
+    const ride = first.threads.find((thread) => thread.text.startsWith('ride the Salt Road')).id;
+    const closing = apply(log, { THREADS: [`CLOSE ${ride} | they reached Brightwater | #22`] }, pick(22));
+    const left = said(closing, ['Halvard']);
+    assert.equal(left, '[Scribe] The party: carry the letter through Brightwater. Brightwater: by the lake.');
+    const plainThreads = book(
+        {
+            SUBJECTS: ['Halvard | character', 'Ashby | place'],
+            THREADS: ['OPEN | find the thief | #2', 'OPEN | pay the smith | #4'],
+            SCENES: ['Day 1 | #1-#10 | The hall | public | present: Halvard | He waits'],
+        },
+        10,
+    );
+    assert.equal(said(plainThreads, ['Halvard']), '[Scribe] The party: pay the smith.');
+    const none = book(
+        {
+            SUBJECTS: ['Halvard | character', 'Ashby | place'],
+            SCENES: ['Day 1 | #1-#10 | The hall | public | present: Halvard | He waits'],
+        },
+        10,
+    );
+    assert.equal(said(none, ['Halvard']), null);
+    assert.equal(said(none, ['Halvard'], { notes: [wears('Halvard', 'a cloak')] }), '[Scribe] Halvard wears a cloak.');
+});
+
+test('a place is found by its whole name, longest first, and a name inside a longer one is skipped', () => {
+    const places = (threads) =>
+        said(
+            book(
+                {
+                    SUBJECTS: [
+                        'Halvard | character',
+                        'Ashenmaw Ruins | place',
+                        'Ashenmaw | place',
+                        'Ruins of the Old Keep | place',
+                        'Old Keep | place',
+                        'Keep | place',
+                        'Salt and Stone | place',
+                        'Ashen | place',
+                        'Inn @ the Ford | place',
+                    ],
+                    NAMES: ['Inn by the Ford | Inn @ the Ford | #3'],
+                    FACTS: [
+                        'Ashenmaw Ruins | appearance | a broken tower over a flooded courtyard | #2',
+                        'Ashenmaw | appearance | a mining town in the hills | #3',
+                        'Ruins of the Old Keep | appearance | a shell of black stone | #4',
+                        'Old Keep | appearance | a hill fort | #5',
+                        'Keep | appearance | the duke keep in the capital | #6',
+                        'Salt and Stone | appearance | a smugglers inn on the cliffs | #7',
+                        'Ashen | appearance | a burnt village | #9',
+                        'Inn @ the Ford | appearance | a low inn of grey stone | #9',
+                    ],
+                    THREADS: threads.map((thread, index) => `OPEN | ${thread} | #${index + 10}`),
+                    SCENES: ['Day 1 | #1-#20 | The hall | public | present: Halvard | He waits'],
+                },
+                20,
+            ),
+            ['Halvard'],
+        );
+    assert.equal(
+        places(['the guild sent Halvard to the Ashenmaw Ruins job']),
+        '[Scribe] The party: the guild sent Halvard to the Ashenmaw Ruins job. ' +
+            'Ashenmaw Ruins: a broken tower over a flooded courtyard.',
+    );
+    assert.equal(
+        places(['the guild sent Halvard to the Ruins of the Old Keep']),
+        '[Scribe] The party: the guild sent Halvard to the Ruins of the Old Keep. ' +
+            'Ruins of the Old Keep: a shell of black stone.',
+    );
+    assert.equal(
+        places(['ride from Ashenmaw to the Ashenmaw Ruins']),
+        '[Scribe] The party: ride from Ashenmaw to the Ashenmaw Ruins. ' +
+            'Ashenmaw: a mining town in the hills. Ashenmaw Ruins: a broken tower over a flooded courtyard.',
+    );
+    assert.equal(
+        places(['the Old Keep and the Keep both burn']),
+        '[Scribe] The party: the Old Keep and the Keep both burn. ' +
+            'Old Keep: a hill fort. Keep: the duke keep in the capital.',
+    );
+    assert.equal(
+        places(['meet the fence at Salt and Stone']),
+        '[Scribe] The party: meet the fence at Salt and Stone. Salt and Stone: a smugglers inn on the cliffs.',
+    );
+    assert.equal(places(['walk the Ashenmawish road']), '[Scribe] The party: walk the Ashenmawish road.');
+    assert.equal(places(['wait at the Inn by the Ford']), '[Scribe] The party: wait at the Inn by the Ford.');
+});
+
+test("corrections lead for anyone here but the main character's secrets, and led holds what was said", () => {
+    const state = book(
+        {
+            SUBJECTS: ['Halvard | character', 'Mirelle | character', 'Isolde | character'],
+            FACTS: [
+                'Halvard | age | 34 | #2',
+                'Halvard | build | scarred and lean | hidden | #3',
+                'Mirelle | eyes | brown | #4',
+                'Mirelle | relation to Halvard | old friends | #5',
+                'Mirelle | location | the mill | #6',
+                'Isolde | hair | black | #7',
+            ],
+            SCENES: ['Day 1 | #1-#10 | The hall | public | present: Halvard, Mirelle | They feast'],
+        },
+        10,
+    );
+    const texts = ['34', 'scarred and lean', 'brown', 'old friends', 'the mill', 'black'];
+    const ids = texts.map((text) => factSaying(state, text).id);
+    const result = composed(state, ['Halvard', 'Mirelle'], { first: [...ids, 'F999', ids[0]] });
+    assert.deepEqual(sentences(result.text), [
+        'Halvard is aged 34.',
+        'Mirelle has brown eyes.',
+        'Mirelle toward Halvard: old friends.',
+        'Mirelle is at the mill.',
+    ]);
+    assert.deepEqual(plain(result.led), [ids[0], ids[2], ids[3], ids[4]]);
+    assert.equal(/scarred/.test(result.text), false, result.text);
+    const unread = composed(state, ['Halvard', 'Mirelle'], { first: ids, unread: unreadSaying('The rain falls.') });
+    assert.deepEqual(plain(unread.led), [ids[0], ids[2]]);
+    assert.equal(/old friends|the mill/.test(unread.text), false, unread.text);
+    const plainResult = composed(state, ['Halvard', 'Mirelle']);
+    for (const odd of [undefined, null, ids[0], new Set([ids[0]]), { 0: ids[0], length: 1 }, 9]) {
+        assert.deepEqual(plain(composed(state, ['Halvard', 'Mirelle'], { first: odd })), plain(plainResult));
+    }
+});
+
+test('a hidden fact that leads as a correction says who here knows it, once', () => {
+    const log = ScribeLog.create();
+    const first = apply(
+        log,
+        {
+            SUBJECTS: [
+                'Halvard | character',
+                'Mirelle | character',
+                'Isolde | character',
+                'Thessaly | character',
+                'Dr! Venn | character',
+            ],
+            FACTS: [
+                'Mirelle | background | poisoned the old king | hidden | #5',
+                'Halvard | background | deserted at the siege | hidden | #6',
+                'Thessaly | relation to Isolde | is secretly in love with her | hidden | #7',
+            ],
+            SCENES: ['Day 1 | #1-#10 | The hall | public | present: Halvard, Mirelle, Isolde, Thessaly | They feast'],
+        },
+        stretch(1, 10),
+    );
+    const king = factSaying(first, 'poisoned the old king').id;
+    const siege = factSaying(first, 'deserted at the siege').id;
+    const love = factSaying(first, 'is secretly in love with her').id;
+    const room = ['Halvard', 'Mirelle', 'Isolde'];
+    const alone = 'Mirelle secretly poisoned the old king; no one else here knows.';
+    const led = composed(first, room, { first: [king] });
+    assert.deepEqual(sentences(led.text), [alone]);
+    assert.deepEqual(plain(led.led), [king]);
+    assert.deepEqual(sentences(said(first, room)), [alone]);
+    const own = composed(first, room, { first: [siege] });
+    assert.deepEqual(sentences(own.text), [alone]);
+    assert.deepEqual(plain(own.led), []);
+    const toIsolde = apply(log, { TOLD: [`${king} | Mirelle | Isolde | #12`] }, pick(12));
+    assert.deepEqual(sentences(said(toIsolde, room, { first: [king] })), [
+        'Mirelle secretly poisoned the old king; only Isolde knows.',
+    ]);
+    const toAll = apply(log, { TOLD: [`${king} | Mirelle | Halvard | #14`] }, pick(14));
+    assert.equal(said(toAll, room), null);
+    const everyone = composed(toAll, room, { first: [king] });
+    assert.deepEqual(sentences(everyone.text), [
+        'Mirelle secretly poisoned the old king; only Halvard and Isolde know.',
+    ]);
+    assert.deepEqual(plain(everyone.led), [king]);
+    const toVenn = apply(log, { TOLD: [`${king} | Mirelle | Dr! Venn | #16`] }, pick(16));
+    const unnamed = composed(toVenn, ['Halvard', 'Mirelle', 'Isolde', 'Dr! Venn'], { first: [king] });
+    assert.equal(unnamed, null);
+    const lover = composed(first, ['Halvard', 'Thessaly', 'Isolde'], { first: [love] });
+    assert.deepEqual(sentences(lover.text), [
+        'Thessaly toward Isolde: is secretly in love with her; no one else here knows.',
+    ]);
+    assert.deepEqual(plain(lover.led), [love]);
+});
+
+test('facts the operator filed lead while their character is here', () => {
+    const state = filed([
+        ['trait', 'hums old songs'],
+        ['eyes', 'grey'],
+        ['condition', 'drunk'],
+    ]);
+    const room = ['Halvard', 'Mirelle'];
+    assert.equal(said(state, room), '[Scribe] Mirelle hums old songs. Mirelle is drunk. Mirelle has grey eyes.');
+    assert.equal(said(state, ['Halvard']), null);
+    const unread = unreadSaying('The rain falls.');
+    assert.equal(said(state, room, { unread }), '[Scribe] Mirelle hums old songs. Mirelle has grey eyes.');
+    const asMirelle = said(state, ['Halvard', 'Mirelle'], { player: 'Mirelle' });
+    assert.equal(asMirelle, null);
+});
+
+test('only what stands is said', () => {
+    const log = ScribeLog.create();
+    const first = apply(
+        log,
+        {
+            SUBJECTS: ['Halvard | character', 'Mirelle | character'],
+            FACTS: [
+                'Mirelle | age | forty | #2',
+                'Mirelle | eyes | grey | #3',
+                'Mirelle | age | fifty | #4',
+                'Mirelle | hair | red | #5',
+                'Mirelle | build | sly | #6',
+            ],
+            SCENES: ['Day 1 | #1-#9 | The square | public | present: Halvard, Mirelle | They meet'],
+        },
+        stretch(1, 9),
+    );
+    rule(log, { type: 'RemoveFact', fact: factSaying(first, 'sly').id });
+    const state = rule(log, {
+        type: 'Pin',
+        subject: idOf(first, 'Mirelle'),
+        category: 'age',
+        target: null,
+        text: 'forty',
+        hidden: false,
+    });
+    assert.equal(factSaying(state, 'fifty').status, 'Disputed');
+    assert.equal(said(state, ['Halvard', 'Mirelle']), '[Scribe] Mirelle: aged forty, grey eyes, red hair.');
+});
+
+test('a contested value is never said, in any wording', () => {
+    const log = ScribeLog.create();
+    const first = apply(
+        log,
+        {
+            SUBJECTS: ['Halvard | character', 'Mirelle | character', 'Isolde | character'],
+            FACTS: ['Mirelle | age | thirty | #3', 'Mirelle | trait | snores | #4', 'Mirelle | eyes | brown | #5'],
+            SCENES: ['Day 1 | #1-#10 | The cellar | private | present: Halvard, Mirelle | They hide'],
+        },
+        stretch(1, 10),
+    );
+    const thirty = factSaying(first, 'thirty').id;
+    const state = apply(
+        log,
+        {
+            CHANGES: [`${thirty} | Mirelle | age | FULLER: thirty winters | #12`],
+            FACTS: ['Mirelle | age | forty-one | #20'],
+            SCENES: ['Day 1 | #11-#20 | The study | private | present: Mirelle, Isolde | They read'],
+        },
+        stretch(11, 20),
+    );
+    const wordings = ['thirty', 'thirty winters', 'forty-one'].map((text) => factSaying(state, text).id);
+    assert.equal(state.conflicts.length, 1);
+    for (const room of [['Halvard', 'Mirelle', 'Isolde'], ['Halvard', 'Mirelle'], ['Mirelle', 'Isolde']]) {
+        const result = composed(state, room, { first: wordings });
+        assert.equal(/thirty|forty/.test(result.text), false, result.text);
+        assert.deepEqual(plain(result.led), []);
+        assert.equal(result.text.includes('brown eyes'), true, result.text);
+    }
+});
+
+test('a relation needs its target here or the main character', () => {
+    const log = ScribeLog.create();
+    const room = apply(
+        log,
+        {
+            SUBJECTS: [
+                'Halvard | character',
+                'Mirelle | character',
+                'Brandt | character',
+                'Kira (the smith) | character',
+                'Kira (the baker) | character',
+            ],
+            SCENES: ['Day 1 | #1-#10 | The hall | public | present: Halvard, Mirelle | They feast'],
+        },
+        stretch(1, 10),
+    );
+    let ruled = room;
+    for (const [index, [target, text]] of [
+        ['Halvard', 'old friends'],
+        ['Brandt', 'rivals'],
+        ['Kira (the smith)', 'owes her money'],
+    ].entries()) {
+        ruled = rule(log, {
+            type: 'AddFact',
+            subject: idOf(room, 'Mirelle'),
+            category: 'relation',
+            target: idOf(room, target),
+            text,
+            hidden: false,
+            cite: `MESSAGE-${index + 12}`,
+            position: index + 12,
+        });
+    }
+    assert.equal(said(ruled, ['Halvard', 'Mirelle']), '[Scribe] Mirelle toward Halvard: old friends.');
+    assert.equal(said(ruled, ['Mirelle'], { player: 'Halvard' }), '[Scribe] Mirelle toward Halvard: old friends.');
+    assert.equal(
+        said(ruled, ['Halvard', 'Mirelle', 'Brandt']),
+        '[Scribe] Mirelle toward Halvard: old friends. Mirelle toward Brandt: rivals.',
+    );
+    assert.equal(
+        said(ruled, ['Halvard', 'Mirelle', 'Kira (the smith)', 'Kira (the baker)']),
+        '[Scribe] Mirelle toward Halvard: old friends.',
+    );
+    assert.equal(said(ruled, ['Mirelle'], { player: 'Corvane' }), null);
+});
+
+test('a merged subject is the one it became', () => {
+    const log = ScribeLog.create();
+    const before = apply(
+        log,
+        {
+            SUBJECTS: ['Halvard | character', 'Mirelle | character', 'Mira | character', 'Isolde | character'],
+            FACTS: ['Mirelle | background | poisoned the old king | hidden | #5', 'Mira | eyes | brown | #6'],
+            SCENES: ['Day 1 | #1-#10 | The hall | public | present: Halvard, Mirelle, Mira, Isolde | They feast'],
+        },
+        stretch(1, 10),
+    );
+    const now = scene(before, ['Halvard', 'Mira', 'Mirelle', 'Isolde']);
+    const merged = rule(log, { type: 'Merge', from: idOf(before, 'Mira'), into: idOf(before, 'Mirelle') });
+    const request = { now, player: 'Halvard', unread: [], notes: [wears('Mira', 'a red dress')], characters: null };
+    const secret = 'Mirelle secretly poisoned the old king; no one else here knows.';
+    assert.equal(
+        ScribeReminder.compose({ state: merged, ...request }).text,
+        `[Scribe] Mirelle wears a red dress; brown eyes. ${secret}`,
+    );
+    const apart = ScribeReminder.compose({ state: before, ...request }).text;
+    assert.equal(apart, `[Scribe] Mira wears a red dress; brown eyes. ${secret}`);
+    assert.deepEqual(labelsOf(merged, ['Halvard', 'Mira', 'Mirelle', 'Isolde']), ['Halvard', 'Mirelle', 'Isolde']);
+});
+
+test('the main character is one subject or none', () => {
+    const ferry = book(
+        {
+            SUBJECTS: ['Hal (the ferryman) | character', 'Halvard | character', 'Mirelle | character'],
+            NAMES: ['Hal | Halvard | #3'],
+            FACTS: ['Mirelle | trait | hums | hidden | #6'],
+            SCENES: ['Day 1 | #1-#10 | The hall | public | present: Halvard, Hal (the ferryman), Mirelle | They feast'],
+        },
+        10,
+    );
+    const room = ['Halvard', 'Hal (the ferryman)', 'Mirelle'];
+    assert.equal(ScribeReminder.namesakes(ferry, 'Hal').length, 2);
+    assert.equal(ScribeReminder.namesakes(ferry, 'Halvard').length, 1);
+    assert.deepEqual(labelsOf(ferry, room, 'Hal'), ['Halvard', null, 'Mirelle']);
+    const asHal = said(ferry, room, { player: 'Hal', notes: [wears('Hal', 'a grey cloak')] });
+    assert.equal(asHal.includes('grey cloak'), false, asHal);
+    const asHalvard = said(ferry, room, { player: 'Halvard', notes: [wears('Halvard', 'a grey cloak')] });
+    assert.equal(asHalvard.startsWith('[Scribe] Halvard wears a grey cloak.'), true, asHalvard);
+    assert.equal(said(ferry, ['Mirelle'], { player: 'Hal', notes: [wears('Hal', 'a grey cloak')] }), null);
+    const bold = book(
+        {
+            SUBJECTS: ['Halvard the Bold! | character', 'Mirelle | character'],
+            FACTS: ['Mirelle | eyes | brown | #7'],
+            SCENES: ['Day 1 | #1-#10 | The hall | public | present: Halvard the Bold!, Mirelle | They feast'],
+        },
+        10,
+    );
+    const unnamed = said(bold, ['Halvard the Bold!', 'Mirelle'], {
+        player: 'Halvard the Bold!',
+        notes: [wears('Halvard the Bold!', 'a grey cloak')],
+    });
+    assert.equal(unnamed, '[Scribe] Mirelle: brown eyes.');
+});
+
+test('a name is made of allowed characters, and a label that speaks of someone else names only its looks', () => {
+    const point = (code) => String.fromCodePoint(code);
+    const printed = (label) => ScribeReminder.printed(label);
+    assert.equal(printed('Hal (the ferryman)'), 'Hal');
+    assert.equal(printed('Hal [the ferryman]'), 'Hal');
+    assert.equal(printed('Dr. Venn'), 'Dr Venn');
+    assert.equal(printed(`Oswin (Tamsin${curly}s uncle)`), 'Oswin');
+    assert.equal(printed(`Iso${point(0x3164)}lde`), 'Isolde');
+    assert.equal(printed(`O${curly}Brien-Hale`), `O${curly}Brien-Hale`);
+    assert.equal(printed('x'.repeat(60)), 'x'.repeat(60));
+    const refused = ['Mirelle, Isolde', 'Venn: the elder', 'a b c d e', 'x'.repeat(61), 'Brandt and Sons'];
+    for (const label of [...refused, 'Halvard the Bold!', '']) {
+        assert.equal(printed(label), null, label);
+    }
     const cast = [
         'Halvard',
         'Isolde',
@@ -2061,30 +1426,20 @@ test('a longer label may not speak of someone else', async () => {
         'guards of Halvard',
         'Isolde knows it too',
         "Halvard's sworn guard",
-        'friends of Wren',
-        'sons of Corvane',
-        'ferryman of Ashby',
         'Isolde Venn',
-        'Halvard Venn',
         'Tamsin the Elder',
-        'Ida of Ash Vale',
-        'the old smith of Ashford',
         'Brandt (the ferryman)',
     ];
     const state = book(
         {
             SUBJECTS: cast.map((label) => `${label} | character`),
             FACTS: [
-                'Isolde | aka | Wren | hidden | #2',
-                `Isolde Venn | aka | ${Array.from('Corvane', (letter) => String.fromCodePoint(letter.codePointAt(0) + 0xfee0)).join('')} | #3`,
-                'Halvard | background | deserted at the siege | hidden | #5',
-                'the men who saw Halvard desert | trait | loud | #12',
-                'Isolde knows it too | trait | quiet | #13',
+                'the men who saw Halvard desert | eyes | grey | #12',
+                'Isolde knows it too | eyes | green | #13',
+                'Isolde Venn | eyes | blue | #14',
+                'Isolde knows it too | trait | hums | hidden | #15',
             ],
-            SCENES: [
-                'Day 1 | #1-#10 | The cellar | private | present: Halvard | He broods',
-                'Day 1 | #11-#20 | The hall | public | present: Halvard, the men who saw Halvard desert, Isolde, Isolde knows it too | They feast',
-            ],
+            SCENES: ['Day 1 | #1-#20 | The hall | public | present: Halvard, Isolde | They feast'],
         },
         20,
     );
@@ -2095,380 +1450,209 @@ test('a longer label may not speak of someone else', async () => {
         null,
         null,
         null,
-        null,
-        null,
-        null,
         'Isolde Venn',
-        'Halvard Venn',
         'Tamsin the Elder',
-        'Ida of Ash Vale',
-        null,
         'Brandt',
     ]);
-    const warning = `${secret}background: "deserted at the siege".`;
-    const men = await composed(state, scene(state, ['Halvard', 'the men who saw Halvard desert', 'Isolde']));
-    assert.equal(men.text, `[Scribe] Day 3, "the mill", private. Present: Halvard, Isolde, and 1 other. ${warning}`);
-    const echo = await composed(state, scene(state, ['Halvard', 'Isolde', 'Isolde knows it too']));
-    assert.equal(echo.text, `[Scribe] Day 3, "the mill", private. Present: Halvard, Isolde, and 1 other. ${warning}`);
-    for (const text of [men.text, echo.text]) {
-        assert.equal(/men who saw|knows it too|loud|quiet/.test(text), false, text);
-    }
-    const lord = book(
+    const text = said(state, cast, {
+        notes: [wears('the men who saw Halvard desert', 'a cloak'), wears('Isolde knows it too', 'a hood')],
+    });
+    assert.equal(text, '[Scribe] Isolde knows it too wears a hood; green eyes. Isolde Venn: blue eyes.');
+    assert.equal(said(state, ['Halvard', 'Isolde knows it too', 'Isolde Venn']).includes('hums'), false);
+    const doctor = book(
         {
-            SUBJECTS: ['Halvard Lord of Ash | character', 'Isolde | character'],
-            FACTS: ['Halvard Lord of Ash | trait | stern | #2'],
-            SCENES: ['Day 1 | #1-#10 | The hall | public | present: Halvard Lord of Ash, Isolde | They feast'],
+            SUBJECTS: ['Halvard | character', 'Dr. Venn | character', 'Mirelle, Isolde | group'],
+            FACTS: ['Dr. Venn | eyes | grey | #2', 'Mirelle, Isolde | trait | loud | hidden | #3'],
+            SCENES: ['Day 1 | #1-#10 | The hall | public | present: Halvard | They feast'],
         },
         10,
     );
-    const lordResult = await composed(lord, scene(lord, ['Halvard Lord of Ash', 'Isolde']));
-    assert.equal(
-        lordResult.text,
-        '[Scribe] Day 3, "the mill", private. Present: Halvard Lord of Ash, Isolde. Halvard Lord of Ash, trait: "stern".',
-    );
+    assert.equal(said(doctor, ['Halvard', 'Dr. Venn', 'Mirelle, Isolde']), '[Scribe] Dr Venn: grey eyes.');
 });
 
-test("a printed label may not be someone else's name", async () => {
-    /**
-     * @param {string} text
-     * @return {string}
-     */
-    const widen = (text) =>
-        Array.from(text, (letter) => (letter === ' ' ? letter : String.fromCodePoint(letter.codePointAt(0) + 0xfee0))).join('');
-    /**
-     * @param {string} aka
-     * @param {boolean} hidden
-     * @return {object}
-     */
-    const cook = (aka, hidden) => {
-        const log = ScribeLog.create();
-        const first = apply(
-            log,
-            {
-                SUBJECTS: ['Halvard | character', 'Mirelle | character', 'Mira (the cook) | character', 'Isolde | character'],
-                FACTS: [`Mirelle | aka | ${aka}${hidden ? ' | hidden' : ''} | #2`, 'Halvard | background | deserted at the siege | hidden | #5'],
-                SCENES: ['Day 1 | #1-#10 | The hall | public | present: Halvard, Mirelle, Mira (the cook), Isolde | They feast'],
-            },
-            stretch(1, 10),
-        );
-        return apply(
-            log,
-            { TOLD: [`${factSaying(first, 'deserted at the siege').id} | Halvard | Mira (the cook) | #12`] },
-            pick(12),
-        );
-    };
-    const room = ['Halvard', 'Mirelle', 'Mira (the cook)', 'Isolde'];
-    const open = cook('Mira', false);
-    const result = await composed(open, scene(open, room));
-    assert.equal(
-        result.text,
-        '[Scribe] Day 3, "the mill", private. Present: Halvard, Mirelle, Isolde, and 1 other. Mirelle, aka: "Mira".',
-    );
-    assert.equal(result.text.includes('only Mira know'), false);
-    assert.deepEqual(labelsOf(cook('Mira', true), room), ['Halvard', 'Mirelle', null, 'Isolde']);
-    assert.deepEqual(labelsOf(cook(widen('Mira'), false), room), ['Halvard', 'Mirelle', null, 'Isolde']);
-    const ferry = book(
-        {
-            SUBJECTS: ['Halvard | character', 'Hal (the ferryman) | character', 'Isolde | character'],
-            NAMES: ['Hal | Halvard | #2'],
-            FACTS: ['Hal (the ferryman) | trait | rows | #3'],
-            SCENES: ['Day 1 | #1-#10 | The hall | public | present: Halvard, Hal (the ferryman), Isolde | They feast'],
-        },
-        10,
-    );
-    assert.deepEqual(labelsOf(ferry, ['Halvard', 'Hal (the ferryman)', 'Isolde']), ['Halvard', null, 'Isolde']);
-    const elder = book(
-        {
-            SUBJECTS: ['Halvard | character', 'Halvard (the elder) | character', 'Isolde | character'],
-            FACTS: ['Halvard | background | deserted at the siege | hidden | #5', 'Halvard (the elder) | trait | limps | #6'],
-            SCENES: ['Day 1 | #1-#10 | The hall | public | present: Halvard, Halvard (the elder), Isolde | They feast'],
-        },
-        10,
-    );
-    assert.equal(ScribeReminder.namesakes(elder, 'Halvard').length, 2);
-    const omitted = await composed(elder, scene(elder, ['Halvard (the elder)', 'Isolde']));
-    assert.equal(omitted.text, '[Scribe] Day 3, "the mill", private. Present: Isolde, and 1 other.');
-    const listed = await composed(elder, scene(elder, ['Halvard', 'Halvard (the elder)', 'Isolde']));
-    assert.equal(listed.text, '[Scribe] Day 3, "the mill", private. Present: Isolde, and 2 others.');
-    const wide = widen('Halvard');
-    const stranger = book(
-        {
-            SUBJECTS: [`${wide} (the elder) | character`, 'Isolde | character'],
-            FACTS: [`${wide} (the elder) | trait | limps | #6`],
-            SCENES: [`Day 1 | #1-#10 | The hall | public | present: ${wide} (the elder), Isolde | They feast`],
-        },
-        10,
-    );
-    assert.equal(ScribeReminder.printed(`${wide} (the elder)`), 'Halvard');
-    assert.equal(ScribeReminder.namesakes(stranger, 'Halvard').length, 0);
-    const unfound = await composed(stranger, scene(stranger, [`${wide} (the elder)`, 'Isolde']));
-    assert.equal(unfound.text, '[Scribe] Day 3, "the mill", private. Present: Isolde, and 1 other.');
-    assert.deepEqual(labelsOf(stranger, [`${wide} (the elder)`, 'Isolde'], 'Isolde'), ['Halvard', 'Isolde']);
-    const doctor = widen('Dr Venn');
-    const stops = book(
-        {
-            SUBJECTS: [
-                'Halvard | character',
-                'J.Venn | character',
-                'JVenn | character',
-                'Dr.Venn (the elder) | character',
-                `${doctor} | character`,
-                'Isolde | character',
-            ],
-            SCENES: ['Day 1 | #1-#10 | The hall | public | present: Halvard, Isolde | They feast'],
-        },
-        10,
-    );
-    assert.equal(stops.subjects.length, 6);
-    assert.equal(ScribeReminder.printed(doctor), 'Dr Venn');
-    assert.deepEqual(labelsOf(stops, ['Halvard', 'J.Venn', 'JVenn', 'Dr.Venn (the elder)', doctor, 'Isolde']), [
-        'Halvard',
-        null,
-        null,
-        'DrVenn',
-        null,
-        'Isolde',
-    ]);
-    const joined = ScribeLog.create();
-    const apart = apply(
-        joined,
-        {
-            SUBJECTS: ['Halvard | character', 'Mirelle | character', 'Mirelle (the cook) | character'],
-            SCENES: ['Day 1 | #1-#10 | The hall | public | present: Halvard, Mirelle | They feast'],
-        },
-        stretch(1, 10),
-    );
-    assert.deepEqual(labelsOf(apart, ['Halvard', 'Mirelle']), ['Halvard', null]);
-    const merged = rule(joined, { type: 'Merge', from: idOf(apart, 'Mirelle (the cook)'), into: idOf(apart, 'Mirelle') });
-    assert.deepEqual(labelsOf(merged, ['Halvard', 'Mirelle', 'Mirelle (the cook)']), ['Halvard', 'Mirelle']);
-    const kiras = ScribeLog.create();
-    const twins = apply(
-        kiras,
-        {
-            SUBJECTS: ['Halvard | character', 'Kira (the smith) | character', 'KIRA (the baker) | character', 'Isolde | character'],
-            FACTS: ['Halvard | background | deserted at the siege | hidden | #5'],
-            SCENES: ['Day 1 | #1-#10 | The cellar | private | present: Halvard | He broods'],
-        },
-        stretch(1, 10),
-    );
-    const told = apply(
-        kiras,
-        { TOLD: [`${factSaying(twins, 'deserted at the siege').id} | Halvard | KIRA (the baker) | #12`] },
-        pick(12),
-    );
-    const both = await composed(told, scene(told, ['Halvard', 'Kira (the smith)', 'KIRA (the baker)', 'Isolde']));
-    assert.equal(both.text, '[Scribe] Day 3, "the mill", private. Present: Halvard, Isolde, and 2 others.');
-    assert.equal(
-        ScribeReminder.write(
-            bare([
-                { subject: 'S1', label: 'Kira' },
-                { subject: 'S2', label: 'KIRA' },
-            ]),
-            [],
-        ),
-        '[Scribe] Day 3, "the mill", private. Present: 2 people.',
-    );
-});
-
-test('a backslash cannot stand in a quoted text', () => {
-    const state = added([
-        ['trait', 'hums an old tune \\'],
-        ['trait', 'keeps notes in C:\\ledgers'],
-    ]);
-    assert.deepEqual(lines(offered(state, ['Halvard', 'Mirelle'])), [
-        'Mirelle, trait: "hums an old tune /"',
-        'Mirelle, trait: "keeps notes in C:/ledgers"',
-    ]);
-    const now = bare([
-        { subject: 'S1', label: 'Halvard' },
-        { subject: 'S2', label: 'Mirelle' },
-    ]);
-    assert.equal(
-        ScribeReminder.write({ ...now, place: 'the mill \\' }, []),
-        '[Scribe] Day 3, "the mill /", private. Present: Halvard, Mirelle.',
-    );
-});
-
-test('look-alike quotation marks are replaced', async () => {
-    const point = (code) => String.fromCodePoint(code);
-    const marks = [0x2ba, 0x2ee, 0x5f4, 0x2033, 0x2036, 0x275d, 0x275e, 0x3003, 0x1f676, 0x1f677, 0x1f678];
-    const texts = marks.map((code, index) => `hums ${point(code)}tune ${index + 1}${point(code)} softly`);
-    const kept = [`wears Tamsin${curly}s ring`, "keeps O'Brien's key"];
-    const state = added([...texts, ...kept].map((text) => ['trait', text]));
-    const found = lines(offered(state, ['Halvard', 'Mirelle']));
-    assert.deepEqual(found, [
-        ...marks.map((_, index) => `Mirelle, trait: "hums 'tune ${index + 1}' softly"`),
-        ...kept.map((text) => `Mirelle, trait: "${text}"`),
-    ]);
-    for (const line of found) {
-        assert.equal(line.split('"').length - 1, 2, line);
-    }
-    const result = await composed(state, scene(state, ['Halvard', 'Mirelle']));
-    assert.equal(result.text.split('"').length - 1, 2 + 2 * result.used.length);
-    assert.equal(
-        ScribeReminder.quoted(`the ${point(0x275d)}old${point(0x275e)} mill`, 60),
-        `"the 'old' mill"`,
-    );
-});
-
-test("the book's own characters are written", () => {
-    const point = (...codes) => String.fromCodePoint(...codes);
-    const kept = [
-        `stands 5${point(0xbd)} ft`,
-        `a debt of 10${point(0xb9, 0x2070)} crowns`,
-        `owes 2${point(0xb3)} favours`,
-        `lives at ${point(0x2116)}7`,
-        `came on the ${point(0x2462)} day`,
-    ];
-    const refused = [`hums ${point(0xff3b)} gently`, `waves ${point(0xff20)}Isolde`, `signs ${point(0xfe6b)}Isolde`];
-    const state = added([...kept, ...refused, `Zoe${point(0x308)} hums`].map((text) => ['trait', text]));
-    assert.deepEqual(lines(offered(state, ['Halvard', 'Mirelle'])), [
-        ...kept.map((text) => `Mirelle, trait: "${text}"`),
-        `Mirelle, trait: "Zo${point(0xeb)} hums"`,
-    ]);
-    const now = bare([{ subject: 'S1', label: 'Halvard' }]);
-    assert.equal(
-        ScribeReminder.write({ ...now, place: `the 5${point(0xbd)} mile inn` }, []),
-        `[Scribe] Day 3, "the 5${point(0xbd)} mile inn", private. Present: Halvard.`,
-    );
-    assert.equal(ScribeReminder.write({ ...now, place: `the ${point(0xff20)} inn` }, []), '[Scribe] Day 3, private. Present: Halvard.');
-});
-
-test('a long place does not cost the names', () => {
-    const umlaut = String.fromCodePoint(0xfc);
-    const now = bare([
-        { subject: 'S1', label: 'Halvard' },
-        { subject: 'S2', label: 'Mirelle' },
-        { subject: 'S3', label: 'Isolde' },
-    ]);
-    assert.equal(
-        ScribeReminder.write({ ...now, place: deseret.repeat(60) }, []),
-        '[Scribe] Day 3, private. Present: Halvard, Mirelle, Isolde.',
-    );
-    const eighty = umlaut.repeat(39);
-    assert.equal(ScribeText.bytes(`"${eighty}"`), 80);
-    assert.equal(
-        ScribeReminder.write({ ...now, place: eighty }, []),
-        `[Scribe] Day 3, "${eighty}", private. Present: Halvard, Mirelle, Isolde.`,
-    );
-    assert.equal(
-        ScribeReminder.write({ ...now, place: `${eighty}a` }, []),
-        '[Scribe] Day 3, private. Present: Halvard, Mirelle, Isolde.',
-    );
-});
-
-test('no line toward nobody', () => {
+test('with no scene only the main character can be named, and nothing to say gives nothing', () => {
     const state = book(
         {
-            SUBJECTS: [
-                'Halvard | character',
-                'Mirelle | character',
-                'Kira (the smith) | character',
-                'Kira (the baker) | character',
-                'Brandt Sons! | group',
-            ],
-            FACTS: [
-                'Mirelle | relation to Kira (the smith) | owes her money | #2',
-                'Mirelle | relation to Brandt Sons! | buys their grain | #3',
-                'Mirelle | relation to Halvard | old friends | #4',
-                'Mirelle | trait | hums | #5',
-            ],
-            SCENES: [
-                'Day 1 | #1-#10 | The hall | public | present: Halvard, Mirelle, Kira (the smith), Kira (the baker), Brandt Sons! | They feast',
-            ],
+            SUBJECTS: ['Halvard | character', 'Mirelle | character'],
+            FACTS: ['Mirelle | eyes | grey | #2', 'Halvard | eyes | blue | #3'],
+            SCENES: ['Day 1 | #1-#10 | The hall | public | present: Halvard, Mirelle | They feast'],
         },
         10,
     );
-    assert.notEqual(factSaying(state, 'owes her money').target, null);
-    assert.notEqual(factSaying(state, 'buys their grain').target, null);
-    for (const room of [
-        ['Halvard', 'Mirelle', 'Kira (the smith)', 'Kira (the baker)', 'Brandt Sons!'],
-        ['Halvard', 'Mirelle', 'Kira (the smith)', 'Brandt Sons!'],
-    ]) {
-        const found = lines(offered(state, room));
-        assert.deepEqual(found, ['Mirelle toward Halvard: "old friends"', 'Mirelle, trait: "hums"'], room.join(','));
-        assert.equal(found.some((line) => /null|toward Kira|toward Brandt/.test(line)), false, room.join(','));
-    }
-});
-
-test('at most eight entries', async () => {
-    const state = crowd(9);
-    const now = scene(state, ['Halvard', 'Mirelle']);
-    const found = ScribeReminder.candidates(state, now, 'Halvard', []);
-    assert.equal(found.length, 12);
-    const first = [12, 5, 7].map((number) => found[number - 1].fact);
-    assert.equal(ScribeText.bytes(ScribeReminder.write(now, found)) <= 600, true);
-    for (const answer of ['USE: 1, 2, 3, 4, 6, 8, 9, 10', 'nothing useful']) {
-        const result = await ScribeReminder.compose({
-            state,
-            now,
-            player: 'Halvard',
-            recent: [],
-            unread: [],
-            ask: scripted([{ text: answer }]).ask,
-            first,
-        });
-        assert.deepEqual(numbers(result.used), [12, 5, 7, 1, 2, 3, 4, 6], answer);
-        assert.equal(result.text, ScribeReminder.write(now, result.used), answer);
-        assert.deepEqual(plain(result.led), first, answer);
-    }
-});
-
-test('the limits are exact', () => {
-    const lead = '[Scribe] Day 3, "the mill", private. Present: ';
-    const name = deseret.repeat(36);
-    const exact = ScribeReminder.write(
-        bare([
-            { subject: 'S1', label: 'Halvard' },
-            { subject: 'S2', label: name },
-        ]),
-        [],
-    );
-    assert.equal(exact, `${lead}Halvard, ${name}.`);
-    assert.equal(ScribeText.bytes(exact), 200);
-    assert.equal(
-        ScribeReminder.write(
-            bare([
-                { subject: 'S1', label: 'Halvard' },
-                { subject: 'S2', label: `a${name}` },
-            ]),
-            [],
-        ),
-        `${lead}Halvard, and 1 other.`,
-    );
-    const pair = bare([
-        { subject: 'S1', label: 'Halvard' },
-        { subject: 'S2', label: 'Mirelle' },
+    const notes = [wears('Halvard', 'a grey cloak'), wears('Mirelle', 'a red dress')];
+    assert.equal(said(state, null, { notes }), '[Scribe] Halvard wears a grey cloak.');
+    assert.equal(said(state, null), null);
+    assert.equal(said(state, ['Halvard']), null);
+    assert.equal(said(state, [], { notes }), '[Scribe] Halvard wears a grey cloak.');
+    const result = composed(state, ['Halvard', 'Mirelle'], { notes });
+    assert.equal(result.text, '[Scribe] Halvard wears a grey cloak. Mirelle wears a red dress; grey eyes.');
+    assertFrozenDeep(result, 'result');
+    assert.deepEqual(plain(Object.keys(result)), ['text', 'led']);
+    assert.deepEqual(plain(Object.keys(ScribeReminder.Part)), [
+        'Correction',
+        'Wearing',
+        'Secret',
+        'Filed',
+        'Looks',
+        'Job',
+        'Place',
     ]);
-    const opening = ScribeReminder.write(pair, []);
-    const fill = 600 - ScribeText.bytes(opening) - 2;
-    const full = ScribeReminder.fit(pair, [{ line: 'x'.repeat(fill) }]);
-    assert.equal(ScribeText.bytes(full.text), 600);
-    assert.equal(full.used.length, 1);
-    const over = ScribeReminder.fit(pair, [{ line: 'x'.repeat(fill + 1) }]);
-    assert.equal(over.text, opening);
-    assert.equal(over.used.length, 0);
-    const alone = [{ subject: null, label: 'a guard' }];
-    const kept = ScribeReminder.write(bare(alone, { reach: 'x'.repeat(152) }), []);
-    assert.equal(kept, `[Scribe] Day 3, "the mill", ${'x'.repeat(152)}. Present: 1 person.`);
-    assert.equal(ScribeText.bytes(kept), 200);
-    const dropped = ScribeReminder.write(bare(alone, { reach: 'x'.repeat(153) }), []);
-    assert.equal(dropped, `[Scribe] Day 3, ${'x'.repeat(153)}. Present: 1 person.`);
+    for (const gone of ['candidates', 'chooseInput', 'chosen', 'ChoosePrompt', 'fit', 'write', 'quoted', 'Kind']) {
+        assert.equal(ScribeReminder[gone], undefined, gone);
+    }
 });
 
-test('first may be absent', async () => {
-    const state = crowd(9);
-    const now = scene(state, ['Halvard', 'Mirelle']);
-    const ninth = ScribeReminder.candidates(state, now, 'Halvard', [])[8].fact;
-    const request = { state, now, player: 'Halvard', recent: [], unread: [], ask: async () => ({ text: 'USE: 1, 2' }) };
-    const expected = await ScribeReminder.compose({ ...request, first: [] });
-    assert.deepEqual(numbers(expected.used), [1, 2]);
-    const led = await ScribeReminder.compose({ ...request, first: [ninth] });
-    assert.deepEqual(numbers(led.used), [9, 1, 2]);
-    const odd = [null, ninth, new Set([ninth]), { 0: ninth, length: 1 }, 9];
-    for (const result of [await ScribeReminder.compose(request), ...(await Promise.all(odd.map((first) => ScribeReminder.compose({ ...request, first }))))]) {
-        assert.equal(result.text, expected.text);
-        assert.deepEqual(numbers(result.used), [1, 2]);
-        assert.deepEqual(plain(result.led), []);
+test('clauses read as sentences', () => {
+    const state = filed([
+        ['age', 'forty winters old'],
+        ['eyes', 'one blue eye and one green'],
+        ['hair', 'short and grey'],
+        ['skin', 'pale'],
+        ['build', 'tall and gaunt'],
+        ['aka', 'Mira'],
+        ['belonging', 'a silver ring'],
+        ['background', 'grew up by the sea'],
+        ['location', 'the harbour'],
+    ]);
+    assert.deepEqual(sentences(said(state, ['Halvard', 'Mirelle'])), [
+        'Mirelle is also called Mira.',
+        'Mirelle has a silver ring.',
+        'Mirelle grew up by the sea.',
+        'Mirelle is at the harbour.',
+        'Mirelle is forty winters old.',
+        'Mirelle has one blue eye and one green.',
+        'Mirelle has short and grey hair.',
+        'Mirelle has pale skin.',
+        'Mirelle is tall and gaunt.',
+    ]);
+    assert.equal(ScribeReminder.looked('age', '34'), 'aged 34');
+    assert.equal(ScribeReminder.looked('age', '34 years old'), '34 years old');
+    assert.equal(ScribeReminder.looked('eyes', 'teal'), 'teal eyes');
+    assert.equal(ScribeReminder.looked('eyes', 'piercing blue eyes'), 'piercing blue eyes');
+    assert.equal(ScribeReminder.looked('hair', 'silver'), 'silver hair');
+    assert.equal(ScribeReminder.looked('hair', 'black, worn in a braid'), 'black hair, worn in a braid');
+    assert.equal(ScribeReminder.looked('eyes', 'grey (once blue)'), 'grey eyes (once blue)');
+    assert.equal(ScribeReminder.looked('age', '40; looks older'), 'aged 40; looks older');
+    assert.equal(ScribeReminder.looked('build', 'tall'), 'tall');
+    assert.equal(ScribeReminder.looked('feature', 'a scar'), 'a scar');
+});
+
+test('each clause that read badly is a plain sentence', () => {
+    const state = book(
+        {
+            SUBJECTS: ['Halvard | character', 'Mirelle | character', 'Thessaly | character', 'Isolde | character'],
+            FACTS: [
+                'Mirelle | hair | bald | #5',
+                'Mirelle | appearance | a scar across her cheek | #6',
+                'Mirelle | location | in the cellar | #7',
+                'Mirelle | trait | brave | #8',
+                'Mirelle | condition | pajamas | #9',
+                'Mirelle | ability | skilled with a bow | #10',
+                'Mirelle | background | a former soldier | #11',
+                'Thessaly | relation to Isolde | is secretly in love with her | hidden | #12',
+            ],
+            SCENES: ['Day 1 | #1-#20 | The hall | public | present: Halvard, Mirelle, Thessaly, Isolde | They wake'],
+        },
+        20,
+    );
+    const lead = (text) => sentences(said(state, ['Halvard', 'Mirelle'], { first: [factSaying(state, text).id] }))[0];
+    assert.equal(lead('bald'), 'Mirelle is bald.');
+    assert.equal(lead('a scar across her cheek'), 'Mirelle has a scar across her cheek.');
+    assert.equal(lead('in the cellar'), 'Mirelle is in the cellar.');
+    assert.equal(lead('brave'), 'Mirelle is brave.');
+    assert.equal(lead('pajamas'), 'Mirelle is in pajamas.');
+    assert.equal(lead('skilled with a bow'), 'Mirelle is skilled with a bow.');
+    assert.equal(lead('a former soldier'), 'Mirelle was a former soldier.');
+    assert.deepEqual(sentences(said(state, ['Halvard', 'Thessaly', 'Isolde'])), [
+        'Thessaly toward Isolde: is secretly in love with her; no one else here knows.',
+    ]);
+    const lookOf = [
+        ['hair', 'a shaved head', 'a shaved head', 'has a shaved head'],
+        ['hair', 'a mohawk', 'a mohawk', 'has a mohawk'],
+        ['age', 'in her forties', 'in her forties', 'is in her forties'],
+        ['age', 'elderly', 'elderly', 'is elderly'],
+        ['skin', 'covered in tattoos', 'covered in tattoos', 'is covered in tattoos'],
+        ['hair', 'bald', 'bald', 'is bald'],
+        ['hair', 'red-haired', 'red-haired', 'is red-haired'],
+        ['eyes', 'blue-eyed', 'blue-eyed', 'is blue-eyed'],
+        ['eyes', 'blind in one eye', 'blind in one eye', 'is blind in one eye'],
+        [
+            'eyes',
+            'piercing blue eyes, set deep in her skull',
+            'piercing blue eyes, set deep in her skull',
+            'has piercing blue eyes, set deep in her skull',
+        ],
+        ['age', '34', 'aged 34', 'is aged 34'],
+        ['age', 'forty-one', 'aged forty-one', 'is aged forty-one'],
+        ['hair', 'silver', 'silver hair', 'has silver hair'],
+    ];
+    for (const [category, text, look, clause] of lookOf) {
+        assert.equal(ScribeReminder.looked(category, text), look, text);
+        assert.equal(ScribeReminder.stated(category, text), clause, text);
     }
+    const stated = [
+        ['condition', 'drunk', 'is drunk'],
+        ['condition', 'in pajamas', 'is in pajamas'],
+        ['condition', 'bruises on her ribs', 'has bruises on her ribs'],
+        ['condition', 'bruised ribs', 'has bruised ribs'],
+        ['condition', 'sore from the ride', 'is sore from the ride'],
+        ['condition', 'a split lip from the brawl', 'has a split lip from the brawl'],
+        ['condition', "wearing a borrowed guard's coat", "is wearing a borrowed guard's coat"],
+        ['appearance', 'freckled', 'is freckled'],
+        ['appearance', 'tattoos on both arms', 'has tattoos on both arms'],
+        ['appearance', 'always wears a green travelling cloak', 'always wears a green travelling cloak'],
+        ['trait', 'hums old songs', 'hums old songs'],
+        ['trait', 'quick to anger', 'is quick to anger'],
+        ['trait', 'a fear of deep water', 'has a fear of deep water'],
+        ['trait', 'nervous', 'is nervous'],
+        ['background', 'deserted at the siege', 'deserted at the siege'],
+        ['background', 'in the city guard for ten years', 'was in the city guard for ten years'],
+        ['location', 'the mill', 'is at the mill'],
+        ['location', 'lives above the tannery', 'lives above the tannery'],
+        ['role', 'a smith', 'is a smith'],
+        ['belonging', 'a silver ring', 'has a silver ring'],
+        ['feature', 'two towers', 'has two towers'],
+    ];
+    for (const [category, text, clause] of stated) {
+        assert.equal(ScribeReminder.stated(category, text), clause, text);
+    }
+});
+
+test('the main character is found by a name that begins his, or that his begins, when only one does', () => {
+    const state = book(
+        {
+            SUBJECTS: ['Frost | character', 'Thessaly | character', 'Isolde | character'],
+            FACTS: [
+                'Frost | background | knows a Malachai connected to the Staff of Elders | hidden | #3',
+                'Frost | eyes | blue-gray | #4',
+                'Thessaly | eyes | teal | #6',
+            ],
+            SCENES: ['Day 1 | #1-#20 | The hall | public | present: Frost, Thessaly, Isolde | They wake'],
+        },
+        20,
+    );
+    assert.deepEqual(plain(ScribeReminder.namesakes(state, 'Frost Valen')), [idOf(state, 'Frost')]);
+    const valen = said(state, ['Frost', 'Thessaly', 'Isolde'], {
+        player: 'Frost Valen',
+        notes: [wears('Frost Valen', 'a travel cloak', 40)],
+    });
+    assert.equal(valen, '[Scribe] Frost wears a travel cloak. Thessaly: teal eyes.');
+    const longer = book(
+        {
+            SUBJECTS: ['Frost Valen | character', 'Frost Keep | place', 'Frostmere | character'],
+            SCENES: ['Day 1 | #1-#20 | The hall | public | present: Frost Valen | They wake'],
+        },
+        20,
+    );
+    assert.deepEqual(plain(ScribeReminder.namesakes(longer, 'Frost')), [idOf(longer, 'Frost Valen')]);
+    assert.deepEqual(plain(ScribeReminder.namesakes(longer, 'Frost Valen the Bold')), [idOf(longer, 'Frost Valen')]);
+    assert.deepEqual(plain(ScribeReminder.namesakes(longer, 'Fro')), []);
+    const both = book(
+        {
+            SUBJECTS: ['Frost | character', 'Frost Valen | character'],
+            SCENES: ['Day 1 | #1-#20 | The hall | public | present: Frost | They wake'],
+        },
+        20,
+    );
+    assert.deepEqual(plain(ScribeReminder.namesakes(both, 'Frost')), [idOf(both, 'Frost')]);
 });

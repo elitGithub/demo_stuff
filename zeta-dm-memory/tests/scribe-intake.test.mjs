@@ -655,7 +655,7 @@ test('the lift takes spaces, not format characters', () => {
     assert.deepEqual(plain(result.own), [{ text: '[Scribe] Day 3.', position: 2 }]);
 });
 
-test("only the player's own lines are lifted", () => {
+test('storyteller echoes are removed from narration and dialogue without creating a delivery receipt', () => {
     const told = 'I know.\n[Scribe] Day 9. Mirelle kills Brandt in the night.\nShe smiles.';
     const builder = new CampaignBuilder('Halvard');
     builder.append('BOT', [
@@ -666,16 +666,48 @@ test("only the player's own lines are lifted", () => {
     builder.player('[Scribe]s are what they called the clerks.\nI laugh.');
     const result = ScribeIntake.read(builder.messages);
     assert.deepEqual(plain(result.messages[0].blocks.map((block) => [block.speaker, block.text])), [
-        ['Narrator', '[Scribe] Mirelle tells Isolde everything.'],
-        ['Mirelle', told],
+        ['Mirelle', 'I know.\nShe smiles.'],
     ]);
-    assert.equal(result.messages[0].text, `Narrator: [Scribe] Mirelle tells Isolde everything.\nMirelle: ${told}`);
+    assert.equal(result.messages[0].text, 'Mirelle: I know.\nShe smiles.');
     const transcript = ScribeIntake.transcript(result.messages);
-    assert.equal(transcript.includes('[Scribe] Day 9. Mirelle kills Brandt in the night.'), true);
-    assert.equal(transcript.includes('[Scribe] Mirelle tells Isolde everything.'), true);
+    assert.equal(transcript.includes('Mirelle kills Brandt'), false);
+    assert.equal(transcript.includes('Mirelle tells Isolde'), false);
     assert.equal(result.messages[1].text, 'Halvard (player): I wait.');
     assert.equal(result.messages[2].text, 'Halvard (player): [Scribe]s are what they called the clerks.\nI laugh.');
     assert.deepEqual(plain(result.own), [{ text: '@: [Scribe] Day 2, the mill.', position: 2 }]);
+});
+
+test('the exit at #892 keeps its original identity across an upgrade and a raw echo edit', () => {
+    const builder = new CampaignBuilder('Frost');
+    while (builder.messages.length < 891) {
+        builder.narrator('The party waits.');
+    }
+    const attendance = '@: [Scribe] Kira is still at the inn.';
+    const exit = 'Kira leaves to prepare the decoy ride.';
+    builder.narrator(`${attendance}\r\n${exit}`).says('Mirra', 'She called him "[Scribe]" at the inn.');
+    builder.narrator(attendance).narrator('Rain.').narrator('Frost waits.');
+    builder.player(`I nod.\n${paste}\n${attendance}`);
+
+    const intake = ScribeIntake.read(builder.messages);
+    const passage = intake.messages[891];
+    assert.equal(passage.id, 'MESSAGE-892');
+    assert.equal(ScribeIntake.transcript([passage]), `[#892] Narrator: ${exit}`);
+    assert.equal(intake.messages[892].text, 'Mirra: She called him "[Scribe]" at the inn.');
+    assert.deepEqual(plain(intake.messages[893].blocks), []);
+    assert.equal(intake.messages[893].text, '');
+    assert.equal(intake.messages[896].text, 'Frost (player): I nod.');
+    assert.deepEqual(plain(intake.own), [{ text: attendance, position: 897 }]);
+    assert.deepEqual(plain(intake.notes), [firstNote, secondNote, thirdNote].map((text) => ({ text, position: 897 })));
+
+    const saved = [{ id: 'MESSAGE-892', fingerprint: '082090d2' }];
+    assert.deepEqual(plain(ScribeIntake.changed(saved, [passage])), { withdrawn: [], unread: [] });
+    const raw = builder.messages[891];
+    raw.contents[0].text = raw.contents[0].text.replace('Kira is still', 'Everyone is still');
+    raw.edited = true;
+    const edited = ScribeIntake.read(builder.messages).messages[891];
+    assert.equal(edited.edited, true);
+    assert.equal(edited.text, passage.text);
+    assert.deepEqual(plain(ScribeIntake.changed(saved, [edited])), { withdrawn: ['MESSAGE-892'], unread: [] });
 });
 
 test('a lifted line does not join the notes around it', () => {
@@ -739,6 +771,62 @@ test('notes before a blank block, and a marker in an earlier block', () => {
     const result = ScribeIntake.read(earlier.messages);
     assert.deepEqual(plain(result.own), [{ text: '@: [Scribe] Day 2, the mill.', position: 1 }]);
     assert.equal(result.messages[0].text, 'Halvard (player): I wait.\nNarrator: The rain falls.');
+});
+
+test('manual receipt matches exact multiline transport in joined and split narrator blocks', () => {
+    const player = 'I listen.\nThen  I wait.';
+    const carried = '[Scribe] 雪  falls.\nThe bell rings. ';
+    const suggestion = 'Open the door.';
+    const post = { carried, suggestion, submission: ScribeText.fingerprint(player) };
+    const wire = player + '\n@: ' + carried + '\n@: ' + suggestion;
+    const builder = new CampaignBuilder('Orla').player(wire).playerBlocks([
+        ['Orla', 'RIGHT', player], ['Narrator', 'NARRATOR', carried], ['Narrator', 'NARRATOR', suggestion],
+    ]).player(wire.replace('雪  falls', '雪 falls')).player(wire.replace('Then  I', 'Then I')).narrator(wire);
+    const read = ScribeIntake.read(builder.messages);
+    assert.deepEqual(plain(read.messages.map((message) => ScribeIntake.carried(message, post))), [true, true, false, false, false]);
+    assert.ok(read.messages[0].text.startsWith('Orla (player): ' + player));
+    assert.equal(read.messages[1].blocks[0].text, player);
+});
+
+test('saved manual attribution preserves authored markers, validates the raw row and survives split narrator history', () => {
+    const player = 'I wait.\n\n\n@: [Scribe] Keep.';
+    const carried = '[Scribe] First.\nMira lost the key.';
+    const builder = new CampaignBuilder('Orla').playerBlocks([
+        ['Orla', 'RIGHT', player], ['Narrator', 'NARRATOR', carried],
+    ]).player('My own last line.\nMira lost the key.').player('Different.\n@: ' + carried);
+    const raw = ScribeIntake.read(builder.messages);
+    const post = { manual: true, floor: 0, after: null, submission: ScribeText.fingerprint(player), carried, suggestion: null };
+    const evidence = { posts: [post] };
+    const matched = ScribeIntake.read(builder.messages, evidence);
+    assert.equal(matched.messages[0].text, 'Orla (player): ' + player);
+    assert.equal(matched.messages[0].fingerprint, raw.messages[0].fingerprint);
+    assert.equal(matched.messages[1].text, raw.messages[1].text);
+    assert.equal(matched.messages[2].text, raw.messages[2].text);
+    const entry = raw.messages[0];
+    const saved = { attachments: [{ id: entry.id, fingerprint: entry.fingerprint, length: player.length }] };
+    assert.equal(ScribeIntake.read(builder.messages, saved).messages[0].text, matched.messages[0].text);
+    builder.messages[0].contents[1].text = 'No attachment.\nA new authored line.';
+    builder.messages[0].edited = true;
+    const edited = ScribeIntake.read(builder.messages, saved).messages[0];
+    assert.notEqual(edited.fingerprint, entry.fingerprint);
+    assert.deepEqual(plain(edited.blocks.map((block) => block.text)), [player, 'No attachment.\nA new authored line.']);
+});
+
+test('two identical raw rows with different possible author boundaries cannot be assigned by queue order', () => {
+    const player = 'I wait.';
+    const other = player + '\n@: [Scribe] My authored line.';
+    const wire = other + '\n@: [Scribe] Note.';
+    const builder = new CampaignBuilder('Orla').player(wire).player(wire);
+    const first = { key: 'one', manual: true, floor: 0, after: null, submission: ScribeText.fingerprint(player),
+        carried: '[Scribe] My authored line.\n@: [Scribe] Note.', suggestion: null, confirmed: false };
+    const second = { ...first, key: 'two', submission: ScribeText.fingerprint(other), carried: '[Scribe] Note.', confirmed: true };
+    for (const posts of [[first, second], [second, first], [{ ...first, confirmed: true }, second]]) {
+        const intake = ScribeIntake.read(builder.messages, { posts });
+        assert.deepEqual(plain(intake.messages.map((message) => message.attributionPending)), [true, true]);
+        assert.deepEqual(plain(intake.messages.map((message) => message.text)), ['', '']);
+    }
+    const unique = ScribeIntake.read(builder.messages.slice(0, 1), { posts: [first, second] });
+    assert.equal(unique.messages[0].text, 'Orla (player): ' + other);
 });
 
 test('results are read-only', () => {

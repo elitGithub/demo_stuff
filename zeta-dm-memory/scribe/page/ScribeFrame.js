@@ -10,6 +10,7 @@ const ScribeFrame = Object.freeze({
             Ready: 'ready',
             Arm: 'arm',
             Starting: 'starting',
+            Reserved: 'reserved',
             Cancelled: 'cancelled',
             Rejected: 'rejected',
             Uncertain: 'uncertain',
@@ -156,6 +157,7 @@ const ScribeFrame = Object.freeze({
             ...(typeof data.room === 'string' && ScribeFrame.named(data.room) ? { room: data.room } : {}),
             token,
             ready,
+            ...(data.manual === true && ready !== null && reminder !== null ? { manual: true } : {}),
             suggestion,
             ends,
             reminder: ready === null ? null : reminder,
@@ -229,6 +231,7 @@ const ScribeFrame = Object.freeze({
             seq: settings.NoSeq,
             offer: settings.NothingOffered,
             went: null,
+            reserve: null,
             repeat: null,
             index: settings.FirstIndex,
         };
@@ -253,6 +256,15 @@ const ScribeFrame = Object.freeze({
             if (event.isTrusted !== true || event.origin !== bridge.TopOrigin || event.source !== window.parent) {
                 return;
             }
+            if (ScribeFrame.tagged(event.data, bridge.Kind.Reserved)) {
+                const grant = event.data;
+                const waiting = frame.reserve;
+                if (waiting && grant.token === token() && grant.room === waiting.went.room && grant.seq === waiting.went.seq &&
+                    grant.index === waiting.went.index && typeof grant.allowed === settings.BooleanType) {
+                    waiting.finish(grant.allowed);
+                }
+                return;
+            }
             const arm = ScribeFrame.arm(event.data);
             if (arm === null || arm.token !== token()) {
                 return;
@@ -264,6 +276,7 @@ const ScribeFrame = Object.freeze({
             frame.offer = Object.freeze({
                 room: arm.room,
                 ready: arm.ready,
+                manual: arm.manual === true,
                 suggestion: arm.suggestion,
                 ends: arm.ends,
                 reminder: arm.reminder,
@@ -295,20 +308,21 @@ const ScribeFrame = Object.freeze({
          * @param {string} text
          * @return {string}
          */
-        const outgoing = (text) => {
+        const outgoing = (text, bare = false) => {
             if (frame.seq === settings.NoSeq) {
                 return text;
             }
             const offer = frame.offer;
-            const made = ScribeSender.compose(text, offer, bridge.MessageBytes);
+            const made = ScribeSender.compose(text, bare ? settings.NothingOffered : offer, bridge.MessageBytes);
             frame.went = Object.freeze({
                 room: offer.room,
                 seq: frame.seq,
                 index: frame.index,
-                submission: ScribeText.submission(made.text),
+                manual: made.ready && offer.manual === true,
+                submission: made.ready && offer.manual ? ScribeText.fingerprint(text) : ScribeText.submission(made.text),
                 ready: made.ready ? offer.ready : null,
                 suggestion: made.suggestion ? offer.suggestion : null,
-                cut: made.carried === null || made.carried === offer.ready ? null : made.carried.length,
+                cut: offer.manual || made.carried === null || made.carried === offer.ready ? null : made.carried.length,
                 crowded: made.crowded,
                 reminder: made.ready ? offer.reminder : null,
                 attempt: made.ready ? offer.attempt : null,
@@ -334,6 +348,7 @@ const ScribeFrame = Object.freeze({
             frame.offer = Object.freeze({
                 room: offer.room,
                 ready: kept,
+                manual: kept !== null && offer.manual,
                 suggestion: offer.suggestion === went.suggestion ? null : offer.suggestion,
                 ends: kept === null ? Object.freeze([]) : offer.ends,
                 reminder: kept === null ? null : offer.reminder,
@@ -356,13 +371,26 @@ const ScribeFrame = Object.freeze({
             }
             return {
                 room: (roomId) => went.room === roomId,
+                manual: went.manual,
+                reserve: went.reminder !== null ? (resume) => {
+                    const finish = (allowed) => {
+                        window.clearTimeout(timer);
+                        frame.reserve = null;
+                        const current = frame.offer.reminder === went.reminder && frame.offer.attempt === went.attempt;
+                        resume(frame.offer.room === went.room ? allowed && current : null);
+                    };
+                    const timer = window.setTimeout(() => finish(false), ScribeSender.Settings.SettleMs);
+                    frame.reserve = { went, finish };
+                    return () => finish(null);
+                } : null,
                 confirmed: () => sent(went),
                 uncertain: () => sent(went, bridge.Kind.Uncertain),
                 rejected: () => report(bridge.Kind.Rejected, went),
                 cancelled: () => report(bridge.Kind.Cancelled, went),
             };
         };
-        const hook = ScribeSender.attach({ document, window, outgoing, sent, cancelled, receipt: options.watch ? receipt : null, ignore: null });
+        const hook = ScribeSender.attach({ document, window, outgoing, sent, cancelled, receipt: options.watch ? receipt : null,
+            manualClick: () => Boolean(options.watch && (frame.offer.reminder || frame.reserve)), ignore: null });
         const watcher = options.watch?.();
         watcher?.onPost(hook.posting);
         window.addEventListener(settings.Message, heard);
@@ -374,6 +402,7 @@ const ScribeFrame = Object.freeze({
              */
             stop: () => {
                 hook.detach();
+                frame.reserve?.finish(null);
                 watcher?.stop();
                 window.removeEventListener(settings.Message, heard);
                 window.clearInterval(frame.repeat);

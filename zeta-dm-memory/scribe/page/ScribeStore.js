@@ -410,7 +410,8 @@ const ScribeStore = Object.freeze({
                 if (value === null) {
                     throw ScribeStore.damaged(kind);
                 }
-                return { value, head, text: joined };
+                const redacted = ScribeStore.redactRoomDiagnostics(storage, kind, value);
+                return { value, head, text: redacted ? JSON.stringify(value) : joined };
             } catch (error) {
                 if (error?.damaged !== true || attempt >= settings.Attempts) {
                     throw error;
@@ -526,7 +527,11 @@ const ScribeStore = Object.freeze({
         const types = settings.Types;
         const room = ScribeStore.room(roomId);
         ScribeStore.checkKind(kind);
-        ScribeStore.check(typeof text === settings.StringType && ScribeStore.decode(text) !== null, 'value');
+        const value = ScribeStore.decode(text);
+        ScribeStore.check(value !== null, 'value');
+        if (ScribeStore.redactRoomDiagnostics(storage, kind, value)) {
+            text = JSON.stringify(value);
+        }
         const pieces = ScribeStore.pieces(text, settings.PartCharacters);
         const headName = ScribeStore.name(types.Head, room, kind);
         const written = new Map();
@@ -729,6 +734,115 @@ const ScribeStore = Object.freeze({
             removed++;
         }
         return removed;
+    },
+
+    /**
+     * @param {{ get: Function }} storage
+     * @param {Set<string|null>} known
+     * @return {Set<string|null>}
+     */
+    diagnosticKeys(storage, known = new Set()) {
+        try {
+            for (const key of [ScribeStore.key(storage), ScribeStore.cloudKey(storage)]) {
+                if (key) {
+                    known.add(key);
+                }
+            }
+        } catch {
+            known.add(null);
+        }
+        return known;
+    },
+
+    /**
+     * @param {{ get: Function }} storage
+     * @param {Set<string|null>} known
+     * @return {(text: string) => string}
+     */
+    redactor(storage, known = new Set()) {
+        ScribeStore.diagnosticKeys(storage, known);
+        if (known.has(null)) {
+            return () => 'Diagnostic withheld while saved credentials are unavailable.';
+        }
+        const keys = [...known].sort((first, second) => second.length - first.length);
+        return (text) => {
+            let masked = text;
+            for (const key of keys) {
+                masked = masked.replaceAll(key, '[key]');
+            }
+            return masked.replace(/\bsk-or-[A-Za-z0-9_-]+/gi, '[key]').replace(/\bBearer [^\s;,]+/gi, 'Bearer [key]');
+        };
+    },
+
+    /**
+     * @param {*} value
+     * @param {(text: string) => string} mask
+     * @return {*}
+     */
+    diagnosticCopy(value, mask) {
+        if (typeof value === 'string') {
+            return value === '' ? value : mask(value);
+        }
+        if (Array.isArray(value)) {
+            return Object.freeze(value.map((item) => ScribeStore.diagnosticCopy(item, mask)));
+        }
+        if (value !== null && typeof value === 'object') {
+            const fields = Object.entries(value).map(([name, item]) => [name, ScribeStore.diagnosticCopy(item, mask)]);
+            return Object.freeze(Object.fromEntries(fields));
+        }
+        return value;
+    },
+
+    /**
+     * @param {{ get: Function }} storage
+     * @param {string|null} text
+     * @return {string|null}
+     */
+    diagnostic(storage, text) {
+        return text ? ScribeStore.redactor(storage)(text) : text;
+    },
+
+    /**
+     * @param {{ get: Function }} storage
+     * @param {string} kind
+     * @param {object} value
+     * @return {boolean}
+     */
+    redactRoomDiagnostics(storage, kind, value) {
+        let mask;
+        let changed = false;
+        const field = (record, key) => {
+            if (typeof record?.[key] === 'string' && record[key] !== '') {
+                mask ??= ScribeStore.redactor(storage);
+                const masked = mask(record[key]);
+                if (record[key] !== masked) {
+                    record[key] = masked;
+                    changed = true;
+                }
+            }
+        };
+        if (kind === ScribeStore.Kind.Settings) {
+            field(value.stop, 'problem');
+        } else if (kind === ScribeStore.Kind.Live) {
+            for (const role of ['scene', 'check']) {
+                field(value.failing, role);
+                field(value.failing?.[role], 'reason');
+            }
+            field(value.untold, 'reason');
+            if (Array.isArray(value.retries)) {
+                for (const retry of value.retries) {
+                    field(retry, 'reason');
+                }
+            }
+            if (Array.isArray(value.calls)) {
+                for (const call of value.calls) {
+                    field(call, 'answer');
+                    field(call, 'finish');
+                    field(call, 'problem');
+                }
+            }
+        }
+        return changed;
     },
 
     /**

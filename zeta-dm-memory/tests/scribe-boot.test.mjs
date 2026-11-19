@@ -473,6 +473,7 @@ function standIns(timers) {
                     record.reads.push('lines');
                     return {
                         ready: record.ready,
+                        manual: record.manual === true,
                         suggestion: record.suggestion,
                         ends: [],
                         reminder: record.reminder,
@@ -490,10 +491,11 @@ function standIns(timers) {
                 },
                 /**
                  * @param {object} lines
-                 * @return {void}
+                 * @return {boolean}
                  */
                 starting: (lines) => {
                     record.starting.push(lines);
+                    return true;
                 },
                 posting: () => ({ key: 'current attempt' }),
                 outstanding: (key) => record.uncertain.find((lines) => lines.key === key &&
@@ -586,6 +588,7 @@ function standIns(timers) {
         },
     };
     context.ScribeSender = {
+        paragraph: RealSender.paragraph,
         /**
          * @param {object} options
          * @return {object}
@@ -2887,6 +2890,23 @@ test('a reminder report is told to the live part with the identities of the arm 
     run.boot.stop();
 });
 
+test('a manual frame arm keeps the selected text and journals the full marked paragraph', async () => {
+    const { run, chat, live } = await bridged();
+    live.manual = true;
+    live.ready = 'Hold  here.\nThen go.';
+    live.reminder = 'room-1#reminder-2';
+    live.attempt = 'room-1#attempt-2';
+    await deliver(run, readyFrom(chat.window));
+    const identity = { kind: 'starting', index: 0, reminder: live.reminder, attempt: live.attempt, submission: 'abcd1234' };
+    await deliver(run, reminderSentFrom(chat.window, 1, { ...identity, cut: 4 }));
+    assert.equal(live.starting.length, 0);
+    await deliver(run, reminderSentFrom(chat.window, 1, identity));
+    assert.equal(live.starting.length, 1);
+    const started = live.starting[0];
+    assert.deepEqual([started.ready, started.carried, started.manual], [live.ready, '[Scribe] ' + live.ready, true]);
+    run.boot.stop();
+});
+
 test('a duplicate report of one arm tells the live part once, and a new index is a new send', async () => {
     const { run, chat, live } = await bridged();
     await deliver(run, readyFrom(chat.window));
@@ -3856,6 +3876,31 @@ test('a model call carries the operator notes only when the cloud has some, and 
     answer(run.sent.calls.at(-1), 401, `{"error":"bad key ${DM_KEY}"}`);
     await failing;
     assert.equal(run.lines.some((line) => line.includes(DM_KEY) || line.includes(KEY)), false);
+    run.boot.stop();
+});
+
+test('key and spend preflight failures carry the local source without sending either kind of model call', async () => {
+    const run = harness();
+    start(run);
+    await settle();
+    ScribeStore.setKey(run.storage, KEY);
+    const book = run.world.keepers[0].options.ask;
+    const live = run.world.lives[0].options.ask;
+    run.storage.refuseGetsMatching(/^scribe:key$/);
+    for (const ask of [book, live]) {
+        const failure = await failureOf(ask(ScribeBoot.Role.Scribe, SYSTEM, USER));
+        assert.equal(failure.source, 'Scribe');
+    }
+    run.storage.allow();
+    run.storage.refuseGetsMatching(/^scribe:spent:/);
+    assert.equal((await failureOf(live(ScribeBoot.Role.Scribe, SYSTEM, USER))).source, 'Scribe');
+    assert.equal(run.sent.calls.length, 0);
+    run.storage.allow();
+    const denied = failureOf(book(ScribeBoot.Role.Analyzer, SYSTEM, USER));
+    await settle();
+    answer(run.sent.calls.at(-1), 401, '{"error":"unauthorized"}');
+    assert.equal((await denied).source, 'OpenRouter');
+    assert.equal(run.sent.calls.length, 1);
     run.boot.stop();
 });
 

@@ -1059,9 +1059,7 @@ const ScribeReplay = Object.freeze({
          * @return {void}
          */
         Answer(book, operation, order) {
-            const ruling = { order, text: operation.text };
-            book.answers.set(operation.question, ruling);
-            book.answeredTexts.set(ScribeReplay.wording(operation.questionText), ruling);
+            book.answers.set(operation.question, { order, text: operation.text });
         },
 
         /**
@@ -1071,9 +1069,7 @@ const ScribeReplay = Object.freeze({
          * @return {void}
          */
         Dismiss(book, operation, order) {
-            const ruling = { order };
-            book.dismissals.set(operation.question, ruling);
-            book.dismissedTexts.set(ScribeReplay.wording(operation.questionText), ruling);
+            book.dismissals.set(operation.question, { order });
         },
 
         /**
@@ -1106,9 +1102,10 @@ const ScribeReplay = Object.freeze({
     /**
      * @param {object} log
      * @param {string[]} order
+     * @param {ReadonlySet<string>|null} pending
      * @return {Readonly<{ revision: number, subjects: readonly object[], facts: readonly object[], scenes: readonly object[], nights: readonly object[], threads: readonly object[], conflicts: readonly object[], lookAlikes: readonly object[], stale: readonly object[], refinements: readonly object[], aliases: readonly object[], questions: readonly object[], unaliased: readonly object[], distinct: readonly object[], contradictions: readonly object[] }>}
      */
-    run(log, order) {
+    run(log, order, pending = null) {
         const settings = ScribeReplay.Settings;
         const status = ScribeReplay.Status;
         const likeness = ScribeReplay.Likeness;
@@ -1155,17 +1152,22 @@ const ScribeReplay = Object.freeze({
             widenings: new Map(),
             widenedMarks: new Map(),
             answers: new Map(),
-            answeredTexts: new Map(),
             dismissals: new Map(),
-            dismissedTexts: new Map(),
             contradictions: new Map(),
         };
         const counted = [];
         const showings = [];
         const rulings = [];
+        const withdrawnQuestions = new Map();
+        const previousQuestions = new Map();
         for (const entry of log.entries) {
             const ruled = entry.kind === ScribeLog.Kind.Operator;
             for (const [index, operation] of entry.operations.entries()) {
+                if (pending && (pending.has(operation.cite) ||
+                    (operation.type === types.Contradiction && pending.has(operation.earlier)) ||
+                    (operation.type === types.Scene && (pending.has(operation.first) || pending.has(operation.last))))) {
+                    continue;
+                }
                 if (operation.type === types.Subject) {
                     const declared = book.subjects.get(operation.subject) ?? { label: operation.label, kind: null };
                     if (!entry.withdrawn && declared.kind === null) {
@@ -1182,6 +1184,17 @@ const ScribeReplay = Object.freeze({
                     !book.subjects.has(operation.becomes);
                 if (splitting) {
                     book.subjects.set(operation.becomes, { label: operation.label, kind: operation.kind });
+                }
+                if (operation.type === types.Question && typeof operation.cite === 'string') {
+                    const key = JSON.stringify([entry.origin, operation.cite, ScribeReplay.wording(operation.text)]);
+                    const previous = withdrawnQuestions.get(key);
+                    if (entry.withdrawn) {
+                        const ids = previous ?? [];
+                        ids.push(operation.question);
+                        withdrawnQuestions.set(key, ids);
+                    } else if (previous) {
+                        previousQuestions.set(operation.question, previous.slice());
+                    }
                 }
                 if (entry.withdrawn || (ruling && !ruled)) {
                     continue;
@@ -1365,9 +1378,9 @@ const ScribeReplay = Object.freeze({
             fact.widened = widened;
         }
         for (const question of book.questions) {
-            const wording = ScribeReplay.wording(question.text);
-            const answered = ScribeReplay.latest(book.answeredTexts, [wording], book.answers.get(question.id));
-            const dismissed = ScribeReplay.latest(book.dismissedTexts, [wording], book.dismissals.get(question.id));
+            const previous = previousQuestions.get(question.id) ?? [];
+            const answered = ScribeReplay.latest(book.answers, previous, book.answers.get(question.id));
+            const dismissed = ScribeReplay.latest(book.dismissals, previous, book.dismissals.get(question.id));
             if (answered !== undefined) {
                 question.answer = answered.text;
             }

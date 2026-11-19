@@ -1366,6 +1366,21 @@ test('compose adds, drops and reports', () => {
     const odd = ScribeSender.compose('Hello', { ready: told, suggestion: null, ends: [500, -3, 'x'] }, 60);
     assert.equal(odd.ready, false);
 
+    const player = 'I keep  my\nwords. ';
+    const selected = ' 雪  on\nthe quay. ';
+    const paragraph = '[Scribe] ' + selected;
+    const manual = { ready: selected, manual: true, ends: [2, 7], suggestion: 'Optional.' };
+    const full = player + '\n@: ' + paragraph;
+    const padding = 'x'.repeat(4500 - Buffer.byteLength(full));
+    const exact = ScribeSender.compose(padding + player, manual, 4500);
+    assert.deepEqual({ ...exact }, { text: padding + full, ready: true, suggestion: false, carried: paragraph, crowded: false });
+    const over = 'x' + padding + player;
+    assert.deepEqual({ ...ScribeSender.compose(over, manual, 4500) },
+        { text: over, ready: false, suggestion: false, carried: null, crowded: true });
+    for (const marked of [paragraph, '@: ' + paragraph]) {
+        assert.equal(ScribeSender.compose(player, { ...manual, ready: marked }, 4500).text, full + '\n@: Optional.');
+    }
+
     const spaced = `${String.fromCodePoint(0xa0)}Hello`;
     assert.equal(ScribeSender.compose(spaced, lines, 4500).text, `${spaced}\n@: [Scribe] Day 1, the mill.\n@: Ask the miller.`);
     const wide = Object.freeze({ ready: 'Ü'.repeat(10), suggestion: 'ß' });

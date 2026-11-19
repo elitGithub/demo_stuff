@@ -2,6 +2,7 @@ const ZetaSource = Object.freeze({
     End: Object.freeze({
         NoCursor: 'NoCursor',
         EmptyPage: 'EmptyPage',
+        ThroughMessage: 'ThroughMessage',
         RepeatedCursor: 'RepeatedCursor',
         NothingNew: 'NothingNew',
         Limit: 'Limit',
@@ -695,7 +696,7 @@ const ZetaSource = Object.freeze({
             throw ZetaSource.failure(words.Shape, answered.status, false);
         }
         const nextCursor = finite || ZetaSource.filled(offered) ? String(offered) : null;
-        return { messages, nextCursor, skipped };
+        return { messages, nextCursor, skipped, emptyRoom: cursor === null && body.messages.length === 0 && offered === null };
     },
 
     /**
@@ -909,7 +910,7 @@ const ZetaSource = Object.freeze({
     },
 
     /**
-     * @param {{ fetch: Function, token: string|null, roomId: string|null, pause: (milliseconds: number) => Promise<void>, onPage?: (count: number) => void }} request
+     * @param {{ fetch: Function, token: string|null, roomId: string|null, pause: (milliseconds: number) => Promise<void>, onPage?: (count: number) => void, through?: string|null }} request
      * @return {Promise<Readonly<{ messages: object[], end: string, problem: string|null, skipped: number }>>}
      * @throws {Error}
      */
@@ -957,11 +958,14 @@ const ZetaSource = Object.freeze({
                 end = ends.NothingNew;
             } else if (next === null) {
                 end = ends.NoCursor;
+            } else if (request.through && distinct.has(request.through)) {
+                end = ends.ThroughMessage;
             } else if (used.has(next)) {
                 end = ends.RepeatedCursor;
             }
             if (end !== null) {
-                return ZetaSource.outcome(received, end, null, skipped);
+                const result = ZetaSource.outcome(received, end, null, skipped);
+                return page.emptyRoom ? Object.freeze({ ...result, emptyRoom: true }) : result;
             }
             cursor = next;
             used.add(cursor);
@@ -970,14 +974,18 @@ const ZetaSource = Object.freeze({
     },
 
     /**
-     * @param {{ fetch: Function, token: string|null, roomId: string|null, pause: (milliseconds: number) => Promise<void> }} request
+     * @param {{ fetch: Function, token: string|null, roomId: string|null, pause: (milliseconds: number) => Promise<void>, through?: string|null }} request
      * @return {Promise<Readonly<{ messages: object[], end: string, problem: string|null, skipped: number }>>}
      * @throws {Error}
      */
     async newest(request) {
+        if (request.through) {
+            return ZetaSource.history(request);
+        }
         const ends = ZetaSource.End;
         ZetaSource.ready(request);
         const page = await ZetaSource.page(request, null);
-        return ZetaSource.outcome(page.messages, page.messages.length === 0 ? ends.EmptyPage : ends.NoCursor, null, page.skipped);
+        const result = ZetaSource.outcome(page.messages, page.messages.length === 0 ? ends.EmptyPage : ends.NoCursor, null, page.skipped);
+        return page.emptyRoom ? Object.freeze({ ...result, emptyRoom: true }) : result;
     },
 });

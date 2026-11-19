@@ -43,7 +43,7 @@ const ScribeSender = Object.freeze({
 
     /**
      * @param {string} text
-     * @param {{ ready: string|null, suggestion: string|null, ends?: readonly number[] }} lines
+     * @param {{ ready: string|null, suggestion: string|null, manual?: boolean, ends?: readonly number[] }} lines
      * @param {number} limit
      * @return {Readonly<{ text: string, ready: boolean, suggestion: boolean, carried: string|null, crowded: boolean }>}
      */
@@ -53,7 +53,8 @@ const ScribeSender = Object.freeze({
         if (settings.Blank.test(text)) {
             return Object.freeze({ text, ready: false, suggestion: false, carried: null, crowded: false });
         }
-        const ends = ready !== null && Array.isArray(lines.ends) ? lines.ends : [];
+        const manual = ready !== null && lines.manual === true;
+        const ends = !manual && ready !== null && Array.isArray(lines.ends) ? lines.ends : [];
         const versions = ready === null ? [] : [ready];
         for (const end of [...ends].reverse()) {
             if (Number.isSafeInteger(end) && end > settings.NoLength && end < ready.length) {
@@ -75,6 +76,20 @@ const ScribeSender = Object.freeze({
             return joined;
         };
         let suggestion = lines.suggestion;
+        if (manual) {
+            const paragraph = ScribeSender.paragraph(ready);
+            const fits = ScribeText.bytes(whole(paragraph, null)) <= limit;
+            if (!fits || ScribeText.bytes(whole(paragraph, suggestion)) > limit) {
+                suggestion = null;
+            }
+            return Object.freeze({
+                text: whole(fits ? paragraph : null, suggestion),
+                ready: fits,
+                suggestion: suggestion !== null,
+                carried: fits ? paragraph : null,
+                crowded: !fits,
+            });
+        }
         let carried = null;
         for (const version of versions) {
             if (carried === null && ScribeText.bytes(whole(version, suggestion)) <= limit) {
@@ -91,6 +106,15 @@ const ScribeSender = Object.freeze({
             carried,
             crowded: ready !== null && carried === null,
         });
+    },
+
+    /**
+     * @param {string} text
+     * @return {string}
+     */
+    paragraph(text) {
+        const bare = text.replace(/^([\p{Zs}\t]*)(?:@:[\p{Zs}\t]*)+(?=\[Scribe\](?:\s|$))/u, '$1');
+        return ScribeText.reminderLine(bare.split(/\r?\n/, 1)[0]) ? bare : '[Scribe] ' + bare;
     },
 
     /**
@@ -195,11 +219,15 @@ const ScribeSender = Object.freeze({
     /**
      * @param {object} sender
      * @param {HTMLTextAreaElement} box
+     * @param {{text: string, receipt: object}|null} authorized
      * @return {boolean}
      */
-    prepare(sender, box) {
+    prepare(sender, box, authorized = null) {
         const settings = ScribeSender.Settings;
         const text = box.value;
+        if (sender.reservation) {
+            return true;
+        }
         if (text.trim() === settings.Nothing) {
             return false;
         }
@@ -214,9 +242,30 @@ const ScribeSender = Object.freeze({
             sender.pending = null;
             ScribeSender.finish(sender, pending, true);
         }
-        const result = sender.outgoing(text);
+        const result = authorized ? authorized.text : sender.outgoing(text);
+        const receipt = authorized ? authorized.receipt : sender.receipt?.();
+        if (!authorized && receipt?.reserve) {
+            const reservation = { box, cancel: null };
+            sender.reservation = reservation;
+            reservation.cancel = receipt.reserve((allowed) => {
+                sender.reservation = null;
+                if (sender.detached || allowed === null ||
+                    box !== ScribeSender.find(sender.document, sender.ignore) || box.value !== text) {
+                    receipt.cancelled();
+                    return;
+                }
+                let send = { text: result, receipt };
+                if (!allowed) {
+                    receipt.cancelled();
+                    send = { text: sender.outgoing(text, true), receipt: sender.receipt?.() };
+                }
+                ScribeSender.prepare(sender, box, send);
+                sender.resend = sender.window.setTimeout(() => sender.again(box), settings.ResendMs);
+            });
+            return true;
+        }
         const added = result.slice(text.length);
-        const writes = result.startsWith(text) && !text.endsWith(added);
+        const writes = result.startsWith(text) && added.length > settings.NoLength && (receipt?.manual || !text.endsWith(added));
         if (writes) {
             const { selectionStart, selectionEnd, selectionDirection } = box;
             ScribeSender.write(sender.window, box, result);
@@ -227,7 +276,7 @@ const ScribeSender = Object.freeze({
         }
         sender.pending = {
             box, added: writes ? added : null, original: text, waited: settings.NoWait, sampled: false, cleared: false,
-            receipt: sender.receipt?.(), event: null, bound: false, ambiguous: false, status: null, finished: false, outcome: null,
+            receipt, event: null, bound: false, ambiguous: false, status: null, finished: false, outcome: null,
         };
         return writes;
     },
@@ -303,6 +352,7 @@ const ScribeSender = Object.freeze({
             timer: null,
             resend: null,
             resending: false,
+            reservation: null,
             tick: null,
         };
         /**
@@ -353,6 +403,9 @@ const ScribeSender = Object.freeze({
          * @return {void}
          */
         const touched = (event) => {
+            if (sender.reservation && ScribeSender.on(event, sender.reservation.box)) {
+                sender.reservation.cancel();
+            }
             const pending = sender.pending;
             if (sender.resending || pending === null) {
                 return;
@@ -386,6 +439,9 @@ const ScribeSender = Object.freeze({
          * @return {void}
          */
         const typed = (event) => {
+            if (sender.reservation && ScribeSender.on(event, sender.reservation.box)) {
+                sender.reservation.cancel();
+            }
             const pending = sender.pending;
             if (pending === null) {
                 return;
@@ -432,7 +488,7 @@ const ScribeSender = Object.freeze({
          * @param {HTMLTextAreaElement} box
          * @return {void}
          */
-        const again = (box) => {
+        sender.again = (box) => {
             try {
                 sender.resending = true;
                 try {
@@ -494,13 +550,13 @@ const ScribeSender = Object.freeze({
                 }
                 event.preventDefault();
                 event.stopImmediatePropagation();
-                if (sender.resend === null) {
+                if (sender.resend === null && !sender.reservation) {
                     sender.resend = window.setTimeout(
                         /**
                          * @return {void}
                          */
                         () => {
-                            again(active);
+                            sender.again(active);
                         },
                         settings.ResendMs,
                     );
@@ -521,6 +577,10 @@ const ScribeSender = Object.freeze({
                 const button = event.target.closest(settings.SendButton);
                 const box = ScribeSender.find(document, ignore);
                 if (button !== null && box !== null) {
+                    if (options.manualClick?.()) {
+                        event.stopImmediatePropagation();
+                        return;
+                    }
                     ScribeSender.prepare(sender, box);
                     if (sender.pending) {
                         sender.pending.event = event;
@@ -532,7 +592,19 @@ const ScribeSender = Object.freeze({
             }
         };
         const click = (event) => {
-            if (sender.pending && event.target?.closest?.(settings.SendButton) && !ScribeSender.inside(event, ignore)) {
+            if (!event.target?.closest?.(settings.SendButton) || ScribeSender.inside(event, ignore)) {
+                return;
+            }
+            if (options.manualClick?.()) {
+                const box = ScribeSender.find(document, ignore);
+                if (box && ScribeSender.prepare(sender, box)) {
+                    event.preventDefault();
+                    event.stopImmediatePropagation();
+                    return;
+                }
+                ScribeSender.watch(sender);
+            }
+            if (sender.pending) {
                 sender.pending.event = event;
             }
         };

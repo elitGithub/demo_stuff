@@ -668,6 +668,12 @@ const ScribeLog = Object.freeze({
                 return reasons.Citation;
             }
             for (const attendee of operation.present) {
+                for (const position of [attendee.from, attendee.until]) {
+                    const source = context.sources.get(position);
+                    if (source?.attributionPending || (context.story && source?.text === ScribeLog.Settings.Nothing)) {
+                        return reasons.Citation;
+                    }
+                }
                 if (ScribeLog.clashes(context, attendee.label)) {
                     return reasons.Mismatch;
                 }
@@ -1248,7 +1254,7 @@ const ScribeLog = Object.freeze({
      * @param {object} log
      * @param {object} state
      * @param {readonly object[]} operations
-     * @param {{ messages: readonly object[], origin: string }} stretch
+     * @param {{ messages: readonly object[], origin: string, sources?: ReadonlyMap<number, object> }} stretch
      * @return {Readonly<{ entry: object, refused: ReadonlyArray<Readonly<{ operation: object, reason: string }>> }>}
      * @throws {Error}
      */
@@ -1266,12 +1272,18 @@ const ScribeLog = Object.freeze({
             throw new Error(settings.StaleState);
         }
         const story = stretch.origin === origins.Story;
+        const sources = stretch.sources ?? new Map(stretch.messages.map((message) => [message.position, message]));
         const messageIds = [];
         const cites = new Map();
         let earliest = Number.POSITIVE_INFINITY;
         for (const message of stretch.messages) {
+            if (message.attributionPending) {
+                continue;
+            }
             messageIds.push(message.id);
-            cites.set(message.position, message.id);
+            if (!story || message.text !== settings.Nothing) {
+                cites.set(message.position, message.id);
+            }
             earliest = Math.min(earliest, message.position);
         }
         let before = null;
@@ -1307,6 +1319,8 @@ const ScribeLog = Object.freeze({
         while (unsettled) {
             context = {
                 cites,
+                sources,
+                story,
                 before,
                 unaliased,
                 distinct,

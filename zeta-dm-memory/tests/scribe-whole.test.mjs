@@ -1,9 +1,7 @@
 import assert from 'node:assert/strict';
 import { readFileSync } from 'node:fs';
 import test from 'node:test';
-import { fileURLToPath } from 'node:url';
 import vm from 'node:vm';
-import { ScribePack } from '../scribe/pack.mjs';
 import CampaignBuilder from './support/CampaignBuilder.mjs';
 import FakeLocks from './support/FakeLocks.mjs';
 import FakeScribeWorker from './support/FakeScribeWorker.mjs';
@@ -13,8 +11,7 @@ import WholeModel from './support/WholeModel.mjs';
 import WholeSite from './support/WholeSite.mjs';
 import WholeTab from './support/WholeTab.mjs';
 
-const ROOT = fileURLToPath(new URL('../', import.meta.url));
-const PACKED = ScribePack.build((relativePath) => readFileSync(`${ROOT}${relativePath}`, 'utf8'));
+const PACKED = readFileSync(new URL('../scribe/scribe.user.js', import.meta.url), 'utf8');
 const START = Date.UTC(2026, 10, 15, 9, 0, 0);
 const KEY = 'sk-test-KEY-123';
 const BARE_TOKEN = WholeSite.Token.slice('Bearer '.length);
@@ -426,6 +423,25 @@ function rangeOf(user) {
 }
 
 /**
+ * @param {object} walk
+ * @param {(role: string, input: string) => boolean} match
+ * @return {{ release: Function|null }}
+ */
+function holdCompletion(walk, match) {
+    const held = { release: null };
+    const request = walk.model.request.bind(walk.model);
+    walk.model.request = (tab, details) => {
+        const [system, user] = JSON.parse(details.data).messages;
+        if (match(walk.model.roleOf(system.content), user.content)) {
+            walk.model.request = request;
+            return request(tab, { ...details, onload: (response) => { held.release = () => details.onload(response); } });
+        }
+        return request(tab, details);
+    };
+    return held;
+}
+
+/**
  * @param {*} value
  * @return {*}
  */
@@ -601,7 +617,7 @@ async function reload(walk, tab, width = WIDE) {
     await until(
         walk,
         'the reloaded tab to settle',
-        () => fresh.panel.headline().startsWith('Up to date') || fresh.panel.headline().startsWith('Stopped'),
+        () => /^(?:Up to date|Waiting to read|Unresolved authorship|Stopped)/.test(fresh.panel.headline()),
         15000,
     );
     return fresh;
@@ -692,7 +708,7 @@ test('2. a chat opens', async () => {
     await tab.openPage();
     await until(walk, 'step 2: a panel on the page', () => tab.panel.host() !== null, 2000);
     const first = tab.panel.headlines()[0];
-    assert.equal(first === 'Loading the chat...' || first.startsWith('Pulling the chat'), true, first);
+    assert.equal(first === 'Loading the chat...' || first.startsWith('Reading chat history from Zeta'), true, first);
     await until(walk, 'step 2: the chat to be pulled', () => tab.panel.headline().startsWith('No book for this chat yet'), 15000);
     assert.equal(tab.panel.headline(), 'No book for this chat yet: 91 messages.');
     const reads = walk.site.pageRequests();
@@ -758,7 +774,7 @@ test('4. adopt', async () => {
     await adopt(walk, tab, '1.2');
     assert.deepEqual(
         walk.model.calls.filter((call) => call.role === 'Story').map((call) => rangeOf(call.user)),
-        ['1-30', '31-60', '61-90'],
+        ['1-30', '31-60', '61-90', '91-91'],
     );
     for (const call of walk.model.calls) {
         assert.equal(call.url, WholeModel.Endpoint);
@@ -770,11 +786,11 @@ test('4. adopt', async () => {
     assert.deepEqual(walk.model.strays, []);
     const seen = tab.panel.headlines();
     assert.equal(seen.some((line) => line.startsWith('Reading #1 to #30')), true, seen.join(' / '));
-    assert.equal(tab.panel.headline(), 'Up to date: 90 of 91 read.');
+    assert.equal(tab.panel.headline(), 'Up to date: 91 of 91 read.');
     const book = stored(walk, 'book');
     assert.equal(book.adopted, true);
-    assert.equal(Object.keys(book.log.read).length, 90);
-    assert.equal(Object.hasOwn(book.log.read, `MESSAGE-${CHAT_LENGTH}`), false);
+    assert.equal(Object.keys(book.log.read).length, 91);
+    assert.equal(Object.hasOwn(book.log.read, `MESSAGE-${CHAT_LENGTH}`), true);
     assert.equal(tab.panel.spend(), `$${billed(walk).toFixed(4)} today`);
     assert.equal(Math.abs(spentToday(walk) - billed(walk)) < 1e-9, true);
     tab.panel.tab('Summary');
@@ -786,6 +802,183 @@ test('4. adopt', async () => {
         'Tamsin (character)',
         'The harbour market (place)',
     ]);
+});
+
+for (const change of ['quiet room', 'new reply', 'edit ahead of the current batch', 'edit between scheduled polls']) {
+    test(`the installed reader drains 400 of 441 on its own with ${change}`, async () => {
+        const walk = world();
+        walk.site.open(ROOM, campaign(400));
+        let tab = await opened(walk);
+        await saveKey(walk, tab);
+        tab.panel.tab('Settings');
+        tab.panel.type('scribe-setting-size', '40');
+        tab.panel.type('scribe-setting-budget', '8');
+        tab.panel.click('scribe-next');
+        await until(walk, 'the initial saved book', () => tab.panel.headline() === 'Up to date: 400 of 400 read.', 4 * TICK_MS);
+        const published = [];
+        const previous = plain(stored(walk, 'book').log.read);
+        walk.site.open(ROOM, campaign(441));
+        walk.model.watch = (call) => {
+            if (call.role === 'Story') {
+                const batch = rangeOf(call.user);
+                published.push([batch, Object.keys(stored(walk, 'book').log.read).length]);
+                if (change === 'new reply' && batch === '401-440') {
+                    walk.site.reply(CALM_REPLY);
+                }
+            }
+        };
+        const held = change.startsWith('edit ') ? holdCompletion(walk,
+            (role, input) => role === 'Story' && rangeOf(input) === '401-440') : null;
+        tab = await reload(walk, tab);
+        assert.equal(tab.panel.headline(), 'Waiting to read: 400 of 441 read.');
+        if (held) {
+            await until(walk, 'the full batch in flight', () => held.release !== null, 2 * TICK_MS);
+            walk.site.edit(441, 'The lamp is now dark.');
+            await pass(walk, change === 'edit between scheduled polls' ? 100 : TICK_MS + 100);
+            assert.deepEqual(published, [['401-440', 400]]);
+            held.release();
+        }
+        const total = change === 'new reply' ? 442 : 441;
+        const complete = `Up to date: ${total} of ${total} read.`;
+        await until(walk, 'the automatic polls to save every available row', () => tab.panel.headline() === complete, 4 * TICK_MS);
+        const batches = [['401-440', 400], [`441-${total}`, 440]];
+        await pass(walk, 2 * TICK_MS);
+        assert.deepEqual(published, batches);
+        const saved = stored(walk, 'book');
+        if (held) {
+            const tail = walk.model.of('Story').filter((call) => rangeOf(call.user) === '441-441');
+            assert.equal(tail.length, 1);
+            assert.ok(tail[0].user.includes('The lamp is now dark.'));
+            const latest = REFERENCE.ScribeIntake.read(walk.site.messages).messages.at(-1);
+            assert.equal(saved.fingerprints[latest.id], latest.fingerprint);
+        }
+        for (const [id, sequence] of Object.entries(previous)) {
+            assert.equal(saved.log.read[id], sequence);
+        }
+        const reopened = await reload(walk, tab);
+        assert.equal(reopened.panel.headline(), complete);
+        assert.deepEqual(plain(stored(walk, 'book')), plain(saved));
+        assert.deepEqual(published, batches);
+    });
+}
+
+const OLD_LEDGER = 'Mirelle keeps the harbour ledger.';
+const NEW_LEDGER = 'Mirelle keeps the clocktower logs.';
+const KEY_NOTE = 'Oswin holds the spare key.';
+const NARRATIVE = 'I shut the cover.';
+const noteBlock = (text) => `*(\n${text}\n)*`;
+
+for (const { name, size, original, edit, extra, notes, story } of [
+    { name: 'an edited note-only #441', size: 40, original: noteBlock(OLD_LEDGER), edit: noteBlock(NEW_LEDGER), notes: [NEW_LEDGER] },
+    { name: 'an empty row edited into a note', original: noteBlock(''), edit: noteBlock(NEW_LEDGER), notes: [NEW_LEDGER] },
+    { name: 'a note edited into narrative', original: noteBlock(OLD_LEDGER), edit: NARRATIVE, notes: [], story: true },
+    { name: 'a deleted note', original: noteBlock(OLD_LEDGER), edit: null, notes: [] },
+    { name: 'notes and narrative in the same stretch', original: noteBlock(OLD_LEDGER), edit: noteBlock(NEW_LEDGER),
+        extra: NARRATIVE + '\n' + noteBlock(KEY_NOTE), notes: [NEW_LEDGER, KEY_NOTE], story: true },
+]) {
+    test(`the installed reader verifies ${name} before paying at the next boundary`, async () => {
+        const batch = size ?? 2;
+        const prefix = size ? 400 : 2;
+        const boundary = prefix + batch;
+        const walk = world();
+        walk.site.open(ROOM, campaign(prefix));
+        let tab = await opened(walk);
+        await saveKey(walk, tab);
+        tab.panel.tab('Settings');
+        tab.panel.type('scribe-setting-size', String(batch));
+        tab.panel.type('scribe-setting-budget', '8');
+        tab.panel.click('scribe-next');
+        await until(walk, 'the saved prefix', () => tab.panel.headline() === `Up to date: ${prefix} of ${prefix} read.`, 4 * TICK_MS);
+        await quiet(walk, 'the saved prefix');
+        const firstCall = walk.model.calls.length;
+        const initialSpend = spentToday(walk);
+        const room = campaign(boundary).player(original);
+        if (extra) {
+            room.player(extra);
+        }
+        walk.site.open(ROOM, room);
+        const firstRange = `${prefix + 1}-${boundary}`;
+        const savedAtNotes = [];
+        walk.model.watch = (call) => {
+            if (call.role === 'Notes') {
+                savedAtNotes.push(Object.keys(stored(walk, 'book').log.read).length);
+            }
+        };
+        const held = holdCompletion(walk, (role, input) => role === 'Story' && rangeOf(input) === firstRange);
+        tab = await reload(walk, tab);
+        await until(walk, 'the first Story stretch in flight', () => held.release !== null, 2 * TICK_MS);
+        if (edit === null) {
+            walk.site.open(ROOM, campaign(boundary));
+        } else {
+            walk.site.edit(boundary + 1, edit);
+        }
+        await pass(walk, 100);
+        assert.equal(asked(walk, 'Notes', firstCall), 0);
+        assert.equal(Object.keys(stored(walk, 'book').log.read).length, prefix);
+        held.release();
+        const total = walk.site.messages.length;
+        const complete = `Up to date: ${total} of ${total} read.`;
+        await pass(walk, 4 * TICK_MS);
+        assert.equal(tab.panel.headline(), complete);
+        const saved = plain(stored(walk, 'book'));
+        assert.deepEqual(saved.log.notes, notes);
+        assert.equal(Object.keys(saved.log.read).length, total);
+        for (const row of REFERENCE.ScribeIntake.read(walk.site.messages).messages) {
+            assert.equal(saved.fingerprints[row.id], row.fingerprint);
+        }
+        tab = await reload(walk, tab);
+        await pass(walk, 2 * TICK_MS);
+        assert.equal(tab.panel.headline(), complete);
+        assert.deepEqual(plain(stored(walk, 'book')), saved);
+        const calls = walk.model.calls.slice(firstCall);
+        const storyCalls = calls.filter((call) => call.role === 'Story');
+        const noteCalls = calls.filter((call) => call.role === 'Notes');
+        assert.deepEqual(storyCalls.map((call) => rangeOf(call.user)), story ? [firstRange, `${boundary + 1}-${total}`] : [firstRange]);
+        if (story) {
+            assert.ok(storyCalls.at(-1).user.includes(NARRATIVE));
+        }
+        assert.equal(noteCalls.length, notes.length ? 1 : 0);
+        assert.deepEqual(savedAtNotes, notes.length ? [boundary] : []);
+        for (const [index, note] of notes.entries()) {
+            assert.ok(noteCalls[0].user.includes(`[#${boundary + index + 1}] ${note}`));
+        }
+        assert.ok([...storyCalls, ...noteCalls].every((call) => !call.user.includes(OLD_LEDGER)));
+        const otherCharges = calls.filter((call) => call.role !== 'Notes').reduce((sum, call) => sum + (walk.model.costs[call.role] ?? 0), 0);
+        const noteSpend = spentToday(walk) - initialSpend - otherCharges;
+        assert.ok(Math.abs(noteSpend - (notes.length ? COSTS.Notes : 0)) < 1e-9);
+    });
+}
+
+test('an authoritative empty room withdraws the last saved passage and its facts across reload', async () => {
+    const walk = world();
+    walk.site.open(ROOM, campaign(1));
+    let tab = await opened(walk);
+    await saveKey(walk, tab);
+    await adopt(walk, tab, '2');
+    const was = stored(walk, 'book');
+    assert.ok(Object.hasOwn(was.log.read, 'MESSAGE-1'));
+    assert.ok(bookState(walk).facts.some((fact) => fact.cite === 'MESSAGE-1'));
+    const ruling = REFERENCE.ScribeLog.rule(was.log, bookState(walk), {
+        type: 'Pin', subject: bookState(walk).subjects.find((subject) => subject.label === 'Mirelle').id,
+        category: 'age', target: null, text: 'forty', hidden: false,
+    });
+    REFERENCE.ScribeStore.write(walk.storage, ROOM, 'book', was);
+    tab = await reload(walk, tab);
+    walk.site.open(ROOM, campaign(0));
+    walk.site.rooms.get(ROOM).zeta.endless = true;
+    await pass(walk, 2 * TICK_MS);
+    assert.deepEqual(plain(stored(walk, 'book')), plain(was));
+    walk.site.rooms.get(ROOM).zeta.endless = false;
+    await pass(walk, 3 * TICK_MS);
+    assert.equal(tab.panel.headline(), 'Up to date: 0 of 0 read.');
+    tab = await reload(walk, tab);
+    assert.equal(tab.panel.headline(), 'Up to date: 0 of 0 read.');
+    const saved = stored(walk, 'book');
+    assert.deepEqual(plain(saved.log.read), {});
+    assert.deepEqual(plain(saved.fingerprints), {});
+    assert.ok(!bookState(walk).facts.some((fact) => fact.cite === 'MESSAGE-1'));
+    assert.deepEqual(plain(saved.log.entries.find((entry) => entry.sequence === ruling.sequence)), plain(ruling));
+    assert.ok(saved.log.entries.find((entry) => entry.messageIds?.includes('MESSAGE-1')).withdrawn);
 });
 
 test('4. while the book is first read, only the Analyzer is asked; then the newest reply is checked once', async () => {
@@ -802,7 +995,7 @@ test('4. while the book is first read, only the Analyzer is asked; then the newe
     const reading = seen.slice(0, last + 1);
     assert.deepEqual(
         reading.map((entry) => entry.role),
-        ['Story', 'Story', 'Story'],
+        ['Story', 'Story', 'Story', 'Story'],
     );
     assert.equal(reading.every((entry) => entry.ready === null), true);
     assert.equal(reading.some((entry) => entry.headline.startsWith('Up to date')), false);
@@ -867,6 +1060,48 @@ test('4. without the press nothing goes before the count, and at the count the n
     assert.equal(await send(walk, tab, 'I wait again.'), 'I wait again.');
 });
 
+for (const layout of ['top', 'frame']) {
+    test(`a due ${layout} reminder waits for the saved reply and uses its new evidence`, async () => {
+        const walk = world({ layout });
+        let tab = await opened(walk);
+        await saveKey(walk, tab);
+        tab.panel.tab('Settings');
+        tab.panel.type('scribe-setting-refresh', '2');
+        await adopt(walk, tab, '8');
+        await send(walk, tab, 'I look around.');
+        await send(walk, tab, 'I wait.');
+        await pass(walk, 2 * TICK_MS);
+        const clue = 'the lantern has gone dark';
+        const reply = 'The lantern keeper needs a new flame.';
+        const previous = walk.model.answers.Story;
+        walk.model.answers.Story = (input) => input.includes(reply)
+            ? '=== THREADS\nOPEN | ' + clue + ' | #95' : previous(input);
+        walk.model.answers.Told = (input) => input.includes(clue) ? 'The lantern has gone dark.' : 'The lantern is burning.';
+        const held = holdCompletion(walk, (role, input) => role === 'Story' && input.includes(reply));
+        const first = walk.model.calls.length;
+        await arrive(walk, tab, ASKED, [['Narrator', reply]]);
+        await until(walk, 'the reader to hold the new evidence', () => held.release !== null, 2 * TICK_MS);
+        await pass(walk, TICK_MS);
+        assert.equal(asked(walk, 'Told', first), 0);
+        assert.equal(Object.keys(stored(walk, 'book').log.read).length, 93);
+        assert.equal(stored(walk, 'live').ready, null);
+        assert.equal(await send(walk, tab, 'I listen.'), 'I listen.');
+        assert.ok(stored(walk, 'live').sends >= 2);
+        if (layout === 'frame') {
+            tab = await reload(walk, tab);
+        }
+        held.release();
+        await until(walk, 'the due reminder with the saved evidence', () =>
+            stored(walk, 'live').ready?.includes('The lantern has gone dark.') === true, 4 * TICK_MS);
+        const recaps = walk.model.calls.slice(first).filter((call) => call.role === 'Told');
+        assert.equal(recaps.length, 1);
+        assert.ok(recaps[0].user.includes(clue));
+        const ready = stored(walk, 'live').ready;
+        assert.equal(await send(walk, tab, 'I bring a match.'), 'I bring a match.\n@: ' + ready);
+        assert.equal(stored(walk, 'live').sends, 0);
+    });
+}
+
 test('5. a reload keeps everything', async () => {
     const { walk, tab } = await adopted('2');
     tab.panel.tab('Summary');
@@ -883,7 +1118,7 @@ test('5. a reload keeps everything', async () => {
     await pass(walk, TICK_MS * 2);
     fresh.panel.tab('Summary');
     assert.equal(walk.model.calls.length, calls);
-    assert.equal(fresh.panel.headline(), 'Up to date: 90 of 91 read.');
+    assert.equal(fresh.panel.headline(), 'Up to date: 91 of 91 read.');
     assert.deepEqual(
         {
             headline: fresh.panel.headline(),
@@ -914,7 +1149,7 @@ test('6. a new reply arrives', async () => {
     assert.equal(new URL(pulled[0].url).searchParams.get('cursor'), null);
     assert.equal(asked(walk, 'Scene', from), 1);
     assert.equal(asked(walk, 'Pedant', from), 1);
-    assert.equal(asked(walk, 'Story', from), 0);
+    assert.equal(asked(walk, 'Story', from), 1);
     const pedant = walk.model.calls.slice(from).find((call) => call.role === 'Pedant');
     assert.equal(pedant.user.includes('REPLY (#93):'), true);
     const profiled = `PLAYER CHARACTER PROFILE:\n${WholeSite.Profile}`;
@@ -1003,6 +1238,7 @@ test('7. sending', async () => {
     const at = walk.clock.now();
     assert.equal(pressed.defaultPrevented, true);
     assert.equal(tab.keys.length, 0);
+    await pass(walk, 0);
     assert.equal(tab.box.value, `I nod.\n@: ${ready}`);
     await pass(walk, 24);
     assert.equal(tab.keys.length, 0);
@@ -1063,7 +1299,7 @@ test('8. a regenerated reply', async () => {
     await tab.pageRegenerate('MESSAGE-93');
     await until(walk, 'step 8: the new reply to be checked', () => stored(walk, 'live').seen.id === 'MESSAGE-93-B', 20000);
     await pass(walk, TICK_MS);
-    assert.equal(asked(walk, 'Story', from), 0);
+    assert.equal(asked(walk, 'Story', from), 1);
     assert.equal(asked(walk, 'Scene', from), 1);
     assert.equal(asked(walk, 'Pedant', from), 1);
     assert.equal(
@@ -1074,7 +1310,7 @@ test('8. a regenerated reply', async () => {
     assert.equal(stored(walk, 'live').findings.length, 0);
 });
 
-test('8. switching back to the first version costs no further model request', async () => {
+test('8. switching back rereads the changed stretch and checks the restored version once', async () => {
     const { walk, tab } = await replied('2');
     const original = walk.site.messages[92];
     walk.site.put(93, {
@@ -1090,10 +1326,10 @@ test('8. switching back to the first version costs no further model request', as
     await tab.pageRegenerate('MESSAGE-93-B');
     await until(walk, 'step 8: the first version to be back', () => stored(walk, 'live').seen.id === 'MESSAGE-93', 20000);
     await pass(walk, TICK_MS);
-    assert.equal(asked(walk, 'Scene', back), 0);
-    assert.equal(asked(walk, 'Pedant', back), 0);
+    assert.equal(asked(walk, 'Scene', back), 1);
+    assert.equal(asked(walk, 'Pedant', back), 1);
     assert.equal(findingRows(tab).length, 1);
-    assert.deepEqual(rolesSince(walk, back), []);
+    assert.deepEqual(rolesSince(walk, back).sort(), ['Pedant', 'Scene', 'Story']);
 });
 
 test('10. a ruling', async () => {
@@ -1144,7 +1380,7 @@ test('9. an edited old message', async () => {
         roles.filter((role) => role !== 'Story' && role !== 'Told'),
         [],
     );
-    assert.equal(tab.panel.headline(), 'Up to date: 90 of 91 read.');
+    assert.equal(tab.panel.headline(), 'Up to date: 91 of 91 read.');
     tab.panel.tab('Rulings');
     assert.equal(tab.panel.rows('made').length, 1);
     const book = stored(walk, 'book');
@@ -1160,7 +1396,7 @@ test('11. telling the scribe', async () => {
     tab.panel.click('scribe-tell-work');
     await until(walk, 'step 11: the words to be worked out', () => tab.panel.text('scribe-understood').startsWith('The scribe understood:'), 5000);
     assert.deepEqual(rolesSince(walk, from), ['Notes']);
-    assert.equal(walk.model.calls[from].user.includes('[#90] Mirelle keeps a brass compass from her father.'), true);
+    assert.equal(walk.model.calls[from].user.includes('[#91] Mirelle keeps a brass compass from her father.'), true);
     const understood = tab.panel.byId('scribe-understood');
     const lines = tab.panel.walk(understood).filter((element) => element.tagName === 'LI').map((element) => element.textContent);
     assert.deepEqual(lines, [`Not hidden, new: "Mirelle", belonging: "${COMPASS}"`]);
@@ -1231,7 +1467,7 @@ test('12. an answer without the mark offers nothing', async () => {
  * @return {Promise<{ walk: object, tab: WholeTab, from: number, before: number }>}
  */
 async function exhausted() {
-    const { walk, tab } = await replied('1.2');
+    const { walk, tab } = await replied('1.95');
     const before = spentToday(walk);
     walk.model.answers.Pedant = () => '';
     walk.model.costs.Pedant = 0.15;
@@ -1242,12 +1478,28 @@ async function exhausted() {
     return { walk, tab, from, before };
 }
 
+test('saved scene and check auth failures reopen as one warning with private detail masked in Progress', async () => {
+    const { walk, tab } = await adopted('5');
+    const live = stored(walk, 'live');
+    const reason = 'unexpected HTTP status; status 401; finish none; reason: user not found ' + KEY;
+    live.failing = { scene: reason, check: reason };
+    REFERENCE.ScribeStore.write(walk.storage, ROOM, 'live', live);
+    const openedAgain = await reload(walk, tab);
+    assert.equal(openedAgain.panel.text('scribe-problems'), 'OpenRouter rejected the saved API key. Scene updates and story checks could not run. Open Settings, enter your current OpenRouter key, and press Save key.');
+    openedAgain.panel.tab('Progress');
+    const detail = openedAgain.panel.text('scribe-problem-details');
+    assert.match(detail, /user not found \[key\]/);
+    assert.ok(!detail.includes(KEY));
+    assert.doesNotMatch(openedAgain.panel.headline(), /status 401/);
+    assert.doesNotMatch(openedAgain.panel.text('scribe-list-liveCalls'), /user not found/);
+});
+
 test('13. every billed attempt of a failed answer is counted', async () => {
     const { walk, from, before } = await exhausted();
     assert.equal(asked(walk, 'Pedant', from), 3);
-    const expected = before + asked(walk, 'Scene', from) * COSTS.Scene + 3 * 0.15;
+    const expected = before + asked(walk, 'Story', from) * COSTS.Story + asked(walk, 'Scene', from) * COSTS.Scene + 3 * 0.15;
     assert.equal(Math.abs(spentToday(walk) - expected) < 1e-9, true, `${before} -> ${spentToday(walk)}`);
-    assert.equal(spentToday(walk) >= 1.2, true);
+    assert.equal(spentToday(walk) >= 1.95, true);
 });
 
 test('13. the header shows what was spent', async () => {
@@ -1255,9 +1507,10 @@ test('13. the header shows what was spent', async () => {
     assert.equal(tab.panel.spend(), `$${spentToday(walk).toFixed(4)} today`);
 });
 
-test("13. the headline says the day's budget is spent", async () => {
+test("13. the panel distinguishes Scribe's local budget from a provider limit", async () => {
     const { tab } = await exhausted();
-    assert.equal(tab.panel.headline().includes('budget is spent'), true, tab.panel.headline());
+    assert.match(tab.panel.text('scribe-problems'), /local daily budget/);
+    assert.doesNotMatch(tab.panel.text('scribe-problems'), /OpenRouter reported a credit/);
 });
 
 test('13. once the budget is spent, new replies cause no model request', async () => {
@@ -1327,7 +1580,7 @@ test('14. when the first tab is hidden while the second waits, the second become
     const since = walk.model.calls.slice(from);
     assert.equal(since.filter((call) => call.tab === second.name && call.role === 'Scene').length, 1);
     assert.equal(since.filter((call) => call.tab === second.name && call.role === 'Pedant').length, 1);
-    assert.equal(second.panel.headline(), 'Up to date: 90 of 93 read.');
+    assert.equal(second.panel.headline(), 'Up to date: 93 of 93 read.');
 });
 
 test('14. with a lock manager that has no query, the hidden first tab keeps the chat', async () => {
@@ -1336,7 +1589,7 @@ test('14. with a lock manager that has no query, the hidden first tab keeps the 
     tab.show('hidden');
     await pass(walk, TICK_MS * 3);
     assert.equal(second.panel.headline(), 'Another tab is reading this chat.');
-    assert.equal(tab.panel.headline(), 'Up to date: 90 of 91 read.');
+    assert.equal(tab.panel.headline(), 'Up to date: 91 of 91 read.');
     const from = walk.model.calls.length;
     await arrive(walk, second, ASKED, REPLY);
     await until(walk, 'step 14: the hidden reader to check the reply', () => asked(walk, 'Pedant', from) >= 1, TICK_MS * 3);
@@ -1429,7 +1682,7 @@ test('15. pausing, a reply, resuming', async () => {
     await pass(walk, TICK_MS * 2);
     assert.equal(asked(walk, 'Scene', from), 1);
     assert.equal(asked(walk, 'Pedant', from), 1);
-    assert.equal(asked(walk, 'Story', from), 0);
+    assert.equal(asked(walk, 'Story', from), 1);
 });
 
 test('15. the pause survives a reload, and resuming checks the newest reply', async () => {
@@ -1444,7 +1697,7 @@ test('15. the pause survives a reload, and resuming checks the newest reply', as
     assert.deepEqual(rolesSince(walk, from), []);
     await resume(walk, fresh);
     await pass(walk, TICK_MS * 3);
-    assert.equal(asked(walk, 'Story', from), 0);
+    assert.equal(asked(walk, 'Story', from), 1);
     assert.equal(asked(walk, 'Scene', from), 1);
     assert.equal(asked(walk, 'Pedant', from), 1);
 });
@@ -1473,7 +1726,7 @@ test('16. starting the book over', async () => {
     assert.deepEqual(tab.questions, ['Start a new book? It replaces the saved book for this chat.']);
     assert.deepEqual(
         walk.model.calls.slice(from).filter((call) => call.role === 'Story').map((call) => rangeOf(call.user)),
-        ['1-30', '31-60', '61-90', '91-92'],
+        ['1-30', '31-60', '61-90', '91-93'],
     );
     const lastStory = walk.model.calls.findLastIndex((call) => call.role === 'Story');
     assert.deepEqual(
@@ -1583,14 +1836,14 @@ async function checkedWhileFolded(walk, tab, label) {
     assert.deepEqual(folded(tab), FOLDED);
     assert.equal(asked(walk, 'Scene', from), 1);
     assert.equal(asked(walk, 'Pedant', from), 1);
-    assert.equal(asked(walk, 'Story', from), 0);
+    assert.equal(asked(walk, 'Story', from), 1);
     const live = stored(walk, 'live');
     assert.equal(typeof live.ready, 'string');
     assert.equal(live.ready, `${HAIR} ${LOOKS_LEFT} ${PARTY}`);
     assert.deepEqual(plain(live.findings.map((finding) => [finding.kind, finding.said, finding.status])), [['Contradiction', 'red as rust', 'Open']]);
     assert.equal(tab.panel.text('scribe-badge'), '1 to rule, 1 finding');
     assert.equal(tab.panel.byId('scribe-badge').hidden, false);
-    assert.equal(tab.panel.headline(), 'Up to date: 90 of 93 read.');
+    assert.equal(tab.panel.headline(), 'Up to date: 93 of 93 read.');
     return live.ready;
 }
 
@@ -1661,8 +1914,8 @@ test('20. two chats in two tabs of one window, the first hidden: each reads its 
     await until(walk, 'step 20: the second chat to be pulled', () => other.panel.headline() === 'No book for this chat yet: 61 messages.', 15000);
     await adopt(walk, other, '2');
     await forceReminder(walk, other);
-    assert.equal(other.panel.headline(), 'Up to date: 60 of 61 read.');
-    assert.equal(tab.panel.headline(), 'Up to date: 90 of 91 read.');
+    assert.equal(other.panel.headline(), 'Up to date: 61 of 61 read.');
+    assert.equal(tab.panel.headline(), 'Up to date: 91 of 91 read.');
     await tab.pagePost(ASKED);
     tab.show('hidden');
     walk.site.reply(REPLY.map((block) => [...block]));
@@ -1692,10 +1945,10 @@ test('20. two chats in two tabs of one window, the first hidden: each reads its 
     assert.deepEqual(replies(tab, 'Pedant'), ['93']);
     assert.deepEqual(replies(other, 'Scene'), ['scene']);
     assert.deepEqual(replies(other, 'Pedant'), ['63']);
-    assert.equal(since.filter((call) => call.role === 'Story').length, 0);
+    assert.equal(since.filter((call) => call.role === 'Story').length, 2);
     assert.equal(tab.document.visibilityState, 'hidden');
-    assert.equal(tab.panel.headline(), 'Up to date: 90 of 93 read.');
-    assert.equal(other.panel.headline(), 'Up to date: 60 of 63 read.');
+    assert.equal(tab.panel.headline(), 'Up to date: 93 of 93 read.');
+    assert.equal(other.panel.headline(), 'Up to date: 63 of 63 read.');
     const hiddenReady = stored(walk, 'live').ready;
     const visibleReady = stored(walk, 'live', QUARRY).ready;
     assert.equal(hiddenReady, `${HAIR} ${LOOKS_LEFT} ${PARTY}`);
@@ -2362,7 +2615,7 @@ test("F10. leaving one chat for another: the second chat's messages never carry 
     assert.equal(harbourArm.ready, first);
     const mark = walk.posts.length;
     tab.go(`/rooms/${QUARRY}`);
-    await until(walk, 'step F10: the second chat to be open again', () => tab.panel.headline().startsWith('Up to date: 60 of'), TICK_MS * 2);
+    await until(walk, 'step F10: the second chat to be open again', () => tab.panel.headline() === 'Up to date: 63 of 63 read.', TICK_MS * 2);
     await quiet(walk, 'step F10: back in the second chat');
     const reads = walk.site.pageRequests().length;
     const reported = walk.posts.length;
@@ -2561,7 +2814,7 @@ test('C1. two PCs, one book: the second PC opens what the first read and reads n
     await pass(walk, 60000);
     assert.equal(second.panel.headline(), 'Another PC is reading this chat.');
     await until(walk, 'PC B to take the lease and read', () => second.panel.headline().startsWith('Up to date'), 60000);
-    assert.equal(second.panel.headline(), 'Up to date: 90 of 91 read.');
+    assert.equal(second.panel.headline(), 'Up to date: 91 of 91 read.');
     assert.equal(walk.worker.leases.get(CLOUD_ROOM).browser.startsWith('tab-2-'), true);
     await quiet(walk, 'PC B after taking over');
     assert.deepEqual(rolesSince(walk, before), []);
@@ -2580,11 +2833,11 @@ test('C2. offline and back: the second PC works offline at 15 s and its unsent w
     await second.openPage();
     second.ready();
     await until(walk, 'PC B to load from the Worker', () => second.panel.headline() === 'Loading the book from your Worker...', 5000);
-    await until(walk, 'PC B to work offline', () => second.panel.headline().endsWith(' Working offline.'), 16000);
+    await until(walk, 'PC B to work offline', () => second.panel.text('scribe-problems').includes('working offline'), 16000);
     await until(
         walk,
         'PC B to pull the chat offline',
-        () => second.panel.headline() === 'No book for this chat yet: 91 messages. Working offline.',
+        () => second.panel.headline() === 'No book for this chat yet: 91 messages.' && second.panel.text('scribe-problems').includes('working offline'),
         15000,
     );
     second.panel.tab('Settings');
@@ -2597,7 +2850,7 @@ test('C2. offline and back: the second PC works offline at 15 s and its unsent w
     second.cut = false;
     await until(walk, "PC B's settings to go up", () => walk.worker.textOf(CLOUD_ROOM, 'settings') === localText(storageB, 'settings'), TICK_MS * 4);
     await until(walk, 'PC B to read the book from the Worker', () => second.panel.headline().startsWith('Up to date'), TICK_MS * 4);
-    assert.equal(second.panel.headline(), 'Up to date: 90 of 91 read.');
+    assert.equal(second.panel.headline(), 'Up to date: 91 of 91 read.');
     assert.equal(localText(storageB, 'book'), walk.worker.textOf(CLOUD_ROOM, 'book'));
     assert.equal(JSON.parse(walk.worker.textOf(CLOUD_ROOM, 'settings')).budget, 5);
     await quiet(walk, 'PC B back online');
@@ -2615,7 +2868,7 @@ test('C3. offline and back: a book read on both PCs asks which to keep', async (
     await until(
         walk,
         'PC B to pull the chat offline',
-        () => second.panel.headline() === 'No book for this chat yet: 91 messages. Working offline.',
+        () => second.panel.headline() === 'No book for this chat yet: 91 messages.' && second.panel.text('scribe-problems').includes('working offline'),
         40000,
     );
     await saveKey(walk, second);
@@ -2635,7 +2888,7 @@ test('C3. offline and back: a book read on both PCs asks which to keep', async (
         TICK_MS * 4,
     );
     assert.equal(second.panel.byId('scribe-choice').hidden, false);
-    assert.equal(second.panel.text('scribe-choice-counts'), 'This PC: 90 messages read. Your Worker: 90 messages read.');
+    assert.equal(second.panel.text('scribe-choice-counts'), 'This PC: 91 messages read. Your Worker: 91 messages read.');
     assert.equal(tab.panel.headline().startsWith('Up to date'), true);
     const cloudBook = walk.worker.textOf(CLOUD_ROOM, 'book');
     second.panel.click('scribe-keep-here');
@@ -2649,6 +2902,101 @@ test('C3. offline and back: a book read on both PCs asks which to keep', async (
     await until(walk, "PC B to take the Worker's book", () => second.panel.headline() === 'Another PC is reading this chat.', TICK_MS);
     assert.equal(localText(storageB, 'book'), cloudBook);
     assert.equal(second.panel.byId('scribe-choice').hidden, true);
+});
+
+test('an empty Findings click reports a refused request save and leaves the next send bare', async () => {
+    const walk = world();
+    const tab = await opened(walk);
+    await saveKey(walk, tab);
+    await adopt(walk, tab, '2');
+    tab.panel.tab('Findings');
+    assert.equal(tab.panel.byId('scribe-reminder').value, '');
+    walk.storage.refuseSetsMatching(/live/);
+    tab.panel.click('scribe-force');
+    await settle();
+    assert.match(tab.panel.text('scribe-force-outcome'), /storage|save|write/i);
+    assert.equal(tab.panel.byId('scribe-reminder').value, '');
+    assert.equal(stored(walk, 'live').forced, false);
+    assert.equal(stored(walk, 'live').ready, null);
+    walk.storage.allow();
+    assert.equal(await send(walk, tab, 'I wait.'), 'I wait.');
+});
+
+test('Cancel and Save replace an obsolete Force validation with the queued status', async () => {
+    const { walk, tab } = await adopted();
+    tab.panel.tab('Findings');
+    tab.panel.click('scribe-force');
+    await settle();
+    const first = stored(walk, 'live').selection;
+    tab.panel.click('scribe-edit');
+    tab.panel.type('scribe-reminder', 'A different choice');
+    walk.storage.refuseSetsMatching(/live/);
+    tab.panel.click('scribe-force');
+    await settle();
+    const refused = tab.panel.text('scribe-force-outcome');
+    assert.match(refused, /storage|save|write/i);
+    tab.panel.click('scribe-edit-cancel');
+    await settle();
+    assert.equal(tab.panel.text('scribe-force-outcome'), refused);
+    walk.storage.allow();
+    for (const action of ['scribe-edit-cancel', 'scribe-edit-save']) {
+        tab.panel.click('scribe-edit');
+        tab.panel.type('scribe-reminder', ' ');
+        tab.panel.click('scribe-force');
+        await settle();
+        assert.match(tab.panel.text('scribe-force-outcome'), /Enter a reminder/);
+        if (action === 'scribe-edit-save') {
+            tab.panel.type('scribe-reminder', 'A revised choice');
+        }
+        tab.panel.click(action);
+        await settle();
+        assert.equal(tab.panel.text('scribe-force-outcome'), 'Queued for your next message');
+        const selected = stored(walk, 'live').selection;
+        if (action === 'scribe-edit-save') {
+            assert.equal(selected.text, 'A revised choice');
+            assert.notEqual(selected.id, first.id);
+        } else {
+            assert.equal(selected.id, first.id);
+        }
+    }
+});
+
+test('Findings keeps an unsaved choice across a newer writer result, reload and a room switch', async () => {
+    const { walk, tab } = await adopted();
+    const chosen = '[Scribe] <ledger>  open\nby the quay 雪';
+    tab.panel.tab('Findings');
+    tab.panel.click('scribe-edit');
+    tab.panel.type('scribe-reminder', chosen);
+    tab.panel.click('scribe-force');
+    await settle();
+    const selected = plain(stored(walk, 'live').selection);
+    assert.equal(selected.text, chosen);
+    tab.panel.click('scribe-edit');
+    for (const invalid of ['   ', '@: [Scribe]', '\u0085', '\u200B', '[Scribe] [Scribe]', 'x'.repeat(3001)]) {
+        tab.panel.type('scribe-reminder', invalid);
+        tab.panel.click('scribe-force');
+        await settle();
+        assert.match(tab.panel.text('scribe-force-outcome'), /Enter a reminder|3,000 characters/);
+        assert.equal(tab.panel.byId('scribe-reminder').readOnly, false);
+        assert.deepEqual(plain(stored(walk, 'live').selection), selected);
+    }
+    tab.panel.click('scribe-edit-cancel');
+    assert.equal(tab.panel.byId('scribe-reminder').value, chosen);
+    const reply = walk.site.reply(CALM_REPLY);
+    await until(walk, 'the newer reply to be checked', () => stored(walk, 'live').now?.message === reply.id, TICK_MS * 2);
+    await quiet(walk, 'after the newer writer result');
+    assert.notEqual(stored(walk, 'live').ready, chosen);
+    assert.equal(tab.panel.byId('scribe-reminder').value, chosen);
+    const fresh = await reload(walk, tab);
+    fresh.panel.tab('Findings');
+    assert.equal(fresh.panel.byId('scribe-reminder').value, chosen);
+    assert.deepEqual(plain(stored(walk, 'live').selection), selected);
+    walk.site.open(QUARRY, campaign(QUARRY_LENGTH));
+    fresh.go(`/rooms/${QUARRY}`);
+    await fresh.openPage();
+    await until(walk, 'the other room to open', () => fresh.panel.headline().startsWith('No book for this chat yet'), TICK_MS * 2);
+    assert.equal(await send(walk, fresh, 'I wait here.'), 'I wait here.');
+    assert.deepEqual(plain(stored(walk, 'live').selection), selected);
 });
 
 test('F8. the old layout, the chat box in the top document, still works', async () => {
@@ -2798,7 +3146,7 @@ for (const layout of ['frame', 'top']) {
         await saveKey(walk, tab);
         tab.panel.tab('Settings');
         tab.panel.type('scribe-setting-refresh', '8');
-        await adopt(walk, tab, '2');
+        await adopt(walk, tab, '7');
         assert.equal(await send(walk, tab, 'I look around.'), 'I look around.');
         assert.equal(await send(walk, tab, 'I wait.'), 'I wait.');
         assert.equal(stored(walk, 'live').sends, 2);
@@ -2862,6 +3210,8 @@ for (const layout of ['frame', 'top']) {
         assert.equal(stored(walk, 'live').delivery.id, delivery.id);
         assert.equal(stored(walk, 'live').forced, true);
         assert.equal(stored(walk, 'live').settled.includes(delivery.id), false);
+        await until(walk, 'the changed player row to be saved and the offer rearmed', () =>
+            Object.hasOwn(stored(walk, 'book').log.read, walk.site.messages.at(-1).id) && queued(fresh).includes(`Reminder: ${ready}`), TICK_MS * 2);
         assert.equal(await send(walk, fresh, 'I wait.'), `I wait.\n@: ${ready}`);
         assert.equal(stored(walk, 'live').sends, 0);
     });
@@ -2933,12 +3283,15 @@ for (const layout of ['top', 'frame']) {
         const start = walk.site.messages.length;
         await send(walk, tab, 'First.');
         await pass(walk, 2 * TICK_MS);
+        const api = walk.site.rooms.get(ROOM).zeta;
+        api.messages = walk.site.messages.slice();
         tab.type('I stand.');
         tab.enter();
         await pass(walk, 200);
         assert.equal(stored(walk, 'live').sends, 1);
         assert.equal(stored(walk, 'live').posts.at(-1).confirmed, true);
         walk.site.edit(start + 2, 'I stood.');
+        api.messages = walk.site.messages;
         await pass(walk, 2 * TICK_MS);
         await reload(walk, tab);
         await pass(walk, 2 * TICK_MS);
@@ -2973,10 +3326,498 @@ for (const layout of ['top', 'frame']) {
     });
 }
 
+/**
+ * @param {WholeTab} tab
+ * @param {string} text
+ * @return {Promise<void>}
+ */
+async function queueSelection(tab, text) {
+    tab.panel.tab('Findings');
+    tab.panel.click('scribe-edit');
+    tab.panel.type('scribe-reminder', text);
+    tab.panel.click('scribe-force');
+    await settle();
+}
+
+test('a manual frame send requires click or Enter after a cancelled or abandoned pointer gesture', async () => {
+    const { walk, tab } = await adopted('2', { layout: 'frame' });
+    await queueSelection(tab, 'Keep.');
+    tab.type('Still my draft.');
+    const first = walk.site.messages.length;
+    for (const end of ['pointercancel', 'pointerup']) {
+        tab.chatWindow.dispatch(tab.icon, 'pointerdown', {});
+        await pass(walk, 100);
+        tab.chatWindow.dispatch(end === 'pointercancel' ? tab.icon : tab.box, end, {});
+        await pass(walk, 2000);
+        assert.equal(walk.site.messages.length, first);
+        assert.equal(tab.box.value, 'Still my draft.');
+        assert.equal(stored(walk, 'live').posts.length, 0);
+        assert.equal(stored(walk, 'live').selection.text, 'Keep.');
+    }
+    tab.chatWindow.dispatch(tab.icon, 'click', {});
+    tab.chatWindow.dispatch(tab.icon, 'click', {});
+    await pass(walk, 2000);
+    assert.equal(walk.site.messages.length, first + 1);
+    assert.equal(walk.site.messages.at(-1).contents[0].text, 'Still my draft.\n@: [Scribe] Keep.');
+    assert.equal(stored(walk, 'live').selection, null);
+});
+
+test('a frame reservation abandoned by an input change sends nothing and retains the chosen reminder', async () => {
+    const { walk, tab } = await adopted('2', { layout: 'frame' });
+    await queueSelection(tab, 'Keep.');
+    const before = walk.site.messages.length;
+    tab.type('Original.');
+    tab.enter();
+    tab.type('My new message.');
+    await pass(walk, 2000);
+    assert.equal(tab.box.value, 'My new message.');
+    assert.equal(walk.site.messages.length, before);
+    assert.equal(stored(walk, 'live').posts.length, 0);
+    assert.equal(stored(walk, 'live').selection.text, 'Keep.');
+    assert.equal(await send(walk, tab, 'My new message.'), 'My new message.\n@: [Scribe] Keep.');
+});
+
+test('a lost frame grant sends bare text only for an activated click and an edited reservation can be replaced immediately', async () => {
+    const { walk, tab } = await adopted('2', { layout: 'frame' });
+    await queueSelection(tab, 'Keep.');
+    const before = walk.site.messages.length;
+    const receive = tab.chatWindow.receive.bind(tab.chatWindow);
+    tab.chatWindow.receive = (event) => {
+        if (event.data?.kind !== 'reserved') {
+            receive(event);
+        }
+    };
+    tab.type('Do not send.');
+    tab.chatWindow.dispatch(tab.icon, 'pointerdown', {});
+    await pass(walk, 2000);
+    assert.equal(walk.site.messages.length, before);
+    tab.chatWindow.dispatch(tab.icon, 'click', {});
+    tab.type('My actual click.');
+    tab.chatWindow.dispatch(tab.icon, 'click', {});
+    await pass(walk, 3000);
+    assert.equal(walk.site.messages.length, before + 1);
+    assert.equal(walk.site.messages.at(-1).contents[0].text, 'My actual click.');
+    assert.equal(stored(walk, 'live').selection.text, 'Keep.');
+    tab.chatWindow.receive = receive;
+    assert.equal(await send(walk, tab, 'Once.'), 'Once.\n@: [Scribe] Keep.');
+});
+
 for (const layout of ['top', 'frame']) {
+    test(`a later unique ${layout} history row settles while an older receipt is ambiguous after reload`, async () => {
+        const { walk, tab } = await adopted('2', { layout });
+        await queueSelection(tab, 'Keep.');
+        const pending = [];
+        const respond = walk.site.respond.bind(walk.site);
+        walk.site.respond = (receiver, url, options) => url === WholeSite.Messages && options?.method === 'POST'
+            ? new Promise((resolve) => pending.push({ receiver, url, options, resolve })) : respond(receiver, url, options);
+        assert.equal(await send(walk, tab, 'Go.'), 'Go.\n@: [Scribe] Keep.');
+        tab.panel.click('scribe-force');
+        await settle();
+        for (const text of ['Changed.', 'Keep.']) {
+            tab.panel.click('scribe-edit');
+            tab.panel.type('scribe-reminder', text);
+            tab.panel.click('scribe-edit-save');
+            await settle();
+        }
+        assert.equal(await send(walk, tab, 'Go.'), 'Go.\n@: [Scribe] Keep.');
+        await respond(pending[0].receiver, pending[0].url, pending[0].options);
+        const fresh = await reload(walk, tab);
+        fresh.panel.tab('Findings');
+        fresh.panel.click('scribe-edit');
+        fresh.panel.type('scribe-reminder', 'Unique third.');
+        fresh.panel.click('scribe-edit-save');
+        await settle();
+        const third = stored(walk, 'live').selection.id;
+        assert.equal(await send(walk, fresh, 'Later unique player.'), 'Later unique player.\n@: [Scribe] Unique third.');
+        const latest = pending[2];
+        await respond(latest.receiver, latest.url, latest.options);
+        latest.resolve({ status: 503 });
+        await pass(walk, 2 * TICK_MS);
+        assert.deepEqual(plain(stored(walk, 'live').settled), [third]);
+        assert.equal(stored(walk, 'live').selection, null);
+        assert.equal(stored(walk, 'live').sends, 0);
+        assert.equal(stored(walk, 'live').posts.filter((post) => post.manual).length, 2);
+        walk.site.respond = respond;
+        assert.equal(await send(walk, fresh, 'Bare.'), 'Bare.');
+        const again = await reload(walk, fresh);
+        await pass(walk, TICK_MS);
+        assert.equal(stored(walk, 'live').sends, 1);
+        assert.equal(await send(walk, again, 'Bare again.'), 'Bare again.');
+        assert.equal(stored(walk, 'live').sends, 2);
+    });
+
+    /**
+     * @return {Promise<{ walk: object, tab: WholeTab, row: object, first: string }>}
+     */
+    async function disputedHistory() {
+        const { walk, tab } = await adopted('5', { layout });
+        const first = 'I wait by red door.';
+        const second = first + '\n@: [Scribe] Authored secret choice.';
+        const wire = second + '\n@: [Scribe] Second.';
+        await queueSelection(tab, 'Authored secret choice.\n@: [Scribe] Second.');
+        const pending = [];
+        const respond = walk.site.respond.bind(walk.site);
+        walk.site.respond = (receiver, url, options) => url === WholeSite.Messages && options?.method === 'POST'
+            ? new Promise((resolve) => pending.push({ receiver, url, options, resolve })) : respond(receiver, url, options);
+        assert.equal(await send(walk, tab, first), wire);
+        tab.panel.click('scribe-edit');
+        tab.panel.type('scribe-reminder', 'Second.');
+        tab.panel.click('scribe-edit-save');
+        await settle();
+        assert.equal(await send(walk, tab, second), wire);
+        const actual = pending[1];
+        const accepted = await respond(actual.receiver, actual.url, actual.options);
+        const row = walk.site.messages.at(-1);
+        for (let index = 0; index < 32; index++) {
+            walk.site.reply(CALM_REPLY);
+        }
+        const before = walk.model.calls.length;
+        tab.panel.tab('Progress');
+        tab.panel.click('scribe-pull');
+        await pass(walk, 2 * TICK_MS);
+        assert.equal(Object.hasOwn(stored(walk, 'book').log.read, row.id), false);
+        assert.ok(!walk.model.calls.slice(before).some((call) => call.role === 'Story' && call.user.includes(first)));
+        actual.resolve(accepted);
+        await pass(walk, 2 * TICK_MS);
+        const reader = walk.model.calls.slice(before).find((call) => call.role === 'Story' && call.user.includes(first));
+        assert.ok(reader?.user.includes(second), reader?.user);
+        assert.ok(!reader.user.includes('@: [Scribe] Second.'));
+        assert.equal(stored(walk, 'book').projections[row.id], second.length);
+        assert.equal(stored(walk, 'live').attachments.find((entry) => entry.id === row.id).length, second.length);
+        assert.equal(row.contents[0].text, wire);
+        const fingerprint = stored(walk, 'book').fingerprints[row.id];
+        const rival = pending[0];
+        rival.resolve(await respond(rival.receiver, rival.url, rival.options));
+        await pass(walk, 2 * TICK_MS);
+        assert.equal(stored(walk, 'live').attachments.find((entry) => entry.id === row.id).contested, true);
+        assert.equal(Object.hasOwn(stored(walk, 'book').log.read, row.id), false);
+        assert.equal(REFERENCE.ScribeIntake.read(walk.site.messages).messages.find((message) => message.id === row.id).fingerprint, fingerprint);
+        return { walk, tab, row, first };
+    }
+
+    test(`different ${layout} authored boundaries wait for an identified receipt before Keeper files the passage`, async () => {
+        const { walk, tab, row, first } = await disputedHistory();
+        const fresh = await reload(walk, tab);
+        const disputed = [row, walk.site.messages.at(-1)];
+        const positions = disputed.map((message) => walk.site.messages.indexOf(message) + 1);
+        assert.deepEqual(positions, [92, 125]);
+        const baseline = walk.model.calls.length;
+        const later = [];
+        for (let index = 1; index <= 65; index++) {
+            later.push(walk.site.reply([['Narrator', `The public ledger contains later entry ${index}.`]]));
+        }
+        fresh.panel.tab('Progress');
+        fresh.panel.click('scribe-pull');
+        await pass(walk, 4 * TICK_MS);
+        const calls = walk.model.calls.slice(baseline).filter((call) => call.role === 'Story');
+        const newBatches = calls.filter((call) => call.user.includes('The public ledger contains later entry'));
+        assert.deepEqual(newBatches.map((call) => rangeOf(call.user)), ['126-155', '156-185', '186-190']);
+        for (const call of calls) {
+            assert.ok(!call.user.includes(first) && !call.user.includes('Authored secret choice.'), call.user);
+        }
+        const book = stored(walk, 'book');
+        const ids = later.map((message) => message.id);
+        for (const message of later) {
+            assert.equal(Object.hasOwn(book.log.read, message.id), ids.includes(message.id));
+            assert.equal(Object.hasOwn(book.fingerprints, message.id), ids.includes(message.id));
+        }
+        for (const message of disputed) {
+            assert.ok(!Object.hasOwn(book.log.read, message.id));
+        }
+        assert.equal(fresh.panel.headline(), 'Unresolved authorship: 188 of 190 read.');
+        assert.match(fresh.panel.text('scribe-counts'), /2 unread messages have unresolved authorship/);
+        assert.deepEqual(fresh.panel.rowTexts('disputed'), ['Player message #92', 'Player message #125']);
+        const counted = walk.model.calls.length;
+        const charged = spentToday(walk);
+        const reopened = await reload(walk, fresh);
+        reopened.panel.tab('Progress');
+        await pass(walk, 4 * TICK_MS);
+        assert.deepEqual(rolesSince(walk, counted), []);
+        assert.equal(spentToday(walk), charged);
+        assert.deepEqual(plain(stored(walk, 'book').log.read), plain(book.log.read));
+        assert.deepEqual(reopened.panel.rowTexts('disputed'), ['Player message #92', 'Player message #125']);
+        const corrected = 'I wrote the corrected account myself.';
+        walk.site.edit(positions[0], corrected);
+        reopened.panel.click('scribe-pull');
+        await pass(walk, 4 * TICK_MS);
+        const repaired = walk.model.calls.slice(counted).filter((call) => call.role === 'Story');
+        assert.deepEqual(repaired.map((call) => rangeOf(call.user)), ['92-92']);
+        assert.ok(repaired[0].user.includes(corrected));
+        assert.deepEqual(reopened.panel.rowTexts('disputed'), ['Player message #125']);
+        assert.equal(reopened.panel.headline(), 'Unresolved authorship: 189 of 190 read.');
+        assert.match(reopened.panel.text('scribe-counts'), /1 unread message has unresolved authorship/);
+        const saved = stored(walk, 'book').log.read;
+        assert.ok(Object.hasOwn(saved, row.id));
+        assert.ok(!Object.hasOwn(saved, disputed[1].id));
+        for (const id of ids) {
+            assert.equal(saved[id], book.log.read[id]);
+        }
+    });
+
+    /**
+     * @param {boolean} sameWording
+     * @return {Promise<void>}
+     */
+    async function fileAnsweredPair(sameWording) {
+        const { walk, tab } = await disputedHistory();
+        const { ScribeIntake, ScribeLog, ScribeReplay, ScribeStore } = REFERENCE;
+        const rows = ScribeIntake.read(walk.site.messages, stored(walk, 'live')).messages;
+        assert.equal(rows.length, 125);
+        assert.ok(!rows[92].attributionPending);
+        assert.equal(rows[124].attributionPending, true);
+        const questions = [
+            { type: 'Question', text: 'What is the weather at the quay?', position: 93 },
+            { type: 'Question', text: sameWording ? 'What is the weather at the quay?' : 'When does the ferry depart?', position: 125 },
+        ];
+        const answers = ['The weather is clear.', 'The ferry departs at sunset.'];
+        const book = stored(walk, 'book');
+        const order = rows.map((row) => row.id);
+        const replay = () => ScribeReplay.run(book.log, order);
+        const original = ScribeIntake.read(walk.site.messages).messages;
+        const result = ScribeLog.append(book.log, replay(), questions, {
+            origin: 'Notes', messages: [original[92], original[124]],
+        });
+        assert.equal(result.entry.operations.length, 2);
+        const disputedFact = 'keeps an uncertified harbour ledger';
+        ScribeLog.append(book.log, replay(), REFERENCE.ScribeAnswer.parse(
+            '=== FACTS\nHalvard | trait | ' + disputedFact + ' | #125',
+        ).operations, { origin: 'Notes', messages: [original[124]] });
+        const ids = questions.map(({ position }) => replay().questions.find((question) => question.position === position).id);
+        for (const [index, id] of ids.entries()) {
+            ScribeLog.rule(book.log, replay(), { type: 'Answer', question: id, text: answers[index] });
+        }
+        ScribeStore.write(walk.storage, ROOM, 'book', book);
+        walk.model.answers.Answers = () =>
+            '=== FACTS\nHalvard | trait | observes the harbour forecast | #93\nHalvard | trait | knows the sailing schedule | #125';
+        const before = walk.model.of('Answers').length;
+        const requests = () => walk.model.of('Answers').slice(before).map((call) => call.user);
+        const dismissed = () => ids.map((id) => bookState(walk).questions.find((question) => question.id === id).dismissed);
+        const dismissedIds = () => plain(stored(walk, 'book').log.entries.flatMap((entry) => entry.operations)
+            .filter((operation) => operation.type === 'Dismiss' && ids.includes(operation.question))
+            .map((operation) => operation.question));
+        const filed = () => plain(bookState(walk).facts.filter((fact) => fact.origin === 'Answers').map((fact) => fact.cite));
+        const fresh = await reload(walk, tab);
+        await pass(walk, 2 * TICK_MS);
+        assert.equal(requests().length, 1);
+        assert.ok(requests()[0].includes('[#93] ' + questions[0].text));
+        assert.ok(requests()[0].includes(answers[0]));
+        assert.ok(!requests()[0].includes(disputedFact));
+        assert.ok(!requests()[0].includes('[#125]') && !requests()[0].includes(answers[1]));
+        assert.ok(sameWording || !requests()[0].includes(questions[1].text));
+        assert.deepEqual(dismissed(), [true, false]);
+        assert.deepEqual(dismissedIds(), [ids[0]]);
+        assert.deepEqual(filed(), [rows[92].id]);
+        const spent = spentToday(walk);
+        const reopened = await reload(walk, fresh);
+        await pass(walk, 3 * TICK_MS);
+        assert.equal(requests().length, 1);
+        assert.equal(spentToday(walk), spent);
+        assert.deepEqual(dismissed(), [true, false]);
+        walk.site.edit(125, 'I wrote the ferry timetable myself.');
+        reopened.panel.tab('Progress');
+        reopened.panel.click('scribe-pull');
+        await pass(walk, 3 * TICK_MS);
+        assert.equal(requests().length, 2);
+        assert.ok(requests()[1].includes('[#125] ' + questions[1].text));
+        assert.ok(requests()[1].includes(answers[1]));
+        assert.ok(requests()[1].includes(disputedFact));
+        assert.ok(!requests()[1].includes('[#93]') && !requests()[1].includes(answers[0]));
+        assert.ok(sameWording || !requests()[1].includes(questions[0].text));
+        assert.deepEqual(dismissed(), [true, true]);
+        assert.deepEqual(filed(), [rows[92].id, rows[124].id]);
+        await reload(walk, reopened);
+        await pass(walk, 2 * TICK_MS);
+        assert.equal(requests().length, 2);
+        assert.deepEqual(dismissedIds(), ids);
+    }
+
+    test(`Answers files #93 and leaves disputed #125 pending across ${layout} reloads until its authorship resolves`,
+        () => fileAnsweredPair(false));
+
+    test(`Answers keeps equally worded questions at #93 and disputed #125 independent across ${layout} reloads`,
+        () => fileAnsweredPair(true));
+
+    test(`a failed ${layout} attempt journal sends only the player's text and preserves the queue across reload`, async () => {
+        const { walk, tab } = await adopted('2', { layout });
+        await queueSelection(tab, 'Keep this.');
+        const selected = plain(stored(walk, 'live').selection);
+        walk.storage.refuseSetsMatching(/live/);
+        assert.equal(await send(walk, tab, 'I wait.'), 'I wait.');
+        assert.equal(walk.site.messages.at(-1).contents[0].text, 'I wait.');
+        assert.match(tab.panel.text('scribe-held'), /attempt could not be saved/);
+        walk.storage.allow();
+        const fresh = await reload(walk, tab);
+        assert.deepEqual(plain(stored(walk, 'live').selection), selected);
+        assert.equal(await send(walk, fresh, 'Again.'), 'Again.\n@: [Scribe] Keep this.');
+        assert.equal(await send(walk, fresh, 'Third.'), 'Third.');
+    });
+
+    test(`a failed ${layout} final write reopens the durable attempt and reconciles its accepted message`, async () => {
+        const { walk, tab } = await adopted('2', { layout });
+        await queueSelection(tab, 'Keep this.');
+        const selected = plain(stored(walk, 'live').selection);
+        const respond = walk.site.respond.bind(walk.site);
+        walk.site.respond = (receiver, url, options) => {
+            if (url === WholeSite.Messages && options?.method === 'POST') {
+                assert.ok(stored(walk, 'live').posts.some((post) => post.reminder === selected.id && post.submission));
+                walk.storage.refuseSetsMatching(/live/);
+            }
+            return respond(receiver, url, options);
+        };
+        assert.equal(await send(walk, tab, 'I wait.'), 'I wait.\n@: [Scribe] Keep this.');
+        assert.equal(walk.site.messages.at(-1).contents[0].text, 'I wait.\n@: [Scribe] Keep this.');
+        walk.site.respond = respond;
+        walk.storage.allow();
+        const fresh = await reload(walk, tab);
+        await pass(walk, TICK_MS);
+        assert.equal(await send(walk, fresh, 'Again.'), 'Again.');
+        assert.deepEqual(plain(stored(walk, 'live').settled), [selected.id]);
+    });
+
+    test(`ambiguous ${layout} history waits for the receipt identifying the first of two identical attempts`, async () => {
+        const { walk, tab } = await adopted('2', { layout });
+        await queueSelection(tab, 'Keep.');
+        const first = plain(stored(walk, 'live').selection);
+        const pending = [];
+        const respond = walk.site.respond.bind(walk.site);
+        walk.site.respond = (receiver, url, options) => url === WholeSite.Messages && options?.method === 'POST'
+            ? new Promise((resolve) => pending.push({ receiver, url, options, resolve })) : respond(receiver, url, options);
+        assert.equal(await send(walk, tab, 'Go.'), 'Go.\n@: [Scribe] Keep.');
+        tab.panel.click('scribe-force');
+        await settle();
+        for (const text of ['Changed.', 'Keep.']) {
+            tab.panel.click('scribe-edit');
+            tab.panel.type('scribe-reminder', text);
+            tab.panel.click('scribe-edit-save');
+            await settle();
+        }
+        const second = plain(stored(walk, 'live').selection);
+        assert.notEqual(first.id, second.id);
+        assert.equal(await send(walk, tab, 'Go.'), 'Go.\n@: [Scribe] Keep.');
+        assert.equal(pending.length, 2);
+        const [original] = pending;
+        const response = await respond(original.receiver, original.url, original.options);
+        await pass(walk, 2 * TICK_MS);
+        assert.deepEqual(plain(stored(walk, 'live').settled), []);
+        assert.deepEqual(plain(stored(walk, 'live').selection), second);
+        original.resolve(response);
+        await pass(walk, TICK_MS);
+        assert.deepEqual(plain(stored(walk, 'live').settled), [first.id]);
+        assert.deepEqual(plain(stored(walk, 'live').selection), second);
+        walk.site.respond = respond;
+        const fresh = await reload(walk, tab);
+        assert.deepEqual(plain(stored(walk, 'live').selection), second);
+        assert.equal(await send(walk, fresh, 'Bare.'), 'Bare.');
+        assert.equal(stored(walk, 'live').sends, 1);
+    });
+
+    test(`the reader receives only the authored portion of a verified ${layout} manual attachment after reload`, async () => {
+        const { walk, tab } = await adopted('5', { layout });
+        const player = 'I wait.\n@: [Scribe] First.';
+        const selected = 'First.\nMira lost the key.';
+        await queueSelection(tab, selected);
+        await pause(walk, tab);
+        const wire = player + '\n@: [Scribe] ' + selected;
+        assert.equal(await send(walk, tab, player), wire);
+        const raw = walk.site.messages.at(-1);
+        assert.equal(raw.contents[0].text, wire);
+        await pass(walk, TICK_MS * 2);
+        const bound = stored(walk, 'live').attachments.find((entry) => entry.id === raw.id);
+        assert.equal(bound.length, player.length);
+        const fresh = await reload(walk, tab);
+        const before = walk.model.calls.length;
+        await resume(walk, fresh);
+        await until(walk, 'Keeper to send the verified player passage to the reader', () =>
+            walk.model.calls.slice(before).some((call) => call.role === 'Story' && call.user.includes('I wait.')), TICK_MS * 3);
+        const passage = walk.model.calls.slice(before).find((call) => call.role === 'Story' && call.user.includes('I wait.')).user;
+        assert.ok(passage.includes(player), passage);
+        assert.equal(passage.includes('Mira lost the key.'), false, passage);
+        assert.equal(walk.site.messages.find((message) => message.id === raw.id).contents[0].text, wire);
+    });
+
+    test(`the ${layout} composer submits the full manual selection once and clears its preview`, async () => {
+        const { walk, tab } = await adopted('2', { layout });
+        const selected = '雪  on the quay.\nHold here. ';
+        await queueSelection(tab, selected);
+        const { id } = stored(walk, 'live').selection;
+        const player = 'I  wait.\nThen I move.';
+        const tail = '\n@: [Scribe] ' + selected;
+        const crowded = 'x'.repeat(4501 - Buffer.byteLength(tail));
+        assert.equal(await send(walk, tab, crowded), crowded);
+        assert.equal(walk.site.messages.at(-1).contents[0].text, crowded);
+        assert.equal(stored(walk, 'live').selection.id, id);
+        assert.match(tab.panel.text('scribe-held'), /still queued/);
+        const before = walk.site.messages.length;
+        tab.type(player);
+        if (layout === 'top') {
+            tab.enter();
+        }
+        tab.press('Send', true);
+        await pass(walk, 1200);
+        assert.equal(walk.site.messages.length, before + 1);
+        assert.equal(walk.site.messages.at(-1).contents[0].text, player + tail);
+        const accepted = walk.site.requests.filter((request) => request.method === 'POST' && request.url === WholeSite.Messages).at(-1);
+        assert.equal(JSON.parse(accepted.body).text, player + tail);
+        const saved = stored(walk, 'live');
+        assert.deepEqual([saved.selection, saved.draft, saved.ready, saved.forced, saved.sends], [null, null, null, false, 0]);
+        assert.deepEqual(plain(saved.settled), [id]);
+        assert.equal(tab.panel.byId('scribe-reminder').value, '');
+        assert.equal(tab.panel.text('scribe-force-outcome'), '');
+        assert.equal(await send(walk, tab, 'Again.'), 'Again.');
+    });
+
+    test(`a pending ${layout} manual send permits saving a new choice, even with identical final text`, async () => {
+        const { walk, tab } = await adopted('2', { layout });
+        const original = 'Keep  two spaces.\nAnd this line.';
+        await queueSelection(tab, original);
+        const first = stored(walk, 'live').selection;
+        const respond = walk.site.respond.bind(walk.site);
+        let release;
+        walk.site.respond = (receiver, url, options) => url === WholeSite.Messages && options?.method === 'POST'
+            ? new Promise((resolve) => { release = () => resolve(respond(receiver, url, options)); }) : respond(receiver, url, options);
+        assert.equal(await send(walk, tab, 'First.'), 'First.\n@: [Scribe] ' + original);
+        for (const text of ['An intermediate draft.', original]) {
+            assert.equal(tab.panel.byId('scribe-edit').disabled, false);
+            tab.panel.click('scribe-edit');
+            tab.panel.type('scribe-reminder', text);
+            tab.panel.click('scribe-edit-save');
+            await settle();
+        }
+        const newer = stored(walk, 'live').selection;
+        assert.notEqual(newer.id, first.id);
+        walk.site.respond = respond;
+        release();
+        await pass(walk, 1000);
+        assert.equal(walk.site.messages.at(-1).contents[0].text, 'First.\n@: [Scribe] ' + original);
+        assert.deepEqual(plain(stored(walk, 'live').selection), plain(newer));
+        assert.deepEqual(plain(stored(walk, 'live').settled), [first.id]);
+        assert.equal(stored(walk, 'live').sends, 0);
+        assert.equal(await send(walk, tab, 'Second.'), 'Second.\n@: [Scribe] ' + original);
+        assert.equal(stored(walk, 'live').selection, null);
+    });
+
+    test(`an open manual edit survives ${layout} delivery and Save keeps its exact spacing`, async () => {
+        const { walk, tab } = await adopted('2', { layout });
+        const original = '[Scribe] At the quay.';
+        const newer = '[Scribe] At  the\nquay.';
+        await queueSelection(tab, original);
+        tab.panel.click('scribe-edit');
+        tab.panel.type('scribe-reminder', newer);
+        assert.equal(await send(walk, tab, 'Go.'), 'Go.\n@: ' + original);
+        assert.equal(stored(walk, 'live').selection, null);
+        assert.equal(tab.panel.byId('scribe-reminder').value, newer);
+        tab.panel.click('scribe-edit-save');
+        await settle();
+        assert.equal(stored(walk, 'live').selection.text, newer);
+        assert.equal(await send(walk, tab, 'Next.'), 'Next.\n@: ' + newer);
+    });
+
     test(`a ${layout} POST returning 401 keeps the unsent reminder for a manual retry, even across reload`, async () => {
         const { walk, tab } = await adopted('2', { layout });
-        const { ready, delivery } = stored(walk, 'live');
+        const chosen = 'A full  choice.\nKeep this line.';
+        await queueSelection(tab, chosen);
+        const ready = '[Scribe] ' + chosen;
+        const { delivery } = stored(walk, 'live');
         const start = walk.site.messages.length;
         const respond = walk.site.respond.bind(walk.site);
         let attempts = 0;
@@ -3000,6 +3841,7 @@ for (const layout of ['top', 'frame']) {
         const rejected = stored(walk, 'live');
         assert.equal(attempts, 1);
         assert.equal(rejected.delivery.id, delivery.id);
+        assert.deepEqual(plain(rejected.selection), { id: delivery.id, text: chosen });
         assert.equal(rejected.sends, 0);
         assert.equal(rejected.forced, true);
         assert.equal(rejected.settled.includes(delivery.id), false);

@@ -348,21 +348,21 @@ test('the headline says what is going on', (context) => {
     assert.equal(line({ phase: Phase.NoBook, total: 999 }), 'No book for this chat yet: 999 messages.');
     assert.equal(line({ phase: Phase.Reading, flight: 'Reading #81 to #120' }), 'Reading #81 to #120');
     assert.equal(line({ phase: Phase.Idle, flight: 'Pulling the chat: 1,620 messages' }), 'Pulling the chat: 1,620 messages');
-    assert.equal(line({ phase: Phase.Idle, read: 1325, total: 1326 }), 'Up to date: 1,325 of 1,326 read.');
+    assert.equal(line({ phase: Phase.Idle, read: 1325, total: 1326 }), 'Waiting to read: 1,325 of 1,326 read.');
     assert.equal(line({ phase: Phase.Stopped, stop: { reason: 'Paused', problem: null } }), 'Stopped: Paused.');
     assert.equal(
         line({ phase: Phase.Stopped, stop: { reason: 'Budget', problem: null } }),
         "Stopped: the day's budget is spent.",
     );
-    assert.equal(line({ phase: Phase.Stopped, stop: { reason: 'Failed', problem: 'No key' } }), 'Stopped: No key');
+    assert.equal(line({ phase: Phase.Stopped, stop: { reason: 'Failed', problem: 'No key' } }), 'Stopped.');
     assert.equal(line({ phase: Phase.Watching, reader: false }), 'Another tab is reading this chat.');
     assert.equal(
         line({ phase: Phase.Idle, read: 1325, total: 1326, problem: 'Zeta answered HTTP 401' }),
-        'Up to date: 1,325 of 1,326 read. Problem: Zeta answered HTTP 401',
+        'Waiting to read: 1,325 of 1,326 read.',
     );
     assert.equal(
         line({ phase: Phase.Stopped, stop: null, problem: 'The saved book of this chat is damaged' }),
-        'Stopped. Problem: The saved book of this chat is damaged',
+        'Stopped.',
     );
     assert.equal(
         line({ phase: Phase.Watching, reader: false, flight: 'Looking for new messages' }),
@@ -586,7 +586,7 @@ test('the panel mounts in a shadow root and collapses', () => {
     assert.equal(first.byId('scribe-toggle').hidden, false);
     assert.equal(first.text('scribe-toggle'), 'Scribe');
     assert.equal(first.byId('scribe-toggle').getAttribute('aria-expanded'), 'false');
-    assert.equal(first.text('scribe-headline'), 'Up to date: 40 of 100 read.');
+    assert.equal(first.text('scribe-headline'), 'Waiting to read: 40 of 100 read.');
     assert.equal(storage.values.get('scribe:panel'), 'collapsed');
     const second = mounted(log, { storage });
     assert.equal(second.byId('scribe-body').hidden, true);
@@ -1263,6 +1263,40 @@ test('while the box is open a reply and a rebuild leave the typed text alone, an
     assert.deepEqual(panel.live.called('edit'), []);
 });
 
+test('Findings snapshots the displayed text before an action redraw and preserves it on Cancel', async () => {
+    const older = '[Scribe] A';
+    const newer = '[Scribe] B';
+    const panel = mounted(findingsBook(), { live: liveView([], { stale: true, draft: older }) });
+    await panel.tab('Findings');
+    const field = panel.byId('scribe-reminder');
+    const captured = [];
+    panel.live.force = async (resend, text) => {
+        captured.push([resend, text]);
+        panel.live.current = liveView([], { selected: text, ready: text, forced: true });
+    };
+    panel.live.current = liveView([], { ready: newer });
+    panel.click('scribe-force');
+    await panel.flush();
+    assert.deepEqual(captured, [[null, older]]);
+    assert.equal(field.value, older);
+    panel.click('scribe-edit');
+    await panel.flush();
+    field.value = 'discard';
+    panel.click('scribe-edit-cancel');
+    await panel.flush();
+    assert.equal(field.value, older);
+    panel.click('scribe-edit');
+    await panel.flush();
+    const edit = '<strong>  Å\n雪</strong>';
+    field.value = edit;
+    panel.click('scribe-force');
+    await panel.flush();
+    assert.deepEqual(captured.at(-1), [null, edit]);
+    assert.equal(field.readOnly, true);
+    assert.equal(field.value, edit);
+    assert.equal(panel.text('scribe-force-outcome'), 'Queued for your next message');
+});
+
 test('while the box is open Clear closes it and the force button still works', async () => {
     const panel = mounted(findingsBook(), { live: liveView([], { ready: '[Scribe] Hold.' }) });
     await panel.tab('Findings');
@@ -1298,13 +1332,13 @@ test('the placeholder says a stored edit waits for the book, and the force outco
     await panel.tab('Findings');
     panel.click('scribe-force');
     await panel.flush();
-    assert.equal(panel.text('scribe-force-outcome'), 'It goes with your next message.');
+    assert.equal(panel.text('scribe-force-outcome'), 'Queued for your next message');
     panel.live.current = liveView([], { forced: true, due: true, ready: null });
     panel.redraw();
-    assert.equal(panel.text('scribe-force-outcome'), 'A reminder is prepared after the next reply.');
+    assert.equal(panel.text('scribe-force-outcome'), 'Waiting for a reminder to be prepared.');
     assert.equal(
         panel.byId('scribe-reminder').getAttribute('placeholder'),
-        'A reminder is prepared after the next reply.',
+        'Waiting for a reminder to be prepared.',
     );
     panel.live.current = liveView([], { forced: false, ready: null });
     panel.redraw();
@@ -1335,7 +1369,7 @@ test('Clear sits left of the force button in one row, and the force button answe
     hold.open();
     await panel.flush();
     assert.deepEqual(plain(panel.live.called('force')), [[]]);
-    assert.equal(panel.text('scribe-force-outcome'), 'It goes with your next message.');
+    assert.equal(panel.text('scribe-force-outcome'), 'Queued for your next message');
     assert.equal(force.disabled, false);
 
     panel.live.failure = new Error('The book has not finished its first reading.');
@@ -1348,11 +1382,11 @@ test('Clear sits left of the force button in one row, and the force button answe
     await later.tab('Findings');
     assert.equal(
         later.byId('scribe-reminder').getAttribute('placeholder'),
-        'A reminder is prepared after the next reply.',
+        'Waiting for a reminder to be prepared.',
     );
     later.click('scribe-force');
     await later.flush();
-    assert.equal(later.text('scribe-force-outcome'), 'A reminder is prepared after the next reply.');
+    assert.equal(later.text('scribe-force-outcome'), 'Waiting for a reminder to be prepared.');
     later.live.current = liveView([], { forced: false });
     later.redraw();
     assert.equal(later.text('scribe-force-outcome'), '');
@@ -1363,10 +1397,10 @@ test('Clear sits left of the force button in one row, and the force button answe
     await waiting.tab('Findings');
     waiting.click('scribe-force');
     await waiting.flush();
-    assert.equal(waiting.text('scribe-force-outcome'), 'A reminder is prepared after the next reply.');
+    assert.equal(waiting.text('scribe-force-outcome'), 'Waiting for a reminder to be prepared.');
     waiting.live.current = liveView([], { forced: true, due: true, ready });
     waiting.redraw();
-    assert.equal(waiting.text('scribe-force-outcome'), 'It goes with your next message.');
+    assert.equal(waiting.text('scribe-force-outcome'), 'Queued for your next message');
     assert.equal(waiting.byId('scribe-reminder').value, ready);
 });
 
@@ -1393,20 +1427,20 @@ test('in a held book the placeholder and the force outcome say what will happen'
     await forced.tab('Findings');
     forced.click('scribe-force');
     await forced.flush();
-    assert.equal(forced.text('scribe-force-outcome'), 'It goes with your next message.');
+    assert.equal(forced.text('scribe-force-outcome'), 'Queued for your next message');
     forced.live.current = liveView([], { ...hold, prepared: true, forced: true });
     forced.redraw();
     assert.equal(forced.byId('scribe-reminder').getAttribute('placeholder'), reason);
-    assert.equal(forced.text('scribe-force-outcome'), 'It goes with your next message.');
+    assert.equal(forced.text('scribe-force-outcome'), 'Queued for your next message');
     forced.live.current = liveView([], { due: true, prepared: true, forced: true, ready: '[Scribe] Hold.' });
     forced.redraw();
-    assert.equal(forced.text('scribe-force-outcome'), 'It goes with your next message.');
+    assert.equal(forced.text('scribe-force-outcome'), 'Queued for your next message');
 
     const unprepared = mounted(findingsBook(), { live: liveView([], { due: true, forced: true }) });
     await unprepared.tab('Findings');
     unprepared.click('scribe-force');
     await unprepared.flush();
-    assert.equal(unprepared.text('scribe-force-outcome'), 'A reminder is prepared after the next reply.');
+    assert.equal(unprepared.text('scribe-force-outcome'), 'Waiting for a reminder to be prepared.');
     unprepared.live.current = liveView([], { ...hold, forced: true });
     unprepared.redraw();
     assert.equal(unprepared.byId('scribe-reminder').getAttribute('placeholder'), reason);
@@ -1415,14 +1449,14 @@ test('in a held book the placeholder and the force outcome say what will happen'
     await edited.tab('Findings');
     edited.click('scribe-force');
     await edited.flush();
-    assert.equal(edited.text('scribe-force-outcome'), 'It goes with your next message.');
+    assert.equal(edited.text('scribe-force-outcome'), 'Queued for your next message');
     edited.live.current = liveView([], { ...hold, forced: true, edited: true });
     edited.redraw();
     assert.equal(edited.byId('scribe-reminder').getAttribute('placeholder'), 'Your edit goes once the book is ready.');
-    assert.equal(edited.text('scribe-force-outcome'), 'It goes with your next message.');
+    assert.equal(edited.text('scribe-force-outcome'), 'Queued for your next message');
     edited.live.current = liveView([], { due: true, forced: true, edited: true, ready: '[Scribe] Mine.' });
     edited.redraw();
-    assert.equal(edited.text('scribe-force-outcome'), 'It goes with your next message.');
+    assert.equal(edited.text('scribe-force-outcome'), 'Queued for your next message');
 });
 
 test('a forced reminder that becomes ready after the force reads as going with the next message', async () => {
@@ -1430,10 +1464,10 @@ test('a forced reminder that becomes ready after the force reads as going with t
     await panel.tab('Findings');
     panel.click('scribe-force');
     await panel.flush();
-    assert.equal(panel.text('scribe-force-outcome'), 'A reminder is prepared after the next reply.');
+    assert.equal(panel.text('scribe-force-outcome'), 'Waiting for a reminder to be prepared.');
     panel.live.current = liveView([], { forced: true, due: true, prepared: true, ready: '[Scribe] Prepared.' });
     panel.redraw();
-    assert.equal(panel.text('scribe-force-outcome'), 'It goes with your next message.');
+    assert.equal(panel.text('scribe-force-outcome'), 'Queued for your next message');
     assert.equal(panel.byId('scribe-reminder').value, '[Scribe] Prepared.');
     panel.live.current = liveView([], { forced: false, due: false });
     panel.redraw();
@@ -1928,7 +1962,7 @@ test('hostile text in an offer stays text', async () => {
         assert.equal(['IMG', 'B', 'SCRIPT'].includes(element.tagName), false, element.tagName);
         assert.equal(attributeTexts(element).some((value) => /<|onerror|quoted/.test(value)), false, element.tagName);
     }
-    assert.equal(panel.text('scribe-headline'), 'Up to date: 40 of 100 read.');
+    assert.equal(panel.text('scribe-headline'), 'Waiting to read: 40 of 100 read.');
 });
 
 test("the player's words are worked out, shown, then filed", async () => {
@@ -2382,7 +2416,7 @@ test('a broken tab or row is contained', async () => {
             },
             live: bare,
         });
-        assert.equal(panel.text('scribe-headline'), 'Up to date: 40 of 100 read.');
+        assert.equal(panel.text('scribe-headline'), 'Waiting to read: 40 of 100 read.');
         assert.equal(panel.rows('cast').length, 2);
         assert.equal(panel.text('scribe-list-threads'), 'None.');
         await panel.tab('Findings');
@@ -2409,7 +2443,7 @@ test('a broken tab or row is contained', async () => {
         panel.live.current = { ...bare, offer: breaking({}, 'text') };
         panel.redraw();
         assert.equal(panel.text('scribe-failure-findings'), 'This tab could not be drawn: text broke');
-        assert.equal(panel.text('scribe-headline'), 'Up to date: 40 of 100 read.');
+        assert.equal(panel.text('scribe-headline'), 'Waiting to read: 40 of 100 read.');
         assert.equal(panel.byId('scribe-trouble').hidden, true);
         await panel.tab('Timeline');
         assert.equal(panel.byId('scribe-failure-timeline').hidden, true);
@@ -2643,11 +2677,14 @@ test('problems and the last pull are shown', async () => {
     const panel = mounted(log, {
         keeper: {
             problem: 'Zeta answered HTTP 401',
+            problemSource: 'Zeta',
             pulled: { end: 'NoCursor', count: 1326, skipped: 0, at: 0 },
         },
         live: liveView([], { problem: 'No key' }),
     });
-    assert.equal(panel.text('scribe-headline'), 'Up to date: 40 of 100 read. Problem: Zeta answered HTTP 401 Scribe: No key');
+    assert.equal(panel.text('scribe-headline'), 'Waiting to read: 40 of 100 read.');
+    assert.match(panel.text('scribe-problems'), /chat history from Zeta/);
+    assert.match(panel.text('scribe-problem-details'), /No key/);
     await panel.tab('Progress');
     assert.equal(panel.byId('scribe-pulled').hidden, false);
     assert.equal(panel.text('scribe-pulled'), 'Last pull: 1,326 messages, ended NoCursor');
@@ -3244,7 +3281,7 @@ test('a failed draw leaves nothing to press', async () => {
     assert.equal(panel.byId('scribe-failure-findings').hidden, true);
     assert.deepEqual(panel.buttonsWhere('scribe-list-findings', false), healthy);
     assert.equal(panel.text('scribe-badge'), '2 findings');
-    assert.equal(panel.text('scribe-headline'), 'Up to date: 40 of 100 read.');
+    assert.equal(panel.text('scribe-headline'), 'Waiting to read: 40 of 100 read.');
     panel.keeper.current = keeperView(log, { state: null });
     panel.redraw();
     assert.equal(panel.text('scribe-headline'), '');
@@ -3254,7 +3291,7 @@ test('a failed draw leaves nothing to press', async () => {
     assert.equal(panel.text('scribe-trouble').startsWith('Something went wrong in the panel: '), true);
     panel.keeper.current = keeperView(log);
     panel.redraw();
-    assert.equal(panel.text('scribe-headline'), 'Up to date: 40 of 100 read.');
+    assert.equal(panel.text('scribe-headline'), 'Waiting to read: 40 of 100 read.');
     assert.equal(panel.text('scribe-badge'), '2 findings');
 });
 
@@ -3309,18 +3346,20 @@ test('one bad row never takes its neighbours', async () => {
 test('a missing reason is said in words', async () => {
     const empty = { phase: Phase.Stopped, total: 1, read: 0, flight: null, problem: null };
     for (const stop of [{ reason: 'Failed', problem: null }, { reason: 'Failed' }, { reason: 'Failed', problem: ' ' }]) {
-        assert.equal(PanelView.headline({ ...empty, stop }, {}), 'Stopped: the reason was not recorded.');
+        assert.equal(PanelView.headline({ ...empty, stop }, {}), 'Stopped.');
+        assert.deepEqual(plain(PanelView.problems({ ...empty, stop }, {})[0].details), ['The reason was not recorded.']);
     }
     assert.equal(
         PanelView.headline({ ...empty, stop: { reason: 'Failed', problem: 'The key was refused.' } }, {}),
-        'Stopped: The key was refused.',
+        'Stopped.',
     );
     const log = disputedBook();
     const panel = mounted(log, {
         keeper: { phase: Phase.Stopped, stop: { reason: 'Failed', problem: null }, lastRead: null, pulled: null },
         live: liveView([contradiction(), leak()]),
     });
-    assert.equal(panel.text('scribe-headline'), 'Stopped: the reason was not recorded.');
+    assert.equal(panel.text('scribe-headline'), 'Stopped.');
+    assert.match(panel.text('scribe-problem-details'), /reason was not recorded/);
     const texts = [];
     for (const name of ['Summary', 'Book', 'Timeline', 'Rulings', 'Findings', 'Progress']) {
         await panel.tab(name);
@@ -3858,12 +3897,12 @@ test('a button that goes away leaves no trouble', async () => {
 test('a login not yet seen reads as a wait', () => {
     const messages = scripts.ZetaSource.Settings.Messages;
     const base = { phase: Phase.NoBook, total: 0, read: 0, flight: null, stop: null };
-    const waiting = PanelView.headline({ ...base, problem: messages.NoLogin }, {});
-    assert.equal(waiting.includes("Waiting for the site's login"), true);
-    assert.equal(waiting.includes('Problem:'), false);
-    const other = PanelView.headline({ ...base, problem: messages.NoRoom }, {});
-    assert.equal(other.includes('Problem: ' + messages.NoRoom), true);
-    assert.equal(other.includes("Waiting for the site's login"), false);
+    const waiting = PanelView.problems({ ...base, problem: messages.NoLogin }, {})[0];
+    assert.equal(waiting.service, 'Zeta');
+    assert.match(waiting.explanation, /Sign in to Zeta/);
+    const other = PanelView.problems({ ...base, problem: messages.NoRoom }, {})[0];
+    assert.deepEqual(plain(other.details), [messages.NoRoom]);
+    assert.doesNotMatch(other.explanation, /Sign in to Zeta/);
 });
 
 const finishedReport = {
@@ -3958,6 +3997,68 @@ test('one timer and it ends', async () => {
     assert.equal(panel.clock.intervals, 1);
     panel.handle.unmount();
     assert.equal(panel.clock.intervals, 0);
+});
+
+test('legacy book calls mask both keys in pass and answer, including after a key slot refuses reads', async () => {
+    const storage = new FakeStorage();
+    ScribeStore.setKey(storage, 'or-fixture');
+    ScribeStore.setCloudKey(storage, 'private-worker-fixture');
+    const text = 'or-fixture / private-worker-fixture';
+    const calls = [
+        { sequence: 14, pass: text, answer: text, readable: true },
+        { sequence: null, pass: text, answer: text, readable: false },
+        { sequence: null, pass: text, answer: null, stopped: true },
+    ];
+    const panel = mounted(ScribeLog.create(), { storage, keeper: { calls } });
+    await panel.tab('Progress');
+    const rows = panel.rowTexts('calls');
+    assert.match(rows[0], /Call 14: \[key\] \/ \[key\]/);
+    assert.match(rows[1], /The answer\[key\] \/ \[key\]/);
+    assert.match(rows[2], /Stopped by the operator: \[key\] \/ \[key\]/);
+    for (const slot of [/^scribe:key$/, /^scribe:cloudkey$/]) {
+        storage.refuseGetsMatching(slot);
+        panel.redraw();
+        for (const row of panel.rowTexts('calls')) {
+            assert.match(row, /Diagnostic withheld/);
+            assert.doesNotMatch(row, /or-fixture|private-worker-fixture/);
+        }
+        storage.allow();
+    }
+    assert.equal(calls[0].answer, text);
+});
+
+test('legacy Readings and Last finished mask pass, refused lines, nested operations and reasons with no calls', async () => {
+    const storage = new FakeStorage();
+    ScribeStore.setKey(storage, 'or-fixture');
+    ScribeStore.setCloudKey(storage, 'private-worker-fixture');
+    const text = 'or-fixture / private-worker-fixture';
+    const report = {
+        ...finishedReport,
+        pass: 'Review ' + text,
+        refusedLines: [{ line: 'Line ' + text, reason: 'Refusal ' + text }],
+        refusedOperations: [{
+            operation: { type: 'Contradiction', position: 7, said: 'Quote ' + text, entry: 'F3', why: 'Why ' + text },
+            reason: 'Citation ' + text,
+        }],
+    };
+    const panel = mounted(ScribeLog.create(), { storage, keeper: working(40, 864, { lines: [report], calls: [] }) });
+    await panel.tab('Progress');
+    const [shown] = panel.rowTexts('lines');
+    for (const label of ['Review', 'Line', 'Refusal', 'Quote', 'Why', 'Citation']) {
+        assert.ok(shown.includes(label + ' [key] / [key]'), label);
+    }
+    assert.match(shown, /F3/);
+    assert.match(panel.text('scribe-finished'), /Review \[key\] \/ \[key\]/);
+    for (const slot of [/^scribe:key$/, /^scribe:cloudkey$/]) {
+        storage.refuseGetsMatching(slot);
+        panel.redraw();
+        for (const shown of [panel.rowTexts('lines')[0], panel.text('scribe-finished')]) {
+            assert.match(shown, /Diagnostic withheld/);
+            assert.doesNotMatch(shown, /or-fixture|private-worker-fixture/);
+        }
+        storage.allow();
+    }
+    assert.equal(report.refusedOperations[0].operation.why, 'Why ' + text);
 });
 
 test('the last finished step is the Readings wording', async () => {
@@ -4258,7 +4359,7 @@ test('the first pull hides Adopt under its headline, and a routine poll never do
     assert.equal(keeper.view().adoptBlock, pulling);
     assert.equal(keeper.view().busy, 'Pulling');
     assert.equal(harness.byId('scribe-next').hidden, true);
-    assert.equal(harness.text('scribe-headline'), 'Pulling the chat: 0 messages');
+    assert.equal(harness.text('scribe-headline'), 'Reading chat history from Zeta · 0 messages');
     assert.equal(harness.byId('scribe-next-outcome').hidden, true);
     first.release();
     await harness.flush();
@@ -4419,7 +4520,7 @@ test('a controls refusal stored while settled survives a step that reads a stret
             await harness.flush();
             assert.equal(harness.text('scribe-controls-outcome'), line);
         }
-        assert.equal(keeper.view().read, 52);
+        assert.equal(keeper.view().read, 73);
     }
 });
 
@@ -4587,7 +4688,7 @@ test('the headline says where the book is kept', () => {
     const idle = keeperView(log);
     const watching = keeperView(log, { phase: Phase.Watching, reader: false });
     const today = PanelView.headline(idle, liveView());
-    assert.equal(today.startsWith('Up to date: '), true);
+    assert.equal(today.startsWith('Waiting to read: '), true);
     const cases = [
         [idle, null, today],
         [idle, cloudView('Off', { keyed: false }), today],
@@ -4596,13 +4697,13 @@ test('the headline says where the book is kept', () => {
         [watching, cloudView('Loading'), 'Loading the book from your Worker...'],
         [watching, cloudView('Watching'), 'Another PC is reading this chat.'],
         [watching, cloudView('Conflict', { conflict: { here: 1, there: 2 } }), 'This PC and your Worker hold different books for this chat.'],
-        [idle, cloudView('Offline'), `${today} Working offline.`],
-        [idle, cloudView('Refused'), `${today} The DM API key was refused; the book stays on this PC.`],
-        [idle, cloudView('Unusable', { problem: BAD_ROOM }), `${today} The book stays on this PC: ${BAD_ROOM}.`],
+        [idle, cloudView('Offline'), today],
+        [idle, cloudView('Refused'), today],
+        [idle, cloudView('Unusable', { problem: BAD_ROOM }), today],
         [
             idle,
             cloudView('Leading', { problem: 'Your Worker refused the request: bad_request' }),
-            `${today} Worker: Your Worker refused the request: bad_request`,
+            today,
         ],
     ];
     for (const [keeper, cloud, expected] of cases) {
@@ -4613,7 +4714,9 @@ test('the headline says where the book is kept', () => {
     }
     const troubled = keeperView(log, { problem: 'Zeta could not be reached' });
     const offline = PanelView.headline(troubled, liveView({}, { problem: 'The scene failed' }), cloudView('Offline', { problem: 'x' }));
-    assert.equal(offline.endsWith(' Working offline. Problem: Zeta could not be reached Scribe: The scene failed Worker: x'), true);
+    assert.equal(offline, today);
+    const issues = PanelView.problems(troubled, liveView({}, { problem: 'The scene failed' }), cloudView('Offline', { problem: 'x' }));
+    assert.deepEqual(plain(issues.flatMap((item) => item.details)), ['Zeta could not be reached', 'The scene failed', 'x']);
 });
 
 test('the choice shows only on a conflict, with both counts, Use the cloud on the left', () => {
@@ -4765,19 +4868,106 @@ test('the header says which live calls keep failing, and the reminder line says 
     const held = 'No reminder: the scene was last read at #157; the latest reply is #225.';
     const panel = mounted(log, {
         live: liveView([], {
-            failing: ['Scene failing: unexpected HTTP status; status 402', 'Checks failing: no answer'],
+            failing: [{ role: 'scene', reason: 'HTTP 402' }, { role: 'check', reason: 'no answer' }],
             held,
         }),
     });
-    assert.equal(
-        panel.text('scribe-headline').endsWith(
-            ' Scene failing: unexpected HTTP status; status 402 Checks failing: no answer',
-        ),
-        true,
-        panel.text('scribe-headline'),
-    );
+    assert.equal(panel.byId('scribe-problems').children.length, 2);
+    assert.match(panel.text('scribe-problems'), /OpenRouter reported a credit or spending limit/);
+    assert.match(panel.text('scribe-problems'), /Story checks could not run/);
+    assert.match(panel.text('scribe-problem-details'), /no answer/);
     await panel.tab('Findings');
     assert.equal(panel.byId('scribe-reminder').getAttribute('placeholder'), held);
+});
+
+test('the phone strip groups and clears only the affected work while Progress retains masked detail', async () => {
+    const key = 'example-test-secret-for-this-browser';
+    const storage = new FakeStorage();
+    ScribeStore.setKey(storage, key);
+    const reason = 'unexpected HTTP status; status 401; finish none; reason: <b>user not found</b> ' + key;
+    const errors = (roles) => liveView([], {
+        failing: roles.map((role) => ({ role, reason, retrying: false })),
+        problem: roles.length ? reason : null,
+        calls: [],
+    });
+    const room = mounted(ScribeLog.create(), {
+        width: 320,
+        storage,
+        keeper: { phase: Phase.Loading, flight: 'Reading chat history from Zeta · 155 messages' },
+        live: errors(['scene', 'check']),
+    });
+    assert.equal(room.byId('scribe-problems').hidden, true);
+    assert.equal(room.text('scribe-problems-compact'), 'OpenRouter key rejected');
+    room.click('scribe-toggle');
+    await room.flush();
+    const expected = 'OpenRouter rejected the saved API key. Scene updates and story checks could not run. Open Settings, enter your current OpenRouter key, and press Save key.';
+    for (let draw = 0; draw < 2; draw++) {
+        room.redraw();
+        assert.equal(room.text('scribe-headline'), 'Reading chat history from Zeta · 155 messages');
+        assert.equal(room.byId('scribe-problems').children.length, 1);
+        assert.equal(room.text('scribe-problems'), expected);
+    }
+    await room.tab('Progress');
+    assert.match(room.text('scribe-problem-details'), /<b>user not found<\/b> \[key\]/);
+    assert.ok(!room.root.textContent.includes(key));
+    room.live.current = errors(['scene', 'check', 'recap']);
+    room.redraw();
+    assert.match(room.text('scribe-problems'), /Scene updates, story checks, and story recap could not run/);
+    room.live.current = errors(['check']);
+    room.redraw();
+    assert.match(room.text('scribe-problems'), /Story checks could not run/);
+    assert.doesNotMatch(room.text('scribe-problems'), /[Ss]cene/);
+    room.cloud.current = cloudView('Refused');
+    room.redraw();
+    room.click('scribe-toggle');
+    await room.flush();
+    assert.equal(room.text('scribe-problems-compact'), '2 problems');
+    room.cloud.current = cloudView('Off');
+    room.live.current = errors([]);
+    room.redraw();
+    assert.equal(room.byId('scribe-problems-compact').hidden, true);
+    assert.equal(room.text('scribe-problem-details'), '');
+});
+
+test('an unreadable key slot keeps a raw diagnostic out of the panel', () => {
+    const secret = 'secret-used-only-by-this-test';
+    const storage = new FakeStorage();
+    ScribeStore.setKey(storage, secret);
+    storage.refuseGetsMatching(/^scribe:key$/);
+    const room = mounted(ScribeLog.create(), {
+        storage,
+        live: liveView([], { failing: [{ role: 'scene', reason: 'HTTP 401: ' + secret }] }),
+    });
+    assert.ok(!room.root.textContent.includes(secret));
+    assert.match(room.text('scribe-problem-details'), /Diagnostic withheld/);
+    assert.equal(room.byId('scribe-problems').children.length, 1);
+});
+
+test('problem classification keeps service, provider reason, finish and retry state distinct', () => {
+    const keeper = { problem: scripts.ZetaSource.Settings.Messages.NoLogin, stop: { reason: 'Failed', problem: 'HTTP 401' } };
+    const models = (reasons) => ({ failing: reasons.map(([role, reason, retrying]) => ({ role, reason, retrying })) });
+    const error = (role, reason) => [role, reason, false];
+    const service = PanelView.problems(keeper, models([error('scene', 'HTTP 401: user missing')]), cloudView('Refused'));
+    assert.deepEqual(plain(service.map((item) => [item.service, item.cause])), [['Zeta', 'login'], ['Scribe', 'local'], ['OpenRouter', 'key'], ['Cloudflare', 'workerKey']]);
+    assert.match(service[3].explanation, /Tampermonkey.*Set DM API key/);
+    const reasons = [
+        error('scene', 'unexpected HTTP status; status 503; finish none; reason: nested HTTP 401'),
+        error('check', 'unexpected HTTP status; status 503; finish none; reason: capacity'),
+        error('recap', 'answer was cut off; status 200; finish length'),
+        error('scene', 'request failed; status no response; finish none'),
+        error('check', 'response body is not a JSON object; status 200; finish none'),
+        error('scene', 'quoted 401'),
+        error('check', 'unknown second reason'),
+        error('recap', 'quoted 401'),
+    ];
+    const issues = PanelView.problems({}, models(reasons));
+    assert.deepEqual(plain(issues.map((item) => item.cause)), ['server', 'server', 'length', 'connection', 'unusable', 'unknown', 'unknown']);
+    assert.deepEqual(plain(issues[5].operations), ['scene updates', 'story recap']);
+    for (const retrying of [true, false]) {
+        const issue = PanelView.problems({}, models([['recap', 'HTTP 429', retrying]]))[0];
+        assert.equal(issue.cause, 'rate');
+        assert.equal(issue.explanation.includes('retry is scheduled'), retrying);
+    }
 });
 
 test('live calls are listed beside the keeper calls, a cut-off answer with its first characters', async () => {
@@ -4811,6 +5001,34 @@ test('live calls are listed beside the keeper calls, a cut-off answer with its f
     assert.equal(texts[0].includes('answer was cut off'), true);
     assert.equal(texts[0].includes('w'.repeat(2000)), true);
     assert.equal(texts[1], 'Scribe: in 10, out 20, finish stop');
+});
+
+test('legacy live-call fields are masked on display with either key or an unreadable key slot', async () => {
+    const storage = new FakeStorage();
+    ScribeStore.setKey(storage, 'opaque-provider');
+    ScribeStore.setCloudKey(storage, 'opaque-worker');
+    const detail = '<i>opaque-worker / opaque-provider</i>';
+    const calls = [{ role: 'Pedant', finish: detail, answer: detail, problem: detail }];
+    const room = mounted(ScribeLog.create(), { storage, live: liveView([], { calls }) });
+    await room.tab('Progress');
+    assert.match(room.rowTexts('liveCalls')[0], /<i>\[key\] \/ \[key\]<\/i>/);
+    for (const slot of [/^scribe:key$/, /^scribe:cloudkey$/]) {
+        storage.refuseGetsMatching(slot);
+        room.redraw();
+        const text = room.rowTexts('liveCalls')[0];
+        assert.match(text, /Diagnostic withheld/);
+        assert.doesNotMatch(text, /opaque-/);
+        storage.allow();
+    }
+    const mixed = PanelView.problems({ stop: { reason: 'Failed', source: 'Scribe', problem: 'HTTP 401' } }, {
+        failing: [
+            { role: 'scene', source: 'Scribe', reason: 'HTTP 401' },
+            { role: 'check', source: 'OpenRouter', reason: 'HTTP 401' },
+        ],
+    });
+    assert.deepEqual(plain(mixed.map(({ service, operations }) => [service, operations])), [
+        ['Scribe', ['book reading', 'scene updates']], ['OpenRouter', ['story checks']],
+    ]);
 });
 
 test('Force stop shows only while a call has run four minutes, and pressing it stops that call', async () => {

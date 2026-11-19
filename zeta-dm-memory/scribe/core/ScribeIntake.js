@@ -1,4 +1,5 @@
 const ScribeIntake = Object.freeze({
+    Submissions: new WeakMap(),
     Role: Object.freeze({
         Player: 'Player',
         Narrator: 'Narrator',
@@ -94,24 +95,55 @@ const ScribeIntake = Object.freeze({
     },
 
     /**
+     * @param {object} message
+     * @param {object} post
+     * @return {boolean}
+     */
+    carried(message, post) {
+        return ScribeIntake.playerLength(ScribeIntake.Submissions.get(message), post) !== null;
+    },
+
+    /**
+     * @param {string|undefined} wire
+     * @param {object} post
+     * @return {number|null}
+     */
+    playerLength(wire, post) {
+        const tail = '\n@: ' + post.carried + (post.suggestion === null ? '' : '\n@: ' + post.suggestion);
+        return typeof wire === 'string' && wire.endsWith(tail) && ScribeText.fingerprint(wire.slice(0, -tail.length)) === post.submission
+            ? wire.length - tail.length : null;
+    },
+
+    /**
      * @param {object[]} rawMessages
+     * @param {object|null} evidence
      * @return {Readonly<{ messages: readonly object[], notes: readonly object[], own: readonly object[], player: string }>}
      * @throws {Error}
      */
-    read(rawMessages) {
+    read(rawMessages, evidence = null) {
         const settings = ScribeIntake.Settings;
         for (let index = 1; index < rawMessages.length; index++) {
             if (Date.parse(rawMessages[index - 1].messageTime) > Date.parse(rawMessages[index].messageTime)) {
                 throw new Error(settings.UnorderedMessage);
             }
         }
-        const parsed = rawMessages.map((raw, index) => ({
-            id: raw.id,
-            position: index + 1,
-            fromPlayer: raw.sender.type === settings.PlayerSender,
-            edited: raw.edited === true,
-            blocks: raw.contents.filter((block) => block.type === settings.TextType),
-        }));
+        const copies = new Map();
+        const parsed = rawMessages.map((raw, index) => {
+            const blocks = raw.contents.filter((block) => block.type === settings.TextType);
+            const fromPlayer = raw.sender.type === settings.PlayerSender;
+            const posted = fromPlayer ? blocks.map((block) => block.text).join(settings.Newline) : null;
+            const parts = posted?.includes(settings.OwnMarker) ? blocks.map((block) =>
+                block.position === settings.NarratorPosition && !block.text.startsWith('@: ') ? '@: ' + block.text : block.text) : null;
+            const wire = parts?.join(settings.Newline) ?? null;
+            const position = index + 1;
+            if (wire !== null) {
+                if (!copies.has(wire)) {
+                    copies.set(wire, []);
+                }
+                copies.get(wire).push(position);
+            }
+            return { id: raw.id, position, fromPlayer, edited: raw.edited === true, blocks, parts, wire, posted };
+        });
 
         const rightCounts = new Map();
         for (const message of parsed.filter((entry) => entry.fromPlayer)) {
@@ -132,10 +164,68 @@ const ScribeIntake = Object.freeze({
 
         const notePositions = new Map();
         const lifted = [];
+        const saved = new Map((Array.isArray(evidence?.attachments) ? evidence.attachments : [])
+            .filter((entry) => entry && Number.isSafeInteger(entry.length) && entry.length >= 0)
+            .map((entry) => [entry.id, entry]));
+        const pending = (Array.isArray(evidence?.posts) ? evidence.posts : []).filter((post) => post?.manual === true &&
+            typeof post.carried === 'string' && Number.isSafeInteger(post.floor) && post.floor >= 0);
+        const uncertainCopies = new Set();
+        for (const message of parsed) {
+            const alternatives = saved.get(message.id)?.alternatives;
+            if (!Array.isArray(alternatives) || !message.wire || copies.get(message.wire).length < 2) {
+                continue;
+            }
+            if (pending.some((post) => alternatives.includes(post.key) && post.floor < message.position &&
+                ScribeIntake.playerLength(message.wire, post) !== null &&
+                copies.get(message.wire).some((position) => position !== message.position && post.floor < position))) {
+                uncertainCopies.add(message.wire);
+            }
+        }
         const messages = parsed.map((message) => {
             const found = [];
-            const sources = message.blocks.map((block) => ({ block, kept: block.text }));
-            if (message.fromPlayer) {
+            const original = message.blocks.map((block) => [block.speakerName, block.position, block.text].join(settings.Newline)).join(settings.Newline);
+            const fingerprint = ScribeText.fingerprint(original);
+            const { posted, parts, wire } = message;
+            const bound = saved.get(message.id);
+            let length = null;
+            let interchangeable = uncertainCopies.has(wire);
+            let awaiting = interchangeable;
+            if (wire !== null && !awaiting) {
+                if (bound?.fingerprint === fingerprint && wire[bound.length] === settings.Newline &&
+                    ScribeIntake.own(wire.slice(bound.length + 1).split(settings.LineBreak, 1)[0])) {
+                    awaiting = bound.contested === true;
+                    length = awaiting ? null : bound.length;
+                } else {
+                    const matches = pending.filter((post) => post.floor < message.position &&
+                        (post.after === null || parsed[post.floor - 1]?.id === post.after) && ScribeIntake.playerLength(wire, post) !== null);
+                    const confirmed = matches.filter((post) => post.confirmed);
+                    const candidates = confirmed.length ? confirmed : matches;
+                    const lengths = new Set(candidates.map((post) => ScribeIntake.playerLength(wire, post)));
+                    interchangeable = new Set(matches.map((post) => ScribeIntake.playerLength(wire, post))).size > 1 &&
+                        copies.get(wire).some((position) => position !== message.position &&
+                            matches.filter((post) => post.floor < position).length > 1);
+                    awaiting = lengths.size > 1 || interchangeable || candidates.some((post) => post.contested);
+                    if (!awaiting && candidates.length) {
+                        length = ScribeIntake.playerLength(wire, candidates[0]);
+                        pending.splice(pending.indexOf(candidates[0]), 1);
+                    }
+                }
+            }
+            let remaining = length;
+            const sources = message.blocks.flatMap((block, index) => {
+                if (awaiting) {
+                    return [];
+                }
+                if (remaining === null) {
+                    return [{ block, kept: block.text }];
+                }
+                const end = remaining - (parts[index].length - block.text.length);
+                remaining -= parts[index].length + settings.Newline.length;
+                return end <= 0 ? [] : [{ block, kept: block.text.slice(0, end) }];
+            });
+            if (length !== null) {
+                lifted.push(Object.freeze({ text: wire.slice(length + 1).split(settings.LineBreak, 1)[0], position: message.position }));
+            } else if (message.fromPlayer && !bound) {
                 for (const { block } of sources) {
                     for (const line of block.text.split(settings.LineBreak)) {
                         if (ScribeIntake.own(line)) {
@@ -211,6 +301,8 @@ const ScribeIntake = Object.freeze({
                         return settings.Nothing;
                     });
                     found.push(...inside, ...closing);
+                }
+                if (length === null && !bound && text.includes(settings.OwnMarker)) {
                     const pieces = text.split(settings.LineBreakParts);
                     text = settings.Nothing;
                     for (let part = 0; part < pieces.length; part += 2) {
@@ -219,7 +311,7 @@ const ScribeIntake = Object.freeze({
                         }
                     }
                 }
-                if (text !== block.text) {
+                if (text !== kept || (length === null && text !== block.text)) {
                     text = text.replace(settings.ExcessBreaks, settings.BlankLine);
                 }
                 text = text.trim();
@@ -244,21 +336,24 @@ const ScribeIntake = Object.freeze({
                 const suffix = block.role === ScribeIntake.Role.Player ? settings.PlayerSuffix : settings.Nothing;
                 return block.speaker + suffix + settings.SpeakerSeparator + block.text;
             });
-            const original = message.blocks
-                .map((block) => [block.speakerName, block.position, block.text].join(settings.Newline))
-                .join(settings.Newline);
-            const posted = message.fromPlayer ? message.blocks.map((block) => block.text).join(settings.Newline) : null;
-            return Object.freeze({
+            const entry = Object.freeze({
                 id: message.id,
                 position: message.position,
                 fromPlayer: message.fromPlayer,
                 edited: message.edited,
                 submission: posted === null ? null : ScribeText.submission(posted),
                 completeSubmission: posted === null ? null : ScribeText.submission(posted, true),
+                ...(length === null ? {} : { projection: length }),
+                ...(awaiting ? { attributionPending: true } : {}),
+                ...(interchangeable ? { interchangeable: true } : {}),
                 blocks: Object.freeze(blocks),
                 text: lines.join(settings.Newline),
-                fingerprint: ScribeText.fingerprint(original),
+                fingerprint,
             });
+            if (wire !== null) {
+                ScribeIntake.Submissions.set(entry, wire);
+            }
+            return entry;
         });
 
         const notes = [];

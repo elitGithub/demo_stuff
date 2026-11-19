@@ -410,6 +410,7 @@ const ScribeBoot = Object.freeze({
             const trial = {
                 startedAt: environment.clock.now(),
                 cancelled: false,
+                dispatched: false,
                 stopper: null,
                 halt: null,
                 leave: null,
@@ -450,6 +451,7 @@ const ScribeBoot = Object.freeze({
                             throw new Error(messages.Stopped);
                         }
                         trial.stopper = new environment.pageWindow.AbortController();
+                        trial.dispatched = true;
                         return session.boot.request(url, {
                             method: options.method,
                             headers: options.headers,
@@ -512,7 +514,10 @@ const ScribeBoot = Object.freeze({
                  * @param {*} error
                  * @return {{ answer: null, error: * }}
                  */
-                (error) => ({ answer: null, error }),
+                (error) => {
+                    error.source = trial.dispatched ? 'OpenRouter' : 'Scribe';
+                    return { answer: null, error };
+                },
             );
             session.running.add(trial);
             ScribeBoot.later(
@@ -545,8 +550,15 @@ const ScribeBoot = Object.freeze({
                 continue;
             }
             if (outcome.error !== null) {
-                outcome.error.stopped = stopped;
-                throw outcome.error;
+                const error = outcome.error;
+                const mask = ScribeStore.redactor(environment.storage);
+                for (const field of ['message', 'reason', 'answer', 'finish']) {
+                    if (typeof error[field] === 'string') {
+                        error[field] = mask(error[field]);
+                    }
+                }
+                error.stopped = stopped;
+                throw error;
             }
             return { ...outcome.answer, stopped };
         }
@@ -577,8 +589,8 @@ const ScribeBoot = Object.freeze({
      */
     async ask(session, role, system, user) {
         const bill = { amount: ScribeBoot.Settings.NoSpending, settled: false };
-        ScribeBoot.solvent(session);
         try {
+            ScribeBoot.solvent(session);
             const answer = await ScribeBoot.call(
                 session,
                 role,
@@ -596,6 +608,7 @@ const ScribeBoot = Object.freeze({
         } catch (error) {
             bill.settled = true;
             ScribeBoot.charge(session, bill.amount);
+            error.source ??= 'Scribe';
             throw error;
         }
     },
@@ -629,9 +642,9 @@ const ScribeBoot = Object.freeze({
      */
     async counted(session, role, system, user) {
         const settings = ScribeBoot.Settings;
-        ScribeBoot.affordable(session);
         const bill = { amount: settings.NoSpending, settled: false };
         try {
+            ScribeBoot.affordable(session);
             const answer = await ScribeBoot.call(
                 session,
                 role,
@@ -653,6 +666,9 @@ const ScribeBoot = Object.freeze({
                 finish: answer.finish,
                 stopped: answer.stopped,
             };
+        } catch (error) {
+            error.source ??= 'Scribe';
+            throw error;
         } finally {
             bill.settled = true;
             ScribeBoot.charge(session, bill.amount);
@@ -959,6 +975,7 @@ const ScribeBoot = Object.freeze({
         const attempt = reminder === null ? null : ScribeBoot.name(lines.attempt);
         return Object.freeze({
             ready,
+            ...(lines.manual === true && ready !== null ? { manual: true } : {}),
             suggestion: ScribeBoot.fit(lines.suggestion),
             ends: ready === null ? ScribeBoot.Settings.NothingOffered.ends : lines.ends,
             reminder: attempt === null ? null : reminder,
@@ -995,6 +1012,7 @@ const ScribeBoot = Object.freeze({
             ...(boot.session ? { room: boot.session.roomId } : {}),
             token: boot.bridge,
             ready: lines.ready,
+            ...(lines.manual ? { manual: true } : {}),
             suggestion: lines.suggestion,
             ends: [...lines.ends],
             reminder: lines.reminder,
@@ -1016,6 +1034,7 @@ const ScribeBoot = Object.freeze({
         const arm = Object.freeze({
             seq,
             ready: lines.ready,
+            manual: lines.manual === true,
             ends: lines.ends,
             suggestion: lines.suggestion,
             reminder: lines.reminder,
@@ -1098,16 +1117,18 @@ const ScribeBoot = Object.freeze({
             (arm) => arm.seq === report.seq,
         );
         const repeated = kept !== undefined && report.index !== null && kept.reports.has(report.index);
-        const forged = kept !== undefined && report.ready && report.reminder !== null &&
+        const forged = kept !== undefined && report.ready && (report.reminder !== null || kept.manual) &&
             (report.reminder !== kept.reminder || report.attempt !== kept.attempt);
-        if ((outstanding || kept?.session === session) && !repeated && !forged) {
+        if ((outstanding || kept?.session === session) && !repeated && !forged && !(kept?.manual && report.cut !== null)) {
             const ready = report.ready ? (outstanding ?? kept).ready : null;
             const lines = outstanding ?? Object.freeze({
                 key,
                 ...(report.submission ? { submission: report.submission } : {}),
                 ready,
+                ...(ready !== null && kept.manual ? { manual: true } : {}),
                 suggestion: report.suggestion ? kept.suggestion : null,
-                carried: ready !== null && report.cut !== null ? ready.slice(0, report.cut) : ready,
+                carried: ready !== null && kept.manual ? ScribeSender.paragraph(ready) :
+                    ready !== null && report.cut !== null ? ready.slice(0, report.cut) : ready,
                 crowded: report.crowded,
                 reminder: ready === null ? null : kept.reminder,
                 attempt: ready === null ? null : kept.attempt,
@@ -1117,7 +1138,18 @@ const ScribeBoot = Object.freeze({
             if (report.kind === kind.Starting) {
                 if (!finishing) {
                     entry.pending = { arm: kept, index: report.index, lines };
-                    ScribeBoot.attempt(boot, warning, () => live.starting(lines));
+                    let journaled = false;
+                    ScribeBoot.attempt(boot, warning, () => { journaled = live.starting(lines) === true; });
+                    if (lines.reminder !== null) {
+                        const bridge = ScribeFrame.Bridge;
+                        const grant = { [bridge.TagName]: bridge.Tag, kind: bridge.Kind.Reserved, token: boot.bridge,
+                            room: session.roomId, seq: report.seq, index: report.index, allowed: journaled };
+                        if (!journaled) {
+                            kept.reports.add(report.index);
+                            entry.pending = null;
+                        }
+                        entry.target.postMessage(boot.environment.clone ? boot.environment.clone(grant) : grant, bridge.FrameOrigin);
+                    }
                 }
                 return;
             }
@@ -1810,7 +1842,7 @@ const ScribeBoot = Object.freeze({
                         /**
                          * @return {Promise<void>}
                          */
-                        () => keeper.tick(),
+                        () => keeper.tick(false),
                     );
                 },
             });
@@ -1827,9 +1859,11 @@ const ScribeBoot = Object.freeze({
                         ZetaSource.history({ fetch, token: ScribeBoot.token(boot), roomId: session.roomId, pause, onPage }),
 
                     /**
+                     * @param {string|null} through
                      * @return {Promise<object>}
                      */
-                    newest: () => ZetaSource.newest({ fetch, token: ScribeBoot.token(boot), roomId: session.roomId, pause }),
+                    newest: (through = null) =>
+                        ZetaSource.newest({ fetch, token: ScribeBoot.token(boot), roomId: session.roomId, pause, through }),
                 }),
 
                 /**
@@ -1988,6 +2022,7 @@ const ScribeBoot = Object.freeze({
                     const lines = live.posting();
                     return {
                         room: (roomId) => roomId === session.roomId,
+                        manual: lines.manual === true,
                         confirmed: () => live.went(lines),
                         rejected: () => live.rejected(lines),
                         uncertain: () => live.uncertain(lines),

@@ -434,6 +434,17 @@ test('the newest page alone', async () => {
     assert.equal(error.status, 403);
 });
 
+test('a boundary refresh follows only the cursors needed for the next stretch', async () => {
+    const messages = FakeZeta.messages(100);
+    for (const [through, pages] of [['m099', 1], ['m040', 2]]) {
+        const api = new FakeZeta(messages);
+        const result = await latest(api.fetch, { through });
+        assert.deepEqual(api.requests.map((request) => cursorOf(request.url)), [null, FakeZeta.cursorAt(31)].slice(0, pages));
+        assert.equal(result.end, END.ThroughMessage);
+        assert.deepEqual(ids(result.messages), ids(messages.slice(-31 * pages)));
+    }
+});
+
 test('the status-only watcher reads only the room and HTTP result for player message POSTs', async () => {
     const page = FakeZeta.window();
     const headerSetter = page.XMLHttpRequest.prototype.setRequestHeader;

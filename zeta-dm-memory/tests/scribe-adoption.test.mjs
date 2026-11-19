@@ -245,6 +245,7 @@ async function adopt(chosen = {}) {
     };
     const result = await ScribeAdoption.run({
         messages: book.messages,
+        readThrough: chosen.readThrough,
         notes: book.notes,
         player: book.player,
         profile: chosen.profile,
@@ -491,6 +492,122 @@ test('notes are filed once', async () => {
     assert.deepEqual(plain(again.result), ended('Done', null, 0.25, 1));
     assert.deepEqual(passes(again.calls), [['Story', [1, 40]]]);
     assert.deepEqual(plain(run.log.notes), [firstNote, laterNote]);
+});
+
+test('a mixed stretch reads an echo-only row but accepts story citations only from the surviving release at #217', async () => {
+    const builder = new CampaignBuilder('Frost');
+    while (builder.messages.length < 215) {
+        builder.narrator('Frost waits.');
+    }
+    const attendance = '[Scribe] Mavan stands beside the chains.';
+    const release = 'The chains break and Magera takes cat form.';
+    builder.narrator(attendance).reply([['Mavan', attendance], ['Narrator', release]]);
+    const chosen = ScribeIntake.read(builder.messages);
+    const log = ScribeLog.create();
+    markRead(log, chosen, 1, 215);
+    const result = await adopt({
+        campaign: chosen,
+        log,
+        answering: () => answer({
+            FACTS: ['Mavan | trait | stands beside the chains | #216', 'Magera | trait | takes cat form | #217'],
+        }),
+    });
+    assert.equal(result.result.stop, 'Done');
+    assert.equal(result.calls.length, 1);
+    assert.ok(result.calls[0].user.includes(`[#217] Narrator: ${release}`));
+    assert.ok(!result.calls[0].user.includes('[#216]'));
+    assert.ok(!result.calls[0].user.includes('Mavan'));
+    assert.deepEqual(plain(result.reports[0].refusedOperations.map((item) => item.reason)), ['Citation']);
+    assert.deepEqual(plain(log.entries.at(-1).messageIds), ['MESSAGE-216', 'MESSAGE-217']);
+    const state = ScribeReplay.run(log, orderOf(chosen));
+    assert.deepEqual(plain(state.facts.map((fact) => [fact.text, fact.cite])), [['takes cat form', 'MESSAGE-217']]);
+    assert.equal((await adopt({ campaign: chosen, log })).calls.length, 0);
+});
+
+test('a disputed position stays out of Story, legacy notes and historical attendance citations', async () => {
+    const builder = new CampaignBuilder('Frost').player('I enter.')
+        .player('A disputed account.').narrator('A gate opens.').narrator('Rain falls.');
+    const intake = ScribeIntake.read(builder.messages);
+    const chosen = { ...intake, notes: [{ position: 2, text: 'A disputed legacy note.' }],
+        messages: intake.messages.map((message) => message.position === 2 ? { ...message, attributionPending: true } : message) };
+    const run = await adopt({
+        campaign: chosen,
+        answering: (call) => answer({ SCENES: call.marks.includes(1) ? [
+            'Day 1 | #1-#1 | Inn | public | present: Frost (from #1) | We wait',
+        ] : [
+            'Day 1 | #1-#4 | Inn | public | present: Mavan (from #2 until #4) | Rain falls',
+            'Day 1 | #1-#4 | Inn | public | present: Frost (from #1 until #4) | Rain falls',
+        ] }),
+    });
+    assert.equal(run.result.stop, 'Done');
+    assert.deepEqual(run.calls.map((call) => [call.pass, call.marks]), [['Story', [1, 1]], ['Story', [3, 4]]]);
+    assert.ok(run.calls.every((call) => !call.user.includes('disputed')));
+    assert.deepEqual(plain(run.reports.at(-1).refusedOperations.map((item) => item.reason)), ['Citation']);
+    assert.deepEqual(Object.keys(run.log.read), ['MESSAGE-1', 'MESSAGE-3', 'MESSAGE-4']);
+    assert.deepEqual(plain(run.log.notes), []);
+    const state = ScribeReplay.run(run.log, orderOf(chosen));
+    assert.deepEqual(plain(state.subjects.map((subject) => subject.label)), ['Frost']);
+    assert.equal(state.scenes[0].lastPosition, 4);
+});
+
+test('adoption marks a storyteller echo-only stretch read with zero claims and zero model calls', async () => {
+    const chosen = ScribeIntake.read(new CampaignBuilder('Frost').narrator('@: [Scribe] Mavan is here.').messages);
+    const result = await adopt({ campaign: chosen, budget: 0 });
+    assert.deepEqual(plain(result.result), ended('Done', null, 0, 0));
+    assert.equal(result.calls.length, 0);
+    const saved = result.saved.at(-1);
+    assert.equal(saved.read['MESSAGE-1'], saved.entries[0].sequence);
+    assert.deepEqual(saved.entries[0].operations, []);
+});
+
+test('both scene attendance bounds reject echo-only sources before allocating subjects', async () => {
+    const builder = new CampaignBuilder('Frost').player('I enter.').narrator('[Scribe] Mavan is here.').narrator('The door closes.');
+    const chosen = ScribeIntake.read(builder.messages);
+    const run = await adopt({
+        campaign: chosen,
+        answering: () => answer({
+            SCENES: [
+                'Day 1 | #1-#3 | Inn | public | present: Mavan (from #2) | The door closes',
+                'Day 1 | #1-#3 | Inn | public | present: Mavan (until #2) | The door closes',
+                'Day 1 | #1-#3 | Inn | public | present: Frost (from #1 until #3) | The door closes',
+            ],
+        }),
+    });
+    assert.equal(run.result.stop, 'Done');
+    assert.deepEqual(plain(run.reports[0].refusedOperations.map((item) => item.reason)), ['Citation', 'Citation']);
+    const state = ScribeReplay.run(run.log, orderOf(chosen));
+    assert.deepEqual(plain(state.subjects.map((subject) => [subject.id, subject.label])), [['S1', 'Frost']]);
+    assert.equal(state.scenes.length, 1);
+    assert.deepEqual(plain(state.scenes[0].present), [{ subject: 'S1', from: 1, until: 3 }]);
+    assert.equal(readCount(run.log, chosen), 3);
+});
+
+test('continuing a scene checks historical attendance bounds against the original story rows', async () => {
+    const builder = new CampaignBuilder('Frost').player('I enter.').narrator('[Scribe] Mavan is here.').narrator('The door closes.');
+    const first = await adopt({
+        campaign: ScribeIntake.read(builder.messages),
+        answering: () => answer({ SCENES: ['Day 1 | #1-#3 | Inn | public | present: Frost (from #1) | We wait'] }),
+    });
+    const chosen = ScribeIntake.read(builder.narrator('It starts to rain.').messages);
+    const next = await adopt({
+        campaign: chosen,
+        log: plain(first.saved.at(-1)),
+        answering: () => answer({
+            SCENES: [
+                'Day 1 | #1-#4 | Inn | public | present: Mavan (from #2 until #4) | It rains',
+                'Day 1 | #1-#4 | Inn | public | present: Frost (from #1 until #2) | It rains',
+                'Day 1 | #1-#4 | Inn | public | present: Frost (from #1 until #4) | It rains',
+            ],
+        }),
+    });
+    assert.equal(next.result.stop, 'Done');
+    assert.deepEqual(plain(next.reports[0].refusedOperations.map((item) => item.reason)), ['Citation', 'Citation']);
+    const state = ScribeReplay.run(next.log, orderOf(chosen));
+    assert.deepEqual(plain(state.subjects.map((subject) => subject.label)), ['Frost']);
+    assert.equal(state.scenes.length, 1);
+    assert.equal(state.scenes[0].lastPosition, 4);
+    assert.equal(state.scenes[0].summary, 'It rains');
+    assert.equal(readCount(next.log, chosen), 4);
 });
 
 test('an empty stretch and an empty answer are both read', async () => {
@@ -1069,6 +1186,14 @@ test('withdrawn messages are read again', async () => {
     assert.equal(state.facts.length, 6);
 });
 
+test('reading an interior gap reports saved coverage across the entire room', async () => {
+    const first = await adopt();
+    ScribeLog.withdraw(first.log, 'MESSAGE-41');
+    const second = await adopt({ log: first.log, readThrough: 80 });
+    assert.deepEqual(passes(second.calls), [['Story', [41, 80]]]);
+    assert.deepEqual(plain(second.reports.map(({ read, total }) => [read, total])), [[100, 100]]);
+});
+
 test('answered questions are filed and retired', async () => {
     const order = orderOf(plainCampaign);
     const log = await answeredLog();
@@ -1349,7 +1474,11 @@ test('bad arguments stop before any call', async () => {
     const cases = [
         [{ messages: 'all of them' }, 'messages is not a list.'],
         [{ messages: twice }, 'Two messages share the id MESSAGE-1.'],
+        [{ readThrough: -1 }, 'readThrough is not a whole number within the message list.'],
+        [{ readThrough: 1.5 }, 'readThrough is not a whole number within the message list.'],
+        [{ readThrough: plainCampaign.messages.length + 1 }, 'readThrough is not a whole number within the message list.'],
         [{ notes: null }, 'notes is not a list.'],
+        [{ atBudget: true }, 'atBudget is not a function.'],
         [{ player: 7 }, 'player is not a string.'],
         [{ profile: 7 }, 'profile is neither a string nor null.'],
         [{ profile: { text: 'Orla' } }, 'profile is neither a string nor null.'],

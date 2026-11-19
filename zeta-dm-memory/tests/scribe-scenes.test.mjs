@@ -1101,6 +1101,25 @@ test('nights are listed once in story order', () => {
     assert.equal(factSaying(state, 'weary').status, 'InForce');
 });
 
+test('direct scene appends distinguish empty Story sources from notes, answers and legacy positions', () => {
+    const messages = pick(1, 2, 3);
+    messages[1] = { ...messages[1], text: '' };
+    const text = answer({ SCENES: ['Day 1 | #1-#3 | The mill | public | present: Halvard (from #2) | A visit'] });
+    const denied = apply(ScribeLog.create(), storyOrder, text, messages);
+    assert.deepEqual(plain(denied.result.refused.map((item) => item.reason)), ['Citation']);
+    assert.deepEqual(plain(denied.state.subjects), []);
+    assert.deepEqual(plain(denied.state.scenes), []);
+    for (const origin of ['Notes', 'Answers']) {
+        const accepted = apply(ScribeLog.create(), storyOrder, text, messages, origin);
+        assert.deepEqual(plain(accepted.result.refused), []);
+        assert.equal(accepted.state.scenes[0].present[0].from, 2);
+    }
+    const legacy = messages.map(({ id, position }) => ({ id, position }));
+    const accepted = apply(ScribeLog.create(), storyOrder, text, legacy);
+    assert.deepEqual(plain(accepted.result.refused), []);
+    assert.equal(accepted.state.scenes[0].present[0].from, 2);
+});
+
 test('a scene continues across stretches', () => {
     const log = ScribeLog.create();
     const first = apply(

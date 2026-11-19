@@ -32,7 +32,7 @@ function load() {
     return loaded;
 }
 
-const { ScribeAnswer, ScribeReplay, ScribeAnalyzer, ScribeStore, ScribeKeeper } = load();
+const { ScribeAnswer, ScribeIntake, ScribeLog, ScribeReplay, ScribeAnalyzer, ScribeStore, ScribeKeeper } = load();
 
 const ROOM = 'harbour';
 const OTHER_ROOM = 'quarry';
@@ -542,7 +542,7 @@ test('a chat with no book says so', async () => {
     assert.equal(view.reader, true);
     assert.equal(view.roomId, ROOM);
     assert.equal(view.total, 100);
-    assert.equal(view.settled, 99);
+    assert.equal(view.settled, 100);
     assert.equal(view.read, 0);
     assert.equal(view.problem, null);
     assert.equal(view.flight, null);
@@ -570,7 +570,7 @@ test('adopting reads every settled message and saves after each stretch', async 
     });
     const { keeper, events } = await opened(chat, model, { storage });
     await keeper.adopt({ size: 40 });
-    assert.deepEqual(ranges(model), ['Story 1-40', 'Story 41-80', 'Story 81-99']);
+    assert.deepEqual(ranges(model), ['Story 1-40', 'Story 41-80', 'Story 81-100']);
     assert.deepEqual(
         model.calls.map((call) => call.role),
         ['Analyzer', 'Analyzer', 'Analyzer'],
@@ -578,41 +578,141 @@ test('adopting reads every settled message and saves after each stretch', async 
     assert.deepEqual(savedAtCall, [0, 40, 80]);
     const view = keeper.view();
     assert.equal(view.phase, 'Idle');
-    assert.equal(view.read, 99);
+    assert.equal(view.read, 100);
     assert.equal(view.stop.reason, 'Done');
-    assert.equal(savedReads(storage), 99);
+    assert.equal(savedReads(storage), 100);
     assert.equal(savedRead(storage, 'MESSAGE-99'), true);
-    assert.equal(savedRead(storage, 'MESSAGE-100'), false);
-    assert.equal(Object.keys(savedBook(storage).fingerprints).length, 99);
+    assert.equal(savedRead(storage, 'MESSAGE-100'), true);
+    assert.equal(Object.keys(savedBook(storage).fingerprints).length, 100);
     assert.equal(savedBook(storage).adopted, true);
     assert.deepEqual(plain(view.lines.map((line) => line.first)), [81, 41, 1]);
     assert.equal(view.calls.length, 3);
     assert.equal(events.filter((event) => event.kind === 'Progress').length, 3);
 });
 
-test('the newest reply is read only once it is answered', async () => {
+test('a partial or failed boundary check leaves the next stretch unpaid until its current rows arrive', async () => {
+    const chat = new FakeChat(83);
+    const changed = 'The lamp is dark beside the ford.';
+    const model = analyst({ hold: (call) => {
+        if (call.marks[0] === 1) {
+            chat.edit(42, changed).hide(42);
+        }
+        return null;
+    } });
+    const { keeper, storage } = await opened(chat, model);
+    await keeper.adopt({ size: 40 });
+    const first = savedBook(storage);
+    assert.deepEqual(ranges(model), ['Story 1-40']);
+    assert.equal(Object.keys(first.log.read).length, 40);
+    assert.equal(first.adopted, false);
+    assert.equal(chat.count('tab-1', 'newest'), 1);
+    chat.fail('newest', new Error('Zeta could not be reached'));
+    await keeper.tick();
+    assert.deepEqual(ranges(model), ['Story 1-40']);
+    assert.deepEqual(plain(savedBook(storage)), plain(first));
+    await keeper.tick();
+    const after = savedBook(storage);
+    assert.equal(after.adopted, true);
+    assert.equal(Object.keys(after.log.read).length, 83);
+    assert.deepEqual(ranges(model), ['Story 1-40', 'Story 41-80', 'Story 81-83']);
+    assert.ok(keeper.view().calls.find((call) => call.input.includes('NEW MESSAGES (#41 to #80):')).input.includes(changed));
+    const current = ScribeIntake.read(chat.raw).messages.find((message) => message.id === 'MESSAGE-42');
+    assert.equal(after.fingerprints[current.id], current.fingerprint);
+    for (const [id, sequence] of Object.entries(first.log.read)) {
+        assert.equal(after.log.read[id], sequence);
+    }
+});
+
+test('the newest reply is read without another message', async () => {
     const { chat, model, keeper, storage } = await adopted();
     chat.add(1);
     await keeper.tick();
-    assert.equal(model.calls.length, 3);
-    assert.equal(keeper.view().read, 99);
-    assert.equal(keeper.view().settled, 100);
+    assert.equal(model.calls.length, 4);
+    assert.equal(keeper.view().read, 101);
+    assert.equal(keeper.view().settled, 101);
     for (const batch of [30, 8]) {
         chat.add(batch);
         await keeper.tick();
     }
-    assert.equal(model.calls.length, 3);
-    assert.equal(keeper.view().settled, 138);
-    assert.equal(keeper.view().read, 99);
+    assert.equal(model.calls.length, 6);
+    assert.equal(keeper.view().settled, 139);
+    assert.equal(keeper.view().read, 139);
     chat.add(2);
     await keeper.tick();
-    assert.deepEqual(ranges(model).slice(3), ['Story 100-139']);
+    assert.deepEqual(ranges(model).slice(3), ['Story 101-101', 'Story 102-131', 'Story 132-139', 'Story 140-141']);
     const view = keeper.view();
     assert.equal(view.total, 141);
-    assert.equal(view.read, 139);
+    assert.equal(view.read, 141);
     assert.equal(savedRead(storage, 'MESSAGE-139'), true);
-    assert.equal(savedRead(storage, 'MESSAGE-140'), false);
-    assert.equal(savedRead(storage, 'MESSAGE-141'), false);
+    assert.equal(savedRead(storage, 'MESSAGE-140'), true);
+    assert.equal(savedRead(storage, 'MESSAGE-141'), true);
+});
+
+test('zero, singleton, exact-size and one-over rooms save every available row once', async () => {
+    const empty = new FakeStorage();
+    ScribeStore.write(empty, ROOM, 'campaign', { messages: [], gone: [] });
+    ScribeStore.write(empty, ROOM, 'book', { log: ScribeLog.create(), fingerprints: {}, adopted: true });
+    const silent = analyst();
+    const reopened = await opened(new FakeChat(0), silent, { storage: empty });
+    await reopened.keeper.tick();
+    assert.equal(reopened.keeper.view().phase, 'Idle');
+    assert.equal(reopened.keeper.view().total, 0);
+    assert.equal(reopened.keeper.view().read, 0);
+    assert.deepEqual(ranges(silent), []);
+    for (const [total, expected] of [[1, ['Story 1-1']], [40, ['Story 1-40']], [41, ['Story 1-40', 'Story 41-41']]]) {
+        const { keeper, storage, model } = await adopted({ count: total });
+        assert.equal(savedReads(storage), total);
+        assert.equal(keeper.view().read, total);
+        assert.equal(keeper.view().settled, total);
+        await keeper.tick();
+        assert.deepEqual(ranges(model), expected);
+    }
+});
+
+test('a failed final save keeps 440 of 441 durable, retries once, then rereads only the edited tail', async () => {
+    const chat = new FakeChat(400);
+    const storage = new FakeStorage();
+    const { keeper, clock } = await adopted({ chat, storage, conflict: true });
+    await keeper.rule(PIN);
+    keeper.close();
+    chat.add(41);
+    const savedCounts = [];
+    const model = analyst({ hold: (call) => {
+        savedCounts.push(savedReads(storage));
+        if (call.marks[0] === 441) {
+            storage.refuseSetsMatching(BOOK_HEAD);
+        }
+        return null;
+    } });
+    const second = await opened(chat, model, { storage, clock });
+    await second.keeper.tick();
+    assert.deepEqual(ranges(model), ['Story 401-440', 'Story 441-441']);
+    assert.deepEqual(savedCounts, [400, 440]);
+    assert.equal(second.keeper.view().stop.reason, 'Failed');
+    assert.equal(second.keeper.view().read, 440);
+    assert.equal(second.keeper.view().total, 441);
+    assert.equal(savedReads(storage), 440);
+    assert.equal(savedRead(storage, 'MESSAGE-441'), false);
+    storage.allow();
+    clock.time += MINUTE;
+    await second.keeper.tick();
+    assert.deepEqual(ranges(model), ['Story 401-440', 'Story 441-441']);
+    second.keeper.close();
+    const edited = analyst();
+    const third = await opened(chat, edited, { storage, clock });
+    assert.equal(third.keeper.view().read, 441);
+    const before = savedBook(storage);
+    chat.edit(441, 'The lamp has gone dark.');
+    await third.keeper.tick();
+    await third.keeper.tick();
+    const after = savedBook(storage);
+    assert.deepEqual(ranges(edited), ['Story 441-441']);
+    assert.equal(savedReads(storage), 441);
+    assert.notEqual(before.fingerprints['MESSAGE-441'], after.fingerprints['MESSAGE-441']);
+    for (const number of numbers(1, 440)) {
+        assert.equal(after.log.read['MESSAGE-' + number], before.log.read['MESSAGE-' + number]);
+    }
+    assert.equal(factsSaying(third.keeper, 'thirty')[0].pinned, true);
 });
 
 test('a reply event is sent for a new or changed newest message', async () => {
@@ -649,7 +749,7 @@ test('an edited message is read again', async () => {
          */
         hold: (call) => (rereading && call.marks[0] === 1 ? held.promise : null),
     });
-    assert.deepEqual(ranges(model), ['Story 1-40', 'Story 41-44']);
+    assert.deepEqual(ranges(model), ['Story 1-40', 'Story 41-45']);
     assert.equal(keeper.view().state.conflicts.length, 1);
     await keeper.rule(PIN);
     assert.equal(keeper.view().state.conflicts.length, 0);
@@ -657,8 +757,8 @@ test('an edited message is read again', async () => {
     rereading = true;
     const ticking = keeper.tick();
     await until(() => model.calls.length === 3);
-    assert.equal(keeper.view().read, 4);
-    assert.equal(savedReads(storage), 4);
+    assert.equal(keeper.view().read, 5);
+    assert.equal(savedReads(storage), 5);
     assert.equal(savedRead(storage, 'MESSAGE-1'), false);
     assert.equal(savedRead(storage, 'MESSAGE-40'), false);
     assert.equal(savedRead(storage, 'MESSAGE-41'), true);
@@ -666,8 +766,8 @@ test('an edited message is read again', async () => {
     held.release();
     await ticking;
     await keeper.tick();
-    assert.deepEqual(ranges(model), ['Story 1-40', 'Story 41-44', 'Story 1-40']);
-    assert.equal(keeper.view().read, 44);
+    assert.deepEqual(ranges(model), ['Story 1-40', 'Story 41-45', 'Story 1-40']);
+    assert.equal(keeper.view().read, 45);
     assert.equal(keeper.view().state.conflicts.length, 0);
     const pinned = factsSaying(keeper, 'thirty');
     assert.equal(pinned.length, 1);
@@ -680,21 +780,21 @@ test('a deleted message is noticed in the newest page', async () => {
     const saves = bookSaves(storage);
     chat.regenerate();
     await keeper.tick();
-    assert.equal(keeper.view().read, 99);
+    assert.equal(keeper.view().read, 100);
     assert.equal(keeper.view().total, 100);
-    assert.equal(bookSaves(storage), saves);
-    assert.equal(model.calls.length, 3);
+    assert.ok(bookSaves(storage) > saves);
+    assert.equal(model.calls.length, 4);
     chat.remove(90);
     await keeper.tick();
     const view = keeper.view();
     assert.equal(view.total, 99);
-    assert.equal(view.read, 80);
-    assert.equal(savedReads(storage), 80);
+    assert.equal(view.read, 99);
+    assert.equal(savedReads(storage), 99);
     assert.equal(savedRead(storage, 'MESSAGE-80'), true);
-    assert.equal(savedRead(storage, 'MESSAGE-81'), false);
+    assert.equal(savedRead(storage, 'MESSAGE-81'), true);
     assert.equal(savedRead(storage, 'MESSAGE-90'), false);
     assert.equal(ScribeStore.read(storage, ROOM, ScribeStore.Kind.Campaign).messages.length, 99);
-    assert.equal(model.calls.length, 3);
+    assert.equal(model.calls.length, 5);
 });
 
 test('messages played elsewhere are read in order', async () => {
@@ -704,21 +804,21 @@ test('messages played elsewhere are read in order', async () => {
     const second = analyst();
     const again = await opened(chat, second, { storage, clock, tabId: 'tab-2' });
     assert.equal(again.keeper.view().total, 160);
-    assert.equal(again.keeper.view().read, 99);
+    assert.equal(again.keeper.view().read, 100);
     assert.equal(second.calls.length, 0);
     await again.keeper.tick();
-    assert.deepEqual([...ranges(model), ...ranges(second)], ['Story 1-40', 'Story 41-80', 'Story 81-99', 'Story 100-139']);
-    assert.equal(again.keeper.view().read, 139);
+    assert.deepEqual([...ranges(model), ...ranges(second)], ['Story 1-40', 'Story 41-80', 'Story 81-100', 'Story 101-140', 'Story 141-160']);
+    assert.equal(again.keeper.view().read, 160);
     const ids = [];
     for (const entry of savedBook(storage).log.entries) {
         if (!entry.withdrawn) {
             ids.push(...entry.messageIds);
         }
     }
-    assert.equal(ids.length, 139);
-    assert.equal(new Set(ids).size, 139);
+    assert.equal(ids.length, 160);
+    assert.equal(new Set(ids).size, 160);
     await again.keeper.tick();
-    assert.equal(second.calls.length, 1);
+    assert.equal(second.calls.length, 2);
 });
 
 test('closing mid-reading loses nothing saved', async () => {
@@ -751,8 +851,8 @@ test('closing mid-reading loses nothing saved', async () => {
     assert.equal(again.keeper.view().reader, true);
     assert.equal(again.keeper.view().read, 40);
     await again.keeper.tick();
-    assert.deepEqual(ranges(second), ['Story 41-80', 'Story 81-99']);
-    assert.equal(again.keeper.view().read, 99);
+    assert.deepEqual(ranges(second), ['Story 41-80', 'Story 81-100']);
+    assert.equal(again.keeper.view().read, 100);
 });
 
 test('a pause stops after the stretch in flight and resume goes on', async () => {
@@ -781,10 +881,10 @@ test('a pause stops after the stretch in flight and resume goes on', async () =>
     assert.equal(model.calls.length, 1);
     assert.equal(keeper.view().phase, 'Stopped');
     await keeper.resume();
-    assert.deepEqual(ranges(model), ['Story 1-40', 'Story 41-80', 'Story 81-99']);
+    assert.deepEqual(ranges(model), ['Story 1-40', 'Story 41-80', 'Story 81-100']);
     view = keeper.view();
     assert.equal(view.phase, 'Idle');
-    assert.equal(view.read, 99);
+    assert.equal(view.read, 100);
 });
 
 test('the daily budget stops reading and a new day lifts it', async () => {
@@ -816,11 +916,35 @@ test('the daily budget stops reading and a new day lifts it', async () => {
     assert.equal(keeper.view().phase, 'Stopped');
     clock.day = NEXT_DAY;
     await keeper.tick();
-    assert.deepEqual(ranges(model), ['Story 1-40', 'Story 41-80', 'Story 81-99']);
+    assert.deepEqual(ranges(model), ['Story 1-40', 'Story 41-80', 'Story 81-100']);
     view = keeper.view();
     assert.equal(view.phase, 'Idle');
-    assert.equal(view.read, 99);
+    assert.equal(view.read, 100);
     assert.equal(Math.round(view.spentToday * 100), 4);
+});
+
+test('an empty stretch edited into a note stays unread at the budget and is filed once on the next day', async () => {
+    const chat = new FakeChat(2).edit(2, '*(\n\n)*');
+    const note = 'Mirelle keeps the clocktower logs.';
+    const model = analyst({ hold: (call) => {
+        if (call.pass === 'Story') {
+            chat.edit(2, `*(\n${note}\n)*`);
+        }
+        return null;
+    } });
+    const { keeper, storage, clock } = await opened(chat, model);
+    await keeper.adopt({ size: 1, budget: model.cost });
+    assert.deepEqual(ranges(model), ['Story 1-1']);
+    assert.equal(keeper.view().stop.reason, 'Budget');
+    assert.equal(savedReads(storage), 1);
+    assert.deepEqual(plain(savedBook(storage).log.notes), []);
+    clock.day = NEXT_DAY;
+    await keeper.tick();
+    await keeper.tick();
+    assert.deepEqual(ranges(model), ['Story 1-1', 'Notes 2']);
+    assert.equal(savedReads(storage), 2);
+    assert.deepEqual(plain(savedBook(storage).log.notes), [note]);
+    assert.equal(ScribeStore.spent(storage, ROOM, NEXT_DAY), model.cost);
 });
 
 test('no key stops with words and resumes', async () => {
@@ -839,8 +963,8 @@ test('no key stops with words and resumes', async () => {
     await keeper.resume();
     view = keeper.view();
     assert.equal(view.phase, 'Idle');
-    assert.equal(view.read, 99);
-    assert.deepEqual(ranges(model), ['Story 1-40', 'Story 1-40', 'Story 41-80', 'Story 81-99']);
+    assert.equal(view.read, 100);
+    assert.deepEqual(ranges(model), ['Story 1-40', 'Story 1-40', 'Story 41-80', 'Story 81-100']);
 });
 
 test('a failed pull says why and tries again', async () => {
@@ -905,7 +1029,7 @@ test('rulings are saved before they are shown', async () => {
     await assert.rejects(reading.keeper.revoke(1), { message: READING });
     held.release();
     await adopting;
-    assert.equal(reading.keeper.view().read, 99);
+    assert.equal(reading.keeper.view().read, 100);
 });
 
 test('an answered question is filed on the next tick', async () => {
@@ -939,7 +1063,7 @@ test('one thing at a time', async () => {
     const release = chat.hold('history');
     const pulling = keeper.pull();
     await until(() => chat.count('tab-1', 'history') === 2);
-    assert.equal(keeper.view().flight, 'Pulling the chat: 0 messages');
+    assert.equal(keeper.view().flight, 'Reading chat history from Zeta · 0 messages');
     await keeper.tick();
     assert.equal(chat.count('tab-1', 'history'), 2);
     assert.equal(chat.count('tab-1', 'newest'), 0);
@@ -963,9 +1087,10 @@ test('one thing at a time', async () => {
     await adopting;
     assert.equal(model.calls.length, 3);
 
-    await keeper.tick();
-    await keeper.tick();
     assert.equal(chat.count('tab-1', 'newest'), 2);
+    await keeper.tick();
+    await keeper.tick();
+    assert.equal(chat.count('tab-1', 'newest'), 4);
     assert.equal(model.calls.length, 3);
 });
 
@@ -981,7 +1106,7 @@ test('a second tab watches', async () => {
     assert.equal(view.phase, 'Watching');
     assert.equal(view.reader, false);
     assert.equal(view.total, 100);
-    assert.equal(view.read, 99);
+    assert.equal(view.read, 100);
     await assert.rejects(second.keeper.adopt({}), { message: WATCHING });
     await assert.rejects(second.keeper.resume(), { message: WATCHING });
     await assert.rejects(second.keeper.rule(PIN), { message: WATCHING });
@@ -991,11 +1116,11 @@ test('a second tab watches', async () => {
     await first.keeper.tick();
     chat.add(11);
     await first.keeper.tick();
-    assert.equal(first.keeper.view().read, 139);
+    assert.equal(first.keeper.view().read, 141);
     await second.keeper.tick();
     view = second.keeper.view();
     assert.equal(view.phase, 'Watching');
-    assert.equal(view.read, 139);
+    assert.equal(view.read, 141);
     assert.equal(view.total, 141);
     assert.equal(chat.count('tab-2', 'history') + chat.count('tab-2', 'newest'), 0);
     assert.equal(watcherModel.calls.length, 0);
@@ -1053,8 +1178,8 @@ test('a damaged book is not overwritten', async () => {
     view = again.keeper.view();
     assert.equal(view.phase, 'Idle');
     assert.equal(view.problem, null);
-    assert.equal(view.read, 144);
-    assert.equal(savedReads(storage), 144);
+    assert.equal(view.read, 145);
+    assert.equal(savedReads(storage), 145);
 });
 
 test('settings are kept per chat', async () => {
@@ -1108,12 +1233,13 @@ test('messages out of order are refused', async () => {
 
 test('nothing loops', async () => {
     const down = await adopted();
+    const downBefore = down.chat.count('tab-1', 'newest');
     down.chat.failAlways('newest', new Error('Zeta could not be reached'));
     for (let turn = 0; turn < 20; turn++) {
         down.chat.add(2);
         assert.equal(await returns(down.keeper.tick()), true);
     }
-    assert.equal(down.chat.count('tab-1', 'newest') <= 20, true);
+    assert.equal(down.chat.count('tab-1', 'newest') - downBefore <= 20, true);
     assert.equal(down.keeper.view().problem, 'Zeta could not be reached');
     assert.equal(down.model.calls.length, 3);
 
@@ -1134,6 +1260,7 @@ test('nothing loops', async () => {
     const full = await adopted();
     full.storage.refuseSetsMatching(/^scribe:(?:head|part):/);
     const fullBefore = full.model.calls.length;
+    const fullPolls = full.chat.count('tab-1', 'newest');
     for (let turn = 0; turn < 20; turn++) {
         full.chat.add(3);
         const before = full.model.calls.length;
@@ -1144,32 +1271,34 @@ test('nothing loops', async () => {
         assert.equal(full.chat.count('tab-1', 'newest') - newestBefore <= 1, true);
         assert.equal(full.chat.count('tab-1', 'history') - historyBefore <= 1, true);
     }
-    assert.equal(full.chat.count('tab-1', 'newest') <= 20, true);
+    assert.equal(full.chat.count('tab-1', 'newest') - fullPolls <= 20, true);
     assert.equal(full.model.calls.length, fullBefore);
     assert.equal(full.keeper.view().problem, UNJOINED);
 
     const unsaved = await adopted();
     unsaved.chat.add(30);
-    await unsaved.keeper.tick();
-    unsaved.chat.add(11);
+    await unsaved.keeper.pull();
+    unsaved.chat.add(10);
     unsaved.storage.refuseSetsMatching(BOOK);
     const unsavedBefore = unsaved.model.calls.length;
+    const unsavedPolls = unsaved.chat.count('tab-1', 'newest');
     for (let turn = 0; turn < 20; turn++) {
         const before = unsaved.model.calls.length;
         assert.equal(await returns(unsaved.keeper.tick()), true);
         assert.equal(unsaved.model.calls.length - before <= 1, true);
     }
     assert.equal(unsaved.model.calls.length - unsavedBefore, 1);
-    assert.equal(unsaved.chat.count('tab-1', 'newest') <= 21, true);
+    assert.equal(unsaved.chat.count('tab-1', 'newest') - unsavedPolls <= 20, true);
     const view = unsaved.keeper.view();
     assert.equal(view.phase, 'Stopped');
     assert.equal(view.stop.problem, 'The save failed');
-    assert.equal(view.read, 99);
-    assert.equal(savedReads(unsaved.storage), 99);
+    assert.equal(view.read, 100);
+    assert.equal(savedReads(unsaved.storage), 100);
 });
 
 test('a page that does not join what is saved brings a whole pull', async () => {
     const { chat, model, keeper, storage, clock } = await adopted();
+    const newestBefore = chat.count('tab-1', 'newest');
     assert.equal(chat.count('tab-1', 'history'), 1);
     chat.add(40);
     clock.time += MINUTE;
@@ -1177,19 +1306,19 @@ test('a page that does not join what is saved brings a whole pull', async () => 
     assert.equal(chat.count('tab-1', 'history'), 2);
     assert.equal(savedIds(storage).join(',') === numbers(1, 140).map((number) => `MESSAGE-${number}`).join(','), true);
     assert.equal(keeper.view().total, 140);
-    assert.deepEqual(ranges(model).slice(3), ['Story 100-139']);
-    assert.equal(keeper.view().read, 139);
+    assert.deepEqual(ranges(model).slice(3), ['Story 101-140']);
+    assert.equal(keeper.view().read, 140);
     chat.add(30);
     await keeper.tick();
     assert.equal(chat.count('tab-1', 'history'), 2);
-    assert.equal(chat.count('tab-1', 'newest'), 2);
+    assert.equal(chat.count('tab-1', 'newest') - newestBefore, 2);
     assert.equal(savedIds(storage).length, 170);
     assert.equal(keeper.view().total, 170);
 });
 
 test('a pull cut short withdraws nothing outside it', async () => {
     const { chat, keeper, storage } = await adopted({ count: 120 });
-    assert.equal(keeper.view().read, 119);
+    assert.equal(keeper.view().read, 120);
     const ends = [
         ['Failed', 'Zeta could not be reached', UNREACHED],
         ['RepeatedCursor', null, STOPPED_EARLY],
@@ -1201,9 +1330,9 @@ test('a pull cut short withdraws nothing outside it', async () => {
         await keeper.pull();
         const view = keeper.view();
         assert.equal(view.total, 120, end);
-        assert.equal(view.read, 119, end);
+        assert.equal(view.read, 120, end);
         assert.equal(savedIds(storage).length, 120, end);
-        assert.equal(savedReads(storage), 119, end);
+        assert.equal(savedReads(storage), 120, end);
         assert.equal(savedRead(storage, 'MESSAGE-1'), true, end);
         assert.equal(savedRead(storage, 'MESSAGE-58'), true, end);
         assert.equal(view.problem, words, end);
@@ -1219,7 +1348,7 @@ test('a pull cut short withdraws nothing outside it', async () => {
     assert.equal(savedIds(storage).includes('MESSAGE-5'), false);
     assert.equal(savedRead(storage, 'MESSAGE-1'), false);
     assert.equal(savedRead(storage, 'MESSAGE-41'), true);
-    assert.equal(view.read, 79);
+    assert.equal(view.read, 80);
 });
 
 test('a partial pull still notices what changed inside it', async () => {
@@ -1321,7 +1450,7 @@ test("the player's words are filed as their own", async () => {
          * @param {{ marks: number[] }} call
          * @return {Promise<void>|null}
          */
-        hold: (call) => (call.marks[0] === 100 ? held.promise : null),
+        hold: (call) => (call.marks[0] === 101 ? held.promise : null),
     });
     assert.equal(savedNotes(storage), 0);
     const anchor = { id: 'MESSAGE-12', position: 12 };
@@ -1331,7 +1460,7 @@ test("the player's words are filed as their own", async () => {
     assert.equal(savedNotes(storage), 1);
     assert.deepEqual(notesAtNotice, [1]);
     assert.equal(savedBook(storage).log.entries.at(-1).origin, 'Notes');
-    assert.equal(savedReads(storage), 99);
+    assert.equal(savedReads(storage), 100);
     const filed = factsSaying(keeper, 'swore an oath to the harbour guild');
     assert.equal(filed.length, 1);
     assert.equal(filed[0].origin, 'Notes');
@@ -1341,8 +1470,10 @@ test("the player's words are filed as their own", async () => {
     assert.deepEqual(plain(second.map((item) => item.reason)), ['Citation']);
     assert.equal(factsSaying(keeper, 'keeps a second ledger').length, 0);
 
+    chat.add(1);
+    await keeper.pull();
     const before = storedText(storage, BOOK);
-    await assert.rejects(keeper.file(told(['Halvard | trait | hums at dusk | #12']), { id: 'MESSAGE-100', position: 100 }), {
+    await assert.rejects(keeper.file(told(['Halvard | trait | hums at dusk | #12']), { id: 'MESSAGE-101', position: 101 }), {
         message: BAD_ANCHOR,
     });
     await assert.rejects(keeper.file(told(['Halvard | trait | hums at dusk | #12']), { id: 'MESSAGE-999', position: 12 }), {
@@ -1352,15 +1483,15 @@ test("the player's words are filed as their own", async () => {
     assert.equal((await keeper.file([], anchor)).length, 0);
     assert.equal(storedText(storage, BOOK) === before, true);
 
-    chat.add(30);
-    await keeper.tick();
-    chat.add(11);
+    chat.add(29);
+    await keeper.pull();
+    chat.add(10);
     const ticking = keeper.tick();
     await until(() => model.calls.length === 4);
     await assert.rejects(keeper.file(told(['Halvard | trait | hums at dusk | #12']), anchor), { message: READING });
     held.release();
     await ticking;
-    assert.equal(keeper.view().read, 139);
+    assert.equal(keeper.view().read, 140);
 
     const watcher = await opened(chat, analyst(), { storage, clock, tabId: 'tab-2' });
     await assert.rejects(watcher.keeper.file(told(['Halvard | trait | hums at dusk | #12']), anchor), { message: WATCHING });
@@ -1497,6 +1628,160 @@ test('the chat profile is asked for before each reading and goes to the reading 
     );
 });
 
+test('a new failed book read keeps both credentials out of stored settings after rotation and reopen', async () => {
+    const storage = new FakeStorage();
+    const keys = ['provider-secret-original', 'worker-secret-original'];
+    ScribeStore.setKey(storage, keys[0]);
+    ScribeStore.setCloudKey(storage, keys[1]);
+    const chat = new FakeChat(8);
+    const model = analyst({ broken: 'unexpected HTTP status; status 503; finish none; reason: ' + keys.join(' / ') });
+    const { keeper, clock } = await opened(chat, model, { storage });
+    await keeper.adopt({});
+    assert.match(keeper.view().stop.problem, /\[key\] \/ \[key\]/);
+    assert.equal(keeper.view().stop.source, 'OpenRouter');
+    ScribeStore.setKey(storage, 'different-provider-key');
+    ScribeStore.setCloudKey(storage, 'different-worker-key');
+    keeper.close();
+    for (const value of storage.values.values()) {
+        for (const key of keys) {
+            assert.ok(!String(value).includes(key));
+        }
+    }
+    const reopened = await opened(chat, model, { storage, clock, tabId: 'tab-reopen' });
+    assert.match(reopened.keeper.view().stop.problem, /status 503.*\[key\] \/ \[key\]/);
+    assert.match(ScribeStore.snapshot(storage, ROOM, ScribeStore.Kind.Settings).text, /\[key\] \/ \[key\]/);
+    reopened.keeper.close();
+});
+
+test('an unreadable book response masks both keys in the retained call and Readings before rotation', async () => {
+    const storage = new FakeStorage();
+    const provider = 'or-fixture';
+    const worker = 'private-worker-fixture';
+    ScribeStore.setKey(storage, provider);
+    ScribeStore.setCloudKey(storage, worker);
+    const reply = 'I cannot read the book because ' + provider + ' and ' + worker + ' occur here.';
+    const chat = new FakeChat(8).edit(1, reply);
+    const model = { ask: async (role, system, input) => {
+        assert.ok(input.includes(reply));
+        return { text: reply, cost: 0 };
+    } };
+    const { keeper } = await opened(chat, model, { storage });
+    await keeper.adopt({});
+    ScribeStore.setKey(storage, 'rotated-provider');
+    ScribeStore.setCloudKey(storage, 'rotated-worker');
+    const { calls, lines, stop, messages } = keeper.view();
+    assert.equal(stop.reason, 'Failed');
+    assert.equal(calls[0].readable, false);
+    assert.equal(calls[0].sequence, null);
+    assert.match(calls[0].input, /\[key\] and \[key\]/);
+    assert.match(calls[0].answer, /\[key\] and \[key\]/);
+    assert.match(lines[0].refusedLines[0].line, /\[key\] and \[key\]/);
+    assert.doesNotMatch(JSON.stringify([calls, lines, stop]), /or-fixture|private-worker-fixture/);
+    assert.equal(messages[0].text, 'Narrator: ' + reply);
+    keeper.close();
+});
+
+test('a book read masks credentials seen at dispatch, response, and retention without editing accepted facts', async () => {
+    const storage = new FakeStorage();
+    const pairs = [
+        ['or-fixture', 'private-worker-fixture'],
+        ['router-during', 'worker-during'],
+        ['router-at-retention', 'worker-at-retention'],
+    ];
+    const rotate = (pair) => {
+        ScribeStore.setKey(storage, pair[0]);
+        ScribeStore.setCloudKey(storage, pair[1]);
+    };
+    rotate(pairs[0]);
+    const held = gate();
+    const dispatched = gate();
+    let changedAfterResponse = false;
+    const reply = [
+        '=== FACTS', 'Riven | trait | checks the bell or-fixture | #1',
+        'Riven | trait | ' + pairs.flat().join(' / ') + ' | #9919',
+        'private-worker-fixture',
+    ].join('\n');
+    const model = { ask: async () => {
+        dispatched.release();
+        await held.promise;
+        const set = storage.set.bind(storage);
+        storage.set = (name, value) => {
+            if (!changedAfterResponse && BOOK_PART.test(name)) {
+                changedAfterResponse = true;
+                rotate(pairs[2]);
+            }
+            return set(name, value);
+        };
+        return { text: reply, cost: 0.01 };
+    } };
+    const { keeper } = await opened(new FakeChat(8), model, { storage });
+    const reading = keeper.adopt({});
+    await dispatched.promise;
+    rotate(pairs[1]);
+    held.release();
+    await reading;
+    assert.equal(changedAfterResponse, true);
+    const { calls, lines, state } = keeper.view();
+    assert.equal(calls[0].sequence, 1);
+    assert.equal(lines[0].first, 1);
+    assert.equal(lines[0].refusedLines[0].line, '[key]');
+    assert.equal(lines[0].refusedOperations[0].operation.text, pairs.flat().map(() => '[key]').join(' / '));
+    assert.equal(state.facts[0].text, 'checks the bell or-fixture');
+    for (const key of pairs.flat()) {
+        assert.ok(!JSON.stringify([calls, lines]).includes(key));
+    }
+    keeper.close();
+});
+
+test('refusing either key read withholds book diagnostics without losing their counts or sequence', async () => {
+    for (const slot of [/^scribe:key$/, /^scribe:cloudkey$/]) {
+        const storage = new FakeStorage();
+        ScribeStore.setKey(storage, 'or-fixture');
+        ScribeStore.setCloudKey(storage, 'private-worker-fixture');
+        const model = { ask: async () => {
+            storage.refuseGetsMatching(slot);
+            return { text: '=== FACTS\nRiven | trait | checks the bell | #1\nRiven | trait | or-fixture | #9919\nprivate-worker-fixture', cost: 0 };
+        } };
+        const { keeper } = await opened(new FakeChat(8), model, { storage });
+        await keeper.adopt({});
+        storage.allow();
+        const { calls, lines } = keeper.view();
+        assert.equal(calls[0].sequence, 1);
+        assert.equal(lines[0].refusedLines.length, 1);
+        assert.equal(lines[0].refusedOperations.length, 1);
+        for (const field of [calls[0].system, calls[0].input, calls[0].answer,
+            lines[0].refusedLines[0].line, lines[0].refusedOperations[0].operation.text]) {
+            assert.match(field, /Diagnostic withheld/);
+        }
+        assert.doesNotMatch(JSON.stringify([calls, lines]), /or-fixture|private-worker-fixture/);
+        keeper.close();
+    }
+});
+
+test('the history activity reports each Zeta callback count including one and 155', async () => {
+    const chat = new FakeChat(1);
+    const seen = [];
+    let keeper;
+    const openedRoom = await opened(chat, analyst(), {
+        onNotify: () => {
+            if (keeper) {
+                seen.push(keeper.view().flight);
+            }
+        },
+    });
+    keeper = openedRoom.keeper;
+    await keeper.pull();
+    chat.add(154);
+    await keeper.pull();
+    assert.ok(seen.includes('Reading chat history from Zeta · 0 messages'));
+    assert.ok(seen.includes('Reading chat history from Zeta · 1 message'));
+    assert.ok(seen.includes('Reading chat history from Zeta · 155 messages'));
+    chat.fail('history', new Error('HTTP 401'));
+    await keeper.pull();
+    assert.equal(keeper.view().problemSource, 'Zeta');
+    keeper.close();
+});
+
 test('open returns before the pull ends', async () => {
     const { chat, keeper: first, storage, clock } = await adopted();
     first.close();
@@ -1505,9 +1790,9 @@ test('open returns before the pull ends', async () => {
     const { keeper, events } = await opened(chat, analyst(), { storage, clock, tabId: 'tab-2', wait: false });
     let view = keeper.view();
     assert.equal(view.phase, 'Loading');
-    assert.equal(view.read, 99);
+    assert.equal(view.read, 100);
     assert.equal(view.total, 100);
-    assert.equal(view.flight, 'Pulling the chat: 0 messages');
+    assert.equal(view.flight, 'Reading chat history from Zeta · 0 messages');
     await keeper.tick();
     assert.equal(chat.count('tab-2', 'newest'), 0);
     assert.equal(chat.count('tab-2', 'history'), 1);
@@ -1540,7 +1825,7 @@ test('open returns before the pull ends', async () => {
 test('an unreadable campaign withdraws nothing', async () => {
     const { chat, model, keeper, storage, clock } = await adopted();
     keeper.close();
-    assert.equal(savedReads(storage), 99);
+    assert.equal(savedReads(storage), 100);
     const spoils = [
         [
             'spoiled head',
@@ -1575,8 +1860,8 @@ test('an unreadable campaign withdraws nothing', async () => {
         }
         const again = await opened(chat, model, { storage: wrapper, clock, tabId: `tab-${index + 2}` });
         await again.keeper.tick();
-        assert.equal(savedReads(storage), 99, label);
-        assert.equal(again.keeper.view().read, 99, label);
+        assert.equal(savedReads(storage), 100, label);
+        assert.equal(again.keeper.view().read, 100, label);
         assert.equal(again.keeper.view().problem, null, label);
         assert.equal(model.calls.length, 3, label);
         assert.equal(savedIds(storage).length, 100, label);
@@ -1586,14 +1871,14 @@ test('an unreadable campaign withdraws nothing', async () => {
 
 test('a pull that ends early withdraws nothing older', async () => {
     const { chat, model, keeper, storage } = await adopted({ count: 300 });
-    assert.equal(savedReads(storage), 299);
+    assert.equal(savedReads(storage), 300);
     const calls = model.calls.length;
     for (const end of ['NoCursor', 'EmptyPage']) {
         chat.cutShort(end, 62);
         await keeper.pull();
-        assert.equal(savedReads(storage), 299, end);
+        assert.equal(savedReads(storage), 300, end);
         assert.equal(savedIds(storage).length, 300, end);
-        assert.equal(keeper.view().read, 299, end);
+        assert.equal(keeper.view().read, 300, end);
         await keeper.tick();
         await keeper.tick();
         assert.equal(model.calls.length, calls, end);
@@ -1609,7 +1894,7 @@ test('what is removed is decided by order', async () => {
     await first.keeper.tick();
     assert.equal(savedIds(first.storage).includes('MESSAGE-69'), true);
     assert.equal(savedRead(first.storage, 'MESSAGE-69'), true);
-    assert.equal(first.keeper.view().read, 99);
+    assert.equal(first.keeper.view().read, 100);
 
     const untimed = new FakeChat(100);
     untimed.retime(85, null);
@@ -1617,9 +1902,9 @@ test('what is removed is decided by order', async () => {
     untimed.remove(85);
     await second.keeper.tick();
     assert.equal(savedIds(second.storage).includes('MESSAGE-85'), false);
-    assert.equal(savedRead(second.storage, 'MESSAGE-81'), false);
+    assert.equal(savedRead(second.storage, 'MESSAGE-81'), true);
     assert.equal(savedRead(second.storage, 'MESSAGE-80'), true);
-    assert.equal(second.keeper.view().read, 80);
+    assert.equal(second.keeper.view().read, 99);
 
     const third = await adopted();
     third.chat.add(40);
@@ -1628,7 +1913,7 @@ test('what is removed is decided by order', async () => {
     await third.keeper.tick();
     assert.equal(third.chat.count('tab-1', 'history'), 2);
     assert.equal(savedIds(third.storage).length, 100);
-    assert.equal(savedReads(third.storage), 99);
+    assert.equal(savedReads(third.storage), 100);
     assert.equal(third.keeper.view().total, 100);
 });
 
@@ -1669,7 +1954,7 @@ test('no reading on a chat known to be incomplete', async () => {
     assert.equal(keeper.view().total, 300);
     await keeper.adopt({});
     assert.equal(ranges(model)[0], 'Story 1-40');
-    assert.equal(keeper.view().read, 299);
+    assert.equal(keeper.view().read, 300);
 
     const early = new FakeChat(10);
     early.fail('history', new Error('No login seen yet'));
@@ -1701,37 +1986,37 @@ test('the last pull is shown', async () => {
     }
 });
 
-test('keep-up never pays for a scrap', async () => {
+test('keep-up reads an interior gap and each available tail', async () => {
     const { chat, model, keeper } = await adopted({ count: 120 });
     chat.remove(50);
     await keeper.pull();
     chat.add(1);
     await keeper.tick();
-    assert.deepEqual(ranges(model).slice(3), ['Story 41-79']);
-    assert.equal(keeper.view().read, 118);
+    assert.deepEqual(ranges(model).slice(3), ['Story 41-79', 'Story 120-120']);
+    assert.equal(keeper.view().read, 120);
     chat.add(30);
     await keeper.tick();
-    assert.equal(model.calls.length, 4);
+    assert.equal(model.calls.length, 6);
     chat.add(9);
     await keeper.tick();
-    assert.deepEqual(ranges(model).slice(4), ['Story 119-158']);
+    assert.deepEqual(ranges(model).slice(5), ['Story 121-150', 'Story 151-159']);
 });
 
 test('an answered question is filed at once', async () => {
     const { chat, model, keeper, events } = await adopted({ question: true });
     chat.add(1);
     await keeper.tick();
-    assert.equal(model.calls.length, 3);
+    assert.equal(model.calls.length, 4);
     await keeper.rule({ type: 'Answer', question: 'Q1', text: 'She trusts him with the ledger' });
     await keeper.tick();
-    assert.deepEqual(ranges(model).slice(3), ['Answers 12']);
+    assert.deepEqual(ranges(model).slice(4), ['Answers 12']);
     assert.equal(keeper.view().state.questions[0].dismissed, true);
     assert.equal(factsSaying(keeper, 'settled by the answers at line 12').length, 1);
-    assert.equal(keeper.view().unread.length, 2);
+    assert.equal(keeper.view().unread.length, 0);
     events.length = 0;
     await keeper.tick();
     await keeper.tick();
-    assert.equal(model.calls.length, 4);
+    assert.equal(model.calls.length, 5);
     assert.equal(events.length, 4);
 });
 
@@ -1752,25 +2037,25 @@ test('a storage failure is tried again', async () => {
     await again.keeper.tick();
     view = again.keeper.view();
     assert.equal(view.problem, null);
-    assert.equal(view.read, 139);
-    assert.deepEqual(ranges(model), ['Story 100-139']);
+    assert.equal(view.read, 141);
+    assert.deepEqual(ranges(model), ['Story 101-140', 'Story 141-141']);
 
     const base = new FakeStorage();
     const middleWrapper = guarded(base);
     const middle = await adopted({ storage: middleWrapper });
     middle.chat.add(30);
-    await middle.keeper.tick();
-    middle.chat.add(11);
+    await middle.keeper.pull();
+    middle.chat.add(10);
     middleWrapper.refuseGets(BOOK_HEAD, 1000);
     await middle.keeper.tick();
     assert.equal(middle.keeper.view().problem, UNREAD_STORAGE);
-    assert.equal(savedReads(base), 99);
+    assert.equal(savedReads(base), 100);
     middleWrapper.refusedGets.length = 0;
     await middle.keeper.tick();
     assert.equal(middle.keeper.view().problem, null);
-    assert.equal(middle.keeper.view().read, 139);
-    assert.equal(savedReads(base), 139);
-    assert.deepEqual(ranges(middle.model).slice(3), ['Story 100-139']);
+    assert.equal(middle.keeper.view().read, 140);
+    assert.equal(savedReads(base), 140);
+    assert.deepEqual(ranges(middle.model).slice(3), ['Story 101-140']);
 
     const settingsBase = new FakeStorage();
     const owner = await opened(new FakeChat(100), analyst(), { storage: settingsBase });
@@ -1799,7 +2084,7 @@ test('a save that threw is looked at again', async () => {
     await stored.keeper.tick();
     stored.chat.add(11);
     await stored.keeper.tick();
-    assert.equal(stored.keeper.view().read, 139);
+    assert.equal(stored.keeper.view().read, 141);
     assert.equal(rulingsSaved(base), 1);
 
     const lost = await adopted({ conflict: true });
@@ -1884,7 +2169,7 @@ test('a stop survives a reload', async () => {
     const resumed = await opened(chat, model, { storage, clock, tabId: 'tab-7' });
     await resumed.keeper.resume();
     assert.equal(resumed.keeper.view().phase, 'Idle');
-    assert.equal(resumed.keeper.view().read, 99);
+    assert.equal(resumed.keeper.view().read, 100);
     resumed.keeper.pause();
     assert.equal(resumed.keeper.view().stop.reason, 'Paused');
     held = gate();
@@ -1898,7 +2183,7 @@ test('a stop survives a reload', async () => {
     assert.equal(cleared.keeper.view().stop, null);
     await cleared.keeper.tick();
     assert.equal(cleared.keeper.view().phase, 'Idle');
-    assert.equal(cleared.keeper.view().read, 99);
+    assert.equal(cleared.keeper.view().read, 100);
     cleared.keeper.close();
 
     const failing = new FakeChat(100);
@@ -1947,7 +2232,7 @@ test('a stop survives a reload', async () => {
     const mended = await opened(failing, unreadable, { storage: failingStorage, clock, tabId: 'tab-9' });
     await mended.keeper.resume();
     assert.equal(mended.keeper.view().phase, 'Idle');
-    assert.equal(mended.keeper.view().read, 99);
+    assert.equal(mended.keeper.view().read, 100);
 });
 
 test('paid calls are always counted', async () => {
@@ -2012,13 +2297,13 @@ test('a stale reader saves nothing', async () => {
          * @param {{ marks: number[] }} call
          * @return {Promise<void>|null}
          */
-        hold: (call) => (call.marks[0] === 100 ? held.promise : null),
+        hold: (call) => (call.marks[0] === 101 ? held.promise : null),
     });
     const first = await opened(chat, model, { storage, clock });
     await first.keeper.adopt({});
     chat.add(30);
-    await first.keeper.tick();
-    chat.add(11);
+    await first.keeper.pull();
+    chat.add(10);
     const ticking = first.keeper.tick();
     await until(() => model.calls.length === 4);
     clock.time += 120000;
@@ -2029,7 +2314,7 @@ test('a stale reader saves nothing', async () => {
     held.release();
     await ticking;
     assert.equal(rulingsSaved(storage), 1);
-    assert.equal(savedReads(storage), 99);
+    assert.equal(savedReads(storage), 100);
     assert.equal(first.keeper.view().phase, 'Watching');
 
     const refusedChat = new FakeChat(100);
@@ -2040,13 +2325,13 @@ test('a stale reader saves nothing', async () => {
          * @param {{ marks: number[] }} call
          * @return {Promise<void>|null}
          */
-        hold: (call) => (call.marks[0] === 100 ? refusedHeld.promise : null),
+        hold: (call) => (call.marks[0] === 101 ? refusedHeld.promise : null),
     });
     const refused = await opened(refusedChat, refusedModel, { storage: refusedStorage });
     await refused.keeper.adopt({});
     refusedChat.add(30);
-    await refused.keeper.tick();
-    refusedChat.add(11);
+    await refused.keeper.pull();
+    refusedChat.add(10);
     const refusedTicking = refused.keeper.tick();
     await until(() => refusedModel.calls.length === 4);
     refusedStorage.refuseSetsMatching(/^scribe:claim:/);
@@ -2055,7 +2340,7 @@ test('a stale reader saves nothing', async () => {
     refusedStorage.allow();
     refusedHeld.release();
     await refusedTicking;
-    assert.equal(savedReads(refusedStorage), 139);
+    assert.equal(savedReads(refusedStorage), 140);
     await refused.keeper.tick();
     assert.equal(refusedModel.calls.length, 4);
     assert.equal(refused.keeper.view().reader, true);
@@ -2096,7 +2381,7 @@ test("the owner's notes are filed", async () => {
     const model = analyst();
     const { keeper, storage } = await opened(chat, model);
     await keeper.adopt({});
-    assert.deepEqual(ranges(model), ['Story 1-40', 'Story 41-80', 'Notes 98', 'Story 81-98']);
+    assert.deepEqual(ranges(model), ['Story 1-40', 'Story 41-80', 'Notes 98', 'Story 81-99']);
     assert.equal(savedBook(storage).log.notes.includes('Halvard served ten years with the pikes.'), true);
 });
 
@@ -2112,7 +2397,7 @@ test('a filing that fails or is all refused leaves nothing', async () => {
     await keeper.tick();
     chat.add(11);
     await keeper.tick();
-    assert.equal(keeper.view().read, 139);
+    assert.equal(keeper.view().read, 141);
     assert.equal(savedNotes(storage), 0);
     assert.equal(factsSaying(keeper, 'swore an oath to the harbour guild').length, 0);
     const saves = bookSaves(storage);
@@ -2124,7 +2409,7 @@ test('a filing that fails or is all refused leaves nothing', async () => {
     await keeper.tick();
     chat.add(10);
     await keeper.tick();
-    assert.equal(keeper.view().read, 179);
+    assert.equal(keeper.view().read, 181);
     assert.equal(savedNotes(storage), 0);
 });
 
@@ -2158,14 +2443,14 @@ test('a chat that no longer matches can be started over', async () => {
     assert.equal(view.mismatch, false);
     assert.equal(view.problem, null);
     assert.equal(view.phase, 'Idle');
-    assert.equal(view.read, 99);
-    assert.deepEqual(ranges(model).slice(3), ['Story 1-40', 'Story 41-80', 'Story 81-99']);
+    assert.equal(view.read, 100);
+    assert.deepEqual(ranges(model).slice(3), ['Story 1-40', 'Story 41-80', 'Story 81-100']);
     const ids = savedIds(storage);
     assert.equal(ids.length, 100);
     assert.equal(ids.every((id) => id.startsWith('OTHER-')), true);
     assert.deepEqual(plain(ScribeStore.read(storage, ROOM, ScribeStore.Kind.Campaign).gone), []);
     const marks = Object.keys(savedBook(storage).log.read);
-    assert.equal(marks.length, 99);
+    assert.equal(marks.length, 100);
     assert.equal(marks.every((id) => id.startsWith('OTHER-')), true);
     assert.equal(savedRead(storage, 'OTHER-1'), true);
 });
@@ -2192,8 +2477,8 @@ test('a mismatch that heals is forgotten', async () => {
     assert.equal(storedText(storage, CAMPAIGN) === campaignBefore, true);
     assert.equal(savedIds(storage).every((id) => id.startsWith('MESSAGE-')), true);
     assert.equal(savedRead(storage, 'MESSAGE-1'), true);
-    assert.equal(keeper.view().read, 99);
-    assert.deepEqual(ranges(model).slice(3), ['Story 1-40', 'Story 41-80', 'Story 81-99']);
+    assert.equal(keeper.view().read, 100);
+    assert.deepEqual(ranges(model).slice(3), ['Story 1-40', 'Story 41-80', 'Story 81-100']);
 });
 
 /**
@@ -2245,7 +2530,7 @@ test('a preview shares nothing with the book', async () => {
     await keeper.tick();
     chat.add(11);
     await keeper.tick();
-    assert.equal(keeper.view().read, 139);
+    assert.equal(keeper.view().read, 141);
     assert.equal(factsSaying(keeper, OATH).length, 0);
     assert.equal(savedNotes(storage), 0);
     assert.equal(storedText(storage, BOOK).includes(OATH), false);
@@ -2258,18 +2543,20 @@ test('a preview obeys the same rules as a filing', async () => {
          * @param {{ marks: number[] }} call
          * @return {Promise<void>|null}
          */
-        hold: (call) => (call.marks[0] === 100 ? held.promise : null),
+        hold: (call) => (call.marks[0] === 101 ? held.promise : null),
     });
     const anchor = { id: 'MESSAGE-12', position: 12 };
     const operations = told([`Halvard | trait | ${OATH} | #12`]);
-    await assert.rejects(keeper.preview(operations, { id: 'MESSAGE-100', position: 100 }), { message: BAD_ANCHOR });
+    chat.add(1);
+    await keeper.pull();
+    await assert.rejects(keeper.preview(operations, { id: 'MESSAGE-101', position: 101 }), { message: BAD_ANCHOR });
     await assert.rejects(keeper.preview(operations, { id: 'MESSAGE-999', position: 12 }), { message: BAD_ANCHOR });
     const refused = await keeper.preview(told(['Halvard | trait | keeps a second ledger | #90']), anchor);
     assert.deepEqual(plain(refused.refused.map((item) => item.reason)), ['Citation']);
     assert.equal(refused.state.facts.filter((fact) => fact.text === 'keeps a second ledger').length, 0);
-    chat.add(30);
-    await keeper.tick();
-    chat.add(11);
+    chat.add(29);
+    await keeper.pull();
+    chat.add(10);
     const ticking = keeper.tick();
     await until(() => model.calls.length === 4);
     await assert.rejects(keeper.preview(operations, anchor), { message: READING });
@@ -2317,7 +2604,7 @@ async function tickFor(keeper, clock, span, every) {
  */
 async function grow(opening, added) {
     opening.chat.add(30);
-    await opening.keeper.tick();
+    await opening.keeper.pull();
     opening.chat.add(added - 30);
     await opening.keeper.tick();
 }
@@ -2341,7 +2628,7 @@ test('a full storage never pays twice', async () => {
          * @return {null}
          */
         hold: (call) => {
-            if (call.marks[0] === 100) {
+            if (call.marks[0] === 101) {
                 storage.refuseSetsMatching(/./);
             }
             return null;
@@ -2349,17 +2636,17 @@ test('a full storage never pays twice', async () => {
     });
     const opening = await opened(chat, model, { storage });
     await opening.keeper.adopt({ budget: 0.5 });
-    await grow({ chat, keeper: opening.keeper }, 41);
+    await grow({ chat, keeper: opening.keeper }, 40);
     assert.equal(model.calls.length, 4);
     assert.equal(cents(opening.keeper.view().spentToday), 20);
     await tickFor(opening.keeper, opening.clock, HOUR, SECONDS_SIX);
     assert.equal(model.calls.length, 4);
     assert.equal(cents(opening.keeper.view().spentToday), 20);
-    assert.equal(savedReads(storage), 99);
+    assert.equal(savedReads(storage), 100);
     storage.allow();
     await opening.keeper.tick();
     assert.equal(model.calls.length, 4);
-    assert.equal(savedReads(storage), 139);
+    assert.equal(savedReads(storage), 140);
     assert.equal(cents(ScribeStore.spent(storage, ROOM, DAY)), 20);
 });
 
@@ -2381,26 +2668,26 @@ test('owed spending binds the budget', async () => {
     storage.allow();
     clock.time += MINUTE;
     await keeper.tick();
-    assert.equal(model.calls.length, 6);
-    assert.equal(cents(ScribeStore.spent(storage, ROOM, DAY)), 30);
-    assert.equal(keeper.view().read, 219);
+    assert.equal(model.calls.length, 7);
+    assert.equal(cents(ScribeStore.spent(storage, ROOM, DAY)), 35);
+    assert.equal(keeper.view().read, 220);
 });
 
 test('an unsaved stretch is not bought again', async () => {
     const refused = await adopted({ cost: 0.05 });
     refused.chat.add(30);
-    await refused.keeper.tick();
-    refused.chat.add(11);
+    await refused.keeper.pull();
+    refused.chat.add(10);
     refused.storage.refuseSetsMatching(BOOK);
     await refused.keeper.tick();
     await tickFor(refused.keeper, refused.clock, 10 * MINUTE, SECONDS_SIX);
     assert.equal(refused.model.calls.length, 4);
-    assert.equal(savedReads(refused.storage), 99);
+    assert.equal(savedReads(refused.storage), 100);
     refused.storage.allow();
     refused.clock.time += MINUTE;
     await refused.keeper.tick();
     assert.equal(refused.model.calls.length, 4);
-    assert.equal(savedReads(refused.storage), 139);
+    assert.equal(savedReads(refused.storage), 140);
 
     for (const kind of ['read', 'write']) {
         const base = new FakeStorage();
@@ -2412,7 +2699,7 @@ test('an unsaved stretch is not bought again', async () => {
              * @return {null}
              */
             hold: (call) => {
-                if (call.marks[0] === 100) {
+                if (call.marks[0] === 101) {
                     if (kind === 'read') {
                         wrapper.refuseGets(BOOK_HEAD, 1);
                     } else {
@@ -2422,30 +2709,30 @@ test('an unsaved stretch is not bought again', async () => {
                 return null;
             },
         });
-        await grow(once, 41);
-        assert.equal(savedReads(base), 99, kind);
+        await grow(once, 40);
+        assert.equal(savedReads(base), 100, kind);
         once.clock.time += MINUTE;
         await once.keeper.tick();
         assert.equal(once.model.calls.length, 4, kind);
-        assert.equal(savedReads(base), 139, kind);
+        assert.equal(savedReads(base), 140, kind);
     }
 
     const ruled = await adopted({ conflict: true });
     ruled.chat.add(30);
-    await ruled.keeper.tick();
-    ruled.chat.add(11);
+    await ruled.keeper.pull();
+    ruled.chat.add(10);
     ruled.storage.refuseSetsMatching(BOOK);
     await ruled.keeper.tick();
     ruled.storage.allow();
     await ruled.keeper.rule({ type: 'Merge', from: 'S2', into: 'S1' });
     ruled.clock.time += MINUTE;
     await ruled.keeper.tick();
-    assert.deepEqual(ranges(ruled.model).slice(3), ['Story 100-139', 'Story 100-139']);
-    assert.equal(savedReads(ruled.storage), 139);
+    assert.deepEqual(ranges(ruled.model).slice(3), ['Story 101-140', 'Story 101-140']);
+    assert.equal(savedReads(ruled.storage), 140);
 });
 
 test('kept answers end with a confirmed save and with adopt', async () => {
-    const chat = new FakeChat(41);
+    const chat = new FakeChat(40);
     const model = analyst({ blank: true });
     const { keeper } = await opened(chat, model);
     await keeper.adopt({});
@@ -2478,8 +2765,8 @@ test('kept answers end with a confirmed save and with adopt', async () => {
     assert.equal(again.keeper.view().stop.reason, 'Failed');
     storage.allow();
     await again.keeper.adopt({});
-    assert.deepEqual(ranges(restarting), ['Story 1-40', 'Story 1-40', 'Story 41-80', 'Story 81-99']);
-    assert.equal(again.keeper.view().read, 99);
+    assert.deepEqual(ranges(restarting), ['Story 1-40', 'Story 1-40', 'Story 41-80', 'Story 81-100']);
+    assert.equal(again.keeper.view().read, 100);
 });
 
 test('a refused spending read is storage-caused', async () => {
@@ -2488,7 +2775,7 @@ test('a refused spending read is storage-caused', async () => {
         const wrapper = guarded(base);
         const opening = await adopted({ storage: wrapper });
         opening.keeper.pause();
-        await grow(opening, 41);
+        await grow(opening, 40);
         assert.equal(opening.model.calls.length, 3);
         wrapper.refuseGets(/^scribe:spent:/, 1);
         await opening.keeper.resume();
@@ -2505,7 +2792,7 @@ test('a refused spending read is storage-caused', async () => {
             opening.clock.time += MINUTE;
         }
         await keeper.tick();
-        assert.equal(savedReads(base), 139, String(reload));
+        assert.equal(savedReads(base), 140, String(reload));
         assert.equal(opening.model.calls.length, 4, String(reload));
     }
 });
@@ -2714,8 +3001,8 @@ test('a mismatch needs two whole pulls', async () => {
     await keeper.adopt({});
     assert.equal(savedIds(storage).every((id) => id.startsWith('OTHER-')), true);
     assert.equal(savedIds(storage).length, 40);
-    assert.deepEqual(ranges(model).slice(3), ['Story 1-39']);
-    assert.equal(keeper.view().read, 39);
+    assert.deepEqual(ranges(model).slice(3), ['Story 1-40']);
+    assert.equal(keeper.view().read, 40);
 });
 
 test('a pull cut short is never a mismatch', async () => {
@@ -2730,15 +3017,15 @@ test('a pull cut short is never a mismatch', async () => {
     assert.equal(view.mismatch, false);
     assert.equal(view.problem, note);
     await assert.rejects(keeper.adopt({}), { message: note });
-    assert.equal(savedReads(storage), 99);
+    assert.equal(savedReads(storage), 100);
     assert.equal(rulingsSaved(storage), 1);
     assert.equal(model.calls.length, 3);
     clock.time += MINUTE;
     await keeper.tick();
     view = keeper.view();
     assert.equal(view.total, 300);
-    assert.equal(view.read, 299);
-    assert.deepEqual(ranges(model).slice(3), ['Story 100-139', 'Story 140-179', 'Story 180-219', 'Story 220-259', 'Story 260-299']);
+    assert.equal(view.read, 300);
+    assert.deepEqual(ranges(model).slice(3), ['Story 101-140', 'Story 141-180', 'Story 181-220', 'Story 221-260', 'Story 261-300']);
     assert.equal(rulingsSaved(storage), 1);
     assert.equal(keeper.view().state.conflicts.length, 0);
 });
@@ -2749,7 +3036,7 @@ test('a failed history that joins is used', async () => {
     chat.cutAlways('Failed', 62, 'Zeta answered HTTP 500');
     clock.time += MINUTE;
     await keeper.tick();
-    assert.deepEqual(ranges(model).slice(8), ['Story 300-339']);
+    assert.deepEqual(ranges(model).slice(8), ['Story 301-340']);
     assert.equal(keeper.view().total, 340);
     assert.equal(keeper.view().problem, `${PART}Zeta answered HTTP 500${AGAIN}`);
     await keeper.resume();
@@ -2770,11 +3057,11 @@ test('an unreadable message is not a deleted one', async () => {
     await keeper.tick();
     assert.equal(savedIds(storage).includes('MESSAGE-85'), true);
     assert.equal(savedRead(storage, 'MESSAGE-85'), true);
-    assert.equal(savedReads(storage), 99);
+    assert.equal(savedReads(storage), 100);
     assert.equal(keeper.view().problem, '1 message could not be read from the site.');
     await keeper.tick();
     assert.equal(model.calls.length, 3);
-    assert.equal(keeper.view().read, 99);
+    assert.equal(keeper.view().read, 100);
     assert.equal(keeper.view().problem, null);
 });
 
@@ -2802,16 +3089,16 @@ test('the view is never ahead of what is saved', async () => {
          * @return {null}
          */
         hold: (call) => {
-            if (call.marks[0] === 100) {
+            if (call.marks[0] === 101) {
                 wrapper.refuseGets(BOOK_HEAD, 1000);
             }
             return null;
         },
     });
-    await grow(opening, 41);
+    await grow(opening, 40);
     assert.equal(opening.keeper.view().problem, UNREAD_STORAGE);
-    assert.equal(opening.keeper.view().read, 99);
-    assert.equal(savedReads(base), 99);
+    assert.equal(opening.keeper.view().read, 100);
+    assert.equal(savedReads(base), 100);
 });
 
 test('a watcher is quiet when nothing changed', async () => {
@@ -2850,7 +3137,7 @@ test('the opening compares before it pulls', async () => {
     storage.refuseSetsMatching(BOOK);
     chat.edit(90, 'The tale turns at the ford, line 90.');
     await keeper.tick();
-    assert.equal(savedReads(storage), 99);
+    assert.equal(savedReads(storage), 100);
     keeper.close();
     storage.allow();
     chat.fail('history', new Error('Zeta could not be reached'));
@@ -2887,7 +3174,7 @@ test('what the view keeps is capped and kept', async () => {
     await keeper.adopt({ size: 2 });
     assert.equal(keeper.view().stop.reason, 'Failed');
     await keeper.resume();
-    assert.equal(model.calls.length, 51);
+    assert.equal(model.calls.length, 52);
     const view = keeper.view();
     assert.equal(view.calls.length, 20);
     assert.equal(view.calls.filter((item) => !item.readable).length, 1);
@@ -2911,7 +3198,7 @@ test('absent is not changed', async () => {
     await again.keeper.tick();
     assert.equal(again.keeper.view().total, 300);
     assert.equal(model.calls.length, 8);
-    assert.equal(savedReads(storage), 299);
+    assert.equal(savedReads(storage), 300);
 });
 
 test("the chat's start closes a run", async () => {
@@ -2923,10 +3210,10 @@ test("the chat's start closes a run", async () => {
     await keeper.configure({ size: 40 });
     chat.edit(5, 'The tale turns at the well, line 5.');
     await keeper.pull();
-    assert.equal(keeper.view().read, 89);
+    assert.equal(keeper.view().read, 90);
     await keeper.tick();
     assert.equal(ranges(model).at(-1), 'Story 1-10');
-    assert.equal(keeper.view().read, 99);
+    assert.equal(keeper.view().read, 100);
 });
 
 test('an answer citing the last read message is filed', async () => {
@@ -2936,6 +3223,95 @@ test('an answer citing the last read message is filed', async () => {
     assert.deepEqual(ranges(model).slice(3), ['Answers 99']);
     assert.equal(keeper.view().state.questions[0].dismissed, true);
     assert.equal(factsSaying(keeper, 'settled by the answers at line 99').length, 1);
+});
+
+test('Answers can refine a Story fact at the newest eligible question beyond the reading batch', async () => {
+    const { chat, keeper: first, storage, clock } = await adopted({ count: 90 });
+    first.close();
+    chat.add(1);
+    const rows = ScribeIntake.read(chat.raw).messages;
+    const newest = rows.at(-1);
+    const order = rows.map((message) => message.id);
+    const book = savedBook(storage);
+    const replay = () => ScribeReplay.run(book.log, order);
+    const original = 'keeps a tide chart';
+    const fuller = 'keeps a tide chart for sailing at dusk';
+    const result = ScribeLog.append(book.log, replay(), ScribeAnswer.parse(answer({
+        FACTS: ['Nera | trait | ' + original + ' | #91'],
+        QUESTIONS: ['Which hour does Nera sail? | #91'],
+    })).operations, { origin: 'Story', messages: [newest] });
+    assert.deepEqual(plain(result.refused), []);
+    book.fingerprints[newest.id] = newest.fingerprint;
+    const fact = replay().facts.find((item) => item.text === original);
+    const question = replay().questions.find((item) => item.cite === newest.id);
+    ScribeLog.rule(book.log, replay(), { type: 'Answer', question: question.id, text: 'She sails at dusk.' });
+    ScribeStore.write(storage, ROOM, 'book', book);
+    const prompts = [];
+    const model = { ask: async (role, system, user) => {
+        assert.equal(system, ScribeAnalyzer.AnswersPrompt);
+        prompts.push(user);
+        return { text: answer({ CHANGES: [fact.id + ' | Nera | trait | FULLER: ' + fuller + ' | #91'] }), cost: 0.04 };
+    } };
+    const { keeper } = await opened(chat, model, { storage, clock, tabId: 'tab-2' });
+    await keeper.tick();
+    await keeper.tick();
+    assert.equal(prompts.length, 1);
+    assert.ok(prompts[0].includes(original));
+    assert.ok(prompts[0].includes('[#91] Which hour does Nera sail?'));
+    const saved = ScribeReplay.run(savedBook(storage).log, order);
+    const change = saved.facts.find((item) => item.text === fuller);
+    assert.equal(change?.cite, newest.id);
+    assert.equal(saved.facts.find((item) => item.id === fact.id).replacedBy, change.id);
+    assert.equal(saved.questions.find((item) => item.id === question.id).dismissed, true);
+});
+
+test('an Answers response is discarded when its newest citation becomes disputed in flight', async () => {
+    const player = 'I wait.';
+    const chat = new FakeChat(100).edit(100, player + '\n@: [Scribe] A reminder.');
+    const { keeper: first, storage, clock } = await adopted({ chat });
+    first.close();
+    const book = savedBook(storage);
+    const rows = ScribeIntake.read(chat.raw).messages;
+    const order = rows.map((message) => message.id);
+    const replay = () => ScribeReplay.run(book.log, order);
+    const sources = rows.slice(-2);
+    ScribeLog.append(book.log, replay(), sources.map((message) => ({
+        type: 'Question', text: 'Who was present at #' + message.position + '?', position: message.position,
+    })), { origin: 'Notes', messages: sources });
+    for (const question of replay().questions) {
+        ScribeLog.rule(book.log, replay(), { type: 'Answer', question: question.id, text: 'The ferryman.' });
+    }
+    ScribeStore.write(storage, ROOM, 'book', book);
+    const held = gate();
+    const model = analyst({ hold: (call) => call.pass === 'Answers' ? held.promise : null });
+    const { keeper } = await opened(chat, model, { storage, clock, tabId: 'tab-2' });
+    const reading = keeper.tick();
+    await until(() => model.calls.length === 1);
+    assert.deepEqual(ranges(model), ['Answers 99-100']);
+    const newest = rows.at(-1);
+    ScribeStore.write(storage, ROOM, 'live', { attachments: [{
+        id: newest.id, fingerprint: newest.fingerprint, length: player.length, contested: true,
+    }] });
+    keeper.attributionChanged();
+    held.release();
+    await reading;
+    const saved = () => ScribeReplay.run(savedBook(storage).log, order);
+    const dismissed = () => plain(saved().questions.map((question) => question.dismissed));
+    const filed = () => plain(saved().facts.filter((fact) => fact.origin === 'Answers').map((fact) => fact.cite));
+    assert.deepEqual(dismissed(), [false, false]);
+    assert.deepEqual(filed(), []);
+    await keeper.tick();
+    await keeper.tick();
+    assert.deepEqual(ranges(model), ['Answers 99-100', 'Answers 99', 'Story 81-99']);
+    assert.deepEqual(dismissed(), [true, false]);
+    assert.deepEqual(filed(), [rows[98].id]);
+    chat.edit(100, 'The ferryman is here.');
+    await keeper.pull();
+    await keeper.tick();
+    await keeper.tick();
+    assert.deepEqual(ranges(model), ['Answers 99-100', 'Answers 99', 'Story 81-99', 'Answers 100', 'Story 100-100']);
+    assert.deepEqual(dismissed(), [true, true]);
+    assert.deepEqual(filed(), [rows[98].id, rows[99].id]);
 });
 
 test('a storage-caused stop is not saved and is retried', async () => {
@@ -2950,14 +3326,14 @@ test('a storage-caused stop is not saved and is retried', async () => {
              * @return {null}
              */
             hold: (call) => {
-                if (call.marks[0] === 100 && armed) {
+                if (call.marks[0] === 101 && armed) {
                     armed = false;
                     wrapper.refuseSets(BOOK_PART, 1);
                 }
                 return null;
             },
         });
-        await grow(opening, 41);
+        await grow(opening, 40);
         assert.equal(opening.keeper.view().stop.reason, 'Failed', String(reload));
         assert.equal(savedStop(base), null, String(reload));
         let keeper = opening.keeper;
@@ -2969,7 +3345,7 @@ test('a storage-caused stop is not saved and is retried', async () => {
             opening.clock.time += MINUTE;
         }
         await keeper.tick();
-        assert.equal(savedReads(base), 139, String(reload));
+        assert.equal(savedReads(base), 140, String(reload));
         assert.equal(keeper.view().phase, 'Idle', String(reload));
     }
 });
@@ -2984,14 +3360,14 @@ test('a failed claim check is not a lost claim', async () => {
          * @return {null}
          */
         hold: (call) => {
-            if (call.marks[0] === 100) {
+            if (call.marks[0] === 101) {
                 wrapper.refuseGets(/^scribe:claim:/, 1);
             }
             return null;
         },
     });
-    await grow(opening, 41);
-    assert.equal(savedReads(base), 139);
+    await grow(opening, 40);
+    assert.equal(savedReads(base), 140);
     assert.equal(opening.keeper.view().reader, true);
     assert.equal(opening.model.calls.length, 4);
 });
@@ -3005,7 +3381,7 @@ test('ids are compared as strings', async () => {
     await keeper.pull();
     assert.equal(savedRead(storage, '20'), false);
     assert.equal(savedRead(storage, '41'), true);
-    assert.equal(savedReads(storage), 59);
+    assert.equal(savedReads(storage), 60);
 });
 
 test('a stale reader saves no campaign', async () => {
@@ -3108,7 +3484,7 @@ test('with no book any natural end starts one', async () => {
     assert.equal(keeper.view().total, 62);
     await keeper.adopt({});
     assert.equal(model.calls.length, 2);
-    assert.equal(keeper.view().read, 61);
+    assert.equal(keeper.view().read, 62);
 
     const failed = new FakeChat(100);
     failed.cutShort('Failed', 62, 'Zeta could not be reached');
@@ -3130,19 +3506,19 @@ test('resume keeps what was paid for', async () => {
          * @return {null}
          */
         hold: (call) => {
-            if (call.marks[0] === 100 && armed) {
+            if (call.marks[0] === 101 && armed) {
                 armed = false;
                 wrapper.refuseSets(BOOK_PART, 1);
             }
             return null;
         },
     });
-    await grow(opening, 41);
+    await grow(opening, 40);
     assert.equal(opening.keeper.view().stop.reason, 'Failed');
-    assert.equal(savedReads(base), 99);
+    assert.equal(savedReads(base), 100);
     await opening.keeper.resume();
-    assert.deepEqual(ranges(opening.model).slice(3), ['Story 100-139']);
-    assert.equal(savedReads(base), 139);
+    assert.deepEqual(ranges(opening.model).slice(3), ['Story 101-140']);
+    assert.equal(savedReads(base), 140);
 
     let refusals = 1;
     const unreadable = analyst({
@@ -3157,8 +3533,8 @@ test('resume keeps what was paid for', async () => {
     assert.equal(failing.keeper.view().stop.reason, 'Failed');
     assert.equal(unreadable.calls.length, 2);
     await failing.keeper.resume();
-    assert.deepEqual(ranges(unreadable), ['Story 1-40', 'Story 41-80', 'Story 41-80', 'Story 81-99']);
-    assert.equal(failing.keeper.view().read, 99);
+    assert.deepEqual(ranges(unreadable), ['Story 1-40', 'Story 41-80', 'Story 41-80', 'Story 81-100']);
+    assert.equal(failing.keeper.view().read, 100);
 });
 
 test('a spending write that landed is not owed', async () => {
@@ -3168,7 +3544,7 @@ test('a spending write that landed is not owed', async () => {
     const { keeper } = await opened(chat, model, { storage });
     storage.throwAfterSetsMatching(SPENT);
     await keeper.adopt({});
-    await grow({ chat, keeper }, 41);
+    await grow({ chat, keeper }, 40);
     assert.equal(model.calls.length, 4);
     assert.equal(cents(ScribeStore.spent(storage, ROOM, DAY)), 100);
     assert.equal(cents(keeper.view().spentToday), 100);
@@ -3197,7 +3573,7 @@ test('a pause survives unreadable storage', async () => {
     keeper.pause();
     assert.equal(keeper.view().stop.reason, 'Paused');
     assert.equal(keeper.view().phase, 'Stopped');
-    await grow({ chat, keeper }, 41);
+    await grow({ chat, keeper }, 40);
     for (let turn = 0; turn < 3; turn++) {
         clock.time += MINUTE;
         await keeper.tick();
@@ -3242,7 +3618,7 @@ test('a pause survives unreadable storage', async () => {
 test('a resume that cannot clear the stop does not read', async () => {
     const { chat, model, keeper, storage } = await adopted();
     keeper.pause();
-    await grow({ chat, keeper }, 41);
+    await grow({ chat, keeper }, 40);
     assert.equal(model.calls.length, 3);
     storage.refuseSetsMatching(SETTINGS);
     await assert.rejects(keeper.resume(), { message: SAVE_FAILED });
@@ -3292,7 +3668,7 @@ test('nothing is paid while anything is owed', async () => {
     await keeper.tick();
     assert.equal(model.calls.length, 3);
     assert.equal(cents(ScribeStore.spent(storage, ROOM, DAY)), 15);
-    assert.equal(keeper.view().read, 99);
+    assert.equal(keeper.view().read, 100);
 });
 
 test('owed spending of an earlier day is kept', async () => {
@@ -3404,7 +3780,7 @@ test('a skipped message removes nothing in a history pull either', async () => {
     assert.equal(savedIds(storage).includes('MESSAGE-85'), true);
     assert.equal(savedRead(storage, 'MESSAGE-85'), true);
     assert.equal(storedText(storage, BOOK) === bookText, true);
-    assert.equal(keeper.view().read, 99);
+    assert.equal(keeper.view().read, 100);
     assert.equal(keeper.view().problem, '1 message could not be read from the site.');
     assert.equal(model.calls.length, 3);
 });
@@ -3417,7 +3793,7 @@ test('trusted says the book can be relied on', async () => {
          * @param {{ marks: number[] }} call
          * @return {Promise<void>|null}
          */
-        hold: (call) => (call.marks[0] === 100 ? held.promise : null),
+        hold: (call) => (call.marks[0] === 101 ? held.promise : null),
     });
     const opening = await opened(chat, model);
     assert.equal(opening.keeper.view().trusted, false, 'no book');
@@ -3425,8 +3801,8 @@ test('trusted says the book can be relied on', async () => {
     assert.equal(opening.keeper.view().phase, 'Idle');
     assert.equal(opening.keeper.view().trusted, true, 'idle');
     chat.add(30);
-    await opening.keeper.tick();
-    chat.add(11);
+    await opening.keeper.pull();
+    chat.add(10);
     const ticking = opening.keeper.tick();
     await until(() => model.calls.length === 4);
     assert.equal(opening.keeper.view().phase, 'Reading');
@@ -3441,7 +3817,7 @@ test('trusted says the book can be relied on', async () => {
     const budget = await opened(budgetChat, analyst());
     await budget.keeper.adopt({ budget: 0.03 });
     assert.equal(budget.keeper.view().phase, 'Idle');
-    await grow({ chat: budgetChat, keeper: budget.keeper }, 41);
+    await grow({ chat: budgetChat, keeper: budget.keeper }, 40);
     assert.equal(budget.keeper.view().stop.reason, 'Budget');
     assert.equal(budget.keeper.view().trusted, true, 'budget');
 
@@ -3450,7 +3826,7 @@ test('trusted says the book can be relied on', async () => {
     joined.chat.cutAlways('Failed', 62, 'Zeta answered HTTP 500');
     joined.clock.time += MINUTE;
     await joined.keeper.tick();
-    assert.equal(joined.keeper.view().read, 139);
+    assert.equal(joined.keeper.view().read, 140);
     assert.equal(joined.keeper.view().trusted, true, 'a failed history that joins');
     const watcher = await opened(joined.chat, analyst(), { storage: joined.storage, clock: joined.clock, tabId: 'tab-2' });
     assert.equal(watcher.keeper.view().phase, 'Watching');
@@ -3482,13 +3858,13 @@ test('trusted says the book can be relied on', async () => {
          * @return {null}
          */
         hold: (call) => {
-            if (call.marks[0] === 100) {
+            if (call.marks[0] === 101) {
                 reloadWrapper.refuseGets(BOOK_HEAD, 1000);
             }
             return null;
         },
     });
-    await grow(reloading, 41);
+    await grow(reloading, 40);
     assert.equal(reloading.keeper.view().problem, UNREAD_STORAGE);
     assert.equal(reloading.keeper.view().reader, true);
     assert.equal(reloading.keeper.view().trusted, false, 'a failed reload');
@@ -3545,7 +3921,7 @@ test('trusted says the book can be relied on', async () => {
 });
 
 test('the edition names the book', async () => {
-    const chat = new FakeChat(41);
+    const chat = new FakeChat(40);
     const storage = new FakeStorage();
     const clock = clockAt();
     let holding = true;
@@ -3686,7 +4062,7 @@ test('a book is trusted once it was read', async () => {
     held.release();
     await resuming;
     assert.equal(second.keeper.view().phase, 'Idle');
-    assert.equal(second.keeper.view().read, 99);
+    assert.equal(second.keeper.view().read, 100);
     assert.equal(second.keeper.view().trusted, true, 'read');
     holdAt = 1;
     held = gate();
@@ -3696,7 +4072,7 @@ test('a book is trusted once it was read', async () => {
     assert.equal(second.keeper.view().trusted, false, 'started over');
     held.release();
     await restarting;
-    assert.equal(second.keeper.view().read, 99);
+    assert.equal(second.keeper.view().read, 100);
     assert.equal(second.keeper.view().trusted, true, 'read again');
 });
 
@@ -3725,7 +4101,7 @@ test('the view says when the step began', async () => {
     chat.add(5);
     const release = chat.hold('history');
     const { keeper } = await opened(chat, analyst(), { storage, clock, tabId: 'tab-2', wait: false });
-    assert.equal(keeper.view().flight, 'Pulling the chat: 0 messages');
+    assert.equal(keeper.view().flight, 'Reading chat history from Zeta · 0 messages');
     assert.equal(keeper.view().began, START);
     clock.time = START + 9000;
     assert.equal(keeper.view().began, START);
@@ -3889,7 +4265,7 @@ test('adoptBlock names what adopt would refuse and changes nothing', async () =>
     const ready = await opened(new FakeChat(100), analyst());
     assert.equal(blockOf(ready.keeper, ready.storage), null);
     await ready.keeper.adopt({});
-    assert.equal(ready.keeper.view().read, 99);
+    assert.equal(ready.keeper.view().read, 100);
 
     const pullChat = new FakeChat(100);
     const pulling = await opened(pullChat, analyst());
@@ -3970,7 +4346,7 @@ test('a step that reads a stretch tells 6 times and never shows the keeper idle 
     tells.length = 0;
     clock.time += MINUTE;
     await keeper.tick();
-    assert.equal(keeper.view().read, 52);
+    assert.equal(keeper.view().read, 53);
     assert.equal(tells.length, 6);
     assert.deepEqual(
         tells.filter((tell) => tell.phase === 'Reading' && tell.busy === null),
@@ -4133,6 +4509,25 @@ test('the others spending counts toward the budget', async () => {
     assert.equal(cents(stopped.keeper.view().spentToday), 0);
 });
 
+test('helper spending during the full batch blocks the short tail until the next day', async () => {
+    const storage = new FakeStorage();
+    const chat = new FakeChat(41);
+    const model = analyst({ cost: 0.02, hold: () => {
+        ScribeStore.setOthers(storage, ROOM, DAY, 0.03);
+        return null;
+    } });
+    const { keeper, clock } = await opened(chat, model, { storage });
+    await keeper.adopt({ budget: 0.05 });
+    assert.equal(keeper.view().read, 40);
+    assert.equal(keeper.view().stop.reason, 'Budget');
+    await keeper.tick();
+    assert.deepEqual(ranges(model), ['Story 1-40']);
+    clock.day = NEXT_DAY;
+    await keeper.tick();
+    assert.deepEqual(ranges(model), ['Story 1-40', 'Story 41-41']);
+    assert.equal(savedReads(storage), 41);
+});
+
 test('a lease that is not a function is refused', async () => {
     const chat = new FakeChat(100);
     for (const lease of ['yes', 1, true, {}]) {
@@ -4179,7 +4574,7 @@ test('a saved key clears a failed reading and the next tick reads at once', asyn
     assert.notEqual(keeper.view().phase, 'Stopped');
     await keeper.tick();
     assert.equal(keeper.view().phase, 'Idle');
-    assert.equal(keeper.view().read, 99);
+    assert.equal(keeper.view().read, 100);
 
     const paused = await opened(new FakeChat(100), analyst(), { tabId: 'tab-2' });
     await paused.keeper.adopt({});

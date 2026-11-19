@@ -329,9 +329,11 @@ export default class FakeChat {
             /**
              * @return {Promise<{ messages: object[], end: string, problem: null, skipped: number }>}
              */
-            newest: async () => {
+            newest: async (through = null) => {
                 await this.answer(label, 'newest');
-                let chosen = this.raw.slice(-FakeChat.PageSize);
+                const index = through === null ? this.raw.length - 1 : Math.max(0, this.raw.findIndex((message) => message.id === through));
+                const pages = Math.max(1, Math.ceil((this.raw.length - index) / FakeChat.PageSize));
+                let chosen = this.raw.slice(-pages * FakeChat.PageSize);
                 let skipped = 0;
                 if (this.hidden !== null) {
                     chosen = chosen.filter((message) => message.id !== this.hidden);

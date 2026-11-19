@@ -1082,6 +1082,30 @@ test('parts without a head are damage', () => {
     assert.equal(ScribeStore.read(storage, 'bare', Kind.Live), null);
 });
 
+test('legacy diagnostic snapshots redact credentials in every stored copy without rewriting source generations', () => {
+    const storage = new FakeStorage();
+    ScribeStore.setKey(storage, 'opaque-provider');
+    ScribeStore.setCloudKey(storage, 'opaque-worker');
+    const reason = 'failed: opaque-worker and opaque-provider';
+    const data = {
+        settings: { stop: { reason: 'Failed', problem: reason } },
+        live: { failing: { scene: reason, check: { source: 'Scribe', reason } }, untold: { reason },
+            retries: [{ reason }], calls: [{ problem: reason, finish: reason, answer: reason }] },
+    };
+    for (const [kind, value] of Object.entries(data)) {
+        const original = JSON.stringify(value);
+        const part = 'scribe:part:old:' + kind + ':1:0';
+        storage.values.set('scribe:head:old:' + kind, JSON.stringify({ generation: 1, parts: 1, characters: original.length }));
+        storage.values.set(part, original);
+        const snapshot = ScribeStore.snapshot(storage, 'old', kind);
+        assert.equal(snapshot.generation, 1);
+        assert.doesNotMatch(snapshot.text, /opaque-/);
+        assert.match(snapshot.text, /failed: \[key\] and \[key\]/);
+        assert.equal(storage.values.get(part), original);
+    }
+    assert.doesNotMatch(ScribeStore.exportText(storage, 'old'), /opaque-/);
+});
+
 test('a part that does not match the digest is damage', () => {
     for (const [text, expected] of [['', '811c9dc5'], ['a', 'e40c292c'], ['foobar', 'bf9cf968']]) {
         assert.equal(fnv(text), expected, text);

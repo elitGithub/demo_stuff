@@ -22,6 +22,8 @@ const PanelView = Object.freeze({
             NoBookMany: ' messages.',
             Reading: 'Reading the chat...',
             UpToDateOpen: 'Up to date: ',
+            WaitingRead: 'Waiting to read: ',
+            DisputedOpen: 'Unresolved authorship: ',
             Of: ' of ',
             ReadClose: ' read.',
             StoppedOpen: 'Stopped: ',
@@ -74,6 +76,26 @@ const PanelView = Object.freeze({
             SituationEarlier: '"; earlier: "',
             SituationClose: '".',
         }),
+        ModelOperations: Object.freeze({ scene: 'scene updates', check: 'story checks', recap: 'story recap' }),
+        Problems: Object.freeze({
+            key: ['OpenRouter key rejected', 'OpenRouter rejected the saved API key.', 'Open Settings, enter your current OpenRouter key, and press Save key.'],
+            missingKey: ['OpenRouter key needed', 'Scribe needs an OpenRouter API key.', 'Open Settings, enter your OpenRouter key, and press Save key.'],
+            credit: ['OpenRouter spending limit', 'OpenRouter reported a credit or spending limit.', 'Check the balance and spending limit for your OpenRouter account or key.'],
+            rate: ['OpenRouter rate limit', 'OpenRouter is limiting requests.', ''],
+            server: ['OpenRouter service error', 'OpenRouter returned a service error.', 'See Progress for the provider detail.'],
+            connection: ['OpenRouter connection failed', 'The request to OpenRouter did not complete.', 'Check your connection.'],
+            length: ['OpenRouter answer cut short', 'The model answer ended early.', 'See Progress for details.'],
+            unusable: ['Unusable model answer', 'The model supplied no usable result.', 'See Progress for details.'],
+            unknown: ['OpenRouter request failed', '', 'See the OpenRouter detail in Progress.'],
+            budget: ['Scribe daily budget spent', "Scribe reached its local daily budget.", ''],
+            login: ['Zeta sign-in needed', 'Sign in to Zeta and open the chat.', ''],
+            history: ['Zeta history unavailable', 'Scribe could not read the chat history from Zeta.', 'See Progress for details.'],
+            local: ['Scribe problem', '', 'See the detail in Progress.'],
+            workerKey: ['Worker key rejected', 'The Cloudflare Worker refused the DM API key. The book stays on this PC.', 'In Tampermonkey, choose Zeta Scribe → Set DM API key.'],
+            workerBook: ['Worker book unavailable', 'The Worker book is unavailable. The book stays on this PC.', 'See Progress for details.'],
+            offline: ['Working offline', 'Scribe is working offline with the book on this PC.', ''],
+            worker: ['Worker sync problem', 'The Cloudflare Worker reported a problem.', 'See Progress for details.'],
+        }),
         Titles: Object.freeze({
             Spelling: 'Name spelt another way',
             Contradiction: 'The reply contradicts the book',
@@ -116,7 +138,13 @@ const PanelView = Object.freeze({
         const settings = PanelView.Settings;
         const words = settings.Words;
         let line = PanelView.number(keeperView.read) + words.Of + PanelView.number(keeperView.total) + words.MessagesRead;
-        const left = PanelView.listed(keeperView.unread).length;
+        const unread = PanelView.listed(keeperView.unread);
+        const disputed = unread.filter((message) => message?.attributionPending).length;
+        if (disputed > settings.NoCount) {
+            return line + ' ' + PanelView.number(disputed) +
+                (disputed === settings.Single ? ' unread message has' : ' unread messages have') + ' unresolved authorship.';
+        }
+        const left = unread.length;
         if (left > settings.NoCount) {
             const readings = Math.ceil(left / keeperView.settings.size);
             line +=
@@ -125,6 +153,24 @@ const PanelView = Object.freeze({
                 (readings === settings.Single ? words.ReadingOne : words.ReadingMany);
         }
         return line;
+    },
+
+    /**
+     * @param {object} keeperView
+     * @param {object} live
+     * @return {string|null}
+     */
+    reminderStatus(keeperView, live) {
+        if (live.unconfirmed) {
+            return live.held;
+        }
+        if (live.selected != null) {
+            return live.held;
+        }
+        if (live.forced && live.ready === null) {
+            return keeperView.flight ?? live.preparationBlock ?? live.held;
+        }
+        return live.held;
     },
 
     /**
@@ -204,9 +250,7 @@ const PanelView = Object.freeze({
         const clouds = ScribeCloud.Phase;
         const stops = ScribeAdoption.Stop;
         const flight = keeperView.flight ?? null;
-        const problem = keeperView.problem ?? null;
         const cloud = cloudView === null ? clouds.Off : cloudView.phase;
-        const worker = cloudView === null ? null : (cloudView.problem ?? null);
         let line = words.Reading;
         if (cloud === clouds.Loading) {
             line = words.CloudLoading;
@@ -226,8 +270,12 @@ const PanelView = Object.freeze({
                 PanelView.number(keeperView.total) +
                 (keeperView.total === settings.Single ? words.NoBookOne : words.NoBookMany);
         } else if (keeperView.phase === phases.Idle) {
+            let status = keeperView.read < keeperView.total ? words.WaitingRead : words.UpToDateOpen;
+            if (PanelView.listed(keeperView.unread).some((message) => message?.attributionPending)) {
+                status = words.DisputedOpen;
+            }
             line =
-                words.UpToDateOpen +
+                status +
                 PanelView.number(keeperView.read) +
                 words.Of +
                 PanelView.number(keeperView.total) +
@@ -239,35 +287,126 @@ const PanelView = Object.freeze({
         } else if (keeperView.phase === phases.Stopped && keeperView.stop.reason === stops.Budget) {
             line = words.StoppedOpen + words.Budget;
         } else if (keeperView.phase === phases.Stopped) {
-            const reason = keeperView.stop.problem;
-            const recorded = typeof reason === settings.StringType && reason.trim() !== words.Nothing;
-            line = words.StoppedOpen + (recorded ? reason : words.NoReason);
-        }
-        if (cloud === clouds.Offline) {
-            line += words.Offline;
-        } else if (cloud === clouds.Refused) {
-            line += words.Refused;
-        } else if (cloud === clouds.Unusable) {
-            line += words.UnusableOpen + PanelView.said(worker ?? words.Unknown) + words.FullStop;
-        }
-        if (problem === ZetaSource.Settings.Messages.NoLogin) {
-            line += words.LoginWait;
-        } else if (problem !== null) {
-            line += words.ProblemOpen + PanelView.said(problem);
-        }
-        const scribe = liveView.problem ?? null;
-        if (scribe !== null) {
-            line += words.ScribeOpen + PanelView.said(scribe);
-        }
-        for (const failing of PanelView.lines(liveView.failing)) {
-            if (failing !== null) {
-                line += words.Space + failing;
-            }
-        }
-        if (worker !== null && cloud !== clouds.Unusable) {
-            line += words.WorkerOpen + PanelView.said(worker);
+            line = words.Stopped;
         }
         return line;
+    },
+
+    /**
+     * @param {string} reason
+     * @return {{cause: string, provider: string}}
+     */
+    modelProblem(reason) {
+        const gateway = ScribeGateway.Settings.Messages;
+        const parsed = /^([^;]+); status (\d{3}|no response); finish ([^;]+?)(?:; reason: (.*))?$/.exec(reason);
+        const diagnostic = parsed && (Object.values(gateway).includes(parsed[1]) || /^no answer within \d+ seconds$/.test(parsed[1]));
+        const legacy = /^HTTP (\d{3})(?:\s*:\s*|\s+|$)(.*)$/.exec(reason);
+        const status = Number(diagnostic ? parsed[2] : legacy?.[1]);
+        const provider = (diagnostic ? parsed[4] : legacy?.[2]) ?? '';
+        let cause = 'unknown';
+        if (status === 401) {
+            cause = 'key';
+        } else if (status === 402) {
+            cause = 'credit';
+        } else if (status === 429) {
+            cause = 'rate';
+        } else if (status >= 500 && status < 600) {
+            cause = 'server';
+        } else if (diagnostic && parsed[2] === 'no response' && (parsed[1] === gateway.Network || parsed[1].startsWith(gateway.TimeoutPrefix))) {
+            cause = 'connection';
+        } else if (diagnostic && parsed[3] === ScribeGateway.Settings.Finish.Length) {
+            cause = 'length';
+        } else if ((diagnostic && status >= 200 && status < 300) || [ScribeLive.Settings.Messages.SceneUnreadable, ScribeLive.Settings.Messages.StoryEmpty].includes(reason)) {
+            cause = 'unusable';
+        } else if (reason === 'No key') {
+            cause = 'missingKey';
+        } else if (reason === "The day's budget is spent" || reason === ScribeLive.Settings.Messages.Budget) {
+            cause = 'budget';
+        }
+        return { cause, provider: cause === 'unknown' ? reason : provider };
+    },
+
+    /**
+     * @param {object} keeperView
+     * @param {object} liveView
+     * @param {object|null} cloudView
+     * @return {object[]}
+     */
+    problems(keeperView, liveView, cloudView = null) {
+        const groups = new Map();
+        const copy = PanelView.Settings.Problems;
+        const add = (service, cause, operation, detail, distinction = '', retrying = false) => {
+            const key = JSON.stringify([service, cause, distinction]);
+            if (!groups.has(key)) {
+                groups.set(key, { service, cause, operations: [], label: copy[cause][0], details: [], retrying: false });
+            }
+            const group = groups.get(key);
+            if (!group.operations.includes(operation)) {
+                group.operations.push(operation);
+            }
+            if (detail && !group.details.includes(detail)) {
+                group.details.push(detail);
+            }
+            group.retrying ||= retrying;
+        };
+        const model = (operation, detail, retrying = false, source = 'OpenRouter') => {
+            const { cause, provider } = PanelView.modelProblem(detail);
+            if (cause === 'budget' || cause === 'missingKey') {
+                add('Scribe', cause, operation, detail);
+            } else if (source === 'Scribe') {
+                add('Scribe', 'local', operation, detail, detail);
+            } else {
+                add('OpenRouter', cause, operation, detail, provider, retrying);
+            }
+        };
+        const keeper = keeperView.problem;
+        if (keeper) {
+            if (keeper === ZetaSource.Settings.Messages.NoLogin) {
+                add('Zeta', 'login', 'chat history', keeper);
+            } else if (keeperView.problemSource === 'Zeta') {
+                add('Zeta', 'history', 'chat history', keeper, keeper);
+            } else {
+                add('Scribe', 'local', 'book updates', keeper, keeper);
+            }
+        }
+        const stop = keeperView.stop;
+        if (stop?.reason === ScribeAdoption.Stop.Failed) {
+            const detail = stop.problem?.trim() || 'The reason was not recorded.';
+            if (stop.source === 'OpenRouter' || stop.source === 'Scribe') {
+                model('book reading', detail, false, stop.source);
+            } else {
+                add('Scribe', 'local', 'book reading', detail, detail);
+            }
+        }
+        const failing = PanelView.listed(liveView.failing);
+        for (const failure of failing) {
+            const operation = PanelView.Settings.ModelOperations[failure?.role];
+            if (operation && typeof failure.reason === 'string') {
+                model(operation, failure.reason, failure.retrying === true, failure.source);
+            }
+        }
+        if (liveView.problem && !failing.some((failure) => failure?.reason === liveView.problem)) {
+            const detail = liveView.problem;
+            if (detail === ScribeLive.Settings.Messages.Budget) {
+                add('Scribe', 'budget', 'live updates', detail);
+            } else {
+                add('Scribe', 'local', 'live updates', detail, detail);
+            }
+        }
+        const cloudCause = { Refused: 'workerKey', Unusable: 'workerBook', Offline: 'offline' }[cloudView?.phase];
+        if (cloudCause || cloudView?.problem) {
+            add('Cloudflare', cloudCause ?? 'worker', 'book sync', cloudView.problem);
+        }
+        const result = [];
+        for (const group of groups.values()) {
+            const [, opening, action] = copy[group.cause];
+            const names = new Intl.ListFormat('en', { style: 'long', type: 'conjunction' }).format(group.operations);
+            const affected = names[0].toUpperCase() + names.slice(1) + ' could not run.';
+            const retry = group.retrying && group.cause === 'rate' ? ' A retry is scheduled.' : '';
+            const explanation = [opening, affected, action].filter(Boolean).join(' ') + retry;
+            result.push({ ...group, explanation });
+        }
+        return result;
     },
 
     /**

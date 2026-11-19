@@ -847,6 +847,22 @@ test('a corrected answer reopens the question', () => {
     ]);
 });
 
+test('equally worded questions inherit rulings only from a reread of the same citation', () => {
+    const log = ScribeLog.create();
+    const askAt = (positions) => answer({ QUESTIONS: positions.map((position) => 'Who has the key? | #' + position) });
+    apply(log, storyOrder, askAt([2, 3]), stretch(1, 10));
+    rule(log, { type: 'Answer', question: 'Q1', text: 'The miller.' });
+    rule(log, { type: 'Dismiss', question: 'Q1' });
+    rule(log, { type: 'Answer', question: 'Q2', text: 'The ferryman.' });
+    ScribeLog.withdraw(log, 'MESSAGE-2');
+    const { state } = apply(log, storyOrder, askAt([3, 4, 2]), stretch(1, 10));
+    assert.deepEqual(plain(state.questions.map((question) => [question.id, question.position, question.answer, question.dismissed])), [
+        ['Q5', 2, 'The miller.', true],
+        ['Q3', 3, 'The ferryman.', false],
+        ['Q4', 4, null, false],
+    ]);
+});
+
 test('removing and adding by hand', () => {
     const log = ScribeLog.create();
     const { state } = apply(

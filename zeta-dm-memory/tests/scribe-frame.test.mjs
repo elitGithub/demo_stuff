@@ -352,7 +352,7 @@ test('the role is told by where it runs', () => {
             TagName: 'zetaScribe',
             Tag: 1,
             TokenName: 'scribe-bridge',
-            Kind: { Ready: 'ready', Arm: 'arm', Starting: 'starting', Cancelled: 'cancelled', Rejected: 'rejected', Uncertain: 'uncertain', Sent: 'sent' },
+            Kind: { Ready: 'ready', Arm: 'arm', Starting: 'starting', Reserved: 'reserved', Cancelled: 'cancelled', Rejected: 'rejected', Uncertain: 'uncertain', Sent: 'sent' },
             ReadyRepeatMs: 1000,
             MessageBytes: 4500,
             LongestLine: 6000,
@@ -934,6 +934,20 @@ test('the frame trims a long reminder at a sentence end, as the top page does, a
     assert.deepEqual(sents(page).at(-1), sentOf(2, false, false, true));
 });
 
+test('the frame gives the complete manual selection priority and never reports a cut', () => {
+    const page = framePage();
+    const selected = 'Snow.  雪\nWait here.';
+    const manual = { ready: selected, reminder: 'room#reminder-1', attempt: 'room#attempt-1', manual: true, ends: [5], suggestion: 'Optional.' };
+    const tail = '\n@: [Scribe] ' + selected;
+    const player = 'x'.repeat(4500 - Buffer.byteLength(tail));
+    arm(page, { seq: 1, ...manual });
+    assert.equal(sendNow(page, player + 'x'), player + 'x');
+    assert.equal(sents(page).at(-1).crowded, true);
+    assert.equal(sendNow(page, player), player + tail);
+    const report = sents(page).at(-1);
+    assert.deepEqual([report.ready, report.suggestion, report.cut, report.reminder], [true, false, null, manual.reminder]);
+});
+
 test('an offer carries its reminder and attempt identities, and each report has its own index', () => {
     const page = framePage();
     const reminder = 'room-1#reminder-1';
@@ -1002,7 +1016,7 @@ test('starting and cancellation identify the attempt, and a late confirmation ke
 });
 
 test('the frame role touches nothing else', () => {
-    assert.equal(seen.pages.length, 23);
+    assert.equal(seen.pages.length, 24);
     assert.deepEqual(
         [...seen.window].filter((name) => !WINDOW_READS.includes(name)),
         [],
@@ -1026,7 +1040,7 @@ test('the frame role touches nothing else', () => {
 });
 
 test('the frame reads the token and nothing else', () => {
-    assert.equal(seen.pages.length, 23);
+    assert.equal(seen.pages.length, 24);
     assert.deepEqual(
         [...seen.calls].filter((name) => !OUTSIDE_CALLS.includes(name)),
         ['token'],

@@ -36,6 +36,7 @@ const ScribeAdoption = Object.freeze({
         Arguments: Object.freeze({
             Options: 'The options are missing.',
             Messages: 'messages is not a list.',
+            ReadThrough: 'readThrough is not a whole number within the message list.',
             Notes: 'notes is not a list.',
             Player: 'player is not a string.',
             Profile: 'profile is neither a string nor null.',
@@ -189,19 +190,28 @@ const ScribeAdoption = Object.freeze({
              * @param {{ id: string }} message
              * @return {boolean}
              */
-            (message) => !Object.hasOwn(log.read, message.id),
+            (message) => !message.attributionPending && !Object.hasOwn(log.read, message.id),
         );
         const stretch = [];
         if (start === settings.NotFound) {
             return Object.freeze(stretch);
         }
         for (const message of messages.slice(start, start + count)) {
-            if (Object.hasOwn(log.read, message.id)) {
+            if (message.attributionPending || Object.hasOwn(log.read, message.id)) {
                 break;
             }
             stretch.push(message);
         }
         return Object.freeze(stretch);
+    },
+
+    /**
+     * @param {object} question
+     * @param {readonly object[]} messages
+     * @return {boolean}
+     */
+    canAnswer(question, messages) {
+        return question.answer !== null && !question.dismissed && !messages[question.position - 1]?.attributionPending;
     },
 
     /**
@@ -287,6 +297,10 @@ const ScribeAdoption = Object.freeze({
         if (!Array.isArray(options.messages)) {
             return problems.Messages;
         }
+        if (options.readThrough !== undefined && (!Number.isSafeInteger(options.readThrough) ||
+            options.readThrough < 0 || options.readThrough > options.messages.length)) {
+            return problems.ReadThrough;
+        }
         const seen = new Set();
         for (const message of options.messages) {
             if (seen.has(message.id)) {
@@ -319,6 +333,9 @@ const ScribeAdoption = Object.freeze({
             if (typeof options[name] !== 'function') {
                 return name + settings.NotFunction;
             }
+        }
+        if (options.atBudget !== undefined && typeof options.atBudget !== 'function') {
+            return 'atBudget' + settings.NotFunction;
         }
         return null;
     },
@@ -411,12 +428,12 @@ const ScribeAdoption = Object.freeze({
      * @return {Promise<void>}
      */
     async report(job, step, stored, refusedLines, refusedOperations) {
-        const read = job.messages.filter(
+        const read = job.roomOrder.filter(
             /**
-             * @param {{ id: string }} message
+             * @param {string} id
              * @return {boolean}
              */
-            (message) => Object.hasOwn(job.log.read, message.id),
+            (id) => Object.hasOwn(job.log.read, id),
         ).length;
         await job.progress(
             Object.freeze({
@@ -424,7 +441,7 @@ const ScribeAdoption = Object.freeze({
                 first: step.first,
                 last: step.last,
                 read,
-                total: job.messages.length,
+                total: job.roomOrder.length,
                 spent: job.spent,
                 calls: job.calls,
                 unpriced: job.unpriced,
@@ -475,13 +492,13 @@ const ScribeAdoption = Object.freeze({
         if (await job.paused()) {
             return ScribeAdoption.finish(job, stops.Paused, null);
         }
-        if (job.spent >= job.budget) {
+        if (job.spent >= job.budget || job.atBudget?.()) {
             return ScribeAdoption.finish(job, stops.Budget, null);
         }
         job.calls++;
         let answer = null;
         try {
-            answer = await job.ask(step.system, step.user);
+            answer = await job.ask(step.system, step.user, step.questions);
         } catch (error) {
             await ScribeAdoption.stopped(job, step, error);
             throw error;
@@ -555,7 +572,10 @@ const ScribeAdoption = Object.freeze({
                 unquoted.push(Object.freeze({ operation, reason: ScribeLog.Reason.Quote }));
             }
         }
-        const stretch = { messages: step.messages, origin: step.origin };
+        const stretch = { messages: step.messages, origin: step.origin, sources: job.places };
+        const answers = step.pass === ScribeAdoption.Pass.Answers;
+        const order = answers ? job.roomOrder : job.order;
+        const pending = answers ? job.pending : null;
         let result = null;
         try {
             result = ScribeLog.append(job.log, step.state, operations, stretch);
@@ -563,18 +583,18 @@ const ScribeAdoption = Object.freeze({
             if (error.message !== ScribeLog.Settings.StaleState) {
                 throw error;
             }
-            result = ScribeLog.append(job.log, ScribeReplay.run(job.log, job.order), operations, stretch);
+            result = ScribeLog.append(job.log, ScribeReplay.run(job.log, order, pending), operations, stretch);
         }
         for (const note of step.notes) {
             job.log.notes.push(note.text);
         }
         for (const question of step.questions) {
-            ScribeLog.rule(job.log, ScribeReplay.run(job.log, job.order), {
+            ScribeLog.rule(job.log, ScribeReplay.run(job.log, order, pending), {
                 type: ScribeLog.Ruling.Dismiss,
                 question: question.id,
             });
         }
-        await job.save(job.log);
+        await job.save(job.log, step.questions);
         await job.record(Object.freeze({ sequence: result.entry.sequence, ...kept, readable: true }));
         const refused = Object.freeze([...result.refused, ...unquoted]);
         await ScribeAdoption.report(job, step, result.entry.operations.length, parsed.refused, refused);
@@ -582,7 +602,7 @@ const ScribeAdoption = Object.freeze({
     },
 
     /**
-     * @param {{ messages: readonly object[], notes: readonly object[], player: string, profile?: string|null, log: object, size: number, budget: number, spent: number, ask: Function, save: Function, record: Function, progress: Function, paused: Function }} options
+     * @param {{ messages: readonly object[], readThrough?: number, notes: readonly object[], player: string, profile?: string|null, log: object, size: number, budget: number, spent: number, atBudget?: Function, ask: Function, save: Function, record: Function, progress: Function, paused: Function }} options
      * @return {Promise<Readonly<{ stop: string, problem: string|null, spent: number, calls: number, unpriced: number }>>}
      */
     async run(options) {
@@ -598,19 +618,28 @@ const ScribeAdoption = Object.freeze({
                 job.spent = ScribeAdoption.amount(given) ? given : settings.LeastAmount;
                 return ScribeAdoption.finish(job, stops.Failed, problem);
             }
-            Object.assign(job, options, { order: [], places: new Map(), calls: 0, unpriced: 0 });
-            for (const message of job.messages) {
-                job.order.push(message.id);
-                job.places.set(message.position, message);
-            }
+            const room = options.messages;
+            const roomOrder = room.map((message) => message.id);
+            const end = options.readThrough ?? room.length;
+            Object.assign(job, options, {
+                messages: room.slice(0, end),
+                order: roomOrder.slice(0, end),
+                roomOrder,
+                pending: new Set(room.filter((message) => message.attributionPending).map((message) => message.id)),
+                places: new Map(room.map((message) => [message.position, message])),
+                calls: 0,
+                unpriced: 0,
+            });
             while (!(await job.paused())) {
                 let state = ScribeReplay.run(job.log, job.order);
-                const answered = state.questions.filter(
+                const answerState = job.log.nextQuestion > 1 && (end < room.length || job.pending.size)
+                    ? ScribeReplay.run(job.log, roomOrder, job.pending) : state;
+                const answered = answerState.questions.filter(
                     /**
                      * @param {{ answer: string|null, dismissed: boolean }} question
                      * @return {boolean}
                      */
-                    (question) => question.answer !== null && !question.dismissed,
+                    (question) => ScribeAdoption.canAnswer(question, room),
                 );
                 if (answered.length > 0) {
                     const cited = new Set();
@@ -623,15 +652,15 @@ const ScribeAdoption = Object.freeze({
                         first: null,
                         last: null,
                         system: ScribeAnalyzer.AnswersPrompt,
-                        user: ScribeAnalyzer.answersInput(state, job.player, answered),
-                        messages: job.messages.filter(
+                        user: ScribeAnalyzer.answersInput(answerState, job.player, answered),
+                        messages: room.filter(
                             /**
                              * @param {{ id: string }} message
                              * @return {boolean}
                              */
                             (message) => cited.has(message.id),
                         ),
-                        state,
+                        state: answerState,
                         notes: [],
                         questions: answered,
                     });
@@ -654,7 +683,9 @@ const ScribeAdoption = Object.freeze({
                      * @return {boolean}
                      */
                     (note) =>
+                        (end === room.length || note.position <= job.messages.at(settings.Last)?.position) &&
                         job.places.has(note.position) &&
+                        !job.places.get(note.position).attributionPending &&
                         (!reading || note.position <= last) &&
                         !filed.has(ScribeText.words(note.text).join(settings.Space)),
                 );

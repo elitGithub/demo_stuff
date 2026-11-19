@@ -117,6 +117,44 @@ h4 {
     display: none;
 }
 
+#scribe-problems,
+#scribe-problem-details {
+    flex: 1 1 100%;
+    min-width: 0;
+    overflow-wrap: anywhere;
+}
+
+#scribe-problems p,
+#scribe-problem-details p {
+    margin: 0 0 var(--scribe-gap-small);
+}
+
+.header:has(#scribe-problems:not([hidden])) {
+    max-height: 50vh;
+    overflow-y: auto;
+    flex-shrink: 0;
+}
+
+.panel.collapsed:has(#scribe-problems-compact:not([hidden])) {
+    width: min(14rem, 100vw);
+}
+
+.panel.collapsed .header:has(#scribe-problems-compact:not([hidden])) {
+    flex-direction: row;
+    flex-wrap: wrap;
+}
+
+.panel.collapsed #scribe-problems-compact {
+    flex: 1 1 5rem;
+    min-width: 0;
+    overflow-wrap: anywhere;
+}
+
+.panel.collapsed .header:has(#scribe-problems-compact:not([hidden])) .toggle {
+    writing-mode: horizontal-tb;
+    order: -1;
+}
+
 .panel.collapsed .badge,
 .panel.collapsed .toggle {
     writing-mode: vertical-rl;

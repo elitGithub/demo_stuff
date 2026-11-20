@@ -1484,6 +1484,52 @@ const ScribePedant = Object.freeze({
 
     /**
      * @param {object} state
+     * @param {readonly object[]} findings
+     * @return {Map<object, number>}
+     */
+    decisions(state, findings) {
+        const matches = new Map();
+        for (const issue of state.resolutions ?? []) {
+            for (const finding of findings) {
+                if (finding.kind === issue.kind && (finding.fact === issue.fact || finding.fact === issue.activeFact) &&
+                    finding.message === issue.message &&
+                    finding.fingerprint === issue.fingerprint && finding.subject === issue.subject &&
+                    finding.category === issue.category && (finding.speaker ?? null) === issue.speaker &&
+                    ScribeCategory.same(finding.book, issue.book) && ScribeCategory.same(finding.said, issue.said)) {
+                    matches.set(finding, issue.sequence);
+                }
+            }
+        }
+        for (const { operation, sequence } of state.legacyDecisions ?? []) {
+            const candidates = findings.filter((finding) => {
+                if (!finding.fingerprint || !(state.decisionRead[finding.message] < sequence) ||
+                    ![ScribePedant.Kind.Contradiction, ScribePedant.Kind.Leak].includes(finding.kind)) {
+                    return false;
+                }
+                if ([ScribeAnswer.Type.Change, ScribeAnswer.Type.Refine, ScribeAnswer.Type.End, ScribeAnswer.Type.Told].includes(operation.type) &&
+                    (operation.cite !== finding.message || operation.fact !== finding.fact)) {
+                    return false;
+                }
+                const fact = ScribeLog.lookup(state.facts, finding.fact);
+                if (!fact || fact.subject !== finding.subject || fact.category !== finding.category ||
+                    !ScribeCategory.same(fact.text, finding.book) || !(state.decisionRead[fact.cite] < sequence)) {
+                    return false;
+                }
+                const contradiction = JSON.stringify([finding.message, fact.cite, finding.said, finding.book]);
+                if (operation.type === ScribeLog.Ruling.Pin && operation.winner !== fact.id) {
+                    return false;
+                }
+                return ScribeLog.settles(operation, { ...finding, target: fact.target, targetText: fact.targetText, contradiction });
+            });
+            if (candidates.length === 1) {
+                matches.set(candidates[0], sequence);
+            }
+        }
+        return matches;
+    },
+
+    /**
+     * @param {object} state
      * @param {object} finding
      * @return {boolean}
      */

@@ -403,7 +403,7 @@ const ScribeCloud = Object.freeze({
      * @param {{ status: number, data: *, retryAfter: number }} result
      * @return {void}
      */
-    failed(cloud, result) {
+    failed(cloud, result, lookup = false) {
         const settings = ScribeCloud.Settings;
         const statuses = settings.Statuses;
         const transport = settings.Transport;
@@ -411,6 +411,10 @@ const ScribeCloud = Object.freeze({
         const code = ScribeCloud.code(result);
         if (result.status === transport.Cancelled) {
             return;
+        }
+        if (lookup && !cloud.lookupFailed && cloud.phase === phases.Watching) {
+            cloud.lookupFailed = true;
+            cloud.notify();
         }
         const lapsed = ScribeCloud.lapsed(cloud, cloud.clock.now());
         if (!lapsed && (result.status === statuses.Unauthorized || code === settings.Codes.Configuration)) {
@@ -622,6 +626,8 @@ const ScribeCloud = Object.freeze({
         cloud.key = key;
         cloud.phase = key === ScribeCloud.Settings.Nothing ? phases.Off : phases.Idle;
         cloud.heads = new Map();
+        cloud.checkedHeads = false;
+        cloud.lookupFailed = false;
         cloud.held = false;
         cloud.heldAt = null;
         cloud.renewal = ScribeCloud.Settings.NoCount;
@@ -647,6 +653,7 @@ const ScribeCloud = Object.freeze({
         cloud.retries = ScribeCloud.Settings.NoCount;
         cloud.sent = null;
         cloud.notes = null;
+        cloud.checkedNotes = false;
         cloud.notesAt = null;
         cloud.conflict = null;
         cloud.problem = null;
@@ -926,7 +933,7 @@ const ScribeCloud = Object.freeze({
                     return;
                 }
                 if (!ScribeCloud.ok(lease)) {
-                    ScribeCloud.failed(cloud, lease);
+                    ScribeCloud.failed(cloud, lease, true);
                     return;
                 }
                 ScribeCloud.leased(cloud, lease.data, askedAt);
@@ -953,7 +960,7 @@ const ScribeCloud = Object.freeze({
             return;
         }
         if (!ScribeCloud.ok(result)) {
-            ScribeCloud.failed(cloud, result);
+            ScribeCloud.failed(cloud, result, true);
             return;
         }
         await ScribeCloud.settle(cloud, result.data);
@@ -1046,7 +1053,7 @@ const ScribeCloud = Object.freeze({
         cloud.garbled = true;
         cloud.texts = new Map();
         ScribeCloud.backOff(cloud, ScribeCloud.Settings.NoDelay);
-        cloud.phase = ScribeCloud.Phase.Offline;
+        cloud.phase = cloud.answered && !cloud.held ? ScribeCloud.Phase.Watching : ScribeCloud.Phase.Offline;
         cloud.notify();
     },
 
@@ -1094,7 +1101,9 @@ const ScribeCloud = Object.freeze({
                 return;
             }
             ScribeCloud.noteSpent(cloud, reply.spent);
+            const priorBook = cloud.checkedHeads ? cloud.heads.get(kinds.Book)?.revision ?? settings.NoRevision : null;
             cloud.heads = heads;
+            cloud.checkedHeads = true;
             const synced = ScribeStore.synced(storage, roomId);
             const fetched = new Map();
             let swept = null;
@@ -1123,7 +1132,7 @@ const ScribeCloud = Object.freeze({
                     }
                     continue;
                 }
-                if (!damaged && !moved && (clean || !taking)) {
+                if (snapshot !== null && !damaged && !moved && (clean || !taking)) {
                     continue;
                 }
                 if (cloud.spoiled.get(kind) === revision) {
@@ -1139,16 +1148,18 @@ const ScribeCloud = Object.freeze({
                     break;
                 }
                 if (loaded.result !== null) {
-                    ScribeCloud.failed(cloud, loaded.result);
+                    ScribeCloud.failed(cloud, loaded.result, true);
                     return;
                 }
-                if (ScribeStore.decode(loaded.text) === null) {
+                const value = ScribeStore.decode(loaded.text);
+                if (value === null || (kind === kinds.Book && !ScribeKeeper.soundBook(value))) {
                     cloud.spoiled.set(kind, revision);
                     ScribeCloud.unreadable(cloud, settings.Messages.Unreadable);
                     return;
                 }
                 cloud.texts.set(kind, { revision, text: loaded.text });
-                const adopt = damaged || snapshot === null || taking || (clean && !keeping);
+                const rollback = kind === kinds.Book && revision < entry.revision;
+                const adopt = damaged || snapshot === null || taking || (clean && !keeping && !rollback);
                 fetched.set(kind, { revision, text: loaded.text, snapshot, adopt });
             }
             if (swept !== null) {
@@ -1163,7 +1174,7 @@ const ScribeCloud = Object.freeze({
                     return;
                 }
                 if (!ScribeCloud.ok(again)) {
-                    ScribeCloud.failed(cloud, again);
+                    ScribeCloud.failed(cloud, again, true);
                     return;
                 }
                 reply = again.data;
@@ -1262,7 +1273,9 @@ const ScribeCloud = Object.freeze({
                 cloud.conflict = null;
             }
             const phase = cloud.held ? phases.Leading : phases.Watching;
-            const changed = phase !== cloud.phase || writes.size > settings.NoCount;
+            const changed = cloud.lookupFailed || phase !== cloud.phase || writes.size > settings.NoCount ||
+                priorBook !== (heads.get(kinds.Book)?.revision ?? settings.NoRevision);
+            cloud.lookupFailed = false;
             cloud.phase = phase;
             if (changed) {
                 cloud.notify();
@@ -1463,6 +1476,8 @@ const ScribeCloud = Object.freeze({
         if (cloud.conflict !== null && cloud.conflict.answer === ScribeCloud.Answer.Keep) {
             cloud.conflict = null;
             cloud.notify();
+        } else if (ready.some((item) => item.kind === ScribeStore.Kind.Book)) {
+            cloud.notify();
         }
     },
 
@@ -1490,7 +1505,7 @@ const ScribeCloud = Object.freeze({
             return;
         }
         if (!ScribeCloud.ok(result)) {
-            ScribeCloud.failed(cloud, result);
+            ScribeCloud.failed(cloud, result, true);
             return;
         }
         const held = ScribeCloud.leased(cloud, result.data, askedAt);
@@ -1506,6 +1521,8 @@ const ScribeCloud = Object.freeze({
         if (!held && settings.Dropped.includes(cloud.phase)) {
             cloud.phase = phases.Watching;
             cloud.notify();
+            await ScribeCloud.reload(cloud);
+        } else if (!held && cloud.phase === phases.Watching) {
             await ScribeCloud.reload(cloud);
         }
     },
@@ -1627,10 +1644,18 @@ const ScribeCloud = Object.freeze({
             return;
         }
         const notes = result.data?.notes;
+        const previouslyChecked = cloud.checkedNotes;
+        const previous = cloud.notes;
+        cloud.checkedNotes = false;
         if (result.status === statuses.Ok && typeof notes === settings.StringType) {
             cloud.notes = notes.trim() === settings.Nothing ? null : ScribeCloud.trimmed(notes);
+            cloud.checkedNotes = true;
         } else if (result.status === statuses.NotFound && ScribeCloud.code(result) === settings.Codes.NoNotes) {
             cloud.notes = null;
+            cloud.checkedNotes = true;
+        }
+        if (cloud.checkedNotes !== previouslyChecked || previous?.length !== cloud.notes?.length || previous?.cut !== cloud.notes?.cut) {
+            cloud.notify();
         }
     },
 
@@ -1695,12 +1720,18 @@ const ScribeCloud = Object.freeze({
         const phases = ScribeCloud.Phase;
         const conflict = cloud.phase === phases.Conflict ? cloud.conflict : null;
         const quiet = cloud.phase === phases.Off || cloud.phase === phases.Idle;
+        const unsent = quiet ? [] : ScribeCloud.unsent(cloud);
         return Object.freeze({
             phase: cloud.phase,
             keyed: cloud.key !== ScribeCloud.Settings.Nothing,
+            bookRevision: cloud.checkedHeads ? cloud.heads.get(ScribeStore.Kind.Book)?.revision ?? ScribeCloud.Settings.NoRevision : null,
+            bookPending: unsent.includes(ScribeStore.Kind.Book),
+            lookupFailed: cloud.lookupFailed,
+            unreadable: cloud.garbled,
+            checkedNotes: cloud.checkedNotes,
             conflict: conflict === null ? null : Object.freeze({ here: conflict.here, there: conflict.there }),
             notes: cloud.notes === null ? null : Object.freeze({ length: cloud.notes.length, cut: cloud.notes.cut }),
-            unsent: quiet ? ScribeCloud.Settings.NoCount : ScribeCloud.unsent(cloud).length,
+            unsent: unsent.length,
             problem: cloud.problem,
         });
     },

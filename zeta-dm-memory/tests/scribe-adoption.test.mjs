@@ -1216,7 +1216,8 @@ test('answered questions are filed and retired', async () => {
         ],
     );
     assert.deepEqual(plain(log.entries.at(-1).operations), [
-        { type: 'Dismiss', question: 'Q1', questionText: 'Does Mirelle trust Halvard?' },
+        { type: 'Dismiss', question: 'Q1', questionText: 'Does Mirelle trust Halvard?',
+            passages: [{ id: 'MESSAGE-12', fingerprint: plainCampaign.messages[11].fingerprint }] },
     ]);
     assert.deepEqual(plain(log.read), read);
     assert.deepEqual(plain(log), second.saved.at(-1));

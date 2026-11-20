@@ -5685,6 +5685,27 @@ test('a manual delivery on turn 3 with an interval of 8 makes turn 11 the next r
     assert.equal(live.outgoing('Turn 11.'), `Turn 11.${lineOf(regular)}`);
 });
 
+test('setting the interval to one after an earlier delivery prepares the next send, then the delivered offer stays cleared on reload', async () => {
+    const { keeper, live, storage } = await preparedRoom();
+    live.outgoing('First.');
+    live.sent();
+    assert.equal(live.view().sends, 0);
+    const settings = { refresh: 1, budget: 3 };
+    keeper.change({ settings });
+    live.view();
+    await ticks();
+    const ready = live.view().ready;
+    assert.ok(ready);
+    assert.equal(live.outgoing('Second.'), 'Second.' + lineOf(ready));
+    live.sent();
+    live.close();
+    const reopened = rig({ messages: keeper.current.messages, settings }, storage);
+    reopened.live.view();
+    await ticks();
+    assert.equal(reopened.live.view().ready, null);
+    assert.equal(reopened.live.view().sends, 0);
+});
+
 test('changing the interval keeps the count, and lowering it below the count makes the next send eligible', async () => {
     const { keeper, live } = rig({ settings: { refresh: 8, budget: 3 } });
     for (let count = 1; count <= 5; count++) {
@@ -5850,6 +5871,107 @@ test('reopening two indistinguishable attempts cannot consume either selection o
     room.live.view();
     assert.deepEqual(plain(ScribeStore.read(storage, ROOM, ScribeStore.Kind.Live).settled), [first]);
     assert.equal(room.live.view().unconfirmed.id, second);
+});
+
+for (const reports of ['original first', 'retry first', 'history only', 'retry then history']) {
+    test(`one reminder on two accepted attempts resets at its first room position with ${reports}`, async () => {
+        const fields = { messages: story.slice(0, 41), own: [], unread: [], settings: { refresh: 2, budget: 3 } };
+        let room = await preparedRoom(fields);
+        const storage = room.storage;
+        await room.live.force(null, 'Known.');
+        const id = room.live.lines().reminder;
+        room.live.outgoing('Original.');
+        const original = room.live.posting();
+        room.live.uncertain(original);
+        await room.live.force(id);
+        room.live.outgoing('Retry.');
+        const retry = room.live.posting();
+        room.live.uncertain(retry);
+        if (reports === 'original first' || reports === 'retry first') {
+            const order = reports === 'original first' ? [original, retry] : [retry, original];
+            for (const post of order) {
+                room.live.went(post);
+            }
+            assert.equal(room.live.view().sends, 1);
+        } else if (reports === 'retry then history') {
+            room.live.went(retry);
+            assert.equal(room.live.view().sends, 0);
+        }
+        const history = carriedStory({ 42: '[Scribe] Known.', 44: '[Scribe] Known.' }, 44, 0,
+            { 42: 'Original.', 44: 'Retry.' });
+        const partial = { ...fields, messages: history.messages.slice(0, 42), own: history.own.filter((item) => item.position <= 42) };
+        room.live.close();
+        room = rig(partial, storage);
+        assert.equal(room.live.view().sends, reports === 'history only' ? 0 : 1);
+        room.live.close();
+        room = rig({ ...fields, messages: history.messages, own: history.own }, storage);
+        assert.equal(room.live.view().sends, 1);
+        assert.equal(room.live.view().due, true);
+        room.live.went(original);
+        room.live.went(retry);
+        const saved = ScribeStore.read(storage, ROOM, ScribeStore.Kind.Live);
+        assert.equal(saved.sends, 1);
+        assert.deepEqual(plain(saved.settled), [id]);
+        assert.deepEqual(plain(saved.posts), []);
+        assert.deepEqual(plain(saved.observedReminders), []);
+    });
+}
+
+test('when the retry reaches room history first, the outstanding original still counts when its receipt arrives', async () => {
+    const fields = { messages: story.slice(0, 41), own: [], unread: [], settings: { refresh: 2, budget: 3 } };
+    const { live, keeper, storage } = await preparedRoom(fields);
+    await live.force(null, 'Known.');
+    const id = live.lines().reminder;
+    live.outgoing('Original.');
+    const original = live.posting();
+    live.uncertain(original);
+    await live.force(id);
+    live.outgoing('Retry.');
+    const retry = live.posting();
+    live.uncertain(retry);
+    const history = carriedStory({ 42: '[Scribe] Known.', 44: '[Scribe] Known.' }, 44, 0, { 42: 'Retry.', 44: 'Original.' });
+    keeper.change({ messages: history.messages.slice(0, 42), own: history.own.filter((item) => item.position <= 42) });
+    assert.equal(live.view().sends, 0);
+    live.went(original);
+    assert.equal(live.view().sends, 1);
+    live.close();
+    const fresh = rig({ ...fields, messages: history.messages, own: history.own }, storage);
+    fresh.live.went(retry);
+    assert.equal(fresh.live.view().sends, 1);
+    const saved = ScribeStore.read(storage, ROOM, ScribeStore.Kind.Live);
+    assert.deepEqual(plain(saved.settled), [id]);
+    assert.deepEqual(plain(saved.posts), []);
+    assert.deepEqual(plain(saved.attachments.map((row) => row.id)), [history.messages[41].id, history.messages[43].id]);
+});
+
+test('late and repeated receipts preserve accepted send order before room history catches up', async () => {
+    const fields = { messages: story.slice(0, 41), own: [], unread: [] };
+    const { live, storage } = await preparedRoom(fields);
+    await live.force(null, 'The door is open.');
+    live.outgoing('First.');
+    const first = live.posting();
+    live.uncertain(first);
+    assert.equal(live.outgoing('Second.'), 'Second.');
+    const second = live.posting();
+    const other = rig({ ...fields, reader: false, trusted: false }, storage);
+    other.live.went(second);
+    assert.equal(live.view().sends, 0);
+    live.went(second);
+    live.went(first);
+    assert.equal(live.view().sends, 1);
+    live.close();
+    other.keeper.change({ reader: true, trusted: true });
+    other.live.went(first);
+    other.live.went(second);
+    assert.equal(other.live.view().sends, 1);
+    for (let turn = 0; turn <= ScribeLive.Settings.CountedKept; turn++) {
+        other.live.outgoing('Following ' + turn);
+        other.live.sent();
+    }
+    const expected = ScribeLive.Settings.CountedKept + 2;
+    assert.equal(other.live.view().sends, expected);
+    other.live.went(second);
+    assert.equal(other.live.view().sends, expected);
 });
 
 test('a late receipt replays the interval in room order after later independent deliveries and bare messages', async () => {

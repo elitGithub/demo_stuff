@@ -397,6 +397,67 @@ function subjectsOnly(labels) {
     return { log, state };
 }
 
+test('a legacy decision requires a unique finding with saved passage and fact identities', () => {
+    const { log, state } = book();
+    apply(log, answer({ FACTS: [] }), story.slice(43, 51));
+    const fact = factSaying(state, 'deserted at the siege');
+    const speaker = idOf(state, 'Mirelle');
+    const finding = (position) => ({ kind: 'Leak', message: at(position).id, fingerprint: at(position).fingerprint,
+        subject: fact.subject, fact: fact.id, category: fact.category, book: fact.text, said: 'you deserted', speaker });
+    const first = finding(50);
+    const second = finding(51);
+    const prints = new Map(story.map((message) => [message.id, message.fingerprint]));
+    const ruling = ScribeLog.rule(log, ScribeReplay.run(log, storyOrder), { type: 'Widen', fact: fact.id, to: [speaker] });
+    const replay = () => ScribeReplay.run(log, storyOrder, null, prints);
+    assert.equal(ScribePedant.decisions(replay(), [first]).get(first), ruling.sequence);
+    assert.equal(ScribePedant.decisions(replay(), [first, second]).size, 0);
+    assert.equal(ScribePedant.decisions(replay(), [{ ...first, book: 'another secret' }]).size, 0);
+    ScribeLog.revoke(log, ruling.sequence);
+    assert.equal(ScribePedant.decisions(replay(), [first]).size, 0);
+});
+
+test('an older filed change settles the uniquely cited previous value', () => {
+    const { log, state } = book();
+    apply(log, answer({ FACTS: [] }), story.slice(43, 51));
+    const fact = factSaying(state, 'grey');
+    const note = ScribeAnswer.parse(answer({ CHANGES: [fact.id + ' | Halvard | eyes | blue | #50'] }));
+    const saved = ScribeLog.append(log, ScribeReplay.run(log, storyOrder), note.operations, {
+        messages: [at(50)], origin: 'Notes',
+    });
+    const finding = { kind: 'Contradiction', fact: fact.id, subject: fact.subject, category: fact.category,
+        book: fact.text, said: 'blue', message: at(50).id, fingerprint: at(50).fingerprint };
+    const prints = new Map(story.map((message) => [message.id, message.fingerprint]));
+    const replayed = ScribeReplay.run(log, storyOrder, null, prints);
+    assert.equal(ScribePedant.decisions(replayed, [finding]).get(finding), saved.entry.sequence);
+    assert.equal(ScribePedant.decisions(replayed, [{ ...finding, message: at(51).id }]).size, 0);
+    assert.equal(ScribePedant.decisions(replayed, [{ ...finding, said: 'brown' }]).size, 0);
+});
+
+test('revoking the first widening keeps both leaks settled while another widening still grants them', () => {
+    const { log, state } = book();
+    const fact = factSaying(state, 'picks locks with a bent pin');
+    const prints = new Map(story.map((message) => [message.id, message.fingerprint]));
+    const replay = () => ScribeReplay.run(log, storyOrder, null, prints);
+    const leak = (speaker) => ({ kind: 'Leak', subject: fact.subject, fact: fact.id, category: fact.category,
+        book: fact.text, message: at(54).id, fingerprint: at(54).fingerprint, said: 'You pick locks',
+        speaker: idOf(state, speaker) });
+    const mirelle = leak('Mirelle');
+    const isolde = leak('Isolde');
+    const widen = (finding, to) => {
+        const before = replay();
+        const entry = ScribeLog.rule(log, before, { type: 'Widen', fact: fact.id, to });
+        ScribeLog.link(entry, before, [finding], story);
+        return entry.sequence;
+    };
+    const first = widen(mirelle, [mirelle.speaker]);
+    const second = widen(isolde, [mirelle.speaker, isolde.speaker]);
+    assert.equal(ScribePedant.decisions(replay(), [mirelle, isolde]).size, 2);
+    ScribeLog.revoke(log, first);
+    assert.equal(ScribePedant.decisions(replay(), [mirelle, isolde]).size, 2);
+    ScribeLog.revoke(log, second);
+    assert.equal(ScribePedant.decisions(replay(), [mirelle, isolde]).size, 0);
+});
+
 /**
  * @param {Object<string, string[]>} blocks
  * @return {object}

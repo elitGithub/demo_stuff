@@ -29,6 +29,7 @@ const ScribeLog = Object.freeze({
         Widen: 'Widen',
         AddFact: 'AddFact',
         RemoveFact: 'RemoveFact',
+        EditFact: 'EditFact',
         Unalias: 'Unalias',
         Answer: 'Answer',
         Dismiss: 'Dismiss',
@@ -382,6 +383,19 @@ const ScribeLog = Object.freeze({
             targetText: fact.targetText,
             text: fact.text,
         };
+    },
+
+    /**
+     * @param {object} fact
+     * @return {object}
+     */
+    editExpected(fact, state = null) {
+        const audience = state ? ScribeKnowledge.audience(state, fact) : null;
+        return { ...ScribeLog.mark(fact), cite: fact.cite, status: fact.status, pinned: fact.pinned,
+            ...(state ? { audience: Array.isArray(audience) ? [...new Set(audience)].sort() : audience,
+                fingerprint: ScribeReplay.Inputs.get(state)?.fingerprints?.get(fact.cite) ?? null } : {}),
+            hidden: fact.hidden, widened: Array.isArray(fact.widened) ? [...new Set(fact.widened)].sort() : fact.widened,
+            told: [...new Set(fact.told)].sort() };
     },
 
     /**
@@ -879,6 +893,41 @@ const ScribeLog = Object.freeze({
     }),
 
     Rulers: Object.freeze({
+        /**
+         * @param {object} operation
+         * @param {object} view
+         * @param {object} outcome
+         * @return {string|null}
+         */
+        EditFact(operation, view, outcome) {
+            const fact = view.facts.get(operation.fact);
+            if (!ScribeReplay.live(fact) || !operation.expected) {
+                return ScribeLog.Settings.StaleState;
+            }
+            const expected = ScribeLog.editExpected(fact, Object.hasOwn(operation.expected, 'audience') ? view.state : null);
+            if (Object.keys(expected).some((key) => JSON.stringify(expected[key]) !== JSON.stringify(operation.expected[key]))) {
+                return ScribeLog.Settings.StaleState;
+            }
+            if (!ScribeLog.worded(operation.text)) {
+                return 'Write the corrected wording.';
+            }
+            const text = operation.text.trim();
+            if (text === fact.text) {
+                return null;
+            }
+            const kind = ScribeReplay.kindOf(fact.category);
+            if ([ScribeCategory.Kind.Fixed, ScribeCategory.Kind.List].includes(kind) &&
+                view.state.facts.some((other) => other.id !== fact.id && ScribeReplay.live(other) &&
+                    other.subject === fact.subject && other.category === fact.category && ScribeCategory.same(other.text, text))) {
+                return 'This wording would combine two facts. Choose distinct wording.';
+            }
+            const source = view.state.editOrigins?.[fact.id] ?? { fact: fact.id, cite: fact.cite,
+                subject: fact.subject, category: fact.category, target: fact.target, targetText: fact.targetText,
+                book: fact.text, sourcePrint: null };
+            outcome.stored = { type: operation.type, fact: fact.id, before: fact.text, text, source: { ...source } };
+            return null;
+        },
+
         /**
          * @param {object} operation
          * @param {object} view
@@ -1422,9 +1471,170 @@ const ScribeLog = Object.freeze({
             withdrawn: false,
         };
         log.nextSequence++;
+        if (operation.type === ScribeLog.Ruling.EditFact) {
+            ScribeLog.noteEdit(log);
+        }
         log.revision++;
         log.entries.push(entry);
         return entry;
+    },
+
+    /**
+     * @param {object} log
+     * @return {void}
+     */
+    noteEdit(log) {
+        const from = log.editRun?.through === log.revision ? log.editRun.from : log.revision;
+        log.editRun = { from, through: log.revision + 1 };
+    },
+
+    /**
+     * @param {object} operation
+     * @param {object} issue
+     * @return {boolean}
+     */
+    settles(operation, issue) {
+        const ruling = ScribeLog.Ruling;
+        const type = ScribeAnswer.Type;
+        if (issue.kind === 'Leak') {
+            if (operation.type === type.Told) {
+                return operation.fact === issue.fact && operation.subject === issue.speaker;
+            }
+            return operation.type === ruling.Widen && operation.fact === issue.fact &&
+                (operation.to === ScribeLog.Settings.Everyone || operation.to.includes(issue.speaker));
+        }
+        if (issue.kind !== 'Contradiction') {
+            return false;
+        }
+        if (operation.type === ruling.DismissContradiction) {
+            return operation.contradiction === issue.contradiction;
+        }
+        if (operation.type === ruling.RemoveFact) {
+            return operation.fact === issue.fact;
+        }
+        if (operation.type === ruling.EditFact) {
+            return operation.fact === issue.fact && operation.before === issue.book &&
+                ScribeCategory.same(operation.text, issue.said);
+        }
+        if (operation.type === type.End) {
+            const said = ScribeReplay.wording(issue.said);
+            return operation.fact === issue.fact && operation.cite === issue.message && said.length > 0 &&
+                (' ' + ScribeReplay.wording(operation.reason) + ' ').includes(' ' + said + ' ');
+        }
+        if (operation.subject !== issue.subject || operation.category !== issue.category ||
+            operation.target !== issue.target || (operation.target === null && operation.targetText &&
+                operation.targetText !== issue.targetText)) {
+            return false;
+        }
+        if (operation.type === ruling.Pin) {
+            return operation.winner === issue.fact || ScribeCategory.same(operation.text, issue.said) ||
+                (operation.dispute?.some((fact) => fact.id === issue.fact) &&
+                    operation.dispute.some((fact) => fact.cite === issue.message && ScribeCategory.same(fact.text, issue.said)));
+        }
+        return [type.Fact, type.Refine, type.Change, ruling.AddFact].includes(operation.type) &&
+            (![type.Refine, type.Change].includes(operation.type) || operation.fact === issue.fact) &&
+            (ScribeCategory.same(operation.text, issue.said) || ScribeCategory.same(operation.text, issue.book));
+    },
+
+    /**
+     * @param {object} entry
+     * @param {object} state
+     * @param {object[]} findings
+     * @param {readonly object[]} messages
+     * @return {void}
+     */
+    link(entry, state, findings, messages) {
+        const sources = new Map(messages.map((message) => [message.id, message]));
+        const issues = [];
+        for (const finding of findings) {
+            const fact = ScribeLog.lookup(state.facts, finding.fact);
+            const reply = sources.get(finding.message);
+            if (!fact || !reply || reply.fromPlayer || reply.attributionPending || reply.fingerprint !== finding.fingerprint ||
+                fact.subject !== finding.subject || fact.category !== finding.category ||
+                typeof finding.book !== 'string' || !ScribeCategory.same(fact.text, finding.book) ||
+                typeof finding.said !== 'string' || !ScribeReplay.wording(finding.said) ||
+                !reply.blocks.some((block) => {
+                    if (finding.kind === 'Leak') {
+                        const speaker = ScribeLog.lookup(state.subjects, finding.speaker);
+                        if (!speaker || block.role !== ScribeIntake.Role.Character ||
+                            ![speaker.label, speaker.name, ...speaker.aka].some((name) =>
+                                ScribeText.normaliseName(name) === ScribeText.normaliseName(block.speaker))) {
+                            return false;
+                        }
+                    }
+                    return (' ' + ScribeReplay.wording(block.text) + ' ').includes(' ' + ScribeReplay.wording(finding.said) + ' ');
+                })) {
+                continue;
+            }
+            const source = sources.get(fact.cite);
+            if (fact.cite !== null && (!source || source.attributionPending)) {
+                continue;
+            }
+            if (finding.support && (finding.support.cite !== fact.cite ||
+                finding.support.sourcePrint !== source?.fingerprint)) {
+                continue;
+            }
+            const conflict = state.contradictions.find((item) => item.cite === reply.id &&
+                item.earlier === fact.cite && ScribeCategory.same(item.said, finding.said) &&
+                ScribeCategory.same(item.before, fact.text));
+            issues.push({
+                kind: finding.kind, fact: fact.id, subject: fact.subject, category: fact.category,
+                target: fact.target, targetText: fact.targetText, book: fact.text, said: finding.said,
+                speaker: finding.speaker ?? null, message: reply.id, fingerprint: reply.fingerprint,
+                cite: fact.cite, sourcePrint: source?.fingerprint ?? null, contradiction: conflict?.id ?? null,
+            });
+        }
+        for (const operation of entry.operations) {
+            const ruling = ScribeLog.Ruling;
+            if (operation.type === ruling.EditFact && operation.source.sourcePrint === null && operation.source.cite !== null) {
+                operation.source.sourcePrint = sources.get(operation.source.cite)?.fingerprint ?? null;
+            }
+            if (operation.type === ruling.Widen) {
+                for (const prior of state.resolutions) {
+                    const { sequence, alternatives, activeFact, ...issue } = prior;
+                    issue.fact = activeFact;
+                    if (ScribeLog.settles(operation, issue) && !issues.some((candidate) => candidate.kind === issue.kind &&
+                        candidate.fact === issue.fact && candidate.message === issue.message && candidate.speaker === issue.speaker)) {
+                        issues.push(issue);
+                    }
+                }
+            }
+            let ids = [];
+            if ([ruling.Answer, ruling.Dismiss].includes(operation.type)) {
+                const question = ScribeLog.lookup(state.questions, operation.question);
+                ids = [question.cite];
+            } else if (operation.type === ruling.DismissContradiction) {
+                const contradiction = ScribeLog.lookup(state.contradictions, operation.contradiction);
+                ids = [contradiction.cite, contradiction.earlier];
+            } else if (operation.type === ruling.Pin) {
+                const conflict = state.conflicts.find((item) => item.subject === operation.subject &&
+                    item.category === operation.category);
+                if (conflict) {
+                    operation.dispute = [conflict.established, ...conflict.others].filter(Boolean).map((id) => {
+                        const fact = ScribeLog.lookup(state.facts, id);
+                        return { id, cite: fact.cite, text: fact.text };
+                    });
+                    ids = operation.dispute.map((fact) => fact.cite);
+                }
+            }
+            const passages = [...new Set(ids)].filter((id) => sources.has(id));
+            if (passages.length) {
+                operation.passages = passages.map((id) => ({ id, fingerprint: sources.get(id).fingerprint }));
+            }
+            const linked = issues.filter((issue) => ScribeLog.settles(operation, issue));
+            if (linked.length) {
+                operation.resolutions = linked.map((issue) => {
+                    const alternatives = state.facts.filter((fact) => fact.subject === issue.subject &&
+                        fact.category === issue.category && fact.cite === issue.message &&
+                        ScribeCategory.same(fact.text, issue.said)).map((fact) => fact.id);
+                    if ([ScribeAnswer.Type.Fact, ScribeLog.Ruling.AddFact].includes(operation.type)) {
+                        alternatives.push(operation.fact);
+                    }
+                    return { ...issue, alternatives };
+                });
+            }
+        }
+        entry.linked = true;
     },
 
     /**
@@ -1446,6 +1656,32 @@ const ScribeLog = Object.freeze({
         const reason = ScribeLog.Rulers[operation.type](operation, ScribeLog.view(state), outcome);
         if (reason !== null) {
             throw new Error(reason);
+        }
+        if (outcome.stored === null) {
+            return null;
+        }
+        if ([ScribeLog.Ruling.Widen, ScribeLog.Ruling.RemoveFact].includes(operation.type) && state.editOrigins?.[operation.fact]) {
+            outcome.stored.editedSource = { ...state.editOrigins[operation.fact] };
+        }
+        if (operation.type === ScribeLog.Ruling.Pin && state.editOrigins?.[outcome.stored.winner]) {
+            outcome.stored.editedSource = { ...state.editOrigins[outcome.stored.winner] };
+        }
+        if (operation.type === ScribeLog.Ruling.EditFact) {
+            const inputs = ScribeReplay.Inputs.get(state);
+            if (!inputs) {
+                throw new Error(settings.StaleState);
+            }
+            const { order, pending, fingerprints } = inputs;
+            const source = outcome.stored.source;
+            source.sourcePrint ??= fingerprints?.get(source.cite) ?? null;
+            const preview = { ...log, entries: [...log.entries] };
+            ScribeLog.file(preview, outcome.stored);
+            const after = ScribeReplay.run(preview, order, pending, fingerprints);
+            const retained = new Set(after.facts.map((fact) => fact.id));
+            if (state.facts.some((fact) => !retained.has(fact.id)) ||
+                !after.facts.some((fact) => fact.id === operation.fact && fact.text === outcome.stored.text)) {
+                throw new Error('This wording would combine two facts. Choose distinct wording.');
+            }
         }
         Object.assign(log, outcome.counters);
         return ScribeLog.file(log, outcome.stored);
@@ -1526,8 +1762,22 @@ const ScribeLog = Object.freeze({
      */
     revoke(log, sequence) {
         for (const entry of log.entries) {
+            if (entry.sequence === sequence && entry.origin === ScribeLog.Origin.Notes && !entry.withdrawn) {
+                const linked = entry.operations.filter((operation) => operation.resolutions?.length && !operation.revoked);
+                if (!linked.length) {
+                    return null;
+                }
+                for (const operation of linked) {
+                    operation.revoked = true;
+                }
+                log.revision++;
+                return entry;
+            }
             if (entry.sequence === sequence && entry.kind === ScribeLog.Kind.Operator && !entry.withdrawn) {
                 entry.withdrawn = true;
+                if (entry.operations.some((operation) => operation.type === ScribeLog.Ruling.EditFact)) {
+                    ScribeLog.noteEdit(log);
+                }
                 log.revision++;
                 return entry;
             }

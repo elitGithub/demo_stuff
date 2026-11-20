@@ -110,8 +110,12 @@ const ScribeIntake = Object.freeze({
      */
     playerLength(wire, post) {
         const tail = '\n@: ' + post.carried + (post.suggestion === null ? '' : '\n@: ' + post.suggestion);
-        return typeof wire === 'string' && wire.endsWith(tail) && ScribeText.fingerprint(wire.slice(0, -tail.length)) === post.submission
-            ? wire.length - tail.length : null;
+        if (typeof wire !== 'string' || !wire.endsWith(tail)) {
+            return null;
+        }
+        const prefix = wire.slice(0, -tail.length);
+        const fingerprint = ScribeText.fingerprint(prefix);
+        return (fingerprint === post.submission || fingerprint === post.trimmedSubmission) ? prefix.length : null;
     },
 
     /**

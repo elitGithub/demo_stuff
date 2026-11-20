@@ -25,6 +25,7 @@ const ScribeReminder = Object.freeze({
         MaxCharacters: 3000,
         StoryOpen: 'The story so far: ',
         LongestTimeline: 12000,
+        MostEditedFacts: 8,
         FirstScenes: 5,
         StoryHeadings: Object.freeze({
             Timeline: 'TIMELINE:',
@@ -458,9 +459,42 @@ const ScribeReminder = Object.freeze({
     /**
      * @param {object} state
      * @param {object|null} now
+     * @param {string} player
+     * @return {string[]}
+     */
+    storyCorrections(state, now, player) {
+        if (!state.editOrigins || !now) {
+            return [];
+        }
+        const names = new Map(ScribeReminder.people(state, now, player).filter((person) => person.subject && person.label)
+            .map((person) => [person.subject, person.label]));
+        const disputed = ScribePedant.contested(state);
+        const lines = [];
+        for (const fact of state.facts) {
+            if (!Object.hasOwn(state.editOrigins, fact.id) || fact.status !== ScribeReplay.Status.InForce ||
+                fact.hidden || disputed.has(fact.id) || !names.has(fact.subject) ||
+                ScribeKnowledge.audience(state, fact) !== ScribeKnowledge.Everyone) {
+                continue;
+            }
+            const relation = fact.category === ScribeCategory.Settings.RelationCategory;
+            if (relation && !names.has(fact.target)) {
+                continue;
+            }
+            const text = ScribeReminder.guarded(fact.text);
+            if (text !== null) {
+                const category = relation ? fact.category + ' toward ' + names.get(fact.target) : fact.category;
+                lines.push([names.get(fact.subject), category, text].join(ScribeReminder.Settings.Joiner));
+            }
+        }
+        return lines.slice(-ScribeReminder.Settings.MostEditedFacts);
+    },
+
+    /**
+     * @param {object} state
+     * @param {object|null} now
      * @return {string}
      */
-    storyInput(state, now) {
+    storyInput(state, now, corrections = []) {
         const settings = ScribeReminder.Settings;
         const headings = settings.StoryHeadings;
         const lines = state.scenes.map(
@@ -496,6 +530,7 @@ const ScribeReminder = Object.freeze({
             [headings.Timeline, scenes.length === 0 ? settings.None : scenes.join(settings.Newline)],
             [headings.Threads, threads.length === 0 ? settings.None : threads.join(settings.Newline)],
             [headings.Now, summary],
+            ...(corrections.length ? [['CURRENT BOOK CORRECTIONS:', corrections.join(settings.Newline)]] : []),
         ]
             .map(
                 /**
@@ -1299,6 +1334,8 @@ const ScribeReminder = Object.freeze({
             const aimed = fact.category !== relation || (target !== null && inRoom.has(target));
             return (
                 fact.status === ScribeReplay.Status.InForce &&
+                (!state.editOrigins?.[fact.id] || veiled(fact) || ScribeKnowledge.audience(state, fact) === everyone ||
+                    present.every((person) => person.subject !== null && ScribeKnowledge.knows(state, person.subject, fact))) &&
                 !(changing && unread.length > 0) &&
                 aimed &&
                 !quarrel(fact)

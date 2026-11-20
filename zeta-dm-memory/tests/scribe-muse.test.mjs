@@ -384,6 +384,28 @@ test('the difference is what the engine did', () => {
     assert.deepEqual(plain(ScribeMuse.changes(closed.before, closed.after)), ['Thread closed: "the missing ring"']);
 });
 
+test('the bounty correction preview describes the relation and omits replay bookkeeping', () => {
+    const log = ScribeLog.create();
+    apply(log, answer({
+        SUBJECTS: ['Crown | group', 'Mirra | character'],
+        FACTS: ['Crown | relation to Mirra | offers a bounty of 100,000 gold | #4'],
+    }));
+    const prints = new Map(story.map((message) => [message.id, message.fingerprint]));
+    const before = ScribeReplay.run(log, storyOrder, null, prints);
+    const filed = filing(log, answer({ CHANGES: ['F1 | Crown | relation to Mirra | offers a bounty of 50,000 gold | #45'] }));
+    assert.deepEqual(plain(filed.refused), []);
+    const after = ScribeReplay.run(log, storyOrder, null, prints);
+    assert.notDeepEqual(plain(after.legacyDecisions), plain(before.legacyDecisions));
+    assert.notDeepEqual(plain(after.decisionRead), plain(before.decisionRead));
+    const changes = plain(ScribeMuse.changes(before, after));
+    assert.equal(changes.length, 2);
+    assert.ok(changes.every((line) => line.includes('Mirra')));
+    assert.ok(changes.some((line) => line.includes('50,000 gold')));
+    assert.ok(changes.some((line) => line.includes('100,000 gold')));
+    assert.deepEqual(plain(ScribeMuse.changes(after, { ...after, resolutions: [{ sequence: 99 }] })),
+        ['Nothing in the book would change.']);
+});
+
 test("a new subject's names are said", () => {
     const filed = filing(
         bookLog(),

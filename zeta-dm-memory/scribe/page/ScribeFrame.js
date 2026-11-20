@@ -195,8 +195,10 @@ const ScribeFrame = Object.freeze({
         const attempt = data.attempt === undefined ? null : data.attempt;
         const index = Number.isSafeInteger(data.index) && data.index >= settings.FirstIndex ? data.index : null;
         const stamped = data.kind === bridge.Kind.Starting && data.submission !== undefined;
+        const trimmed = stamped && data.trimmedSubmission !== undefined;
         if (
             (stamped && (typeof data.submission !== settings.StringType || !/^[0-9a-f]{8}$/.test(data.submission))) ||
+            (trimmed && (typeof data.trimmedSubmission !== settings.StringType || !/^[0-9a-f]{8}$/.test(data.trimmedSubmission))) ||
             !ScribeFrame.named(reminder) ||
             !ScribeFrame.named(attempt) ||
             (reminder === null) !== (attempt === null) ||
@@ -216,6 +218,7 @@ const ScribeFrame = Object.freeze({
             attempt: ready ? attempt : null,
             index,
             ...(stamped ? { submission: data.submission } : {}),
+            ...(trimmed ? { trimmedSubmission: data.trimmedSubmission } : {}),
         });
     },
 
@@ -302,6 +305,7 @@ const ScribeFrame = Object.freeze({
                 attempt: went.attempt,
                 index: went.index,
                 ...(kind === bridge.Kind.Starting ? { submission: went.submission } : {}),
+                ...(kind === bridge.Kind.Starting && went.trimmedSubmission ? { trimmedSubmission: went.trimmedSubmission } : {}),
             });
         };
         /**
@@ -319,7 +323,7 @@ const ScribeFrame = Object.freeze({
                 seq: frame.seq,
                 index: frame.index,
                 manual: made.ready && offer.manual === true,
-                submission: made.ready && offer.manual ? ScribeText.fingerprint(text) : ScribeText.submission(made.text),
+                ...(made.ready && offer.manual ? ScribeText.playerSubmission(text) : { submission: ScribeText.submission(made.text) }),
                 ready: made.ready ? offer.ready : null,
                 suggestion: made.suggestion ? offer.suggestion : null,
                 cut: offer.manual || made.carried === null || made.carried === offer.ready ? null : made.carried.length,

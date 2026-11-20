@@ -484,6 +484,14 @@ const BenchView = Object.freeze({
 
     Summaries: Object.freeze({
         /**
+         * @param {object} operation
+         * @return {string}
+         */
+        EditFact(operation) {
+            return 'Edited ' + operation.fact + ' from “' + operation.before + '” to “' + operation.text + '”';
+        },
+
+        /**
          * @param {{ category: string, text: string }} operation
          * @return {string}
          */

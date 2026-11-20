@@ -212,6 +212,31 @@ function sentences(text) {
     return text === null ? [] : text.slice(LEAD.length).split(/(?<=\.) /);
 }
 
+test('story corrections expose only current public wording with the owner and relation target in the scene', () => {
+    const log = ScribeLog.create();
+    const original = apply(log, {
+        SUBJECTS: ['Mira | character', 'Mirra | character', 'Oren | character'],
+        FACTS: ['Mira | relation to Mirra | old bounty | #1', 'Mira | trait | hidden habit | hidden | #2',
+            'Mira | hair | black | #4', 'Oren | role | unknown trade | #2', 'Mira | trait | personal history | #5'],
+        SCENES: ['Day 1 | #1-#4 | The market | public | present: Mira, Mirra, Oren | They wait'],
+    }, stretch(1, 5));
+    const edits = { 'old bounty': 'offers 50,000 gold', 'hidden habit': 'quietly copies keys', black: 'copper',
+        'unknown trade': 'builds bridges', 'personal history': 'knows the private route' };
+    for (const fact of original.facts) {
+        rule(log, { type: 'EditFact', fact: fact.id, expected: ScribeLog.editExpected(fact), text: edits[fact.text] });
+    }
+    const state = ScribeReplay.run(log, storyOrder);
+    const words = (labels) => ScribeReminder.storyCorrections(state, scene(state, labels), 'Halvard').join('\n');
+    const publicRoom = words(['Mira', 'Mirra']);
+    assert.ok(publicRoom.includes('offers 50,000 gold'));
+    assert.ok(!publicRoom.includes('quietly copies keys'));
+    assert.ok(!publicRoom.includes('builds bridges'));
+    assert.ok(!publicRoom.includes('knows the private route'));
+    assert.ok(!words(['Mira']).includes('offers 50,000 gold'));
+    assert.ok(!words(['Mirra']).includes('offers 50,000 gold'));
+    assert.ok(!said(state, ['Mira', 'Mirra'], { first: ['F5'] })?.includes('knows the private route'));
+});
+
 /**
  * @param {string} name
  * @param {string} kind

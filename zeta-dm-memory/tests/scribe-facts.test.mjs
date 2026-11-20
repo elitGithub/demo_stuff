@@ -100,6 +100,67 @@ function apply(log, order, answerText, messages, origin = 'Story') {
     return { state: ScribeReplay.run(log, order), result, parsed };
 }
 
+test('only accepted matching operations carry resolution evidence and material supporting edits reopen the issue', () => {
+    const log = ScribeLog.create();
+    const state = apply(log, storyOrder, answer({ FACTS: ['Mira | eyes | blue | #1', 'Mira | hair | black | #2'] }),
+        story.slice(0, 4)).state;
+    const reply = story[3];
+    const [eyes, hair] = state.facts;
+    const issue = (fact, said) => ({ kind: 'Contradiction', message: reply.id, fingerprint: reply.fingerprint,
+        fact: fact.id, subject: fact.subject, category: fact.category, book: fact.text, said });
+    const drafted = apply(log, storyOrder, answer({ FACTS: ['Mira | eyes | line 4 | #4', 'Mira | trait | alert | #4',
+        'Mira | hair | tale | #8'] }), [reply], 'Notes');
+    assert.equal(drafted.result.refused.length, 1);
+    const entry = drafted.result.entry;
+    ScribeLog.link(entry, state, [issue(eyes, 'line 4'), issue(hair, 'tale')], story);
+    assert.deepEqual(plain(entry.operations.map((operation) => operation.resolutions?.map((item) => item.fact) ?? [])),
+        [[eyes.id], []]);
+    const prints = new Map(story.map((message) => [message.id, message.fingerprint]));
+    const replay = () => ScribeReplay.run(JSON.parse(JSON.stringify(log)), storyOrder, null, prints);
+    assert.equal(replay().resolutions.length, 1);
+    assert.equal(replay().conflicts.length, 0);
+    prints.set(story[2].id, 'unrelated revision');
+    assert.equal(replay().resolutions.length, 1);
+    for (const support of [reply, story[0]]) {
+        prints.set(support.id, 'regenerated');
+        assert.equal(replay().resolutions.length, 0);
+        assert.equal(replay().conflicts.length, 1);
+        prints.set(support.id, support.fingerprint);
+    }
+    ScribeLog.revoke(log, entry.sequence);
+    assert.equal(replay().resolutions.length, 0);
+    assert.equal(replay().facts.some((fact) => fact.text === 'alert'), true);
+});
+
+test('a filed ending must name the disputed fact and explain its quoted change at the same passage', () => {
+    const cases = [
+        ['F1', 'she calls it line 4 now', 4, true],
+        ['F2', 'she calls it line 4 now', 4, false],
+        ['F1', 'she calls it line 4 now', 3, false],
+        ['F1', 'she changed her name', 4, false],
+    ];
+    for (const [id, reason, position, accepted] of cases) {
+        const log = ScribeLog.create();
+        const state = apply(log, storyOrder, answer({ FACTS: ['Mira | eyes | blue | #1', 'Mira | hair | black | #2'] }),
+            story.slice(0, 4)).state;
+        const [fact] = state.facts;
+        const category = id === 'F1' ? 'eyes' : 'hair';
+        const drafted = apply(log, storyOrder, answer({ CHANGES: [id + ' | Mira | ' + category + ' | ENDED: ' +
+            reason + ' | #' + position] }), story.slice(0, 4), 'Notes');
+        const entry = drafted.result.entry;
+        ScribeLog.link(entry, state, [{ kind: 'Contradiction', message: 'MESSAGE-4', fingerprint: story[3].fingerprint,
+            fact: fact.id, subject: fact.subject, category: fact.category, book: fact.text, said: 'line 4' }], story);
+        const prints = new Map(story.map((message) => [message.id, message.fingerprint]));
+        const replay = () => ScribeReplay.run(log, storyOrder, null, prints);
+        assert.equal(replay().resolutions.length, Number(accepted));
+        prints.set('MESSAGE-4', 'material edit');
+        assert.equal(replay().resolutions.length, 0);
+        prints.set('MESSAGE-4', story[3].fingerprint);
+        ScribeLog.revoke(log, entry.sequence);
+        assert.equal(replay().resolutions.length, 0);
+    }
+});
+
 /**
  * @param {object} state
  * @param {string} label

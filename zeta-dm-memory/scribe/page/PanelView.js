@@ -17,7 +17,8 @@ const PanelView = Object.freeze({
         ]),
         Words: Object.freeze({
             Loading: 'Loading the chat...',
-            NoBookOpen: 'No book for this chat yet: ',
+            NoBookOpen: 'No book on this PC or in the Worker: ',
+            NoLocalBook: 'No local book: ',
             NoBookOne: ' message.',
             NoBookMany: ' messages.',
             Reading: 'Reading the chat...',
@@ -44,7 +45,6 @@ const PanelView = Object.freeze({
             ReadingOne: ' reading to go.',
             ReadingMany: ' readings to go.',
             Minutes: ':',
-            NoBookYet: 'No book yet. Nothing is read, and nothing is spent, before you adopt this chat.',
             FirstUnderWay: 'The first reading is under way. This fills as each stretch lands.',
             NothingReadYet: 'Nothing has been read yet. Press Resume above.',
             ProblemOpen: ' Problem: ',
@@ -91,9 +91,9 @@ const PanelView = Object.freeze({
             login: ['Zeta sign-in needed', 'Sign in to Zeta and open the chat.', ''],
             history: ['Zeta history unavailable', 'Scribe could not read the chat history from Zeta.', 'See Progress for details.'],
             local: ['Scribe problem', '', 'See the detail in Progress.'],
-            workerKey: ['Worker key rejected', 'The Cloudflare Worker refused the DM API key. The book stays on this PC.', 'In Tampermonkey, choose Zeta Scribe → Set DM API key.'],
-            workerBook: ['Worker book unavailable', 'The Worker book is unavailable. The book stays on this PC.', 'See Progress for details.'],
-            offline: ['Working offline', 'Scribe is working offline with the book on this PC.', ''],
+            workerKey: ['Worker key rejected', 'The Cloudflare Worker refused the DM API key.', 'In Tampermonkey, choose Zeta Scribe → Set DM API key.'],
+            workerBook: ['Worker book unavailable', 'Book sync is unavailable.', 'See Progress for details.'],
+            offline: ['Working offline', 'Scribe is working offline. It will retry the Worker connection.', ''],
             worker: ['Worker sync problem', 'The Cloudflare Worker reported a problem.', 'See Progress for details.'],
         }),
         Titles: Object.freeze({
@@ -174,15 +174,59 @@ const PanelView = Object.freeze({
     },
 
     /**
+     * @param {object} keeperView
+     * @param {object|null} cloud
+     * @return {{ status: string, action: string }}
+     */
+    workerBook(keeperView, cloud) {
+        const phases = ScribeCloud.Phase;
+        const phase = cloud?.phase ?? phases.Off;
+        const connect = 'In Tampermonkey, choose Zeta Scribe → Set DM API key and enter the key used on the other PC.';
+        const revision = cloud?.bookRevision;
+        const confirmed = Number.isSafeInteger(revision) && revision > 0 ? 'Worker book revision ' + revision + '.' : '';
+        if (phase === phases.Off) {
+            return { status: 'Worker unchecked. No DM API key on this PC.', action: connect };
+        }
+        if (phase === phases.Refused) {
+            return { status: 'Worker access refused.', action: connect };
+        }
+        if (cloud?.unreadable) {
+            return { status: 'The Worker’s saved data for this room is unreadable.',
+                action: 'Check Progress and the book on the original PC. Scribe retries when the Worker has a new revision.' };
+        }
+        if (phase === phases.Offline || phase === phases.Unusable || cloud?.lookupFailed) {
+            const offline = phase === phases.Offline || cloud?.lookupFailed;
+            const status = offline ? 'Worker offline.' : 'Worker sync unavailable.';
+            return { status: confirmed ? status + ' Last verified: ' + confirmed : status,
+                action: offline ? 'Check your connection. Scribe retries automatically.' : 'See Progress for the Worker error.' };
+        }
+        if (phase === phases.Conflict) {
+            return { status: 'This PC and the Worker have different books.', action: 'Review the two books above.' };
+        }
+        if (confirmed) {
+            return { status: confirmed, action: cloud.bookPending ? 'Local book changes are waiting to upload.' :
+                (keeperView.booked ? 'Open this room on the other PC with the same DM API key.' : 'Scribe is loading this book onto this PC.') };
+        }
+        if ((phase === phases.Leading || phase === phases.Watching) && revision === 0) {
+            return { status: 'The Worker has no saved book for this room.',
+                action: keeperView.booked && cloud.bookPending ? 'This PC’s book is waiting to upload.' :
+                    'If another PC has this book, open the same room there and check its Worker status in Settings.' };
+        }
+        return { status: 'Worker book lookup pending.', action: phase === phases.Idle ? 'The reading tab checks this room.' : 'Checking this room for a saved book.' };
+    },
+
+    /**
      * @param {{ phase: string, read: number, flight: string|null }} keeperView
+     * @param {object|null} cloud
      * @return {string|null}
      */
-    empty(keeperView) {
+    empty(keeperView, cloud = null) {
         const settings = PanelView.Settings;
         const words = settings.Words;
         const phases = ScribeKeeper.Phase;
         if (keeperView.phase === phases.NoBook) {
-            return words.NoBookYet;
+            const worker = PanelView.workerBook(keeperView, cloud);
+            return worker.status + ' ' + worker.action;
         }
         const booked = [phases.Reading, phases.Idle, phases.Stopped].includes(keeperView.phase);
         if (!booked || keeperView.read !== settings.NoCount) {
@@ -265,10 +309,15 @@ const PanelView = Object.freeze({
         } else if (keeperView.phase === phases.Loading) {
             line = words.Loading;
         } else if (keeperView.phase === phases.NoBook) {
+            const verifiedEmpty = [clouds.Leading, clouds.Watching].includes(cloud) && cloudView?.bookRevision === 0 &&
+                !cloudView.lookupFailed && !cloudView.unreadable;
             line =
-                words.NoBookOpen +
+                (verifiedEmpty ? words.NoBookOpen : words.NoLocalBook) +
                 PanelView.number(keeperView.total) +
                 (keeperView.total === settings.Single ? words.NoBookOne : words.NoBookMany);
+            if (!verifiedEmpty) {
+                line += ' ' + PanelView.workerBook(keeperView, cloudView).status;
+            }
         } else if (keeperView.phase === phases.Idle) {
             let status = keeperView.read < keeperView.total ? words.WaitingRead : words.UpToDateOpen;
             if (PanelView.listed(keeperView.unread).some((message) => message?.attributionPending)) {
@@ -393,7 +442,8 @@ const PanelView = Object.freeze({
                 add('Scribe', 'local', 'live updates', detail, detail);
             }
         }
-        const cloudCause = { Refused: 'workerKey', Unusable: 'workerBook', Offline: 'offline' }[cloudView?.phase];
+        const cloudCause = cloudView?.unreadable ? 'workerBook' : cloudView?.lookupFailed ? 'offline' :
+            { Refused: 'workerKey', Unusable: 'workerBook', Offline: 'offline' }[cloudView?.phase];
         if (cloudCause || cloudView?.problem) {
             add('Cloudflare', cloudCause ?? 'worker', 'book sync', cloudView.problem);
         }
@@ -837,7 +887,7 @@ const PanelView = Object.freeze({
             return { ...found, facts };
         };
         const whole = PanelView.objects(state.subjects) && PanelView.objects(state.facts);
-        return whole
+        const subject = whole
             ? PanelView.attempt(
                   /**
                    * @return {object|null}
@@ -846,6 +896,16 @@ const PanelView = Object.freeze({
                   apart,
               )
             : apart();
+        if (subject !== null) {
+            const facts = new Map(PanelView.listed(state.facts).filter(Boolean).map((fact) => [fact.id, fact]));
+            for (const row of subject.facts) {
+                const fact = facts.get(row?.id);
+                if (row && ScribeReplay.live(fact)) {
+                    row.expected = PanelView.attempt(() => ScribeLog.editExpected(fact, state), () => null);
+                }
+            }
+        }
+        return subject;
     },
 
     /**
@@ -1197,6 +1257,8 @@ const PanelView = Object.freeze({
                 return [
                     {
                         key: finding.key,
+                        ...(finding.fingerprint ? { fingerprint: finding.fingerprint } : {}),
+                        ...(finding.ruling !== undefined ? { ruling: finding.ruling } : {}),
                         kind: finding.kind,
                         status: finding.status,
                         title,

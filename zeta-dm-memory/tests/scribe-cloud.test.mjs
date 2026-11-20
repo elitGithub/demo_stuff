@@ -13,7 +13,7 @@ import FakeTimers from './support/FakeTimers.mjs';
 function load() {
     const context = vm.createContext({ TextEncoder, URL, URLSearchParams });
     const loaded = {};
-    for (const name of ['ScribeStore', 'ScribeCloud']) {
+    for (const name of ['ScribeStore', 'ScribeKeeper', 'ScribeCloud']) {
         const url = new URL(`../scribe/page/${name}.js`, import.meta.url);
         vm.runInContext(readFileSync(url, 'utf8'), context, { filename: url.pathname });
         loaded[name] = vm.runInContext(name, context);
@@ -39,8 +39,10 @@ const NOTES = '/v1/memory';
 const TURNS = 30;
 const MOST_STEPS = 2000;
 const SETTINGS = Object.freeze({ edition: 1, budget: 3, size: 30 });
-const BOOK = Object.freeze({ log: { read: { m1: 1, m2: 1, m3: 1 } }, fingerprints: {}, adopted: true });
-const OTHER_BOOK = Object.freeze({ log: { read: { m1: 1, m2: 1, m3: 1, m4: 1, m5: 1 } }, fingerprints: {}, adopted: true });
+const LOG = Object.freeze({ version: 1, nextFact: 1, nextSubject: 1, nextThread: 1, nextQuestion: 1,
+    nextSequence: 2, revision: 1, entries: [], notes: [] });
+const BOOK = Object.freeze({ log: { ...LOG, read: { m1: 1, m2: 1, m3: 1 } }, fingerprints: {}, adopted: true });
+const OTHER_BOOK = Object.freeze({ ...BOOK, log: { ...LOG, read: { m1: 1, m2: 1, m3: 1, m4: 1, m5: 1 } } });
 const LIVE = Object.freeze({ findings: [], ready: null, seen: { id: 'm3' } });
 const OTHER_LIVE = Object.freeze({ findings: [], ready: 'The book says so.', seen: { id: 'm5' } });
 const CONFLICT_BODY = Object.freeze({
@@ -626,7 +628,7 @@ function synchronised(place, base) {
  */
 function startedOverElsewhere(place) {
     place.worker.seed(CLOUD_ROOM, 'settings', 2, [JSON.stringify({ ...SETTINGS, edition: 2 })]);
-    place.worker.seed(CLOUD_ROOM, 'book', 2, [JSON.stringify({ ...BOOK, log: { read: { n1: 1, n2: 1 } } })]);
+    place.worker.seed(CLOUD_ROOM, 'book', 2, [JSON.stringify({ ...BOOK, log: { ...LOG, read: { n1: 1, n2: 1 } } })]);
     place.worker.seed(CLOUD_ROOM, 'live', 2, [JSON.stringify(OTHER_LIVE)]);
     const pc = synchronised(place, { settings: SETTINGS, book: BOOK, live: LIVE });
     save(pc, 'settings', { ...SETTINGS, stop: 'Budget' });
@@ -673,11 +675,11 @@ test("the answer covers all three kinds: Use the cloud's takes the three and lea
     assert.equal(pc.cloud.view().unsent, 0);
     const offline = world();
     offline.worker.seed(CLOUD_ROOM, 'settings', 1, [JSON.stringify(SETTINGS)]);
-    const cloudBook = { ...BOOK, log: { read: { m1: 1, m2: 1, m3: 1, m4: 1 } } };
+    const cloudBook = { ...BOOK, log: { ...LOG, read: { m1: 1, m2: 1, m3: 1, m4: 1 } } };
     offline.worker.seed(CLOUD_ROOM, 'book', 2, [JSON.stringify(cloudBook)]);
-    const restarted = synchronised(offline, { settings: SETTINGS, book: { ...BOOK, log: { read: { m1: 1 } } } });
+    const restarted = synchronised(offline, { settings: SETTINGS, book: { ...BOOK, log: { ...LOG, read: { m1: 1 } } } });
     save(restarted, 'settings', { ...SETTINGS, edition: 2 });
-    save(restarted, 'book', { log: { read: {} }, fingerprints: {}, adopted: false });
+    save(restarted, 'book', { log: { ...LOG, read: {} }, fingerprints: {}, adopted: false });
     await restarted.cloud.tick();
     assert.equal(restarted.cloud.view().phase, 'Conflict');
     assert.deepEqual(plain(restarted.cloud.view().conflict), { here: 0, there: 4 });
@@ -987,7 +989,7 @@ test('the tries after a lapse are spaced and bounded even when the backoff list 
     for (const broken of ['network', 'server']) {
         const place = world();
         place.worker.seed(CLOUD_ROOM, 'settings', 1, [JSON.stringify(SETTINGS)]);
-        place.worker.seed(CLOUD_ROOM, 'book', 2, [JSON.stringify({ ...BOOK, log: { read: { m1: 1, m2: 1, c3: 1 } } })]);
+        place.worker.seed(CLOUD_ROOM, 'book', 2, [JSON.stringify({ ...BOOK, log: { ...LOG, read: { m1: 1, m2: 1, c3: 1 } } })]);
         const pc = synchronised(place, { settings: SETTINGS, book: BOOK });
         save(pc, 'book', OTHER_BOOK);
         await pc.cloud.tick();
@@ -1413,7 +1415,7 @@ test("Use the cloud's on a revision that does not decode says so, and the questi
 test('Keep also pushes a kind this PC holds and the cloud lacks', async () => {
     const place = world();
     place.worker.seed(CLOUD_ROOM, 'settings', 1, [JSON.stringify(SETTINGS)]);
-    place.worker.seed(CLOUD_ROOM, 'book', 2, [JSON.stringify({ ...BOOK, log: { read: { n1: 1, n2: 1 } } })]);
+    place.worker.seed(CLOUD_ROOM, 'book', 2, [JSON.stringify({ ...BOOK, log: { ...LOG, read: { n1: 1, n2: 1 } } })]);
     const pc = synchronised(place, { settings: SETTINGS, book: BOOK });
     save(pc, 'live', LIVE);
     ScribeStore.setSynced(pc.storage, ROOM, 'live', 0, ScribeStore.generation(pc.storage, ROOM, 'live'));

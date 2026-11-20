@@ -344,8 +344,8 @@ test('the headline says what is going on', (context) => {
      */
     const line = (changes) => PanelView.headline({ ...empty, ...changes }, live);
     assert.equal(line({ phase: Phase.Loading }), 'Loading the chat...');
-    assert.equal(line({ phase: Phase.NoBook, total: 1326 }), 'No book for this chat yet: 1,326 messages.');
-    assert.equal(line({ phase: Phase.NoBook, total: 999 }), 'No book for this chat yet: 999 messages.');
+    assert.equal(line({ phase: Phase.NoBook, total: 1326 }), 'No local book: 1,326 messages. Worker unchecked. No DM API key on this PC.');
+    assert.equal(line({ phase: Phase.NoBook, total: 999 }), 'No local book: 999 messages. Worker unchecked. No DM API key on this PC.');
     assert.equal(line({ phase: Phase.Reading, flight: 'Reading #81 to #120' }), 'Reading #81 to #120');
     assert.equal(line({ phase: Phase.Idle, flight: 'Pulling the chat: 1,620 messages' }), 'Pulling the chat: 1,620 messages');
     assert.equal(line({ phase: Phase.Idle, read: 1325, total: 1326 }), 'Waiting to read: 1,325 of 1,326 read.');
@@ -369,7 +369,7 @@ test('the headline says what is going on', (context) => {
         'Another tab is reading this chat.',
     );
     const panel = mounted(ScribeLog.create(), { keeper: { phase: Phase.NoBook, total: 1326 } });
-    assert.equal(panel.text('scribe-headline'), 'No book for this chat yet: 1,326 messages.');
+    assert.equal(panel.text('scribe-headline'), 'No local book: 1,326 messages. Worker unchecked. No DM API key on this PC.');
     assert.equal(panel.text('scribe-spend'), '$0.1200 today');
 });
 
@@ -652,12 +652,12 @@ test('the key is saved and never shown', async () => {
         ['scribe:key'],
     );
     assert.equal(field.value, '');
-    assert.equal(panel.text('scribe-key-state'), 'A key is saved');
+    assert.equal(panel.text('scribe-key-state'), 'An OpenRouter key is saved');
     assert.equal(panel.text('scribe-key-outcome'), '');
     panel.redraw();
     await panel.tab('Summary');
     await panel.tab('Settings');
-    assert.equal(panel.text('scribe-key-state'), 'A key is saved');
+    assert.equal(panel.text('scribe-key-state'), 'An OpenRouter key is saved');
     for (const element of panel.document.elements) {
         assert.equal(element.textContent.includes(key), false, element.tagName);
         assert.equal(element.value.includes(key), false, element.tagName);
@@ -740,7 +740,7 @@ test('adopting asks before replacing a book', async () => {
     const fresh = mounted(ScribeLog.create(), { keeper: { phase: Phase.NoBook } });
     await fresh.tab('Progress');
     assert.equal(fresh.byId('scribe-adopt').hidden, true);
-    assert.equal(fresh.text('scribe-next'), 'Adopt this chat');
+    assert.equal(fresh.text('scribe-next'), 'Start a new local book');
     fresh.confirming = false;
     fresh.click('scribe-next');
     await fresh.flush();
@@ -1557,7 +1557,7 @@ test('everything is locked while the keeper is busy', async () => {
             'Not the same',
             'Revoke',
         ],
-        Book: ['Remove', 'Make public', 'Remove', 'Make public', 'Remove', 'Make public', 'Remove', 'Make public', 'Add the fact', 'Split'],
+        Book: [...Array(4).fill(['Remove', 'Make public', 'Edit']).flat(), 'Add the fact', 'Split'],
         Findings: ['They were told'],
         Progress: ['Pull the chat again', 'Resume', 'Start the book over'],
         Settings: ['Save settings'],
@@ -1653,7 +1653,7 @@ test('a watching tab changes nothing', async () => {
     await panel.flush();
     assert.equal(panel.rows('facts').length, 4);
     assert.deepEqual(panel.actionsWhere('Book', false).sort(), ['Aldric', 'Aldrich', 'Halvard', 'Mirelle', 'Oswin', 'Oswin (the miller)']);
-    assert.equal(panel.actionsWhere('Book', true).length, 10);
+    assert.equal(panel.actionsWhere('Book', true).length, 14);
     await panel.tab('Findings');
     assert.equal(panel.rows('findings').length, 3);
     assert.deepEqual(panel.actionsWhere('Findings', false), ['Cancel', 'Rule it...']);
@@ -2195,7 +2195,7 @@ test('a book loading from storage is shown but locked', async () => {
     panel.button(panel.byId('scribe-list-subjects'), 'Halvard').click();
     await panel.flush();
     assert.equal(panel.rows('facts').length, 2);
-    assert.deepEqual(panel.actionsWhere('Book', true), ['Remove', 'Make public', 'Remove', 'Make public', 'Add the fact', 'Split']);
+    assert.deepEqual(panel.actionsWhere('Book', true), ['Remove', 'Make public', 'Edit', 'Remove', 'Make public', 'Edit', 'Add the fact', 'Split']);
     await panel.tab('Progress');
     assert.equal(panel.byId('scribe-adopt').hidden, true);
     assert.equal(panel.byId('scribe-pull').disabled, true);
@@ -2543,6 +2543,40 @@ test("a row's buttons wait together", async () => {
     ]);
 });
 
+test('a Book editor retains a stale draft and a collision refusal but discards the draft on room exit', async () => {
+    const log = disputedBook();
+    const panel = mounted(log);
+    await panel.tab('Book');
+    panel.button(panel.byId('scribe-list-subjects'), 'Halvard').click();
+    await panel.flush();
+    const row = () => panel.rowSaying('facts', 'twenty-five');
+    const field = () => row().descendants().find((element) => element.tagName === 'TEXTAREA');
+    panel.keeper.rule = async (operation) => ScribeLog.rule(log, replay(log), operation);
+    panel.button(row(), 'Edit').click();
+    await panel.flush();
+    field().value = 'thirty';
+    panel.button(row(), 'Save').click();
+    await panel.flush();
+    assert.match(row().textContent, /combine two facts/);
+    assert.equal(field().value, 'thirty');
+    field().value = 'forty';
+    rule(log, { type: 'Widen', fact: 'F1', to: ['S2'] });
+    panel.keeper.current = keeperView(log);
+    panel.redraw();
+    panel.button(row(), 'Save').click();
+    await panel.flush();
+    assert.equal(field().value, 'forty');
+    assert.ok(!replay(log).facts.some((fact) => fact.text === 'forty'));
+    panel.keeper.current = keeperView(log, { roomId: 'another room' });
+    panel.redraw();
+    panel.keeper.current = keeperView(log);
+    panel.redraw();
+    assert.equal(field(), undefined);
+    panel.button(row(), 'Edit').click();
+    await panel.flush();
+    assert.equal(field().value, 'twenty-five');
+});
+
 test('required fields are asked before the call', async () => {
     const panel = mounted(rulingsBook());
     await panel.tab('Book');
@@ -2604,7 +2638,7 @@ test('a second press does nothing', async () => {
     assert.equal(panel.storage.calls.filter((call) => call.operation === 'set' && call.name === 'scribe:key').length, 1);
     assert.equal(panel.byId('scribe-key').getAttribute('aria-invalid'), null);
     assert.equal(panel.text('scribe-key-outcome'), '');
-    assert.equal(panel.text('scribe-key-state'), 'A key is saved');
+    assert.equal(panel.text('scribe-key-state'), 'An OpenRouter key is saved');
     panel.clock.advance(2000);
     panel.click('scribe-export');
     await panel.flush();
@@ -2704,7 +2738,7 @@ test('problems and the last pull are shown', async () => {
     assert.equal(panel.byId('scribe-pulled').hidden, true);
     panel.keeper.current = keeperView(log, { phase: Phase.NoBook, total: 1 });
     panel.redraw();
-    assert.equal(panel.text('scribe-headline'), 'No book for this chat yet: 1 message.');
+    assert.equal(panel.text('scribe-headline'), 'No local book: 1 message. Worker unchecked. No DM API key on this PC.');
 });
 
 test('counts are counts of the lists', async () => {
@@ -2723,11 +2757,16 @@ test('counts are counts of the lists', async () => {
         [1, 2, 1],
     );
     const questions = panel.rowTexts('questions');
-    assert.equal(questions.length, 2);
+    assert.equal(questions.length, 1);
     assert.equal(questions[0].startsWith('Who rang the bell?'), true);
-    assert.equal(questions[1].startsWith('Does Mirelle trust Halvard?'), true);
-    assert.equal(questions[1].includes('Your answer: She does not'), true);
-    assert.equal(questions[1].includes('Answered; it will be filed at the next reading.'), true);
+    const [processing] = panel.rows('processing');
+    assert.match(processing.textContent, /Does Mirelle trust Halvard\?.*Your answer: She does not/);
+    assert.match(processing.textContent, /filed at the next reading/);
+    assert.equal(panel.inputs(processing, 'text').length, 0);
+    panel.keeper.current = { ...panel.keeper.current, stop: { reason: 'Failed', problem:
+        'The answer for the answered questions held no line that could be read.' } };
+    panel.redraw();
+    assert.equal(panel.inputs(panel.rows('processing')[0], 'text').length, 1);
     const aliased = readTo(
         apply(
             ScribeLog.create(),
@@ -2876,7 +2915,8 @@ test('filing keeps later words', async () => {
     panel.redraw();
     panel.button(panel.byId('scribe-understood'), 'File it').click();
     await panel.flush();
-    assert.deepEqual(panel.live.called('confirm'), [[]]);
+    assert.deepEqual(panel.live.called('confirm'), []);
+    assert.deepEqual(panel.live.called('forget'), [[]]);
     assert.equal(field.value, 'Mirelle is thirty-five. She keeps a knife.');
 });
 
@@ -3741,7 +3781,7 @@ test('the header offers the next step', () => {
         const button = panel.byId('scribe-next');
         return { hidden: button.hidden, text: button.textContent };
     };
-    const adoptWord = 'Adopt this chat';
+    const adoptWord = 'Start a new local book';
     const resumeWord = mounted(log).byId('scribe-resume').textContent;
     assert.deepEqual(offered({ phase: Phase.NoBook }), { hidden: false, text: adoptWord });
     assert.deepEqual(offered(stoppedFailed), { hidden: false, text: resumeWord });
@@ -4085,7 +4125,7 @@ test('elapsed and progress are worded right', () => {
 });
 
 test('empty tabs say why', async () => {
-    const noBook = 'No book yet. Nothing is read, and nothing is spent, before you adopt this chat.';
+    const noBook = 'Worker unchecked. No DM API key on this PC. In Tampermonkey, choose Zeta Scribe → Set DM API key and enter the key used on the other PC.';
     const under = 'The first reading is under way. This fills as each stretch lands.';
     const nothing = 'Nothing has been read yet. Press Resume above.';
     const states = [
@@ -4780,7 +4820,7 @@ test('the Settings tab says where the book is kept and how much of the notes goe
     await local.tab('Settings');
     assert.equal(
         local.text('scribe-cloud-state'),
-        'No DM API key: the book stays on this PC. Set DM API key from the Tampermonkey menu to keep it in your Worker.',
+        'Worker unchecked. No DM API key on this PC. In Tampermonkey, choose Zeta Scribe → Set DM API key and enter the key used on the other PC.',
     );
     assert.equal(local.byId('scribe-notes').hidden, true);
     const cases = [
@@ -4791,9 +4831,9 @@ test('the Settings tab says where the book is kept and how much of the notes goe
         [{ length: 4000, cut: null }, '4,000 characters of the operator notes go to the models.'],
     ];
     for (const [notes, expected] of cases) {
-        const panel = mounted(log, { cloud: cloudView('Leading', { notes }) });
+        const panel = mounted(log, { cloud: cloudView('Leading', { notes, bookRevision: 3, checkedNotes: true }) });
         await panel.tab('Settings');
-        assert.equal(panel.text('scribe-cloud-state'), 'The book is kept in your Worker and shared by every PC with the DM API key.');
+        assert.equal(panel.text('scribe-cloud-state'), 'Worker book revision 3. Open this room on the other PC with the same DM API key.');
         assert.equal(panel.byId('scribe-notes').hidden, false);
         assert.equal(panel.text('scribe-notes'), expected);
     }

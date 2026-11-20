@@ -282,25 +282,33 @@ const ScribeKeeper = Object.freeze({
     show(keeper) {
         const messages = keeper.intake === null ? [] : keeper.intake.messages;
         const log = keeper.book === null ? ScribeLog.create() : keeper.book.log;
-        const order = [];
         const unread = [];
         let lastRead = null;
         for (const message of messages) {
-            order.push(message.id);
             if (Object.hasOwn(log.read, message.id)) {
                 lastRead = Object.freeze({ id: message.id, position: message.position });
             } else {
                 unread.push(message);
             }
         }
-        keeper.state = ScribeReplay.run(log, order);
+        keeper.state = ScribeKeeper.replay(keeper, log);
         keeper.read = messages.length - unread.length;
         keeper.unread = Object.freeze(unread);
         keeper.lastRead = lastRead;
         keeper.made = Object.freeze([]);
         if (typeof BenchView !== ScribeKeeper.Settings.UndefinedType) {
+            const filed = log.entries.filter((entry) => entry.origin === ScribeLog.Origin.Notes && !entry.withdrawn)
+                .flatMap((entry) => {
+                    const linked = entry.operations.filter((operation) => operation.resolutions?.length && !operation.revoked);
+                    if (!linked.length) {
+                        return [];
+                    }
+                    return [{ sequence: entry.sequence, type: ScribeLog.Origin.Notes,
+                        summary: linked.map((operation) => operation.resolutions[0].fact + ' — ' +
+                            (operation.text ?? operation.reason ?? operation.resolutions[0].said)).join(', ') }];
+                });
             keeper.made = Object.freeze(
-                BenchView.made(log).map(
+                [...BenchView.made(log), ...filed].sort((first, second) => second.sequence - first.sequence).map(
                     /**
                      * @param {{ sequence: number, type: string, summary: string }} row
                      * @return {Readonly<{ sequence: number, type: string, summary: string }>}
@@ -2166,16 +2174,13 @@ const ScribeKeeper = Object.freeze({
 
     /**
      * @param {object} keeper
-     * @return {string[]}
+     * @param {object} log
+     * @return {object}
      */
-    order(keeper) {
-        const order = [];
-        if (keeper.intake !== null) {
-            for (const message of keeper.intake.messages) {
-                order.push(message.id);
-            }
-        }
-        return order;
+    replay(keeper, log) {
+        const messages = keeper.intake?.messages ?? [];
+        const order = messages.map((message) => message.id);
+        return ScribeReplay.run(log, order, null, new Map(messages.map((message) => [message.id, message.fingerprint])));
     },
 
     /**
@@ -2188,7 +2193,7 @@ const ScribeKeeper = Object.freeze({
         ScribeKeeper.guard(keeper);
         ScribeKeeper.needBook(keeper);
         const log = ScribeKeeper.copy(keeper.book.log);
-        if (change(log, ScribeReplay.run(log, ScribeKeeper.order(keeper))) === null) {
+        if (change(log, ScribeKeeper.replay(keeper, log)) === null) {
             return;
         }
         const book = { ...keeper.book, log };
@@ -2232,7 +2237,7 @@ const ScribeKeeper = Object.freeze({
             if (ScribeKeeper.words(error) !== ScribeLog.Settings.StaleState) {
                 throw error;
             }
-            result = ScribeLog.append(log, ScribeReplay.run(log, ScribeKeeper.order(keeper)), operations, stretch);
+            result = ScribeLog.append(log, ScribeKeeper.replay(keeper, log), operations, stretch);
         }
         return { log, result };
     },
@@ -2241,10 +2246,11 @@ const ScribeKeeper = Object.freeze({
      * @param {object} keeper
      * @param {*} operations
      * @param {*} anchor
+     * @param {readonly object[]|null} resolution
      * @return {Promise<ReadonlyArray<Readonly<{ operation: object, reason: string }>>>}
      * @throws {Error}
      */
-    async file(keeper, operations, anchor) {
+    async file(keeper, operations, anchor, resolution = null) {
         const settings = ScribeKeeper.Settings;
         const drafted = ScribeKeeper.draft(keeper, operations, anchor);
         if (drafted === null) {
@@ -2253,6 +2259,7 @@ const ScribeKeeper = Object.freeze({
         if (drafted.result.entry.operations.length === settings.NoCount) {
             return drafted.result.refused;
         }
+        ScribeLog.link(drafted.result.entry, keeper.state, resolution ?? [], keeper.intake.messages);
         const book = { ...keeper.book, log: drafted.log };
         ScribeKeeper.saveBook(keeper, book, settings.Flight.Filing);
         return drafted.result.refused;
@@ -2267,15 +2274,14 @@ const ScribeKeeper = Object.freeze({
      */
     async preview(keeper, operations, anchor) {
         const drafted = ScribeKeeper.draft(keeper, operations, anchor);
-        const order = ScribeKeeper.order(keeper);
-        const before = ScribeReplay.run(keeper.book.log, order);
+        const before = ScribeKeeper.replay(keeper, keeper.book.log);
         if (drafted === null) {
             return Object.freeze({ before, state: before, refused: Object.freeze([]) });
         }
         if (drafted.result.entry.operations.length === ScribeKeeper.Settings.NoCount) {
             return Object.freeze({ before, state: before, refused: drafted.result.refused });
         }
-        const state = ScribeReplay.run(drafted.log, order);
+        const state = ScribeKeeper.replay(keeper, drafted.log);
         return Object.freeze({ before, state, refused: drafted.result.refused });
     },
 
@@ -2387,9 +2393,10 @@ const ScribeKeeper = Object.freeze({
 
             /**
              * @param {object} operation
+             * @param {readonly object[]|null} resolution
              * @return {Promise<void>}
              */
-            rule: (operation) =>
+            rule: (operation, resolution = null) =>
                 ScribeKeeper.ruling(
                     keeper,
                     /**
@@ -2397,13 +2404,20 @@ const ScribeKeeper = Object.freeze({
                      * @param {object} state
                      * @return {object}
                      */
-                    (log, state) => ScribeLog.rule(log, state, operation),
+                    (log, state) => {
+                        const entry = ScribeLog.rule(log, state, operation);
+                        if (entry !== null) {
+                            ScribeLog.link(entry, state, resolution ?? [], keeper.intake?.messages ?? []);
+                        }
+                        return entry;
+                    },
                 ),
 
             /**
+             * @param {readonly object[]|null} resolution
              * @return {Promise<void>}
              */
-            keepFirst: () =>
+            keepFirst: (resolution = null) =>
                 ScribeKeeper.ruling(
                     keeper,
                     /**
@@ -2411,7 +2425,13 @@ const ScribeKeeper = Object.freeze({
                      * @param {object} state
                      * @return {readonly object[]}
                      */
-                    (log, state) => ScribeLog.keepFirst(log, state),
+                    (log, state) => {
+                        const entries = ScribeLog.keepFirst(log, state);
+                        for (const entry of entries) {
+                            ScribeLog.link(entry, state, resolution ?? [], keeper.intake?.messages ?? []);
+                        }
+                        return entries;
+                    },
                 ),
 
             /**
@@ -2431,9 +2451,10 @@ const ScribeKeeper = Object.freeze({
             /**
              * @param {object[]} operations
              * @param {{ id: string, position: number }} anchor
+             * @param {readonly object[]|null} resolution
              * @return {Promise<ReadonlyArray<Readonly<{ operation: object, reason: string }>>>}
              */
-            file: (operations, anchor) => ScribeKeeper.file(keeper, operations, anchor),
+            file: (operations, anchor, resolution = null) => ScribeKeeper.file(keeper, operations, anchor, resolution),
 
             /**
              * @param {object[]} operations

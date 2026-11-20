@@ -1,4 +1,5 @@
 const ScribeReplay = Object.freeze({
+    Inputs: new WeakMap(),
     Status: Object.freeze({
         InForce: 'InForce',
         Disputed: 'Disputed',
@@ -100,6 +101,19 @@ const ScribeReplay = Object.freeze({
     },
 
     /**
+     * @param {readonly object[]} facts
+     * @param {object} issue
+     * @return {object|null}
+     */
+    supportedFact(facts, issue) {
+        const candidates = facts.filter((fact) => fact.subject === issue.subject &&
+            fact.category === issue.category && fact.target === issue.target && fact.targetText === issue.targetText &&
+            fact.cite === issue.cite && ScribeCategory.same(fact.text, issue.book));
+        return candidates.find((fact) => fact.id === issue.fact) ??
+            (issue.cite !== null && candidates.length === 1 ? candidates[0] : null);
+    },
+
+    /**
      * @param {object} book
      * @param {object} fact
      * @return {boolean}
@@ -110,7 +124,7 @@ const ScribeReplay = Object.freeze({
             (book.struck.size > 0 &&
                 fact.origin !== ScribeLog.Origin.Operator &&
                 !fact.made &&
-                ScribeReplay.statementKeys(fact).some(
+                ScribeReplay.statementKeys(book.edits.has(fact.id) ? { ...fact, text: book.edits.get(fact.id).source.book } : fact).some(
                     /**
                      * @param {string} key
                      * @return {boolean}
@@ -531,7 +545,7 @@ const ScribeReplay = Object.freeze({
             category: operation.category,
             target: operation.target === null ? null : ScribeReplay.resolve(book, operation.target),
             targetText: operation.targetText,
-            text: operation.text,
+            text: book.edits.get(id)?.text ?? operation.text,
             cite: operation.cite,
             position: item.position,
             origin: item.origin,
@@ -544,6 +558,7 @@ const ScribeReplay = Object.freeze({
             pinned: false,
             made: false,
         };
+        book.sources?.push(fact);
         if (ScribeReplay.erase(book, fact)) {
             return null;
         }
@@ -589,7 +604,7 @@ const ScribeReplay = Object.freeze({
             category: named.category,
             target: named.target,
             targetText: named.targetText,
-            text: operation.text,
+            text: book.edits.get(operation.becomes)?.text ?? operation.text,
             cite: operation.cite,
             position: item.position,
             origin: item.origin,
@@ -602,6 +617,7 @@ const ScribeReplay = Object.freeze({
             pinned: false,
             made: false,
         };
+        book.sources?.push(fact);
         if (ScribeReplay.erase(book, fact)) {
             return null;
         }
@@ -907,6 +923,9 @@ const ScribeReplay = Object.freeze({
          */
         RemoveFact(book, operation) {
             book.removed.add(operation.fact);
+            if (operation.editedSource) {
+                return;
+            }
             for (const key of ScribeReplay.markKeys(book, operation.mark)) {
                 book.struck.add(key);
             }
@@ -957,7 +976,10 @@ const ScribeReplay = Object.freeze({
             const candidates = new Set();
             for (const fact of held) {
                 const standing = ScribeReplay.follow(book, fact.id);
-                if (ScribeCategory.same(fact.text, operation.text) && ScribeReplay.live(standing)) {
+                const edit = book.edits.get(fact.id);
+                const kept = operation.winner === fact.id && operation.editedSource ||
+                    edit && (operation.winner === fact.id || operation.winner === edit.source.fact);
+                if ((kept || ScribeCategory.same(fact.text, operation.text)) && ScribeReplay.live(standing)) {
                     candidates.add(standing);
                 }
             }
@@ -978,7 +1000,7 @@ const ScribeReplay = Object.freeze({
                     category: operation.category,
                     target: null,
                     targetText: null,
-                    text: operation.text,
+                    text: book.edits.get(operation.fact)?.text ?? operation.text,
                     cite: located ? operation.cite : null,
                     position: located
                         ? (book.positions.get(operation.cite) ?? operation.position)
@@ -993,6 +1015,7 @@ const ScribeReplay = Object.freeze({
                     pinned: false,
                     made: true,
                 };
+                book.sources?.push(winner);
                 if (ScribeReplay.erase(book, winner)) {
                     return;
                 }
@@ -1035,6 +1058,9 @@ const ScribeReplay = Object.freeze({
             }
             const ruling = { order, operation };
             book.widenings.set(operation.fact, ruling);
+            if (operation.editedSource) {
+                return;
+            }
             for (const key of ScribeReplay.markKeys(book, operation.mark)) {
                 book.widenedMarks.set(key, ruling);
             }
@@ -1103,19 +1129,48 @@ const ScribeReplay = Object.freeze({
      * @param {object} log
      * @param {string[]} order
      * @param {ReadonlySet<string>|null} pending
+     * @param {ReadonlyMap<string, string>|null} fingerprints
+     * @param {ReadonlyMap<string, object>|null} edits
      * @return {Readonly<{ revision: number, subjects: readonly object[], facts: readonly object[], scenes: readonly object[], nights: readonly object[], threads: readonly object[], conflicts: readonly object[], lookAlikes: readonly object[], stale: readonly object[], refinements: readonly object[], aliases: readonly object[], questions: readonly object[], unaliased: readonly object[], distinct: readonly object[], contradictions: readonly object[] }>}
      */
-    run(log, order, pending = null) {
+    run(log, order, pending = null, fingerprints = null, edits = null, sources = null) {
         const settings = ScribeReplay.Settings;
         const status = ScribeReplay.Status;
         const likeness = ScribeReplay.Likeness;
         const types = ScribeAnswer.Type;
         const rulingTypes = ScribeLog.Ruling;
+        const targets = new Map();
+        if (edits === null) {
+            edits = new Map();
+            const corrections = log.entries.filter((entry) => entry.kind === ScribeLog.Kind.Operator && !entry.withdrawn)
+                .flatMap((entry) => entry.operations.filter((operation) => !operation.revoked &&
+                    (operation.type === rulingTypes.EditFact || operation.editedSource)));
+            if (corrections.length > 0) {
+                const originals = [];
+                ScribeReplay.run(log, order, pending, fingerprints, edits, originals);
+                for (const operation of corrections) {
+                    const source = operation.editedSource ?? operation.source;
+                    if (source.sourcePrint !== null && fingerprints !== null && fingerprints.get(source.cite) !== source.sourcePrint) {
+                        continue;
+                    }
+                    const fact = ScribeReplay.supportedFact(originals, source);
+                    if (fact && (fact.id === source.fact || (source.sourcePrint !== null && fingerprints !== null))) {
+                        if (operation.type === rulingTypes.EditFact) {
+                            edits.set(fact.id, operation);
+                        } else {
+                            targets.set(operation, fact.id);
+                        }
+                    }
+                }
+            }
+        }
         const positions = new Map();
         for (const [index, id] of order.entries()) {
             positions.set(id, index + 1);
         }
         const book = {
+            edits,
+            sources,
             positions,
             subjects: new Map(),
             facts: [],
@@ -1158,11 +1213,19 @@ const ScribeReplay = Object.freeze({
         const counted = [];
         const showings = [];
         const rulings = [];
+        const decisions = [];
+        const legacyDecisions = [];
         const withdrawnQuestions = new Map();
         const previousQuestions = new Map();
+        const questionKeys = new Map();
+        const activeQuestionCounts = new Map();
+        const ambiguousQuestions = new Set();
         for (const entry of log.entries) {
             const ruled = entry.kind === ScribeLog.Kind.Operator;
             for (const [index, operation] of entry.operations.entries()) {
+                if (operation.revoked === true) {
+                    continue;
+                }
                 if (pending && (pending.has(operation.cite) ||
                     (operation.type === types.Contradiction && pending.has(operation.earlier)) ||
                     (operation.type === types.Scene && (pending.has(operation.first) || pending.has(operation.last))))) {
@@ -1190,14 +1253,40 @@ const ScribeReplay = Object.freeze({
                     const previous = withdrawnQuestions.get(key);
                     if (entry.withdrawn) {
                         const ids = previous ?? [];
-                        ids.push(operation.question);
+                        if (ids.at(-1)?.sequence === entry.sequence) {
+                            ambiguousQuestions.add(key);
+                        }
+                        ids.push({ id: operation.question, sequence: entry.sequence });
                         withdrawnQuestions.set(key, ids);
                     } else if (previous) {
-                        previousQuestions.set(operation.question, previous.slice());
+                        activeQuestionCounts.set(key, (activeQuestionCounts.get(key) ?? 0) + 1);
+                        questionKeys.set(operation.question, key);
+                        previousQuestions.set(operation.question, previous.map((item) => item.id));
                     }
                 }
                 if (entry.withdrawn || (ruling && !ruled)) {
                     continue;
+                }
+                if (operation.passages?.some((passage) => !positions.has(passage.id) ||
+                    (fingerprints !== null && fingerprints.get(passage.id) !== passage.fingerprint))) {
+                    continue;
+                }
+                if (ruled || entry.origin === ScribeLog.Origin.Notes) {
+                    for (const issue of operation.resolutions ?? []) {
+                        if (!positions.has(issue.message) || (issue.cite !== null && !positions.has(issue.cite)) ||
+                            (fingerprints !== null && (fingerprints.get(issue.message) !== issue.fingerprint ||
+                                (issue.cite !== null && fingerprints.get(issue.cite) !== issue.sourcePrint))) ||
+                            !ScribeLog.settles(operation, issue)) {
+                            continue;
+                        }
+                        decisions.push({ sequence: entry.sequence, ...issue,
+                            ...(operation.type === rulingTypes.EditFact ? { correctedBy: operation } : {}) });
+                    }
+                    const legacy = ruled ? [rulingTypes.Pin, rulingTypes.Widen, rulingTypes.RemoveFact,
+                        rulingTypes.DismissContradiction] : [types.Change, types.Refine, types.End, types.Told];
+                    if (fingerprints !== null && !entry.linked && legacy.includes(operation.type)) {
+                        legacyDecisions.push({ sequence: entry.sequence, operation: JSON.parse(JSON.stringify(operation)) });
+                    }
                 }
                 if (operation.type === rulingTypes.AddFact) {
                     const position = positions.get(operation.cite) ?? operation.position;
@@ -1205,7 +1294,10 @@ const ScribeReplay = Object.freeze({
                     continue;
                 }
                 if (ruling) {
-                    rulings.push(operation);
+                    if (!operation.editedSource || targets.has(operation) || sources !== null) {
+                        const address = operation.type === rulingTypes.Pin ? 'winner' : 'fact';
+                        rulings.push(targets.has(operation) ? { ...operation, [address]: targets.get(operation) } : operation);
+                    }
                     continue;
                 }
                 if (operation.type === types.Scene) {
@@ -1359,7 +1451,8 @@ const ScribeReplay = Object.freeze({
             if (book.widenings.size === 0 || fact.status === status.Removed) {
                 continue;
             }
-            const keys = ScribeReplay.statementKeys(fact);
+            const edit = edits.get(fact.id);
+            const keys = ScribeReplay.statementKeys(edit ? { ...fact, text: edit.source.book } : fact);
             const ruling = ScribeReplay.latest(book.widenedMarks, keys, book.widenings.get(fact.id));
             if (ruling === undefined) {
                 continue;
@@ -1378,7 +1471,9 @@ const ScribeReplay = Object.freeze({
             fact.widened = widened;
         }
         for (const question of book.questions) {
-            const previous = previousQuestions.get(question.id) ?? [];
+            const key = questionKeys.get(question.id);
+            const previous = activeQuestionCounts.get(key) === 1 && !ambiguousQuestions.has(key)
+                ? previousQuestions.get(question.id) : [];
             const answered = ScribeReplay.latest(book.answers, previous, book.answers.get(question.id));
             const dismissed = ScribeReplay.latest(book.dismissals, previous, book.dismissals.get(question.id));
             if (answered !== undefined) {
@@ -1485,7 +1580,9 @@ const ScribeReplay = Object.freeze({
                 continue;
             }
             const [slot] = ScribeReplay.keys(fact, ScribeCategory.Kind.Fixed);
-            if (book.pinned.has(slot)) {
+            const dispute = book.pins.get(slot)?.dispute;
+            if (book.pinned.has(slot) && (!dispute || dispute.some((item) => item.id === fact.id ||
+                (item.cite === fact.cite && ScribeCategory.same(item.text, fact.text))))) {
                 continue;
             }
             if (!conflicts.has(slot)) {
@@ -1500,6 +1597,37 @@ const ScribeReplay = Object.freeze({
             }
             conflicts.get(slot).others.push(fact.id);
         }
+        const resolved = [];
+        for (const issue of decisions) {
+            const { correctedBy, ...evidence } = issue;
+            const fact = correctedBy ? book.facts.find((row) => edits.get(row.id) === correctedBy && row.text === correctedBy.text)
+                : ScribeReplay.supportedFact(book.facts, issue);
+            const told = fact && (fact.widened === ScribeLog.Settings.Everyone ||
+                fact.widened?.includes(issue.speaker) || fact.told.includes(issue.speaker));
+            if (fact && (issue.kind !== 'Leak' || told)) {
+                resolved.push({ ...evidence, activeFact: fact.id });
+            }
+        }
+        for (const issue of resolved) {
+            if (issue.contradiction !== null && book.contradictions.has(issue.contradiction)) {
+                book.contradictions.get(issue.contradiction).dismissed = true;
+            }
+            const slot = JSON.stringify([issue.subject, issue.category]);
+            const conflict = conflicts.get(slot);
+            if (issue.kind !== 'Contradiction' || !conflict) {
+                continue;
+            }
+            conflict.others = conflict.others.filter((id) => {
+                const other = book.byId.get(id);
+                const holder = book.byId.get(conflict.established);
+                return !((conflict.established === issue.activeFact && issue.alternatives.includes(id) &&
+                    ScribeCategory.same(other.text, issue.said)) || (id === issue.activeFact && holder &&
+                    issue.alternatives.includes(holder.id) && ScribeCategory.same(holder.text, issue.said)));
+            });
+            if (conflict.others.length === 0) {
+                conflicts.delete(slot);
+            }
+        }
         const contradictions = [...book.contradictions.values()].sort(
             /**
              * @param {{ position: number, earlierPosition: number }} first
@@ -1508,8 +1636,10 @@ const ScribeReplay = Object.freeze({
              */
             (first, second) => first.position - second.position || first.earlierPosition - second.earlierPosition,
         );
-        return ScribeReplay.seal({
+        const state = ScribeReplay.seal({
             revision: log.revision,
+            ...(log.editRun?.through === log.revision ? { editedSince: log.editRun.from } : {}),
+            ...(edits.size ? { editOrigins: Object.fromEntries([...edits].map(([id, operation]) => [id, { ...operation.source }])) } : {}),
             subjects,
             facts: book.facts,
             scenes,
@@ -1524,6 +1654,11 @@ const ScribeReplay = Object.freeze({
             unaliased: book.unaliasings,
             distinct: book.distinctions,
             contradictions,
+            resolutions: resolved,
+            legacyDecisions,
+            decisionRead: fingerprints === null ? null : (legacyDecisions.length ? { ...log.read } : {}),
         });
+        ScribeReplay.Inputs.set(state, { order, pending, fingerprints });
+        return state;
     },
 });

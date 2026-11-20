@@ -788,6 +788,32 @@ test('manual receipt matches exact multiline transport in joined and split narra
     assert.equal(read.messages[1].blocks[0].text, player);
 });
 
+test('a trimmed player block identifies only the original attachment and its exact author boundary', () => {
+    const player = '  I  wait.\n@: [Scribe] My own line.';
+    const carried = '[Scribe] The  chosen paragraph. ';
+    const suggestion = 'Keep watch.';
+    const stamp = ScribeText.playerSubmission(player + '  ');
+    const post = { ...stamp, carried, suggestion, manual: true, floor: 0, after: null };
+    const tail = '\n@: ' + carried + '\n@: ' + suggestion;
+    for (const [prefix, suffix, accepted] of [
+        [player + '  ', tail, true], [player, tail, true], [player + ' ', tail, false],
+        [player.trimStart(), tail, false], [player.replace('I  wait', 'I wait'), tail, false],
+        [player, tail.replace('chosen paragraph. ', 'chosen paragraph.'), false], [player, tail.slice(0, -1), false],
+        [player, tail + ' Changed.', false],
+    ]) {
+        const builder = new CampaignBuilder('Orla').player(prefix + suffix);
+        const message = ScribeIntake.read(builder.messages, { posts: [post] }).messages[0];
+        assert.equal(ScribeIntake.carried(message, post), accepted);
+        assert.equal(message.projection, accepted ? prefix.length : undefined);
+        if (accepted) {
+            assert.equal(message.blocks[0].text, player.trim());
+        }
+    }
+    const legacy = { ...post, trimmedSubmission: undefined };
+    const message = ScribeIntake.read(new CampaignBuilder('Orla').player(player + tail).messages).messages[0];
+    assert.equal(ScribeIntake.carried(message, legacy), false);
+});
+
 test('saved manual attribution preserves authored markers, validates the raw row and survives split narrator history', () => {
     const player = 'I wait.\n\n\n@: [Scribe] Keep.';
     const carried = '[Scribe] First.\nMira lost the key.';

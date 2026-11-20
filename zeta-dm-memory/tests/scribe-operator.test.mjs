@@ -2402,6 +2402,187 @@ test('a pin reads the subject as it stands', () => {
     ]);
 });
 
+test('wording edits retain the same fact and provenance through rereading and independent revocation', () => {
+    const log = ScribeLog.create();
+    const original = 'offers 100,000 gold';
+    const wording = answer({ SUBJECTS: ['Crown | group', 'Mirra | character', 'Oren | character'],
+        FACTS: ['Crown | relation to Mirra | ' + original + ' | hidden | #1',
+            'Crown | relation to Oren | offers 50,000 gold | #2'] });
+    apply(log, storyOrder, wording, stretch(1, 3));
+    const prints = new Map(story.map((message) => [message.id, message.fingerprint]));
+    const replay = () => ScribeReplay.run(JSON.parse(JSON.stringify(log)), storyOrder, null, prints);
+    const edit = (fact, text) => {
+        const before = replay();
+        const entry = ScribeLog.rule(log, before, { type: 'EditFact', fact: fact.id, expected: ScribeLog.editExpected(fact), text });
+        if (entry) {
+            ScribeLog.link(entry, before, [], story);
+        }
+        return entry;
+    };
+    const prior = replay().facts[0];
+    assert.equal(edit(prior, ' ' + original + ' '), null);
+    const first = edit(prior, 'offers 50,000 gold');
+    assert.throws(() => edit(prior, 'stale'), /StaleState/);
+    assert.deepEqual(plain(replay().facts[0]), { ...plain(prior), text: 'offers 50,000 gold' });
+    const second = edit(replay().facts[0], 'offers 60,000 gold');
+    const frozen = replay().facts[0];
+    rule(log, { type: 'Widen', fact: prior.id, to: ['S3'] });
+    assert.throws(() => edit(frozen, 'out of date'), /StaleState/);
+    ScribeLog.revoke(log, first.sequence);
+    assert.equal(replay().facts[0].text, 'offers 60,000 gold');
+    assert.deepEqual(plain(replay().facts[0].widened), ['S3']);
+    ScribeLog.withdraw(log, 'MESSAGE-3');
+    apply(log, storyOrder, wording, stretch(1, 3));
+    const remapped = replay().facts.find((fact) => fact.target === prior.target);
+    assert.notEqual(remapped.id, prior.id);
+    assert.equal(remapped.text, 'offers 60,000 gold');
+    assert.deepEqual(plain(remapped.widened), ['S3']);
+    ScribeLog.revoke(log, second.sequence);
+    assert.deepEqual(plain(replay().facts.find((fact) => fact.target === prior.target).widened), ['S3']);
+    log.entries.find((entry) => entry.sequence === second.sequence).withdrawn = false;
+    prints.set('MESSAGE-1', 'new supporting passage');
+    assert.equal(replay().facts.find((fact) => fact.target === prior.target).text, original);
+    ScribeLog.revoke(log, second.sequence);
+    assert.equal(replay().facts.find((fact) => fact.target === prior.target).text, original);
+});
+
+test('edits preserve pin winners and refuse fixed or list collisions with another fact', () => {
+    const log = ScribeLog.create();
+    apply(log, storyOrder, answer({ FACTS: ['Mira | hair | black | #1', 'Mira | hair | auburn | #2',
+        'Mira | trait | calm | #1', 'Mira | trait | sly | #2'] }), stretch(1, 2));
+    const edit = (id, text) => {
+        const state = ScribeReplay.run(log, storyOrder);
+        const expected = ScribeLog.editExpected(factNumbered(state, id));
+        return ScribeLog.rule(log, state, { type: 'EditFact', fact: id, expected, text });
+    };
+    assert.throws(() => edit('F1', 'auburn'), /combine two facts/);
+    assert.throws(() => edit('F3', 'sly'), /combine two facts/);
+    rule(log, pin('S1', 'hair', 'auburn'));
+    edit('F2', 'copper');
+    const pinned = factNumbered(ScribeReplay.run(log, storyOrder), 'F2');
+    assert.deepEqual([pinned.status, pinned.pinned, pinned.text], ['InForce', true, 'copper']);
+    rule(log, pin('S1', 'hair', 'copper'));
+    edit('F2', 'golden-red');
+    const again = factNumbered(ScribeReplay.run(log, storyOrder), 'F2');
+    assert.deepEqual([again.status, again.pinned, again.text], ['InForce', true, 'golden-red']);
+    rule(log, pin('S1', 'hair', 'silver'));
+    const synthetic = ScribeReplay.run(log, storyOrder).facts.find((fact) => fact.made);
+    edit(synthetic.id, 'golden');
+    assert.equal(factNumbered(ScribeReplay.run(log, storyOrder), synthetic.id).text, 'golden');
+    apply(log, storyOrder, answer({ CHANGES: ['F3 | Mira | trait | quiet | #3'] }), pick(3));
+    assert.throws(() => edit('F3', 'other'), /StaleState/);
+});
+
+test('the open editor refuses an intervening change in the source scene audience or who was told', () => {
+    const log = ScribeLog.create();
+    const before = apply(log, storyOrder, answer({ SUBJECTS: ['Mira | character', 'Oren | character', 'Hal | character'],
+        FACTS: ['Mira | trait | calm | #1'], SCENES: ['Day 1 | #1-#2 | The mill | public | present: Mira | Mira waits'] }), stretch(1, 2)).state;
+    const operation = (state) => ({ type: 'EditFact', fact: 'F1', text: 'quiet', expected: ScribeLog.editExpected(state.facts[0], state) });
+    const publicDraft = operation(before);
+    const narrow = rule(log, { type: 'Narrow', scene: 'MESSAGE-1' });
+    assert.throws(() => rule(log, publicDraft), /StaleState/);
+    const privateDraft = operation(narrow.state);
+    ScribeLog.revoke(log, narrow.entry.sequence);
+    assert.throws(() => rule(log, privateDraft), /StaleState/);
+    const told = apply(log, storyOrder, answer({ TOLD: ['F1 | Mira | Oren | #3', 'F1 | Mira | Hal | #3'] }), pick(3)).state;
+    assert.deepEqual(plain(told.facts[0].told), ['S2', 'S3']);
+    assert.throws(() => rule(log, publicDraft), /StaleState/);
+    const sorted = ScribeLog.editExpected({ ...told.facts[0], told: [...told.facts[0].told].reverse() }, told);
+    assert.deepEqual(plain(sorted), plain(ScribeLog.editExpected(told.facts[0], told)));
+});
+
+test('two independently edited source facts can start with identical wording', () => {
+    const log = ScribeLog.create();
+    const initial = apply(log, storyOrder, answer({ FACTS: ['Mira | trait | calm | #1'] }), pick(1)).state;
+    rule(log, { type: 'EditFact', fact: 'F1', expected: ScribeLog.editExpected(initial.facts[0]), text: 'quiet' });
+    const next = apply(log, storyOrder, answer({ FACTS: ['Mira | trait | calm | hidden | #2'] }), pick(2)).state;
+    const { state } = rule(log, { type: 'EditFact', fact: 'F2', expected: ScribeLog.editExpected(next.facts[1]), text: 'sly' });
+    assert.deepEqual(plain(state.facts.map((fact) => [fact.id, fact.text, fact.hidden])), [['F1', 'quiet', false], ['F2', 'sly', true]]);
+});
+
+test('historical fixed and list facts retain both identities when proposed wording would collapse them', () => {
+    for (const category of ['trait', 'hair']) {
+        const log = ScribeLog.create();
+        apply(log, storyOrder, answer({ FACTS: ['Mira | ' + category + ' | calm | hidden | #1',
+            'Mira | ' + category + ' | sly | #2'] }), stretch(1, 2));
+        const { state } = apply(log, storyOrder, answer({ CHANGES: ['F1 | Mira | ' + category + ' | ENDED: changed | #3'] }), pick(3));
+        const count = log.entries.length;
+        assert.throws(() => rule(log, { type: 'EditFact', fact: 'F2', expected: ScribeLog.editExpected(state.facts[1]), text: 'calm' }),
+            /combine two facts/);
+        assert.equal(log.entries.length, count);
+        assert.deepEqual(plain(ScribeReplay.run(log, storyOrder).facts), plain(state.facts));
+    }
+});
+
+test('an older widening or removal does not match an independent corrected relation by display text', () => {
+    for (const decision of [{ type: 'Widen', fact: 'F1', to: 'Everyone' }, { type: 'RemoveFact', fact: 'F1' }]) {
+        const log = ScribeLog.create();
+        apply(log, storyOrder, answer({ FACTS: ['Mira | relation to Oren | offers 50,000 gold | hidden | #1'] }), pick(1));
+        rule(log, decision);
+        const next = apply(log, storyOrder, answer({ FACTS: ['Mira | relation to Oren | offers 100,000 gold | hidden | #2'] }), pick(2)).state;
+        const current = next.facts.find((fact) => fact.id === 'F2');
+        const { state } = rule(log, { type: 'EditFact', fact: 'F2', expected: ScribeLog.editExpected(current), text: 'offers 50,000 gold' });
+        const corrected = state.facts.find((fact) => fact.id === 'F2');
+        assert.deepEqual([corrected.status, corrected.widened, corrected.hidden], ['InForce', null, true]);
+    }
+});
+
+test('a pin filed after a remapped edit retains the same winner through another reread and edit', () => {
+    const log = ScribeLog.create();
+    const prints = new Map(story.map((message) => [message.id, message.fingerprint]));
+    const replay = () => ScribeReplay.run(log, storyOrder, null, prints);
+    const wording = answer({ FACTS: ['Mira | hair | black | #1', 'Mira | hair | red | hidden | #2'] });
+    const read = () => apply(log, storyOrder, wording, stretch(1, 3));
+    const edit = (text) => {
+        const state = replay();
+        const fact = state.facts.find((row) => row.cite === 'MESSAGE-2');
+        const entry = ScribeLog.rule(log, state, { type: 'EditFact', fact: fact.id, expected: ScribeLog.editExpected(fact), text });
+        ScribeLog.link(entry, state, [], story);
+    };
+    read();
+    edit('copper');
+    ScribeLog.withdraw(log, 'MESSAGE-3');
+    read();
+    const pinned = ScribeLog.rule(log, replay(), pin('S1', 'hair', 'copper'));
+    assert.equal(pinned.operations[0].winner, 'F4');
+    edit('golden');
+    ScribeLog.withdraw(log, 'MESSAGE-3');
+    read();
+    const facts = replay().facts;
+    assert.equal(facts.length, 2);
+    assert.deepEqual(plain(facts.filter((fact) => fact.pinned).map((fact) => [fact.id, fact.text, fact.hidden, fact.status])),
+        [['F7', 'golden', true, 'InForce']]);
+});
+
+test('a widening filed before an edit follows only the original cited fact on reread', () => {
+    const log = ScribeLog.create();
+    const wording = answer({ SUBJECTS: ['Mira | character', 'Oren | character'], FACTS: ['Mira | trait | quiet | hidden | #1'] });
+    apply(log, storyOrder, wording, stretch(1, 2));
+    const widened = rule(log, { type: 'Widen', fact: 'F1', to: ['S2'] }).state;
+    const edit = ScribeLog.rule(log, widened, { type: 'EditFact', fact: 'F1', expected: ScribeLog.editExpected(widened.facts[0]), text: 'calm' });
+    ScribeLog.link(edit, widened, [], story);
+    ScribeLog.withdraw(log, 'MESSAGE-2');
+    apply(log, storyOrder, wording, stretch(1, 2));
+    const prints = new Map(story.map((message) => [message.id, message.fingerprint]));
+    const [current] = ScribeReplay.run(log, storyOrder, null, prints).facts;
+    assert.deepEqual(plain([current.id, current.text, current.widened]), ['F2', 'calm', ['S2']]);
+});
+
+test('choosing a third value settles only claims evidenced by the two alternatives on that conflict card', () => {
+    const log = ScribeLog.create();
+    const state = apply(log, storyOrder, answer({ FACTS: ['Mira | hair | auburn | #1', 'Mira | hair | line 3 | #3'] }),
+        stretch(1, 4)).state;
+    const [fact] = state.facts;
+    const issue = (position) => ({ kind: 'Contradiction', fact: fact.id, subject: fact.subject,
+        category: fact.category, book: fact.text, said: 'line ' + position, message: story[position-1].id,
+        fingerprint: story[position-1].fingerprint });
+    const entry = ScribeLog.rule(log, state, pin(fact.subject, 'hair', 'copper'));
+    ScribeLog.link(entry, state, [issue(3), issue(4)], story);
+    const result = ScribeReplay.run(log, storyOrder, null, new Map(story.map((message) => [message.id, message.fingerprint])));
+    assert.deepEqual(plain(result.resolutions.map((item) => item.message)), ['MESSAGE-3']);
+    assert.equal(result.conflicts.length, 0);
+});
+
 test('a second split moves a fact again', () => {
     const log = ScribeLog.create();
     apply(log, storyOrder, answer({ FACTS: ['Oswin | trait | quiet | #1', 'Oswin | trait | gruff | #1'] }), pick(1));

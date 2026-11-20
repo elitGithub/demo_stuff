@@ -1124,6 +1124,7 @@ const ScribeBoot = Object.freeze({
             const lines = outstanding ?? Object.freeze({
                 key,
                 ...(report.submission ? { submission: report.submission } : {}),
+                ...(ready !== null && kept.manual && report.trimmedSubmission ? { trimmedSubmission: report.trimmedSubmission } : {}),
                 ready,
                 ...(ready !== null && kept.manual ? { manual: true } : {}),
                 suggestion: report.suggestion ? kept.suggestion : null,
@@ -1332,6 +1333,9 @@ const ScribeBoot = Object.freeze({
         );
         ScribeBoot.contest(session);
         ScribeBoot.arm(session.boot, []);
+        if (session.live?.refreshWatcher?.()) {
+            ScribeBoot.redraw(session);
+        }
         const cloud = session.cloud;
         ScribeBoot.attempt(
             session.boot,

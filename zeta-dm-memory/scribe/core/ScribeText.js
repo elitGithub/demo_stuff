@@ -209,6 +209,18 @@ const ScribeText = Object.freeze({
 
     /**
      * @param {string} text
+     * @return {object}
+     */
+    playerSubmission(text) {
+        const trimmed = text.replace(/[ \t]+$/u, '');
+        return {
+            submission: ScribeText.fingerprint(text),
+            ...(trimmed !== text ? { trimmedSubmission: ScribeText.fingerprint(trimmed) } : {}),
+        };
+    },
+
+    /**
+     * @param {string} text
      * @param {boolean} includeReminder
      * @return {string}
      */

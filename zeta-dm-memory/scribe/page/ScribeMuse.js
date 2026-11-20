@@ -62,7 +62,8 @@ const ScribeMuse = Object.freeze({
         And: ' and ',
         BookElse: 'Something else in the book would change: ',
         NothingChanges: 'Nothing in the book would change.',
-        Covered: Object.freeze(['revision', 'subjects', 'facts', 'threads', 'conflicts', 'lookAlikes']),
+        Covered: Object.freeze(['revision', 'subjects', 'facts', 'threads', 'conflicts', 'lookAlikes',
+            'resolutions', 'legacyDecisions', 'decisionRead', 'editOrigins', 'editedSince']),
         SubjectCovered: Object.freeze(['id', 'kind', 'label', 'aka']),
         FactCovered: Object.freeze(['id', 'status', 'hidden', 'told', 'widened']),
         FactLinks: Object.freeze(['replacedBy', 'ended']),
@@ -806,8 +807,8 @@ const ScribeMuse = Object.freeze({
             }
         }
         for (const member of Object.keys(after)) {
-            const same = ScribeMuse.serial({ member: before[member] }, []) === ScribeMuse.serial({ member: after[member] }, []);
-            if (settings.Covered.includes(member) || same) {
+            if (settings.Covered.includes(member) ||
+                ScribeMuse.serial({ member: before[member] }, []) === ScribeMuse.serial({ member: after[member] }, [])) {
                 continue;
             }
             let said = false;

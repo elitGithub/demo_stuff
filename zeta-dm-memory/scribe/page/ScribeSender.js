@@ -9,6 +9,7 @@ const ScribeSender = Object.freeze({
         EnterKeyCode: 13,
         Capture: true,
         Unauthorized: 401,
+        Forbidden: 403,
         AcceptedForProcessing: 202,
         Refused: Object.freeze([400, 403, 404, 405, 413, 415, 422, 429]),
         Bubbles: true,
@@ -40,6 +41,28 @@ const ScribeSender = Object.freeze({
             return /^[\p{Z}\p{Cc}\p{Cf}]*$/u;
         },
     }),
+
+    /**
+     * @param {Function|null} receipt
+     * @param {Function|null} notice
+     * @return {Function|null}
+     */
+    observePost(receipt, notice) {
+        if (!notice) {
+            return receipt;
+        }
+        return (status) => {
+            try {
+                if (status === ScribeSender.Settings.Forbidden) {
+                    notice('forbidden');
+                } else if (status >= 200 && status < 300 && status !== ScribeSender.Settings.AcceptedForProcessing) {
+                    notice('ok');
+                }
+            } finally {
+                receipt?.(status);
+            }
+        };
+    },
 
     /**
      * @param {string} text
@@ -319,7 +342,7 @@ const ScribeSender = Object.freeze({
         let outcome = 'uncertain';
         if (!consumed && !pending.bound) {
             outcome = 'cancelled';
-        } else if (!pending.ambiguous && pending.status === ScribeSender.Settings.Unauthorized) {
+        } else if (!pending.ambiguous && [ScribeSender.Settings.Unauthorized, ScribeSender.Settings.Forbidden].includes(pending.status)) {
             outcome = 'rejected';
         } else if (!pending.ambiguous && ScribeSender.Settings.Refused.includes(pending.status)) {
             outcome = 'cancelled';
@@ -347,7 +370,11 @@ const ScribeSender = Object.freeze({
                     }
                 }
             }
-            pending.receipt[outcome]();
+            if (outcome === 'rejected') {
+                pending.receipt.rejected(pending.status);
+            } else {
+                pending.receipt[outcome]();
+            }
         }
     },
 

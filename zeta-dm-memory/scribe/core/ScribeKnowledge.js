@@ -148,6 +148,53 @@ const ScribeKnowledge = Object.freeze({
 
     /**
      * @param {object} state
+     * @param {object} finding
+     * @param {readonly object[]} messages
+     * @param {string|null} wording
+     * @return {boolean}
+     */
+    shareableFinding(state, finding, messages, wording = null) {
+        const support = finding.support;
+        if (!Array.isArray(messages) || !support?.length || !finding.source ||
+            [finding.source, finding.earlier].filter(Boolean).some((citation) => !support.some((source) =>
+                source.messageId === citation.messageId && source.blockNumber === citation.blockNumber && source.quote === citation.quote))) {
+            return false;
+        }
+        const cited = new Set();
+        for (const source of support) {
+            const message = messages[source.position - 1]?.id === source.messageId ? messages[source.position - 1] :
+                messages.find((item) => item.id === source.messageId);
+            if (!message || !ScribeLog.supportedPassage(source, message)) {
+                return false;
+            }
+            const scene = ScribeKnowledge.sceneAt(state, message.position);
+            if (!scene || !ScribeKnowledge.open(scene)) {
+                return false;
+            }
+            cited.add(message.id);
+        }
+        const facts = new Set(finding.factIds ?? []);
+        if (finding.record) {
+            const record = ScribeLog.checkRecord(finding.record);
+            if (!record?.fact || record.hidden || !cited.has(record.cite)) {
+                return false;
+            }
+            facts.add(record.fact);
+        }
+        const words = wording ? ' ' + ScribeReplay.wording(wording) + ' ' : '';
+        for (const fact of state.facts) {
+            const linked = facts.delete(fact.id) || cited.has(fact.cite) ||
+                fact.claims?.some((claim) => cited.has(claim.cite) || cited.has(claim.evidence?.messageId));
+            const mentioned = words && fact.text && words.includes(' ' + ScribeReplay.wording(fact.text) + ' ');
+            if ((linked || mentioned) && (fact.hidden || ScribeKnowledge.audience(state, fact) !== ScribeKnowledge.Everyone)) {
+                return false;
+            }
+        }
+        return facts.size === 0;
+    },
+
+    /**
+     * @param {object} state
      * @param {object} fact
      * @return {string|readonly string[]}
      */

@@ -12,6 +12,7 @@ const ZetaSource = Object.freeze({
     Settings: Object.freeze({
         ApiOrigin: 'https://api.zeta-ai.io',
         PageSize: 31,
+        CheapCheckPages: 2,
         PauseMs: 500,
         MostPages: 2000,
         Tries: 3,
@@ -19,6 +20,8 @@ const ZetaSource = Object.freeze({
         RetryPauseMs: 2000,
         TimeoutMs: 30000,
         TooMany: 429,
+        ReplyChunkSize: 8192,
+        MaxEventChars: 16384,
         FirstServerError: 500,
         FirstSuccess: 200,
         LastSuccess: 299,
@@ -166,7 +169,186 @@ const ZetaSource = Object.freeze({
      */
     traffic(path, method) {
         const verb = String(method).toUpperCase();
-        return ZetaSource.Settings.ReadMethods.includes(verb) ? null : Object.freeze({ method: verb, path });
+        return ZetaSource.Settings.ReadMethods.includes(verb) && !(verb === 'GET' && ZetaSource.replyPath(path))
+            ? null : Object.freeze({ method: verb, path });
+    },
+
+    /**
+     * @param {string} path
+     * @return {RegExpExecArray|null}
+     */
+    replyPath(path) {
+        return /^\/v1\/rooms\/([^/]+)\/messages\/([^/]+)\/candidates\/stream$/.exec(path);
+    },
+
+    /**
+     * @param {object} state
+     * @param {object|null} traffic
+     * @return {Function|null}
+     */
+    streaming(state, traffic) {
+        if (!state.onStream || !traffic || !['GET', 'POST'].includes(traffic.method)) {
+            return null;
+        }
+        const match = ZetaSource.replyPath(traffic.path);
+        const finish = match ? state.onStream(decodeURIComponent(match[1]), decodeURIComponent(match[2])) : null;
+        if (finish) {
+            state.cancelReply?.();
+            state.streamReceipt = finish;
+        }
+        return finish;
+    },
+
+    /**
+     * @param {*} value
+     * @return {string|null}
+     */
+    replyObject(value) {
+        if (!ZetaSource.isObject(value)) {
+            return null;
+        }
+        if (value.code === 'CHAT_ABUSED' || value.error?.code === 'CHAT_ABUSED') {
+            return 'chatAbused';
+        }
+        if (value.status === 429 || value.error?.status === 429 || value.code === 'TOO_MANY_REQUEST' || value.error?.code === 'TOO_MANY_REQUEST') {
+            return 'rateLimited';
+        }
+        return value.error || value.code || value.status >= 400 ? 'unknown' : 'ok';
+    },
+
+    /**
+     * @param {string} event
+     * @return {string|null}
+     */
+    replyEvent(event) {
+        const lines = event.split(/\r?\n/);
+        const data = lines.filter((line) => /^data:/.test(line)).map((line) => line.slice(5).trimStart()).join('\n');
+        const errorEvent = lines.some((line) => /^event:\s*error\s*$/i.test(line));
+        if (data === '[DONE]') {
+            return errorEvent ? 'unknown' : 'done';
+        }
+        const result = ZetaSource.replyObject(ZetaSource.quietly(null, JSON.parse, data));
+        return ['chatAbused', 'rateLimited'].includes(result) || !errorEvent ? result : 'unknown';
+    },
+
+    /**
+     * @param {string} type
+     * @return {Function}
+     */
+    replyParser(type) {
+        const limit = ZetaSource.Settings.MaxEventChars;
+        let format = /^text\/event-stream\b/i.test(type) ? 'events' : null;
+        let pending = '';
+        let oversized = false;
+        let outcome = null;
+        let endedWithCr = false;
+        return (chunk, done) => {
+            if (!format) {
+                const start = chunk.trimStart();
+                if (!start) {
+                    return null;
+                }
+                format = start.startsWith('{') || start.startsWith('[') ? 'json' : 'events';
+                chunk = start;
+            }
+            if (format === 'json') {
+                oversized ||= pending.length + chunk.length > limit;
+                pending = oversized ? '' : pending + chunk;
+                return done && !oversized ? ZetaSource.replyObject(ZetaSource.quietly(null, JSON.parse, pending)) : null;
+            }
+            if (chunk) {
+                if (endedWithCr && chunk.startsWith('\n')) {
+                    chunk = chunk.slice(1);
+                }
+                endedWithCr = chunk.endsWith('\r');
+                chunk = chunk.replace(/\r\n?/g, '\n');
+            }
+            const text = pending + chunk;
+            const separator = /\n\n/g;
+            let from = 0;
+            let match;
+            while ((match = separator.exec(text)) || done) {
+                const end = match ? match.index : text.length;
+                const result = oversized || end - from > limit ? 'skipped' : ZetaSource.replyEvent(text.slice(from, end));
+                if (result === 'chatAbused' || result === 'rateLimited') {
+                    return result;
+                }
+                if (result && outcome !== 'unknown' && (outcome !== 'skipped' || result !== 'ok')) {
+                    outcome = result === 'done' ? 'ok' : result;
+                }
+                oversized = false;
+                if (!match) {
+                    return outcome;
+                }
+                from = separator.lastIndex;
+            }
+            oversized ||= text.length - from > limit;
+            pending = oversized ? text.slice(Math.max(from, text.length - 1)) : text.slice(from);
+            return null;
+        };
+    },
+
+    /**
+     * @param {object} state
+     * @param {object} response
+     * @param {number} status
+     * @param {Function} finish
+     * @return {Promise<void>}
+     */
+    async readReply(state, response, status, finish) {
+        if (status === ZetaSource.Settings.TooMany) {
+            finish('rateLimited');
+            return;
+        }
+        if (!Number.isInteger(status) || typeof response.clone !== 'function') {
+            return;
+        }
+        const reader = response.clone().body?.getReader();
+        if (!reader) {
+            return;
+        }
+        const settings = ZetaSource.Settings;
+        let expired = false;
+        const cancel = () => {
+            expired = true;
+            reader.cancel().catch(() => {});
+        };
+        state.cancelReply = cancel;
+        let complete = false;
+        try {
+            const decoder = new TextDecoder();
+            const parse = ZetaSource.replyParser(response.headers?.get('content-type') ?? '');
+            while (!expired && !state.stopped) {
+                const { done, value } = await reader.read();
+                if (expired || state.stopped) {
+                    return;
+                }
+                complete = done;
+                for (let offset = 0; value && offset < value.length; offset += settings.ReplyChunkSize) {
+                    const piece = value.subarray(offset, offset + settings.ReplyChunkSize);
+                    const outcome = parse(decoder.decode(piece, { stream: true }), false);
+                    if (outcome === 'chatAbused' || outcome === 'rateLimited') {
+                        finish(outcome);
+                        return;
+                    }
+                }
+                if (done) {
+                    const outcome = parse(decoder.decode(), true);
+                    if (outcome === 'chatAbused' || outcome === 'rateLimited' || (outcome === 'ok' && status >= 200 && status < 300)) {
+                        finish(outcome);
+                    }
+                    return;
+                }
+            }
+        } finally {
+            if (state.cancelReply === cancel) {
+                state.cancelReply = null;
+            }
+            if (!complete && !expired) {
+                cancel();
+            }
+            reader.releaseLock();
+        }
     },
 
     /**
@@ -239,8 +421,8 @@ const ZetaSource = Object.freeze({
      * @param {Readonly<{ method: string, path: string }>} traffic
      * @return {void}
      */
-    notify(state, traffic) {
-        if (state.stopped) {
+    notify(state, traffic, replySucceeded = false) {
+        if (state.stopped || (ZetaSource.replyPath(traffic.path) && (traffic.method === 'GET' || !replySucceeded))) {
             return;
         }
         for (const callback of state.callbacks) {
@@ -274,7 +456,7 @@ const ZetaSource = Object.freeze({
      * @param {Readonly<{ method: string, path: string }>|null} traffic
      * @return {void}
      */
-    settled(state, result, traffic, receipt) {
+    settled(state, result, traffic, receipt, stream) {
         if (traffic === null) {
             return;
         }
@@ -286,10 +468,18 @@ const ZetaSource = Object.freeze({
             if (!state.stopped && typeof receipt === 'function') {
                 ZetaSource.quietly(null, receipt, status);
             }
-            ZetaSource.notify(state, traffic);
+            ZetaSource.notify(state, traffic, !stream && status >= 200 && status < 300);
         };
         result.then((response) => {
-            const status = receipt ? ZetaSource.quietly(null, ZetaSource.postStatus, traffic.path, response, 'url') : null;
+            const status = receipt || ZetaSource.replyPath(traffic.path) ? ZetaSource.quietly(null, ZetaSource.postStatus, traffic.path, response, 'url') : null;
+            if (stream && stream === state.streamReceipt && !state.stopped) {
+                ZetaSource.readReply(state, response, status, (outcome) => {
+                    stream(outcome);
+                    if (outcome === 'ok') {
+                        ZetaSource.notify(state, traffic, true);
+                    }
+                }).catch(() => {});
+            }
             finished(status);
         }, () => finished(null));
     },
@@ -317,6 +507,9 @@ const ZetaSource = Object.freeze({
         ZetaSource.Requests.delete(request);
         if (record !== undefined && record.listener !== null) {
             request.removeEventListener(ZetaSource.Settings.Finished, record.listener);
+            if (record.progress) {
+                request.removeEventListener('progress', record.progress);
+            }
         }
     },
 
@@ -352,6 +545,51 @@ const ZetaSource = Object.freeze({
     },
 
     /**
+     * @param {object} state
+     * @param {object} request
+     * @param {object} traffic
+     * @param {Function} stream
+     * @return {Function}
+     */
+    xhrReply(state, request, traffic, stream) {
+        const size = ZetaSource.Settings.ReplyChunkSize;
+        let offset = 0;
+        let parse;
+        let reported = false;
+        return (status, done) => {
+            if (reported || !Number.isInteger(status) || state.stopped || stream !== state.streamReceipt) {
+                return;
+            }
+            let outcome = null;
+            if (status === ZetaSource.Settings.TooMany) {
+                outcome = 'rateLimited';
+            } else if (request.responseType === 'json' && done) {
+                outcome = ZetaSource.replyObject(request.response);
+            } else if (!request.responseType || request.responseType === 'text') {
+                const text = request.responseText;
+                if (typeof text === 'string') {
+                    parse ??= ZetaSource.replyParser(request.getResponseHeader?.('Content-Type') ?? '');
+                    while (offset < text.length && !outcome) {
+                        const end = Math.min(offset + size, text.length);
+                        outcome = parse(text.slice(offset, end), false);
+                        offset = end;
+                    }
+                    if (!outcome && done) {
+                        outcome = parse('', true);
+                    }
+                }
+            }
+            if (outcome === 'chatAbused' || outcome === 'rateLimited' || (outcome === 'ok' && done && status >= 200 && status < 300)) {
+                reported = true;
+                stream(outcome);
+                if (outcome === 'ok') {
+                    ZetaSource.notify(state, traffic, true);
+                }
+            }
+        };
+    },
+
+    /**
      * @param {{ callbacks: Function[], stopped: boolean }} state
      * @param {object} request
      * @return {boolean}
@@ -367,15 +605,25 @@ const ZetaSource = Object.freeze({
          * @return {void}
          */
         const receipt = ZetaSource.posting(state, record.traffic);
+        const stream = ZetaSource.quietly(null, ZetaSource.streaming, state, record.traffic);
+        const observe = stream ? ZetaSource.xhrReply(state, request, record.traffic, stream) : null;
+        const responseStatus = () => ZetaSource.quietly(null, ZetaSource.postStatus, record.traffic.path, request, 'responseURL');
+        if (observe) {
+            record.progress = () => ZetaSource.quietly(null, observe, responseStatus(), false);
+            request.addEventListener('progress', record.progress);
+        }
         record.listener = () => {
             if (ZetaSource.Requests.get(request) === record) {
-                ZetaSource.Requests.delete(request);
+                ZetaSource.forget(request);
             }
+            const status = !state.stopped && (receipt || ZetaSource.replyPath(record.traffic.path)) ? responseStatus() : null;
             if (!state.stopped && typeof receipt === 'function') {
-                const status = ZetaSource.quietly(null, ZetaSource.postStatus, record.traffic.path, request, 'responseURL');
                 ZetaSource.quietly(null, receipt, status);
             }
-            ZetaSource.notify(state, record.traffic);
+            if (observe) {
+                ZetaSource.quietly(null, observe, status, true);
+            }
+            ZetaSource.notify(state, record.traffic, !stream && status >= 200 && status < 300);
         };
         request.addEventListener(settings.Finished, record.listener, settings.Once);
         return true;
@@ -458,8 +706,9 @@ const ZetaSource = Object.freeze({
                 const init = arguments[ZetaSource.Settings.InitPosition];
                 const traffic = ZetaSource.quietly(null, ZetaSource.fetched, state, input, init);
                 const receipt = ZetaSource.quietly(null, ZetaSource.posting, state, traffic);
+                const stream = ZetaSource.quietly(null, ZetaSource.streaming, state, traffic);
                 const result = originals.fetch.apply(this, arguments);
-                ZetaSource.quietly(null, ZetaSource.settled, state, result, traffic, receipt);
+                ZetaSource.quietly(null, ZetaSource.settled, state, result, traffic, receipt, stream);
                 return result;
             },
 
@@ -521,6 +770,12 @@ const ZetaSource = Object.freeze({
             onPost: (callback) => { state.onPost = callback; },
 
             /**
+             * @param {Function} callback
+             * @return {void}
+             */
+            onStream: (callback) => { state.onStream = callback; },
+
+            /**
              * @param {(traffic: Readonly<{ method: string, path: string }>) => void} callback
              * @return {void}
              */
@@ -533,6 +788,7 @@ const ZetaSource = Object.freeze({
              */
             stop: () => {
                 state.stopped = true;
+                state.cancelReply?.();
                 for (const name of Object.keys(owners)) {
                     ZetaSource.quietly(null, ZetaSource.restore, owners[name], name, installed[name], originals[name]);
                 }
@@ -920,16 +1176,21 @@ const ZetaSource = Object.freeze({
         ZetaSource.ready(request);
         const received = [];
         const distinct = new Set();
+        const locations = new Map();
+        const boundaries = new Map();
         const used = new Set();
         let skipped = 0;
         let cursor = null;
         for (let read = 0; read < settings.MostPages; read++) {
+            if (read === settings.CheapCheckPages && request.allowExpensive && !request.allowExpensive()) {
+                return { deferredCheck: true };
+            }
             let page = null;
             try {
                 if (cursor !== null) {
                     await ZetaSource.wait(request, settings.PauseMs);
                 }
-                page = await ZetaSource.page(request, cursor);
+                page = cursor === null && request.firstPage ? request.firstPage : await ZetaSource.page(request, cursor);
             } catch (error) {
                 if (received.length === 0) {
                     throw error;
@@ -938,9 +1199,18 @@ const ZetaSource = Object.freeze({
             }
             skipped += page.skipped;
             const before = distinct.size;
+            if (request.index && page.messages.length) {
+                boundaries.set(cursor, received.length);
+            }
             for (const message of page.messages) {
                 received.push(message);
                 distinct.add(message.id);
+                if (!locations.has(message.id)) {
+                    locations.set(message.id, cursor);
+                }
+            }
+            if (request.index && !skipped && read === settings.CheapCheckPages - 1) {
+                request.index.cheapDepth = received.length;
             }
             if (typeof request.onPage === settings.FunctionType) {
                 Promise.resolve(ZetaSource.quietly(null, request.onPage, distinct.size)).catch(
@@ -958,7 +1228,7 @@ const ZetaSource = Object.freeze({
                 end = ends.NothingNew;
             } else if (next === null) {
                 end = ends.NoCursor;
-            } else if (request.through && distinct.has(request.through)) {
+            } else if (request.through && distinct.has(request.through) && (request.required ?? []).every((id) => distinct.has(id))) {
                 end = ends.ThroughMessage;
             } else if (used.has(next)) {
                 end = ends.RepeatedCursor;
@@ -966,6 +1236,17 @@ const ZetaSource = Object.freeze({
             if (end !== null) {
                 const result = ZetaSource.outcome(received, end, null, skipped);
                 const complete = !skipped && (end === ends.NoCursor || end === ends.EmptyPage);
+                if (complete && request.index) {
+                    request.index.locations = locations;
+                    const head = received.length - 1;
+                    request.index.boundaries = new Map([...boundaries].map(([key, offset]) =>
+                        [key, { first: head - offset, head }]));
+                    const transport = received.map((row) => row.id).reverse();
+                    request.index.transport = transport;
+                    request.index.order = new Map(transport.map((id, position) => [id, position]));
+                    const unique = [...distinct].reverse();
+                    request.index.disordered = result.messages.some((row, position) => unique[position] !== row.id);
+                }
                 return Object.freeze({ ...result, ...(complete ? { completeHistory: true } : {}),
                     ...(page.emptyRoom ? { emptyRoom: true } : {}) });
             }
@@ -981,13 +1262,145 @@ const ZetaSource = Object.freeze({
      * @throws {Error}
      */
     async newest(request) {
-        if (request.through) {
+        if (request.through && !request.index) {
             return ZetaSource.history(request);
         }
         const ends = ZetaSource.End;
         ZetaSource.ready(request);
         const page = await ZetaSource.page(request, null);
         const result = ZetaSource.outcome(page.messages, page.messages.length === 0 ? ends.EmptyPage : ends.NoCursor, null, page.skipped);
+        if (request.index && !page.skipped) {
+            request.index.headIds = new Set(page.messages.map((row) => row.id));
+            request.index.completeHead = page.nextCursor === null && (page.messages.length > 0 || page.emptyRoom);
+        }
+        if (request.index && (request.through || request.index.disordered)) {
+            const limited = request.check && (request.index.expirations >= 2 || request.check.previouslyLimited &&
+                (request.check.cooling || request.index.expirations !== 0));
+            const repair = { needsHistory: true,
+                ...(limited ? { expiredCheck: true } : {}) };
+            if (!page.skipped && page.nextCursor === null && (page.messages.length || page.emptyRoom)) {
+                return { ...result, completeHistory: true, emptyRoom: page.emptyRoom };
+            }
+            if (page.skipped || !page.messages.length) {
+                return repair;
+            }
+            const known = request.index.order;
+            if (!known || !request.known.length) {
+                return repair;
+            }
+            const timeline = new Map(request.known.map((message) => [message.id, message]));
+            const headIds = page.messages.map((message) => message.id).reverse();
+            const transport = request.index.transport;
+            let join = Math.max(transport.length - headIds.length, 0);
+            while (join < transport.length && !headIds.every((id, offset) =>
+                join + offset < transport.length ? transport[join + offset] === id : !known.has(id))) {
+                join++;
+            }
+            if (join === transport.length) {
+                return repair;
+            }
+            for (let position = transport.length; position < join + headIds.length; position++) {
+                const id = headIds[position - join];
+                transport.push(id);
+                known.set(id, position);
+            }
+            const head = transport.length - 1;
+            const observed = new Set(headIds);
+            const verified = new Map();
+            const locations = request.index.locations;
+            const fetched = new Map();
+            let direct = false;
+            const latest = request.known.at(-1);
+            for (const id of new Set([...(request.required ?? []), latest.id])) {
+                let cursor = locations.get(id);
+                let adjacent = null;
+                if (cursor === null && !observed.has(id)) {
+                    cursor = page.nextCursor;
+                    adjacent = join - 1;
+                }
+                let attempts = 0;
+                while (!observed.has(id)) {
+                    if (request.index.expirations >= 2 && !request.check) {
+                        return ZetaSource.history({ ...request, through: request.index.disordered || transport.length !== known.size
+                            ? null : request.through, firstPage: page, required: [...(request.required ?? []), latest.id] });
+                    }
+                    if (cursor == null || !known.has(id) || attempts++ >= 3) {
+                        return repair;
+                    }
+                    if (fetched.has(cursor)) {
+                        const previous = fetched.get(cursor);
+                        cursor = previous.next;
+                        adjacent = previous.last - 1;
+                        continue;
+                    }
+                    await ZetaSource.wait(request, ZetaSource.Settings.PauseMs);
+                    let older;
+                    try {
+                        older = await ZetaSource.page(request, cursor);
+                    } catch (error) {
+                        if ([400, ZetaSource.Settings.NotFound, 410].includes(error.status)) {
+                            request.index.expirations = (request.index.expirations ?? 0) + 1;
+                            if (request.check && (request.index.expirations >= 2 || limited)) {
+                                return ZetaSource.history({ ...request, firstPage: page,
+                                    through: request.index.disordered || transport.length !== known.size ? null : request.through,
+                                    required: [...(request.required ?? []), latest.id], allowExpensive: request.check.reserve });
+                            }
+                            return repair;
+                        }
+                        throw error;
+                    }
+                    const rows = older.messages;
+                    const boundary = request.index.boundaries.get(cursor);
+                    const candidates = adjacent === null && boundary ? [boundary.first, boundary.first + head - boundary.head] : [adjacent];
+                    const first = candidates.find((start) => Number.isInteger(start) && rows.length > 0 &&
+                        rows.every((row, offset) => transport[start - offset] === row.id) &&
+                        (older.nextCursor === null) === (start - rows.length + 1 === 0));
+                    if (older.skipped || first === undefined) {
+                        return repair;
+                    }
+                    request.index.boundaries.set(cursor, { first, head });
+                    direct ||= locations.get(id) === cursor;
+                    adjacent = first - rows.length;
+                    fetched.set(cursor, { next: older.nextCursor, last: adjacent + 1 });
+                    for (const [offset, row] of rows.entries()) {
+                        if (known.get(row.id) !== first - offset) {
+                            continue;
+                        }
+                        locations.set(row.id, cursor);
+                        if (!observed.has(row.id)) {
+                            verified.set(row.id, row);
+                        }
+                        observed.add(row.id);
+                    }
+                    cursor = older.nextCursor;
+                }
+            }
+            if (direct) {
+                request.index.expirations = 0;
+            }
+            for (const id of headIds) {
+                locations.set(id, null);
+            }
+            for (const row of result.messages) {
+                verified.set(row.id, row);
+            }
+            const additions = result.messages.filter((row) => !timeline.has(row.id));
+            const suffix = [verified.get(latest.id), ...additions];
+            const orderedSuffix = ZetaSource.ordered([...suffix].reverse());
+            if (orderedSuffix.some((row, position) => row.id !== suffix[position].id) ||
+                [...verified.values()].some((row) => timeline.has(row.id) && timeline.get(row.id).messageTime !== row.messageTime)) {
+                return repair;
+            }
+            for (const row of suffix) {
+                verified.delete(row.id);
+            }
+            return { ...result, end: ends.ThroughMessage, messages: suffix, verified: [...verified.values()] };
+        }
+        if (request.index && !page.skipped) {
+            for (const row of page.messages) {
+                request.index.locations.set(row.id, null);
+            }
+        }
         return page.emptyRoom ? Object.freeze({ ...result, emptyRoom: true }) : result;
     },
 });

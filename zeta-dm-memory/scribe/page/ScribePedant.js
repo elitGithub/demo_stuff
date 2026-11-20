@@ -787,6 +787,12 @@ const ScribePedant = Object.freeze({
             const findings = new Map();
             const omissions = [];
             for (const page of group) {
+                const sources = new Set([work.message.position]);
+                for (const row of [...page.request.written, ...page.request.evidence]) {
+                    if (Number.isSafeInteger(row.position) && row.position > 0) {
+                        sources.add(row.position);
+                    }
+                }
                 const cached = completed.get(page.id);
                 const reusable = cached?.complete === true && cached.index === page.index && cached.total === group.length &&
                     typeof cached.answer === 'string';
@@ -795,7 +801,7 @@ const ScribePedant = Object.freeze({
                 const ceiling = Math.max(floor, Math.floor((size + systemBytes) / 2));
                 if (answer === null && size <= bound && !saved.some((item) => item.id.startsWith(page.id + '/'))) {
                     try {
-                        const result = await work.ask(ScribePedant.CheckPrompt, page.input);
+                        const result = await work.ask(ScribePedant.CheckPrompt, page.input, sources);
                         if (!result || typeof result.text !== 'string' || (result.finish && result.finish !== 'stop')) {
                             throw new Error('Checker comparison returned no complete answer.');
                         }
@@ -851,8 +857,7 @@ const ScribePedant = Object.freeze({
                         }
                     }
                 }
-                const verifyFrom = [...page.request.written, ...page.request.evidence].reduce((earliest, row) =>
-                    Number.isSafeInteger(row.position) && row.position > 0 ? Math.min(earliest, row.position) : earliest, work.message.position);
+                const verifyFrom = Math.min(...sources);
                 const receipt = { id: page.id, index: page.index, total: group.length, planBytes, verifyFrom, complete: true, answer,
                     claims: verified.claims, findings: verified.findings };
                 if (parent) {
@@ -861,14 +866,15 @@ const ScribePedant = Object.freeze({
                 }
                 const save = parent ? work.saveSegment : work.savePage;
                 if (!reusable && save) {
-                    await save(receipt);
+                    await save(receipt, [...sources]);
                 }
                 pages.push(receipt);
                 for (const claim of receipt.claims) {
                     claims.set(JSON.stringify([claim.source, claim.attribution, claim.subject, claim.attribute, claim.value]), claim);
                 }
                 for (const finding of receipt.findings) {
-                    findings.set(JSON.stringify([finding.kind, finding.source, finding.earlier, finding.record]), finding);
+                    findings.set(JSON.stringify([finding.kind, ScribeText.words(finding.question).join(' '),
+                        finding.source, finding.earlier, finding.record]), finding);
                 }
             }
             return { pages, claims: [...claims.values()], findings: [...findings.values()], omissions };

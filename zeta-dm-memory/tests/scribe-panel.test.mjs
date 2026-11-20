@@ -276,6 +276,78 @@ function contradiction() {
     };
 }
 
+test('current Checker questions paginate individually and file the chosen account, explanation or open decision by evidence version', async () => {
+    const examples = [
+        ['Last Mage', 209, 'Magera', 'I guarded it for a thousand years.', 131, 'Mavan', 'I used that staff.', 'How did Mavan obtain the staff?'],
+        ['Finally Unsealed', 487, 'Morwen', 'Wake me for second watch.', 486, 'Frost', 'Morwen takes third watch.', 'Which watch is Morwen taking?'],
+        ['Princess at Dawn', 19, 'Sylvara', 'If I win, you will stay.', 16, 'Sylvara', 'If you win, I will stay.', 'Which terms did she offer?'],
+        ['Unchained Princess', 200, 'Mirra', 'Daughter of King Aldren.', 89, 'Narrator', 'King Aedelas III', 'What name should the book use?'],
+    ];
+    const checks = examples.map(([id, position, speaker, quote, earlierPosition, earlierSpeaker, earlierQuote, question]) => ({
+        id, version: 'first', status: 'open', kind: 'Contradiction', question, source: { position, speaker, quote },
+        earlier: { position: earlierPosition, speaker: earlierSpeaker, quote: earlierQuote },
+    }));
+    const room = mounted(findingsBook(), { keeper: { checkerFindings: checks } });
+    room.keeper.ruling = (change) => room.keeper.answer('ruling', [change]);
+    await room.tab('Findings');
+    for (const [index, check] of checks.entries()) {
+        assert.equal(room.rows('findings').length, 1);
+        const row = room.rowSaying('findings', check.question);
+        assert.ok(row.textContent.includes('#' + check.source.position + ' · ' + check.source.speaker + ' “' + check.source.quote + '”'));
+        assert.ok(row.textContent.includes('#' + check.earlier.position + ' · ' + check.earlier.speaker + ' “' + check.earlier.quote + '”'));
+        if (index === 0) {
+            room.button(row, 'Leave open').click();
+        } else if (index === 1) {
+            room.inputs(row, 'text')[0].value = 'The order changed after the alarm.';
+            room.button(row, 'Explain how both fit').click();
+        } else {
+            row.descendants().find((element) => element.tagName === 'SELECT').value = 'earlier';
+            room.button(row, 'Choose account').click();
+        }
+        await room.flush();
+        if (index + 1 < checks.length) {
+            room.click('scribe-list-findings-next');
+            await room.flush();
+        }
+    }
+    assert.deepEqual(room.keeper.called('ruling').map(([change]) => change), [
+        { finding: checks[0].id, version: 'first', action: 'open' },
+        { finding: checks[1].id, version: 'first', action: 'explain', explanation: 'The order changed after the alarm.' },
+        ...checks.slice(2).map((check) => ({ finding: check.id, version: 'first', action: 'choose', account: 'earlier' })),
+    ]);
+});
+
+test('reopened unverified evidence waits for the Checker while a settled decision stays in history and out of the badge', async () => {
+    const source = { position: 559, speaker: 'Frost', quote: 'The reward for Mirra rose to 50,000 gold.' };
+    const earlier = { position: 89, speaker: 'Narrator', quote: 'King Aedelas III.' };
+    const reopened = { id: 'Q11', version: 'old', status: 'reopened', actionable: false, kind: 'Omission', source,
+        question: 'Whose bounty is missing from the book?', ruling: { action: 'open' } };
+    const settled = { id: 'Q7', version: 'saved', status: 'settled', kind: 'Question', source: earlier, question: 'Who is her father?',
+        ruling: { action: 'choose', account: 'source', source: earlier } };
+    const room = mounted(findingsBook(), { keeper: { checkerFindings: [settled, reopened] } });
+    await room.tab('Findings');
+    const row = room.rowSaying('findings', reopened.question);
+    assert.match(row.textContent, /Missing from the book.*#559.*50,000 gold.*Evidence changed/);
+    assert.equal(row.descendants().some((element) => element.tagName === 'BUTTON'), false);
+    assert.match(room.rowSaying('ruled-findings', settled.question).textContent, /Chose #89.*King Aedelas/);
+    assert.equal(room.text('scribe-badge'), '1 finding');
+});
+
+test('an inaccurate book entry displays its saved subject, fact and citation beside the source that challenges it', async () => {
+    const fact = { type: 'Fact', fact: 'F120', subject: 'S2', category: 'reward', text: '100,000 gold', cite: story[3].id };
+    const source = { position: 559, speaker: 'Frost', quote: 'The bounty on Mirra is 50,000 gold.' };
+    const cited = { position: 4, speaker: 'Mirelle', quote: 'We divided the old reward.' };
+    const check = { id: 'bounty', version: 'mismatch', kind: 'Citation', status: 'open', source,
+        question: 'Whose bounty does this entry describe?', record: { ref: 'w1', text:
+            JSON.stringify({ origin: 'Story' }) + '\n' + JSON.stringify(fact) + '\nFiled citation: ' + JSON.stringify(cited) } };
+    const room = mounted(disputedBook(), { keeper: { checkerFindings: [check] } });
+    await room.tab('Findings');
+    const row = room.rowSaying('findings', check.question);
+    assert.match(row.textContent, /#559.*Frost.*Mirra is 50,000 gold/);
+    assert.match(row.textContent, /Book entry · F120 · Mirelle · reward · 100,000 gold · cites #4 · #4 · Mirelle “We divided the old reward.”/);
+    assert.ok(!row.textContent.includes('{"type"'));
+});
+
 test('independent findings show the two cited passages, count once alongside live decisions and expose checked progress', async () => {
     const known = { ...contradiction(), fingerprint: 'current' };
     const source = { messageId: known.message, fingerprint: known.fingerprint, position: 99, speaker: 'Mirelle', quote: 'My eyes are blue' };
@@ -297,6 +369,24 @@ test('independent findings show the two cited passages, count once alongside liv
     assert.match(shown, /#2.*Orla.*Her eyes were grey/);
     await room.tab('Progress');
     assert.match(room.text('scribe-checked'), /99 of \d+ messages checked/);
+});
+
+test('Progress shows a future history check in local time and removes the schedule when the wait ends', async () => {
+    const room = mounted(ScribeLog.create(), { keeper: { checksEnabled: true, checkedThrough: 1 } });
+    await room.tab('Progress');
+    const count = room.text('scribe-checked');
+    const deadline = room.clock.now() + 600000;
+    room.keeper.current = { ...room.keeper.current, expensiveCheckAt: deadline };
+    room.redraw();
+    assert.equal(room.text('scribe-checked'), count + ' Zeta expired the links to older messages. ' +
+        'The next background history check is due at ' + new Date(deadline).toLocaleTimeString() + ' (local time).');
+    assert.doesNotMatch(room.text('scribe-problems'), /expired the links/);
+    room.clock.time = deadline;
+    room.redraw();
+    assert.equal(room.text('scribe-checked'), count);
+    room.keeper.current = { ...room.keeper.current, expensiveCheckAt: null };
+    room.redraw();
+    assert.equal(room.text('scribe-checked'), count);
 });
 
 /**
@@ -4997,6 +5087,26 @@ test('a writer refusal has one warning across Findings and Progress and clears w
     room.redraw();
     assert.equal(room.byId('scribe-problems').children.length, 2);
     room.live.current = liveView([], { ready: '[Scribe] The riders returned.', failing: [] });
+    room.redraw();
+    assert.equal(room.byId('scribe-problems').hidden, true);
+});
+
+test('Zeta send and reply warnings name the failing operation in the phone strip, panel and Progress', async () => {
+    const room = mounted(ScribeLog.create(), { width: 320, live: liveView([], { streamWarning: 'rateLimited' }) });
+    assert.equal(room.text('scribe-problems-compact'), 'Zeta reply rate limit');
+    room.click('scribe-toggle');
+    await room.flush();
+    await room.tab('Progress');
+    assert.match(room.text('scribe-problems'), /Zeta paused the reply \(HTTP 429\).*retry the reply in Zeta/u);
+    assert.equal(room.text('scribe-problem-details'), 'Zeta · reply stream · HTTP 429');
+    room.live.current = liveView([], { forbiddenSend: true, streamWarning: 'chatAbused' });
+    room.redraw();
+    assert.equal(room.byId('scribe-problems').children.length, 2);
+    assert.match(room.text('scribe-problems'), /Zeta refused to send your message \(HTTP 403\)/u);
+    assert.match(room.text('scribe-problems'), /Zeta blocked the reply \(CHAT_ABUSED\)/u);
+    assert.match(room.text('scribe-problem-details'), /Zeta · message send · HTTP 403/u);
+    assert.match(room.text('scribe-problem-details'), /Zeta · reply stream · CHAT_ABUSED/u);
+    room.live.current = liveView();
     room.redraw();
     assert.equal(room.byId('scribe-problems').hidden, true);
 });

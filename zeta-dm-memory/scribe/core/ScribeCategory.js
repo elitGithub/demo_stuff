@@ -109,6 +109,20 @@ const ScribeCategory = Object.freeze({
      * @param {object} fact
      * @return {string}
      */
+    displayValue(fact) {
+        const attribute = fact.ruledAttribute;
+        if (!attribute || !fact.evidence || fact.evidence.attribute !== attribute || fact.evidence.value !== fact.text ||
+            ScribeCategory.same(attribute, fact.category) ||
+            (' ' + ScribeText.words(fact.text).join(' ') + ' ').includes(' ' + ScribeText.words(attribute).join(' ') + ' ')) {
+            return fact.text;
+        }
+        return attribute + ' ' + fact.text;
+    },
+
+    /**
+     * @param {object} fact
+     * @return {string}
+     */
     value(fact) {
         const { form, dimension } = ScribeCategory.scope(fact);
         const ordinary = ScribeText.words(fact.text).join(' ');

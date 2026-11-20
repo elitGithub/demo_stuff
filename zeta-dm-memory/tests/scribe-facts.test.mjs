@@ -3,7 +3,7 @@ import test from 'node:test';
 import CampaignBuilder from './support/CampaignBuilder.mjs';
 import ScribeCore from './support/ScribeCore.mjs';
 
-const { ScribeText, ScribeIntake, ScribeAnswer, ScribeLog, ScribeReplay } = ScribeCore.load([
+const { ScribeText, ScribeCategory, ScribeIntake, ScribeAnswer, ScribeLog, ScribeReplay } = ScribeCore.load([
     'ScribeText',
     'ScribeCategory',
     'ScribeIntake',
@@ -99,6 +99,159 @@ function apply(log, order, answerText, messages, origin = 'Story') {
     const result = ScribeLog.append(log, before, parsed.operations, { messages, origin });
     return { state: ScribeReplay.run(log, order), result, parsed };
 }
+
+/**
+ * @param {object[]} rows
+ * @param {string[]} subjects
+ * @param {string} fact
+ * @return {object}
+ */
+function citedCorrection(rows, subjects, fact) {
+    const campaign = new CampaignBuilder('Frost');
+    for (const row of rows) {
+        if (row.speaker) {
+            campaign.says(row.speaker, row.words);
+        } else {
+            campaign.narrator(row.words);
+        }
+    }
+    const messages = ScribeIntake.read(campaign.messages).messages;
+    const order = messages.map((message) => message.id);
+    const prints = new Map(messages.map((message) => [message.id, message.fingerprint]));
+    const book = { log: ScribeLog.create(), fingerprints: Object.fromEntries(prints) };
+    const replay = () => ScribeReplay.run(JSON.parse(JSON.stringify(book.log)), order, null, prints, null, null, messages);
+    const filed = apply(book.log, order, answer({ SUBJECTS: subjects.map((owner) => owner + ' | character'), FACTS: [fact] }), messages);
+    const operation = filed.result.entry.operations.find((item) => item.fact);
+    const sources = messages.map((message) => ({ messageId: message.id, fingerprint: message.fingerprint, position: message.position,
+        blockNumber: message.blocks[0].blockNumber, speaker: message.blocks[0].speaker, quote: message.blocks[0].text }));
+    for (const [index, message] of messages.entries()) {
+        const { claim } = rows[index];
+        const source = sources[index];
+        const record = { ref: 'w1', text: JSON.stringify(operation) };
+        const earlier = index > 0 ? sources[0] : null;
+        const compact = (passage) => passage && ({ ref: 'm' + passage.position + 'b' + passage.blockNumber, quote: passage.quote });
+        const findings = index === rows.length - 1 ?
+            [{ kind: 'Citation', question: 'Which account should correct the book entry?', source, earlier, record }] : [];
+        const id = 'cited-' + index;
+        const receipt = { id, index: 0, total: 1, complete: true, claims: claim ? [{ ...claim, source, text: source.quote }] : [], findings,
+            answer: JSON.stringify({ complete: true, page: id, claims: claim ? [{ ...claim, source: compact(source) }] : [],
+                findings: findings.map((finding) => ({ ...finding, source: compact(source), earlier: compact(earlier), record: record.ref })) }) };
+        assert.equal(ScribeLog.saveCheck(book, messages, ScribeLog.checkWork(book, messages), receipt), true);
+    }
+    const decide = () => {
+        const [row] = ScribeLog.checkProgress(book, messages).findings;
+        return ScribeLog.ruleFinding(book, replay(), messages, { finding: row.id, version: row.version, action: 'choose', account: 'source' });
+    };
+    return { decide, replay, book, sources };
+}
+
+test('a ruled debt binds the named creditor even when the old creditor was only unresolved text', () => {
+    const claim = { subject: 'Frost', attribute: 'owes', value: 'fifty gold', attribution: 'witnessed' };
+    for (const subjects of [['Frost', 'Mirra', 'Aldren'], ['Frost', 'Mirra']]) {
+        const room = citedCorrection([{ words: 'Frost owes Mirra fifty gold.', claim }], subjects, 'Frost | toward Aldren | owes him fifty gold | #1');
+        assert.equal(room.replay().facts[0].targetText, 'Aldren');
+        room.decide();
+        const { subjects: known, facts } = room.replay();
+        assert.equal(facts[0].subject, known.find((owner) => owner.label === 'Frost').id);
+        assert.equal(facts[0].target, known.find((owner) => owner.label === 'Mirra').id);
+        assert.equal(facts[0].targetText, 'Mirra');
+        assert.equal(facts[0].text, 'fifty gold');
+        assert.equal(ScribeCategory.displayValue(facts[0]), 'owes fifty gold');
+        assert.equal(facts[0].evidence.quote, 'Frost owes Mirra fifty gold.');
+    }
+    for (const words of ['Mirra owes Frost fifty gold.', 'Frost owes Mirra and Aldren fifty gold.', 'Mirra told Aldren that Frost owes him fifty gold.']) {
+        const room = citedCorrection([{ words, claim }], ['Frost', 'Mirra', 'Aldren'], 'Frost | toward Aldren | owes him fifty gold | #1');
+        const before = JSON.stringify(room.book);
+        assert.throws(room.decide, /single target/);
+        assert.equal(JSON.stringify(room.book), before);
+    }
+});
+
+test('a citation correction keeps the separately witnessed weapon clause when the earlier Checker page has no structured claim', () => {
+    const original = 'Magera was raised as a weapon.';
+    const later = 'Magera received the staff as a reward.';
+    const room = citedCorrection([{ words: original }, { words: later, claim: {
+        subject: 'Magera', attribute: 'received', value: 'reward', attribution: 'witnessed' } }],
+        ['Magera'], 'Magera | background | Raised as a weapon and given the staff as a reward | #1');
+    room.decide();
+    const facts = room.replay().facts;
+    assert.deepEqual(Array.from(facts, (item) => [item.text, item.evidence.quote, item.cite, item.evidence.attribution]),
+        [['Raised as a weapon', original, room.sources[0].messageId, 'witnessed'], ['reward', later, room.sources[1].messageId, 'witnessed']]);
+    const noAttribute = citedCorrection([{ words: original }, { words: later, claim: {
+        subject: 'Magera', attribute: null, value: 'reward', attribution: 'witnessed' } }],
+        ['Magera'], 'Magera | background | Raised as a weapon and given the staff as a reward | #1');
+    noAttribute.decide();
+    assert.deepEqual(Array.from(noAttribute.replay().facts, (item) => [item.text, item.cite]),
+        [['Raised as a weapon', noAttribute.sources[0].messageId], ['reward', noAttribute.sources[1].messageId]]);
+    for (const wording of ['Raised as a weapon / given the staff as a reward', 'Raised as a weapon (given the staff as a reward)',
+        'Raised as a weapon • given the staff as a reward', 'Raised as a weapon given the staff as a reward']) {
+        const ambiguous = citedCorrection([{ words: original }, { words: later, claim: {
+            subject: 'Magera', attribute: 'received', value: 'reward', attribution: 'witnessed' } }],
+            ['Magera'], 'Magera | background | ' + wording + ' | #1');
+        const before = JSON.stringify(ambiguous.book);
+        assert.throws(ambiguous.decide, /whole book entry/);
+        assert.equal(JSON.stringify(ambiguous.book), before);
+        assert.equal(ambiguous.replay().facts[0].text, wording);
+    }
+    const single = citedCorrection([{ words: original }, { words: later, claim: {
+        subject: 'Magera', attribute: 'received', value: 'reward', attribution: 'witnessed' } }],
+        ['Magera'], 'Magera | background | reward | #1');
+    single.decide();
+    assert.equal(single.replay().facts[0].text, 'reward');
+    assert.equal(single.replay().facts[0].cite, single.sources[1].messageId);
+    const extra = citedCorrection([{ words: original }, { words: later, claim: {
+        subject: 'Magera', attribute: 'received', value: 'reward', attribution: 'witnessed' } }],
+        ['Magera'], 'Magera | background | Raised as a weapon and given the staff as a reward / guards the vault | #1');
+    const saved = JSON.stringify(extra.book);
+    assert.throws(extra.decide, /entire part/);
+    assert.equal(JSON.stringify(extra.book), saved);
+    for (const wording of ['Raised as a weapon / guarded the vault and given the staff as a reward',
+        'Raised as a weapon guarded the vault and given the staff as a reward',
+        'Raised as a weapon (training the guard) and given the staff as a reward',
+        'Raised as a weapon and given the staff as a reward she guarded the vault',
+        'Raised as a weapon and given the vault as a reward']) {
+        const contested = citedCorrection([{ words: 'Magera was raised as a weapon. She guarded the vault.', claim: {
+            subject: 'Magera', attribute: 'raised', value: 'weapon', attribution: 'witnessed' } },
+        { words: later + ' She guarded the vault.', claim: {
+            subject: 'Magera', attribute: 'received', value: 'reward', attribution: 'witnessed' } }],
+        ['Magera'], 'Magera | background | ' + wording + ' | #1');
+        const initial = JSON.stringify(contested.book);
+        assert.throws(contested.decide, /separate source support|entire part/);
+        assert.equal(JSON.stringify(contested.book), initial);
+        assert.equal(contested.replay().facts[0].text, wording);
+    }
+    for (const earlier of ['Magera might have been raised as a weapon.', 'Magera denies she was raised as a weapon.']) {
+        const uncertain = citedCorrection([{ words: earlier }, { words: later, claim: {
+            subject: 'Magera', attribute: 'received', value: 'reward', attribution: 'witnessed' } }],
+            ['Magera'], 'Magera | background | Raised as a weapon and given the staff as a reward | #1');
+        const before = JSON.stringify(uncertain.book);
+        assert.throws(uncertain.decide, /earlier source/);
+        assert.equal(JSON.stringify(uncertain.book), before);
+    }
+});
+
+test('canonical hair value is exactly the supported value, with the ring only in the separately preserved quote', () => {
+    const words = 'Frost has dark hair and a silver ring.';
+    const room = citedCorrection([{ words, claim: { subject: 'Frost', attribute: 'hair', value: 'dark', attribution: 'witnessed' } }],
+        ['Frost'], 'Frost | hair | grey | #1');
+    room.decide();
+    const state = room.replay();
+    assert.equal(state.facts[0].text, 'dark');
+    assert.equal(state.facts[0].category, 'hair');
+    assert.equal(state.facts[0].subject, state.subjects[0].id);
+    assert.equal(state.facts[0].evidence.value, 'dark');
+    assert.equal(state.facts[0].evidence.quote, words);
+    assert.equal(state.checkerRulings[0].canonical, 'dark');
+    assert.equal(ScribeCategory.displayValue(state.facts[0]), 'dark');
+    const bounty = citedCorrection([{ words: 'Mirra has a bounty of 50,000 gold.', claim: {
+        subject: 'Mirra', attribute: 'bounty', value: '50,000 gold', attribution: 'witnessed' } }],
+        ['Acnademia', 'Mirra'], 'Acnademia | status | bounty of 50,000 gold | #1');
+    bounty.decide();
+    const corrected = bounty.replay();
+    assert.equal(corrected.facts[0].subject, corrected.subjects.find((owner) => owner.label === 'Mirra').id);
+    assert.equal(corrected.facts[0].text, '50,000 gold');
+    assert.equal(ScribeCategory.displayValue(corrected.facts[0]), 'bounty 50,000 gold');
+});
 
 test('Sera keeps both cited forms through a transformation and compares only matching measurements', () => {
     const campaign = new CampaignBuilder('Sera');

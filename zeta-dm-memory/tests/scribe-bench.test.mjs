@@ -4,6 +4,7 @@ import test from 'node:test';
 import CampaignBuilder from './support/CampaignBuilder.mjs';
 import CitedStory from './support/CitedStory.mjs';
 import FakePage from './support/FakePage.mjs';
+import PanelHarness from './support/PanelHarness.mjs';
 import FakeServer from './support/FakeServer.mjs';
 
 const { ScribeIntake, ScribeAnswer, ScribeLog, ScribeReplay, ScribeAnalyzer, BenchView, BenchPage } = FakePage.load();
@@ -667,6 +668,51 @@ test('progress lines', () => {
     assert.equal(BenchView.money(3), '$3.0000');
     assert.equal(BenchView.money(0.1), '$0.1000');
     assert.equal(BenchView.money(12.5), '$12.5000');
+});
+
+test('the bench rules on cited questions one at a time and preserves the decision in the saved log', async () => {
+    const log = apply(ScribeLog.create(), answer({ SCENES: ['Day 1 | #1-#2 | The quay | public | present: Orla | They meet.'] }), 1, 2);
+    const book = BenchPage.checkerBook(log, story);
+    const { ScribePedant } = PanelHarness.load();
+    for (const number of [1, 2]) {
+        const work = ScribeLog.checkWork(book, story);
+        await ScribePedant.checkPassage({ ...work,
+            ask: async (system, input) => {
+                const request = JSON.parse(input);
+                const source = { ref: request.target[0].ref, quote: 'Halvard keeps watch from line ' + number + '.' };
+                return { text: JSON.stringify({ complete: true, page: request.page, claims: [{ source, attribution: 'claimed' }],
+                    findings: [{ kind: 'Omission', source, question: 'Was the watch at line ' + number + ' filed?' }] }) };
+            },
+            savePage: (page) => assert.equal(ScribeLog.saveCheck(book, story, work, page), true),
+        });
+    }
+    const page = await opened(log);
+    page.click('tab-rulings');
+    await page.idle();
+    assert.equal(page.rows('findings-list').length, 1);
+    assert.match(page.rows('findings-list')[0].textContent, /Missing from the book.*#1.*Halvard keeps watch from line 1/);
+    page.click('findings-next');
+    await page.idle();
+    const row = rowSaying(page, 'findings-list', 'watch from line 2');
+    page.button(row, 'Leave open').click();
+    await page.idle();
+    const deferred = lastPosted(page, 'log-a.json');
+    const fresh = await opened(deferred);
+    fresh.click('tab-rulings');
+    fresh.click('findings-next');
+    await fresh.idle();
+    const again = rowSaying(fresh, 'findings-list', 'watch from line 2');
+    assert.match(again.textContent, /Left open/);
+    const shared = fresh.inputs(again, 'checkbox')[0];
+    assert.ok(!shared.checked);
+    shared.checked = true;
+    fresh.button(again, 'Choose account').click();
+    await fresh.idle();
+    const decisions = lastPosted(fresh, 'log-a.json').entries.filter((entry) => entry.checkerRuling);
+    assert.equal(decisions.length, 2);
+    assert.equal(decisions[1].checkerRuling.shareInReminder, true);
+    assert.match(fresh.text('made-list'), /Chose #2/);
+    assert.match(fresh.rows('findings-list')[0].textContent, /watch from line 1/);
 });
 
 test('every element the page asks for exists in the markup', () => {

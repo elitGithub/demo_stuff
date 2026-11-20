@@ -41,6 +41,7 @@ const ScribeReminder = Object.freeze({
         StoryPromptLines: Object.freeze([
             'You are the Scribe: you tell the story so far of an ongoing adult fiction roleplay between consenting adult characters.',
             'You receive TIMELINE (every scene in story order: day, place, what happened), OPEN THREADS (what is left hanging) and NOW (what is happening at the last message).',
+            'SHARED RULINGS are decisions the operator expressly made public. Use the current decision for its disputed point. Preserve attribution for a chosen account.',
             '',
             'Write the story so far as plain prose in story order: how it began (who came to whom, and for what), what has been done since, where things stand now and what is needed next. Write as much as the story needs.',
             '',
@@ -480,7 +481,7 @@ const ScribeReminder = Object.freeze({
             if (relation && !names.has(fact.target)) {
                 continue;
             }
-            const text = ScribeReminder.guarded(fact.text);
+            const text = ScribeReminder.guarded(ScribeCategory.displayValue(fact));
             if (text !== null) {
                 const category = relation ? fact.category + ' toward ' + names.get(fact.target) : fact.category;
                 lines.push([names.get(fact.subject), category, text].join(ScribeReminder.Settings.Joiner));
@@ -490,11 +491,34 @@ const ScribeReminder = Object.freeze({
     },
 
     /**
+     * @param {object} view
+     * @return {string[]}
+     */
+    sharedRulings(view) {
+        const shared = [];
+        for (const row of view.state.checkerRulings ?? []) {
+            if (row.shareInReminder !== true || row.status !== 'settled' || !['choose', 'explain'].includes(row.action) ||
+                typeof row.canonical !== 'string' || !row.canonical.trim()) {
+                continue;
+            }
+            const citation = row.action === 'choose' && row.account !== 'record' ? row[row.account] : null;
+            const text = citation ? citation.quote : row.canonical;
+            if (!ScribeKnowledge.shareableFinding(view.state, row, view.messages, text)) {
+                continue;
+            }
+            shared.push(JSON.stringify(citation ? { speaker: citation.speaker, account: text } : { decision: text }));
+        }
+        return shared;
+    },
+
+    /**
      * @param {object} state
      * @param {object|null} now
+     * @param {string[]} corrections
+     * @param {string[]} rulings
      * @return {string}
      */
-    storyInput(state, now, corrections = []) {
+    storyInput(state, now, corrections = [], rulings = []) {
         const settings = ScribeReminder.Settings;
         const headings = settings.StoryHeadings;
         const lines = state.scenes.map(
@@ -531,6 +555,7 @@ const ScribeReminder = Object.freeze({
             [headings.Threads, threads.length === 0 ? settings.None : threads.join(settings.Newline)],
             [headings.Now, summary],
             ...(corrections.length ? [['CURRENT BOOK CORRECTIONS:', corrections.join(settings.Newline)]] : []),
+            ...(rulings.length ? [['SHARED RULINGS:', rulings.join(settings.Newline)]] : []),
         ]
             .map(
                 /**
@@ -1370,7 +1395,7 @@ const ScribeReminder = Object.freeze({
          * @return {string|null}
          */
         const clause = (fact) => {
-            const text = ScribeReminder.guarded(fact.text);
+            const text = ScribeReminder.guarded(ScribeCategory.displayValue(fact));
             if (text === null) {
                 return null;
             }

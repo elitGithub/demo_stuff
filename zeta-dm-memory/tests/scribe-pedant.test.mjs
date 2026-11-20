@@ -44,6 +44,21 @@ function checkInput(position, lines, extra = {}) {
     return { message: passage(position, lines), written: [], earlierClaims: [], rulings: [], ...extra };
 }
 
+test('two different disputes on the very same pair of quotes survive the paid page while a repeated question collapses', async () => {
+    const before = 'Mirra wears the red crown.';
+    const after = 'Orla wears the blue crown.';
+    const result = await ScribePedant.checkPassage(checkInput(2, [['Narrator', after]], {
+        earlierClaims: [earlier(1, 'Narrator', before)],
+        ask: async (system, input) => {
+            const { page } = JSON.parse(input);
+            const findings = ['Who wears the crown?', 'What color is the crown?', 'Who wears the crown?'].map((question) =>
+                ({ kind: 'Question', question, source: { ref: 'm2b1', quote: after }, earlier: { ref: 'm1b1', quote: before }, record: null }));
+            return { text: JSON.stringify({ page, complete: true, claims: [], findings }) };
+        },
+    }));
+    assert.deepEqual(Array.from(result.findings, (row) => row.question), ['Who wears the crown?', 'What color is the crown?']);
+});
+
 test('character testimony and observed speech retain their distinct attributions through real intake blocks', async () => {
     const history = new CampaignBuilder('Frost');
     for (let number = 1; number < 209; number++) {

@@ -1310,7 +1310,7 @@ const ScribeBoot = Object.freeze({
                     entry.pending = null;
                 }
                 if (report.kind === kind.Cancelled || report.kind === kind.Rejected) {
-                    ScribeBoot.attempt(boot, warning, () => report.kind === kind.Rejected ? live.rejected(attempted) : live.cancelled(attempted));
+                    ScribeBoot.attempt(boot, warning, () => report.kind === kind.Rejected ? live.rejected(attempted, report.status ?? 401) : live.cancelled(attempted));
                     const reserved = session.reservedDelivery;
                     if (reserved && reserved.seq === report.seq && reserved.index === report.index) {
                         const delay = reserved.retryAt - boot.environment.clock.now();
@@ -1337,6 +1337,36 @@ const ScribeBoot = Object.freeze({
 
     /**
      * @param {object} boot
+     * @param {string} room
+     * @param {string|null} message
+     * @return {Function|null}
+     */
+    observe(boot, room, message) {
+        const session = boot.session;
+        if (!session?.live || room !== session.roomId || !ScribeBoot.currentRoom(session) ||
+            (message !== null && !ScribeBoot.name(message))) {
+            return null;
+        }
+        const channel = message === null ? 'sendNotice' : 'streamNotice';
+        const finish = (outcome) => {
+            if (session[channel] !== finish || !ScribeBoot.currentRoom(session)) {
+                return;
+            }
+            session[channel] = null;
+            if (message !== null) {
+                session.live.streamResult(message, outcome);
+            } else if (outcome === 'forbidden') {
+                session.live.sendForbidden();
+            } else if (outcome === 'ok') {
+                session.live.sendAllowed();
+            }
+        };
+        session[channel] = finish;
+        return finish;
+    },
+
+    /**
+     * @param {object} boot
      * @param {{ origin: *, source: *, data: * }} event
      * @return {void}
      */
@@ -1356,6 +1386,23 @@ const ScribeBoot = Object.freeze({
             }
             const entry = ScribeBoot.remember(boot, source);
             if (entry === null) {
+                return;
+            }
+            if (report.kind === bridge.Kind.Activity) {
+                const session = boot.session;
+                if (!session || !ScribeBoot.currentRoom(session) || report.room !== session.roomId || entry.last?.session !== session ||
+                    entry.scope === null || report.seq < entry.scope || report.seq > entry.last.seq) {
+                    return;
+                }
+                const channel = report.message === null ? 'sendNotice' : 'streamNotice';
+                const prior = entry[channel];
+                if (report.outcome === 'start') {
+                    if (!prior || report.seq > prior.seq || (report.seq === prior.seq && report.index > prior.index)) {
+                        entry[channel] = { ...report, finish: ScribeBoot.observe(boot, report.room, report.message) };
+                    }
+                } else if (prior?.seq === report.seq && prior.index === report.index && prior.message === report.message) {
+                    prior.finish?.(report.outcome);
+                }
                 return;
             }
             const pending = entry.pending;
@@ -1421,6 +1468,9 @@ const ScribeBoot = Object.freeze({
                 }
             }
             if (report.kind !== bridge.Kind.Ready) {
+                if (report.kind === bridge.Kind.Starting && issued) {
+                    boot.session.sendNotice = null;
+                }
                 ScribeBoot.reported(boot, entry, report, key, outstanding);
             }
             if (report.kind !== bridge.Kind.Starting) {
@@ -1994,6 +2044,7 @@ const ScribeBoot = Object.freeze({
                     );
                 },
             });
+            const historyIndex = { locations: new Map(), boundaries: new Map() };
             const options = {
                 storage: environment.storage,
                 roomId: session.roomId,
@@ -2001,17 +2052,37 @@ const ScribeBoot = Object.freeze({
                 zeta: Object.freeze({
                     /**
                      * @param {(count: number) => void} onPage
+                     * @param {Function|null} allowExpensive
                      * @return {Promise<object>}
                      */
-                    history: (onPage) =>
-                        ZetaSource.history({ fetch, token: ScribeBoot.token(boot), roomId: session.roomId, pause, onPage }),
+                    history: (onPage, allowExpensive = null) =>
+                        ZetaSource.history({ fetch, token: ScribeBoot.token(boot), roomId: session.roomId, pause, onPage,
+                            index: historyIndex, allowExpensive }),
 
                     /**
                      * @param {string|null} through
+                     * @param {readonly string[]} required
+                     * @param {readonly object[]} known
+                     * @param {object|null} check
                      * @return {Promise<object>}
                      */
-                    newest: (through = null) =>
-                        ZetaSource.newest({ fetch, token: ScribeBoot.token(boot), roomId: session.roomId, pause, through }),
+                    newest: (through = null, required = [], known = [], check = null) =>
+                        ZetaSource.newest({ fetch, token: ScribeBoot.token(boot), roomId: session.roomId, pause, through,
+                            required, known, index: historyIndex, check }),
+
+                    /**
+                     * @param {string} id
+                     * @return {boolean}
+                     */
+                    distant: (id) => !historyIndex.completeHead && !historyIndex.headIds?.has(id) &&
+                        historyIndex.transport?.length - historyIndex.order?.get(id) >
+                        (historyIndex.cheapDepth ?? ZetaSource.Settings.CheapCheckPages * ZetaSource.Settings.PageSize),
+
+                    /**
+                     * @param {readonly string[]} ids
+                     * @return {boolean}
+                     */
+                    onHead: (ids) => historyIndex.completeHead || ids.every((id) => historyIndex.headIds?.has(id)),
                 }),
 
                 /**
@@ -2177,7 +2248,7 @@ const ScribeBoot = Object.freeze({
                         room: (roomId) => roomId === session.roomId,
                         manual: lines.manual === true,
                         confirmed: () => live.went(lines),
-                        rejected: () => live.rejected(lines),
+                        rejected: (status) => live.rejected(lines, status),
                         uncertain: () => live.uncertain(lines),
                         cancelled: () => live.cancelled(lines),
                     };
@@ -2452,7 +2523,12 @@ const ScribeBoot = Object.freeze({
         );
         boot.request = ScribeBoot.request(environment.xmlHttpRequest);
         if (boot.watcher !== null) {
-            boot.watcher.onPost((room) => boot.session?.sender?.posting(room) ?? null);
+            boot.watcher.onStream?.((room, message) => ScribeBoot.observe(boot, room, message));
+            boot.watcher.onPost((room) => {
+                const finish = ScribeBoot.observe(boot, room, null);
+                const receipt = boot.session?.sender?.posting(room);
+                return ScribeSender.observePost(receipt, finish);
+            });
             boot.watcher.onTraffic(
                 /**
                  * @param {{ method: string, path: string }} traffic

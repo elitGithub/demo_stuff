@@ -9,7 +9,7 @@ import FakeZeta from './support/FakeZeta.mjs';
  * @return {object}
  */
 function load(name) {
-    const context = vm.createContext({ URL, URLSearchParams });
+    const context = vm.createContext({ URL, URLSearchParams, TextDecoder });
     const url = new URL(`../scribe/page/${name}.js`, import.meta.url);
     vm.runInContext(readFileSync(url, 'utf8'), context, { filename: url.pathname });
     return vm.runInContext(name, context);
@@ -221,6 +221,171 @@ test('the room is read from the address', () => {
         assert.equal(ZetaSource.room(path), null, path);
     }
 });
+
+test('observed room cursors re-fetch distant sources, including edits, without traversing the intervening pages', async () => {
+    const api = new FakeZeta(FakeZeta.messages(1022));
+    api.most = 80;
+    const index = { locations: new Map(), boundaries: new Map() };
+    const { messages: known } = await walk(api.fetch, { index });
+    assert.equal(api.requests.length, 33);
+    const required = [known[0].id, known[500].id, known.at(-1).id];
+    api.messages[500] = { ...api.messages[500], edited: true };
+    const read = () => latest(api.fetch, { index, required, through: required[0], known });
+    let page = await read();
+    assert.equal(api.requests.length, 36);
+    assert.equal(page.end, END.ThroughMessage);
+    assert.equal(page.verified.find((row) => row.id === known[500].id).edited, true);
+    assert.equal(page.verified.some((row) => row.id === known[300].id), false);
+    api.messages.push(said('new-reply', 1023));
+    page = await read();
+    assert.equal(page.messages.at(-1).id, 'new-reply');
+    assert.ok(api.requests.length <= 40);
+    assert.ok(page.verified.some((row) => row.id === known[0].id));
+    const reordered = api.messages[500];
+    api.messages[500] = api.messages[501];
+    api.messages[501] = reordered;
+    assert.equal((await read()).needsHistory, true);
+});
+
+test('an unchanged transport page remains verifiable when timestamps put rows in a different order', async () => {
+    const rows = FakeZeta.messages(1022);
+    [rows[7].messageTime, rows[8].messageTime] = [rows[8].messageTime, rows[7].messageTime];
+    const api = new FakeZeta(rows);
+    api.most = 80;
+    const index = { locations: new Map(), boundaries: new Map() };
+    const { messages: known } = await walk(api.fetch, { index });
+    assert.equal(known[7].id, rows[8].id);
+    const through = rows[4].id;
+    for (let attempt = 1; attempt <= 3; attempt++) {
+        const page = await latest(api.fetch, { index, known, through, required: [through] });
+        assert.equal(page.end, END.ThroughMessage);
+        assert.ok(page.verified.some((row) => row.id === through));
+        assert.equal(api.requests.length, 33 + 2 * attempt);
+    }
+    [rows[7], rows[8]] = [rows[8], rows[7]];
+    assert.equal((await latest(api.fetch, { index, known, through, required: [through] })).needsHistory, true);
+});
+
+test('an expired historical checkpoint requests a fresh index and the next verification stays bounded', async () => {
+    const api = new FakeZeta(FakeZeta.messages(372));
+    api.most = 60;
+    const index = { locations: new Map(), boundaries: new Map() };
+    const { messages: known } = await walk(api.fetch, { index });
+    const through = known[4].id;
+    const stale = index.locations.get(through);
+    const expired = (url, options) => new URL(url).searchParams.get('cursor') === stale
+        ? Promise.resolve(FakeZeta.reply(410, 'Gone')) : api.fetch(url, options);
+    const verify = (fetch) => latest(fetch, { index, known, through, required: [through] });
+    assert.equal((await verify(expired)).needsHistory, true);
+    await walk(api.fetch, { index });
+    const before = api.requests.length;
+    assert.ok((await verify(api.fetch)).verified.some((row) => row.id === through));
+    assert.equal(api.requests.length - before, 2);
+});
+
+test('snapshot-bound cursors switch to the current listing and stop once every requested source is fresh', async () => {
+    const api = new FakeZeta(FakeZeta.messages(372));
+    api.most = 100;
+    let snapshot = 0;
+    let expired = 0;
+    const fetch = async (url, options) => {
+        const address = new URL(url);
+        const cursor = address.searchParams.get('cursor');
+        if (cursor === null) {
+            snapshot++;
+        } else {
+            const [generation, token] = cursor.split(':');
+            if (generation !== String(snapshot)) {
+                expired++;
+                return FakeZeta.reply(410, 'Gone');
+            }
+            address.searchParams.set('cursor', token);
+        }
+        const response = await api.fetch(address.href, options);
+        const data = JSON.parse(await response.text());
+        return FakeZeta.page(data.messages, data.nextCursor && snapshot + ':' + data.nextCursor);
+    };
+    const index = { locations: new Map(), boundaries: new Map() };
+    const { messages: known } = await walk(fetch, { index });
+    const through = known[330].id;
+    const verify = () => latest(fetch, { index, known, through, required: [through] });
+    for (let occurrence = 0; occurrence < 2; occurrence++) {
+        assert.equal((await verify()).needsHistory, true);
+        await walk(fetch, { index });
+    }
+    const before = api.requests.length;
+    for (let check = 0; check < 3; check++) {
+        const page = await verify();
+        assert.equal(page.end, END.ThroughMessage);
+        assert.ok(page.messages.some((row) => row.id === through));
+    }
+    assert.equal(api.requests.length - before, 6);
+    assert.equal(expired, 2);
+});
+
+test('a background check reserves only a deep expired-link walk and can recover indexed verification', async () => {
+    const api = new FakeZeta(FakeZeta.messages(1022));
+    api.most = 250;
+    const index = { locations: new Map(), boundaries: new Map() };
+    const { messages: known } = await walk(api.fetch, { index });
+    const last = known.at(-1).id;
+    const old = known[1].id;
+    const near = known.at(-32).id;
+    let reserved = 0;
+    const check = { previouslyLimited: true, reserve: () => ++reserved === 1 };
+    const verify = async (id, expired) => {
+        const stale = index.locations.get(id);
+        let refused = false;
+        const fetch = (url, options) => {
+            if (expired && !refused && new URL(url).searchParams.get('cursor') === stale) {
+                refused = true;
+                return Promise.resolve(FakeZeta.reply(410, 'Gone'));
+            }
+            return api.fetch(url, options);
+        };
+        return latest(fetch, { index, known, through: id, required: [id], check });
+    };
+    assert.equal((await verify(old, true)).messages.length, 1022);
+    const before = api.requests.length;
+    assert.equal((await verify(old, true)).deferredCheck, true);
+    assert.equal(api.requests.length - before, 2);
+    assert.ok((await verify(last, false)).messages.some((row) => row.id === last));
+    assert.ok((await verify(near, true)).messages.some((row) => row.id === near));
+    assert.equal(reserved, 2);
+    const restored = await verify(old, false);
+    assert.ok(restored.verified.some((row) => row.id === old));
+    assert.equal(reserved, 2);
+    assert.equal((await verify(old, true)).needsHistory, true);
+    assert.equal(reserved, 2);
+});
+
+for (const duplicate of [9, 961]) {
+    test('duplicate #' + duplicate + ' preserves the full listing’s first observation during indexed verification', async () => {
+        const rows = FakeZeta.messages(1022);
+        const index = { locations: new Map(), boundaries: new Map() };
+        const current = rows[duplicate - 1];
+        const shadow = FakeZeta.message(current.id, current.messageTime, 'Outdated duplicate');
+        rows.splice(duplicate - 1, 0, shadow);
+        const api = new FakeZeta(rows);
+        api.most = 90;
+        const { messages: known } = await walk(api.fetch, { index });
+        assert.equal(known.length, 1022);
+        assert.equal(known[duplicate - 1].contents[0].text, current.contents[0].text);
+        shadow.contents[0].text = 'A different outdated duplicate';
+        current.contents[0].text = 'Revised first observation';
+        const expected = (await walk(api.fetch)).messages.find((row) => row.id === current.id);
+        const before = api.requests.length;
+        for (const through of [known[duplicate - 2].id, current.id]) {
+            const page = await latest(api.fetch, { index, known, required: [through], through });
+            assert.equal(page.end, END.ThroughMessage);
+            const seen = page.verified.find((row) => row.id === current.id);
+            if (through === current.id || seen) {
+                assert.deepEqual(seen, expected);
+            }
+        }
+        assert.equal(api.requests.length - before, 4);
+    });
+}
 
 test('the whole history comes in order', async () => {
     const messages = FakeZeta.messages(100);
@@ -528,6 +693,182 @@ test('the POST watcher accepts HTTP results only from the original final endpoin
         xhr.finish();
         assert.deepEqual(statuses.splice(0), [expected]);
     }
+    watcher.stop();
+});
+
+test('reply streams report only a normalized result, without consuming the page response or claiming a player send', async () => {
+    const page = Object.assign(FakeZeta.window(), { setTimeout, clearTimeout });
+    const watcher = ZetaSource.watch(page, undefined, false);
+    const path = MESSAGES + '/message-123/candidates/stream';
+    const attempts = [];
+    const sends = [];
+    const changed = [];
+    watcher.onTraffic((traffic) => changed.push(traffic.method));
+    watcher.onPost((room) => { sends.push(room); });
+    watcher.onStream((room, message) => {
+        const result = deferred();
+        attempts.push({ room, message, result });
+        return (outcome) => result.resolve(outcome);
+    });
+    for (const [type, body, status, outcome] of [
+        ['application/json', '{"code":"TOO_MANY_REQUEST","message":"never expose this"}', 429, 'rateLimited'],
+        ['application/json', '{"error":{"code":"CHAT_ABUSED","message":"never expose this"}}', 400, 'chatAbused'],
+        ['application/json', '{"code":"CHAT_ABUSED"}', 200, 'chatAbused'],
+        ['text/event-stream', 'event: error\r\ndata: {"code":"CHAT_ABUSED"}\r\n\r\n', 200, 'chatAbused'],
+        ['text/event-stream', 'data: {"text":"reply"}\r\revent: error\rdata: {"code":"CHAT_ABUSED"}\r\r', 200, 'chatAbused'],
+        ['text/event-stream', 'data: {"error":{"status":429}}\n\n', 200, 'rateLimited'],
+        ['text/event-stream', 'data: {"content":"CHAT_ABUSED"}\n\ndata: [DONE]\n\n', 200, 'ok'],
+    ]) {
+        const response = new Response(body, { status, headers: { 'Content-Type': type } });
+        Object.defineProperty(response, 'url', { value: path });
+        page.answer = () => Promise.resolve(response);
+        const original = await page.fetch(path, { method: 'POST' });
+        assert.equal(original, response);
+        assert.equal(original.bodyUsed, false);
+        const { room, message, result } = attempts.at(-1);
+        assert.deepEqual([room, message], ['abc', 'message-123']);
+        assert.equal(await result.promise, outcome);
+        assert.equal(await original.text(), body);
+    }
+    assert.deepEqual(changed, ['POST']);
+    const read = new Response('data: [DONE]\n\n', { headers: { 'Content-Type': 'text/event-stream' } });
+    Object.defineProperty(read, 'url', { value: path });
+    page.answer = () => Promise.resolve(read);
+    await page.fetch(path, { method: 'GET' });
+    assert.equal(await attempts.at(-1).result.promise, 'ok');
+    assert.deepEqual(changed, ['POST']);
+    const count = attempts.length;
+    await page.fetch(path + '/other', { method: 'POST' });
+    await page.fetch(path.replace(API, 'https://unrelated.example'), { method: 'GET' });
+    assert.equal(attempts.length, count);
+    assert.deepEqual(sends, []);
+    watcher.stop();
+});
+
+test('fetch and XHR honor a completion marker after an oversized SSE event while preserving real errors', async () => {
+    const page = FakeZeta.window();
+    const watcher = ZetaSource.watch(page, undefined, false);
+    const path = MESSAGES + '/message-123/candidates/stream';
+    const large = 'data: ' + JSON.stringify({ text: 'a'.repeat(18000) }) + '\n\n';
+    const done = 'data: [DONE]\n\n';
+    const blocked = 'event: error\ndata: {"code":"CHAT_ABUSED"}\n\n';
+    const reports = [];
+    watcher.onStream(() => (outcome) => reports.push(outcome));
+    for (const [body, expected] of [[large + done, 'ok'], [large + blocked + done, 'chatAbused'], [large + done + blocked, 'chatAbused']]) {
+        const response = new Response(body, { headers: { 'Content-Type': 'text/event-stream' } });
+        Object.defineProperty(response, 'url', { value: path });
+        page.answer = () => Promise.resolve(response);
+        const fetched = await page.fetch(path, { method: 'POST' });
+        assert.equal(await fetched.text(), body);
+        await settle();
+        assert.deepEqual(reports.splice(0), [expected]);
+        const xhr = new page.XMLHttpRequest();
+        xhr.open('POST', path);
+        xhr.send();
+        Object.assign(xhr, { status: 200, responseURL: path, responseType: 'text', responseText: body });
+        xhr.finish();
+        assert.deepEqual(reports.splice(0), [expected]);
+    }
+    for (const body of [large, large + 'data: {"text":"more"}\n\n', large + 'event: error\ndata: {"code":"OTHER"}\n\n' + done]) {
+        const xhr = new page.XMLHttpRequest();
+        xhr.open('POST', path);
+        xhr.send();
+        Object.assign(xhr, { status: 200, responseURL: path, responseType: 'text', responseText: body });
+        xhr.finish();
+        assert.deepEqual(reports, []);
+    }
+    watcher.stop();
+});
+
+test('XHR stream failures are isolated from send receipts and validate the final endpoint', () => {
+    const page = FakeZeta.window();
+    const watcher = ZetaSource.watch(page, undefined, false);
+    const path = MESSAGES + '/message-123/candidates/stream';
+    const reports = [];
+    const changed = [];
+    watcher.onTraffic((traffic) => changed.push(traffic.method));
+    watcher.onStream((room, message) => (outcome) => reports.push([room, message, outcome]));
+    for (const [status, type, body, url] of [
+        [429, 'text', '', path], [400, 'json', { code: 'CHAT_ABUSED' }, path],
+        [200, 'text', 'data: {"error":{"code":"CHAT_ABUSED"}}\n\n', path],
+        [200, 'text', 'data: {"text":"CHAT_ABUSED"}\n\n', path],
+        [200, 'text', '{"error":"unknown"}', path],
+        [429, 'text', '', path + '/elsewhere'],
+    ]) {
+        const xhr = new page.XMLHttpRequest();
+        xhr.open('POST', path);
+        xhr.send('{}');
+        Object.assign(xhr, { status, responseType: type, responseURL: url, response: body, responseText: body });
+        xhr.finish();
+    }
+    assert.deepEqual(reports, ['rateLimited', 'chatAbused', 'chatAbused', 'ok'].map((outcome) => ['abc', 'message-123', outcome]));
+    assert.deepEqual(changed, ['POST']);
+    watcher.stop();
+});
+
+test('a long-running fetch reports an error after a large stream and preserves the entire response', async () => {
+    const timers = new Map();
+    const page = Object.assign(FakeZeta.window(), {
+        setTimeout(callback, delay) { timers.set(callback, delay); return callback; },
+        clearTimeout(callback) { timers.delete(callback); },
+    });
+    const watcher = ZetaSource.watch(page, undefined, false);
+    const reports = [];
+    watcher.onStream(() => (outcome) => reports.push(outcome));
+    const path = MESSAGES + '/late/candidates/stream';
+    const content = 'data: ' + JSON.stringify({ text: 'a'.repeat(120) }) + '\r\n\r\n';
+    const normalEvents = content.repeat(2000);
+    const largeEvent = 'data: ' + 'a'.repeat(35000) + '\r\n';
+    const finalEvent = '\r\nevent: error\r\ndata: {"code":"CHAT_ABUSED"}\r\n\r\n';
+    let controller;
+    const stream = new ReadableStream({ start(value) { controller = value; } });
+    const response = new Response(stream, { headers: { 'Content-Type': 'text/event-stream' } });
+    Object.defineProperty(response, 'url', { value: path });
+    page.answer = () => Promise.resolve(response);
+    const original = await page.fetch(path);
+    assert.equal(original, response);
+    const body = original.text();
+    const encoder = new TextEncoder();
+    controller.enqueue(encoder.encode(normalEvents));
+    await settle();
+    for (const [callback, delay] of timers) {
+        if (delay <= 125000) {
+            callback();
+        }
+    }
+    controller.enqueue(encoder.encode(largeEvent));
+    controller.enqueue(encoder.encode(finalEvent));
+    controller.close();
+    assert.equal(await body, normalEvents + largeEvent + finalEvent);
+    for (let turn = 0; !reports.length && turn < 20; turn++) {
+        await settle();
+    }
+    assert.deepEqual(reports, ['chatAbused']);
+    watcher.stop();
+});
+
+test('XHR scans appended long stream events before loadend and reports the late rejection exactly once', () => {
+    const page = FakeZeta.window();
+    const watcher = ZetaSource.watch(page, undefined, false);
+    const reports = [];
+    watcher.onStream(() => (outcome) => reports.push(outcome));
+    const path = MESSAGES + '/late/candidates/stream';
+    const xhr = new page.XMLHttpRequest();
+    xhr.open('GET', path);
+    xhr.send();
+    const content = 'data: ' + JSON.stringify({ text: 'b'.repeat(120) }) + '\n\n';
+    Object.assign(xhr, { status: 200, responseType: 'text', responseURL: path, responseText: content.repeat(2000) });
+    const progress = xhr.listeners.find((entry) => entry.type === 'progress').listener;
+    progress();
+    xhr.responseText += 'data: ' + 'b'.repeat(35000) + '\r\n';
+    progress();
+    assert.deepEqual(reports, []);
+    xhr.responseText += '\r\nevent: error\r\ndata: {"code":"CHAT_ABUSED"}\r\n\r\n';
+    progress();
+    assert.deepEqual(reports, ['chatAbused']);
+    xhr.finish();
+    assert.deepEqual(reports, ['chatAbused']);
+    assert.equal(xhr.listeners.length, 0);
     watcher.stop();
 });
 

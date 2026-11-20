@@ -7,6 +7,8 @@ const ScribeLive = Object.freeze({
         Reminded: 'Reminded',
     }),
 
+    Stream: Object.freeze({ RateLimited: 'rateLimited', ChatAbused: 'chatAbused', Ok: 'ok' }),
+
     Settings: Object.freeze({
         MessageBytes: 4500,
         Recent: 20,
@@ -678,6 +680,7 @@ const ScribeLive = Object.freeze({
             ready: null,
             led: [],
             basis: null,
+            checkerStamp: null,
             edited: null,
             editedFor: null,
             draft: null,
@@ -702,6 +705,8 @@ const ScribeLive = Object.freeze({
             receipts: [],
             attachments: [],
             unauthorizedSend: false,
+            forbiddenSend: false,
+            streamWarning: null,
             findings: [],
             notes: [],
             dismissed: [],
@@ -733,6 +738,7 @@ const ScribeLive = Object.freeze({
             return;
         }
         const record = live.record;
+        record.checkerStamp = ScribeLive.isText(saved.checkerStamp) ? saved.checkerStamp : null;
         record.now = ScribeLive.scene(saved.now);
         record.reminded = ScribeLive.scene(saved.reminded);
         const basis = saved.basis;
@@ -757,7 +763,8 @@ const ScribeLive = Object.freeze({
             ScribeLive.isText(written.id) &&
             ScribeLive.isText(written.fingerprint);
         record.editedFor = against ? { id: written.id, fingerprint: written.fingerprint } : null;
-        record.draft = ScribeLive.edited(saved.draft) ?? (against ? null : record.edited);
+        record.draft = ScribeLive.isText(saved.draft) && ScribeLive.selectionError(saved.draft) === null
+            ? saved.draft : (against ? null : record.edited);
         record.edited = against ? record.edited : null;
         record.forced = saved.forced === true;
         record.preparing = saved.preparing === true;
@@ -795,6 +802,10 @@ const ScribeLive = Object.freeze({
             ScribeLive.isObject(entry) && ScribeLive.isText(entry.id) && ScribeLive.isText(entry.fingerprint) &&
             Number.isSafeInteger(entry.length) && entry.length >= 0) : [];
         record.unauthorizedSend = saved.unauthorizedSend === true;
+        record.forbiddenSend = saved.forbiddenSend === true;
+        if ([ScribeLive.Stream.RateLimited, ScribeLive.Stream.ChatAbused].includes(saved.streamWarning)) {
+            record.streamWarning = saved.streamWarning;
+        }
         if (record.delivery?.evidence && !record.posts.some((post) => post.key === record.delivery.evidence.key)) {
             record.posts.unshift(record.delivery.evidence);
             record.delivery.evidence = null;
@@ -972,6 +983,32 @@ const ScribeLive = Object.freeze({
 
     /**
      * @param {object} live
+     * @param {string} field
+     * @param {boolean|string|null} value
+     * @return {void}
+     */
+    zetaWarning(live, field, value) {
+        if (live.closed) {
+            return;
+        }
+        if (live.loaded && !live.watching && live.keeper.view().reader) {
+            const changed = live.record[field] !== value || Object.hasOwn(live.localWarnings, field);
+            if (changed) {
+                delete live.localWarnings[field];
+                live.record[field] = value;
+                ScribeLive.changed(live);
+            }
+        } else {
+            const visible = Object.hasOwn(live.localWarnings, field) ? live.localWarnings[field] : live.record[field];
+            if (visible !== value) {
+                live.localWarnings[field] = value;
+                ScribeLive.announce(live);
+            }
+        }
+    },
+
+    /**
+     * @param {object} live
      * @param {object} view
      * @param {object[]} findings
      * @return {void}
@@ -1144,6 +1181,32 @@ const ScribeLive = Object.freeze({
         const settings = ScribeLive.Settings;
         const record = live.record;
         let moved = ScribeLive.reconcile(live, view);
+        const stamp = ScribeLive.checkerStamp(view.state, view.messages);
+        if (view.historyChecked !== false && record.checkerStamp !== stamp) {
+            record.checkerStamp = stamp;
+            if (record.selection !== null || record.edited !== null || record.ready !== null || live.recounting !== null) {
+                record.draft = record.edited ?? record.draft ?? record.selection?.text ?? null;
+                record.draftOwner = null;
+                record.edited = null;
+                record.editedOwner = null;
+                record.editedFor = null;
+                record.selection = null;
+                record.ready = null;
+                record.led = [];
+                record.basis = null;
+                record.preparing = ScribeLive.due(record, view);
+                live.owed = record.preparing;
+                live.issue++;
+                live.preparationFailure = null;
+                if (record.posts.some((post) => post.reminder === record.delivery?.id && !post.confirmed)) {
+                    record.delivery = null;
+                    live.awaiting = false;
+                }
+            }
+            record.story = null;
+            record.untold = null;
+            moved = true;
+        }
         if (record.edited !== null && !ScribeLive.written(record, view)) {
             record.draft = record.edited;
             record.draftOwner = record.editedOwner;
@@ -1951,12 +2014,46 @@ const ScribeLive = Object.freeze({
      * @param {string[]} corrections
      * @return {string}
      */
-    storyKey(view, now, corrections = ScribeReminder.storyCorrections(view.state, now, view.player)) {
+    storyKey(view, now, corrections = ScribeLive.storyCorrections(view, now), rulings = ScribeReminder.sharedRulings(view)) {
         const scene =
             now === null
                 ? null
                 : [now.day, ScribeText.normaliseName(now.place), now.reach, [...ScribeScene.identities(now)].sort()];
-        return ScribeText.fingerprint(JSON.stringify([ScribeReminder.storyInput(view.state, null, corrections), scene]));
+        const inputs = [ScribeReminder.storyInput(view.state, null, corrections, rulings), scene];
+        const stamp = ScribeLive.checkerStamp(view.state, view.messages, rulings);
+        if (stamp !== null) {
+            inputs.push(stamp);
+        }
+        return ScribeText.fingerprint(JSON.stringify(inputs));
+    },
+
+    /**
+     * @param {object} state
+     * @return {string|null}
+     */
+    checkerStamp(state, messages, shared = null) {
+        const decisions = (state?.checkerRulings ?? []).filter((row) => row.status !== 'superseded');
+        if (!decisions.length) {
+            return null;
+        }
+        const basis = decisions.map((row) => [row.finding, row.sequence, row.version, row.status]);
+        if (decisions.some((row) => row.shareInReminder)) {
+            basis.push(shared ?? ScribeReminder.sharedRulings({ state, messages }));
+        }
+        return ScribeText.fingerprint(JSON.stringify(basis));
+    },
+
+    /**
+     * @param {object} view
+     * @param {object|null} now
+     * @return {string[]}
+     */
+    storyCorrections(view, now) {
+        const state = view.state;
+        const ruled = (state.checkerRulings ?? []).filter((row) => row.status === 'settled')
+            .flatMap((row) => (row.factIds ?? []).map((id) => [id, row.sequence]));
+        return ScribeReminder.storyCorrections(ruled.length
+            ? { ...state, editOrigins: { ...state.editOrigins, ...Object.fromEntries(ruled) } } : state, now, view.player);
     },
 
     /**
@@ -1969,8 +2066,10 @@ const ScribeLive = Object.freeze({
         const settings = ScribeLive.Settings;
         const epoch = live.epoch;
         const record = live.record;
-        const corrections = ScribeReminder.storyCorrections(view.state, now, view.player);
-        const key = ScribeLive.storyKey(view, now, corrections);
+        const corrections = ScribeLive.storyCorrections(view, now);
+        const rulings = ScribeReminder.sharedRulings(view);
+        const stamp = ScribeLive.checkerStamp(view.state, view.messages, rulings);
+        const key = ScribeLive.storyKey(view, now, corrections, rulings);
         if (record.story !== null && record.story.key === key) {
             return record.story.text;
         }
@@ -1992,7 +2091,7 @@ const ScribeLive = Object.freeze({
             let text = null;
             try {
                 const ask = ScribeLive.asker(live, settings.Roles.Scribe, noted);
-                const answer = await ask(ScribeReminder.StoryPrompt, ScribeReminder.storyInput(view.state, now, corrections));
+                const answer = await ask(ScribeReminder.StoryPrompt, ScribeReminder.storyInput(view.state, now, corrections, rulings));
                 if (ScribeReminder.declined(answer.text)) {
                     noted.failure = settings.Messages.StoryDeclined;
                 } else {
@@ -2001,7 +2100,8 @@ const ScribeLive = Object.freeze({
             } catch (error) {
                 noted.failure ??= ScribeStore.diagnostic(live.storage, ScribeLive.words(error));
             }
-            if (live.epoch !== epoch) {
+            const current = live.keeper.view();
+            if (live.epoch !== epoch || ScribeLive.checkerStamp(current.state, current.messages) !== stamp) {
                 return null;
             }
             if (text !== null) {
@@ -2812,10 +2912,10 @@ const ScribeLive = Object.freeze({
     /**
      * @param {object} live
      * @param {object} lines
-     * @param {boolean} unauthorized
+     * @param {number|null} status
      * @return {void}
      */
-    cancelled(live, lines, unauthorized = false) {
+    cancelled(live, lines, status = null) {
         if (!ScribeLive.active(live) || !lines?.key) {
             return;
         }
@@ -2826,8 +2926,8 @@ const ScribeLive = Object.freeze({
             if (prior?.carried) {
                 record.previousPost = prior;
             }
+            record.unauthorizedSend = status === 401;
             record.posts = kept;
-            record.unauthorizedSend = unauthorized;
             live.recovering.delete(lines.key);
             live.awaiting = ScribeLive.awaitingReceipt(live);
             record.receipts = [...record.receipts, lines.key].slice(-ScribeLive.Settings.CountedKept);
@@ -2904,7 +3004,7 @@ const ScribeLive = Object.freeze({
         const view = live.keeper.view();
         const record = live.record;
         const renewed = record.edition !== null && view.edition > record.edition;
-        if (!view.reader || view.trusted !== true || renewed) {
+        if (!view.reader || view.trusted !== true || renewed || record.checkerStamp !== ScribeLive.checkerStamp(view.state, view.messages)) {
             return nothing;
         }
         const waiting = ScribeLive.due(record, view) && ScribeLive.fresh(live, view) ? record.ready : null;
@@ -3680,6 +3780,8 @@ const ScribeLive = Object.freeze({
             stale: draft !== null,
             latest: latest === undefined ? null : Object.freeze({ id: latest.id, fingerprint: latest.fingerprint }),
             held,
+            forbiddenSend: live.localWarnings.forbiddenSend ?? record.forbiddenSend,
+            streamWarning: Object.hasOwn(live.localWarnings, 'streamWarning') ? live.localWarnings.streamWarning : record.streamWarning,
             preparationBlock: live.preparationFailure ?? preparationBlock,
             failing: Object.freeze(failing.map(Object.freeze)),
             calls: Object.freeze([...live.calls]),
@@ -3780,9 +3882,27 @@ const ScribeLive = Object.freeze({
 
             /**
              * @param {object} [lines]
+             * @param {number} [status]
              * @return {void}
              */
-            rejected: (lines = live.appended) => ScribeLive.cancelled(live, lines, true),
+            rejected: (lines = live.appended, status = 401) => ScribeLive.cancelled(live, lines, status),
+
+            /** @return {void} */
+            sendForbidden: () => ScribeLive.zetaWarning(live, 'forbiddenSend', true),
+
+            /** @return {void} */
+            sendAllowed: () => ScribeLive.zetaWarning(live, 'forbiddenSend', false),
+
+            /**
+             * @param {string} messageId
+             * @param {string} outcome
+             * @return {void}
+             */
+            streamResult: (messageId, outcome) => {
+                if (ScribeLive.isText(messageId) && messageId.length && Object.values(ScribeLive.Stream).includes(outcome)) {
+                    ScribeLive.zetaWarning(live, 'streamWarning', outcome === ScribeLive.Stream.Ok ? null : outcome);
+                }
+            },
 
             /**
              * @param {object} [lines]
@@ -3950,6 +4070,7 @@ const ScribeLive = Object.freeze({
             recounting: null,
             crowded: false,
             attemptUnsaved: false,
+            localWarnings: {},
             owed: false,
             awaiting: false,
             recovering: new Set(),

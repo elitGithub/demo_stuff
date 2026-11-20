@@ -435,6 +435,7 @@ export default class WholeTab {
             URL,
             URLSearchParams,
             TextEncoder,
+            TextDecoder,
             Blob,
         };
     }

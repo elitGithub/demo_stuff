@@ -89,10 +89,10 @@ const BenchView = Object.freeze({
     /**
      * @param {readonly object[]} items
      * @param {number} page
+     * @param {number} size
      * @return {{ rows: object[], pages: number }}
      */
-    page(items, page) {
-        const size = BenchView.PageSize;
+    page(items, page, size = BenchView.PageSize) {
         const pages = Math.max(BenchView.Settings.FirstPage, Math.ceil(items.length / size));
         const current = BenchView.clamp(page, pages);
         return { rows: items.slice((current - 1) * size, current * size), pages };
@@ -373,7 +373,7 @@ const BenchView = Object.freeze({
                 (fact) => ({
                     id: fact.id,
                     category: BenchView.category(fact, labels),
-                    text: fact.text,
+                    text: ScribeCategory.displayValue(fact),
                     source: BenchView.source(fact),
                     status: fact.status,
                     audience: BenchView.audience(state, fact, labels),
@@ -559,6 +559,63 @@ const BenchView = Object.freeze({
         return { conflicts, lookAlikes, publicScenes, questions, refinements, aliases };
     },
 
+    /**
+     * @param {object} finding
+     * @param {object} state
+     * @return {{key:string,label:string,text:string}[]}
+     */
+    accounts(finding, state) {
+        const accounts = [];
+        for (const key of ['source', 'earlier']) {
+            const citation = finding[key];
+            if (citation) {
+                const label = '#' + citation.position + ' · ' + citation.speaker;
+                accounts.push({ key, label, text: label + ' “' + citation.quote + '”' });
+            }
+        }
+        if (finding.record) {
+            const entry = ScribeLog.checkRecord(finding.record);
+            const content = [];
+            const name = (id) => state.subjects?.find((subject) => subject.id === id)?.label ?? id;
+            if (entry) {
+                content.push(...[entry.fact, name(entry.subject), entry.category && BenchView.scoped(entry, entry.category),
+                    name(entry.target), entry.text ?? entry.value ?? entry.label ?? entry.summary].filter(Boolean));
+                if (entry.cite) {
+                    const index = ScribeReplay.Inputs.get(state)?.order.indexOf(entry.cite) ?? -1;
+                    content.push(index >= 0 ? 'cites #' + (index + 1) : 'cites ' + entry.cite);
+                }
+            }
+            const prefix = 'Filed citation: ';
+            const filed = finding.record.text.split('\n').find((line) => line.startsWith(prefix));
+            if (filed) {
+                try {
+                    const citation = JSON.parse(filed.slice(prefix.length));
+                    if (citation?.position && citation.speaker && citation.quote) {
+                        content.push('#' + citation.position + ' · ' + citation.speaker + ' “' + citation.quote + '”');
+                    }
+                } catch {
+                    content.push(filed);
+                }
+            }
+            const label = 'Book entry';
+            accounts.push({ key: 'record', label, text: label + ' · ' + (content.join(' · ') || finding.record.text) });
+        }
+        return accounts;
+    },
+
+    /**
+     * @param {object} ruling
+     * @return {string}
+     */
+    checkerDecision(ruling) {
+        if (ruling.action === 'choose') {
+            const citation = ruling[ruling.account];
+            return ruling.account === 'record' ? 'Kept the book entry' + (ruling.canonical ? ' · ' + ruling.canonical : '.') :
+                'Chose #' + citation.position + ' · ' + citation.speaker + ' “' + citation.quote + '”';
+        }
+        return ruling.action === 'explain' ? ruling.explanation : 'Left open.';
+    },
+
     Summaries: Object.freeze({
         /**
          * @param {object} operation
@@ -691,10 +748,12 @@ const BenchView = Object.freeze({
 
     /**
      * @param {{ entries: readonly object[] }} log
+     * @param {object|null} state
      * @return {Array<{ sequence: number, type: string, summary: string }>}
      */
-    made(log) {
+    made(log, state = null) {
         const rulings = ScribeLog.Ruling;
+        const history = new Map((state?.checkerRulings ?? []).map((decision) => [decision.sequence, decision.status]));
         const owned = log.entries.filter(
             /**
              * @param {{ kind: string, withdrawn: boolean }} entry
@@ -706,7 +765,7 @@ const BenchView = Object.freeze({
         const answeredWordings = new Set();
         for (const entry of owned) {
             const [operation] = entry.operations;
-            if (operation.type === rulings.Answer) {
+            if (operation?.type === rulings.Answer) {
                 answeredIds.add(operation.question);
                 answeredWordings.add(ScribeReplay.wording(operation.questionText));
             }
@@ -714,6 +773,13 @@ const BenchView = Object.freeze({
         const rows = [];
         for (const entry of owned) {
             const [operation] = entry.operations;
+            if (entry.checkerRuling) {
+                const status = history.get(entry.sequence);
+                const suffix = status === 'reopened' ? ' Evidence changed.' : status === 'superseded' ? ' Superseded.' : '';
+                rows.unshift({ sequence: entry.sequence, type: 'Checker ruling',
+                    summary: entry.checkerRuling.question + ' ' + BenchView.checkerDecision(entry.checkerRuling) + suffix });
+                continue;
+            }
             const filed =
                 operation.type === rulings.Dismiss &&
                 (answeredIds.has(operation.question) ||

@@ -95,6 +95,9 @@ const PanelView = Object.freeze({
             budget: ['Scribe daily budget spent', "Scribe reached its local daily budget.", ''],
             login: ['Zeta sign-in needed', 'Sign in to Zeta and open the chat.', ''],
             history: ['Zeta history unavailable', 'Scribe could not read the chat history from Zeta.', 'See Progress for details.'],
+            sendForbidden: ['Zeta refused the send', 'Zeta refused to send your message (HTTP 403).', 'Check your access to this chat before sending again.'],
+            replyRate: ['Zeta reply rate limit', 'Zeta paused the reply (HTTP 429).', 'Wait for any active reply to finish, then retry the reply in Zeta.'],
+            replyBlocked: ['Zeta blocked the reply', 'Zeta blocked the reply (CHAT_ABUSED).', 'Check the notice in Zeta before trying the reply again.'],
             local: ['Scribe problem', '', 'See the detail in Progress.'],
             workerKey: ['Worker key rejected', 'The Cloudflare Worker refused the DM API key.', 'In Tampermonkey, choose Zeta Scribe → Set DM API key.'],
             workerBook: ['Worker book unavailable', 'Book sync is unavailable.', 'See Progress for details.'],
@@ -437,6 +440,14 @@ const PanelView = Object.freeze({
         if (keeperView.keyRecoveryProblem) {
             add('Scribe', 'keyRecovery', 'room recovery', null);
         }
+        if (liveView.forbiddenSend) {
+            add('Zeta', 'sendForbidden', 'message send', 'HTTP 403');
+        }
+        if (liveView.streamWarning === ScribeLive.Stream.RateLimited) {
+            add('Zeta', 'replyRate', 'reply stream', 'HTTP 429');
+        } else if (liveView.streamWarning === ScribeLive.Stream.ChatAbused) {
+            add('Zeta', 'replyBlocked', 'reply stream', 'CHAT_ABUSED');
+        }
         const keeper = keeperView.problem;
         if (keeper) {
             if (keeper === ZetaSource.Settings.Messages.NoLogin) {
@@ -500,7 +511,8 @@ const PanelView = Object.freeze({
             const names = new Intl.ListFormat('en', { style: 'long', type: 'conjunction' }).format(group.operations);
             const affected = names[0].toUpperCase() + names.slice(1) + ' could not run.';
             const retry = group.retrying && group.cause === 'rate' ? ' A retry is scheduled.' : '';
-            const description = ['declined', 'previousKey', 'keyStorage', 'keyRecovery'].includes(group.cause) ? '' : affected;
+            const description = ['declined', 'previousKey', 'keyStorage', 'keyRecovery', 'sendForbidden', 'replyRate', 'replyBlocked']
+                .includes(group.cause) ? '' : affected;
             const explanation = [opening, description, action].filter(Boolean).join(' ') + retry;
             result.push({ ...group, explanation });
         }
@@ -617,10 +629,10 @@ const PanelView = Object.freeze({
                     (fact) => {
                         const mark = fact.hidden ? words.Hidden : words.Nothing;
                         if (fact.category !== relation) {
-                            return BenchView.scoped(fact, PanelView.said(fact.category)) + words.Colon + PanelView.said(fact.text) + mark;
+                            return BenchView.scoped(fact, PanelView.said(fact.category)) + words.Colon + PanelView.said(ScribeCategory.displayValue(fact)) + mark;
                         }
                         const target = fact.target === null ? PanelView.named(fact.targetText) : names.get(fact.target);
-                        return words.TowardLine + target + words.Colon + PanelView.said(fact.text) + mark;
+                        return words.TowardLine + target + words.Colon + PanelView.said(ScribeCategory.displayValue(fact)) + mark;
                     },
                 );
                 return [
@@ -1210,20 +1222,29 @@ const PanelView = Object.freeze({
      */
     checkerFindings(state, verified, live) {
         const known = [...PanelView.listed(live), ...PanelView.listed(state?.resolutions)];
+        return PanelView.listed(verified).filter((check) => check.id ||
+            !known.some((finding) => PanelView.sameFinding(state, check, finding)));
+    },
+
+    /**
+     * @param {object} state
+     * @param {object} check
+     * @param {object} finding
+     * @return {boolean}
+     */
+    sameFinding(state, check, finding) {
         const includes = (text, words) => Boolean(text && words &&
             (' ' + ScribeReplay.wording(text) + ' ').includes(' ' + ScribeReplay.wording(words) + ' '));
-        return PanelView.listed(verified).filter((check) => !known.some((finding) => {
-            if (check.kind !== 'Contradiction' || !['Contradiction', 'Situation'].includes(finding.kind) ||
-                check.source.messageId !== finding.message || check.source.fingerprint !== finding.fingerprint ||
-                !(includes(check.source.quote, finding.said) || includes(finding.said, check.source.quote))) {
-                return false;
-            }
-            if (finding.fact && check.record?.text.includes(JSON.stringify(finding.fact))) {
-                return true;
-            }
-            return includes(check.earlier?.quote, finding.book) &&
-                (!finding.fact || state.facts?.some((fact) => fact.id === finding.fact && fact.cite === check.earlier.messageId));
-        }));
+        if (!finding || check.kind !== 'Contradiction' || !['Contradiction', 'Situation'].includes(finding.kind) ||
+            check.source.messageId !== finding.message || check.source.fingerprint !== finding.fingerprint ||
+            !(includes(check.source.quote, finding.said) || includes(finding.said, check.source.quote))) {
+            return false;
+        }
+        if (finding.fact && check.record?.text.includes(JSON.stringify(finding.fact))) {
+            return true;
+        }
+        return includes(check.earlier?.quote, finding.book) &&
+            (!finding.fact || state.facts?.some((fact) => fact.id === finding.fact && fact.cite === check.earlier.messageId));
     },
 
     /**

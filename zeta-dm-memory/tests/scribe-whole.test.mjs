@@ -57,6 +57,19 @@ const REPLY = Object.freeze([
 const CALM_REPLY = Object.freeze([['Narrator', 'Mirelle shrugs and opens the red ledger without a word.']]);
 
 /**
+ * @param {string} url
+ * @param {number} status
+ * @param {string|ReadableStream} body
+ * @param {string} media
+ * @return {Response}
+ */
+function zetaResponse(url, status, body, media = 'application/json') {
+    const response = new Response(body, { status, headers: { 'Content-Type': media } });
+    Object.defineProperty(response, 'url', { value: url });
+    return response;
+}
+
+/**
  * @return {Object<string, object>}
  */
 function reference() {
@@ -905,7 +918,65 @@ test('the installed Checker resumes its own cited history in order after its bud
     assert.equal(inputs.length, 3);
 });
 
-test('a verified historical contradiction shares the existing live finding and its ruling action', async () => {
+for (const variant of ['public explanation', 'public account', 'unchecked explanation', 'private evidence']) {
+    test('the installed reminder writer receives only a shareable decision after reload · ' + variant, async () => {
+        const walk = world();
+        const source = 'I take second watch.';
+        const earlier = 'The harbour market bell signals first watch.';
+        const explanation = 'Mirelle takes over when the first watch ends.';
+        const reach = variant === 'private evidence' ? 'private' : 'public';
+        walk.site.open(ROOM, new CampaignBuilder(PLAYER).reply([['Narrator', earlier], ['Mirelle', source]]));
+        walk.model.answers.Story = (input) => CitedStory.answer(input, CitedStory.messages(input).has(1) ?
+            '=== SCENES\nDay 1 | #1-#1 | The harbour market | ' + reach + ' | present: Mirelle | ' + earlier :
+            CitedStory.messages(input).has(3) ?
+                '=== SCENES\nDay 2 | #3-#3 | The quay | public | present: Mirelle | The quay bell falls silent.' : '');
+        walk.model.answers.HistoryCheck = (input) => {
+            const request = JSON.parse(input);
+            return JSON.stringify({ page: request.page, complete: true, claims: [], findings: request.position === 1 ?
+                [{ kind: 'Contradiction', question: 'Which watch did Mirelle mean?', source: { ref: request.target[1].ref, quote: source },
+                    earlier: { ref: request.target[0].ref, quote: earlier } }] : [] });
+        };
+        let tab = await opened(walk);
+        await saveKey(walk, tab);
+        await adopt(walk, tab, '4');
+        tab.panel.tab('Findings');
+        const row = tab.panel.rows('findings').find((item) => item.textContent.includes('Which watch'));
+        assert.ok(row);
+        const inputs = tab.panel.walk(row).filter((node) => node.tagName === 'INPUT');
+        const checkbox = inputs.find((node) => node.type === 'checkbox');
+        const allowed = reach === 'public';
+        assert.equal(Boolean(checkbox), allowed);
+        if (checkbox) {
+            assert.ok(!checkbox.checked);
+            checkbox.checked = variant.startsWith('public');
+        }
+        if (variant === 'public account') {
+            tab.panel.button(row, 'Choose account').click();
+        } else {
+            inputs.find((node) => node.type === 'text').value = explanation;
+            tab.panel.button(row, 'Explain how both fit').click();
+        }
+        const decision = () => stored(walk, 'book').log.entries.find((entry) => entry.checkerRuling)?.checkerRuling;
+        await until(walk, 'the evidence decision to be saved', () => Boolean(decision()), 2 * TICK_MS);
+        assert.equal(Boolean(decision().shareInReminder), variant.startsWith('public'));
+        assert.deepEqual(plain(decision().factIds), []);
+        tab = await reload(walk, tab);
+        await saveInterval(walk, tab, 1);
+        const before = walk.model.of('Told').length;
+        await arrive(walk, tab, 'I look around.', [['Narrator', 'The quay bell falls silent. Mirelle arrives.']]);
+        await until(walk, 'the writer to receive the next room state', () => walk.model.of('Told').slice(before).some((call) =>
+            variant === 'public explanation' ? call.user.includes(explanation) :
+            variant === 'public account' ? call.user.includes(source) : true), 4 * TICK_MS);
+        const sent = walk.model.of('Told').at(-1).user;
+        assert.equal(sent.includes('SHARED RULINGS:'), variant.startsWith('public'), sent);
+        assert.equal(sent.includes(explanation), variant === 'public explanation', sent);
+        if (variant === 'public account') {
+            assert.match(sent, /"speaker":"Mirelle","account":"I take second watch\."/);
+        }
+    });
+}
+
+test('a verified historical contradiction replaces the provisional alert and keeps its ruling across reload', async () => {
     const walk = world();
     walk.site.open(ROOM, campaign(1));
     const tab = await opened(walk);
@@ -932,8 +1003,24 @@ test('a verified historical contradiction shares the existing live finding and i
     assert.equal(tab.panel.rows('findings').length, 1);
     const only = tab.panel.rows('findings')[0];
     assert.ok(only.textContent.includes('red as rust'));
-    assert.ok(tab.panel.button(only, 'Rule it...'));
+    assert.ok(tab.panel.button(only, 'Choose account'));
     assert.equal(tab.panel.text('scribe-badge'), '1 finding');
+    const question = status().findings[0];
+    tab.panel.button(only, 'Leave open').click();
+    await until(walk, 'the certified question to stay open', () => status().findings[0]?.status === 'deferred', TICK_MS * 2);
+    const fresh = await reload(walk, tab);
+    fresh.panel.tab('Findings');
+    const deferred = fresh.panel.rows('findings').find((row) => row.textContent.includes(question.question));
+    assert.ok(deferred.textContent.includes('Left open.'));
+    fresh.panel.button(deferred, 'Choose account').click();
+    await until(walk, 'the exact account to be settled', () => status().findings[0]?.status === 'settled', TICK_MS * 2);
+    const final = await reload(walk, fresh);
+    final.panel.tab('Findings');
+    assert.equal(final.panel.rows('findings').some((row) => row.textContent.includes('red as rust')), false);
+    const ruled = final.panel.rows('ruled-findings').find((row) => row.textContent.includes(question.question));
+    assert.match(ruled.textContent, /Chose #3.*red as rust/);
+    assert.equal(status().findings[0].id, question.id);
+    assert.equal(stored(walk, 'book').log.entries.filter((entry) => entry.checkerRuling).length, 2);
 });
 
 for (const layout of ['top', 'frame']) {
@@ -1143,6 +1230,195 @@ test('a short history keeps the old prefix until a complete history confirms its
     for (const id of removed) {
         assert.ok(saved.log.entries.some((entry) => entry.withdrawn && entry.messageIds.includes(id)));
     }
+});
+
+test('installed reader bounds history requests while writing, checking and rechecking old evidence after an append', async () => {
+    const walk = world();
+    walk.site.open(ROOM, campaign(372));
+    walk.model.answers.Story = (input) => CitedStory.answer(input, '');
+    walk.model.answers.HistoryCheck = (input) => {
+        const page = JSON.parse(input);
+        const first = page.target[0];
+        const claims = page.position === 1 ? [{ source: { ref: first.ref, quote: first.quote }, attribution: 'witnessed' }] : [];
+        return JSON.stringify({ page: page.page, complete: true, claims, findings: [] });
+    };
+    const held = holdCompletion(walk, (role, input) => role === 'HistoryCheck' && JSON.parse(input).position === 4);
+    const tab = await opened(walk);
+    const cursorReads = () => walk.site.pageRequests().filter((row) => new URL(row.url).searchParams.has('cursor')).length;
+    assert.equal(cursorReads(), 11);
+    const initial = cursorReads();
+    await saveKey(walk, tab);
+    tab.panel.tab('Settings');
+    tab.panel.type('scribe-setting-size', '40');
+    tab.panel.type('scribe-setting-budget', '8');
+    tab.panel.click('scribe-next');
+    await until(walk, 'the initial 372 messages to be written', () => tab.panel.headline() === 'Up to date: 372 of 372 read.', 12 * TICK_MS);
+    const written = cursorReads();
+    assert.ok(written - initial <= 30, 'historical cursor requests during writing: ' + (written - initial));
+    walk.site.reply(CALM_REPLY);
+    await until(walk, 'the fourth historical check to start', () => held.release !== null, 8 * TICK_MS);
+    const fourth = JSON.parse(walk.model.of('HistoryCheck').at(-1).user);
+    assert.ok(fourth.evidence.some((row) => row.position === 1));
+    const checking = cursorReads() - written;
+    assert.ok(checking <= 8, 'historical cursor requests during checking and append: ' + checking);
+    const edited = 'The tide has covered the harbour steps.';
+    walk.site.edit(1, edited);
+    held.release();
+    await until(walk, 'the older edited source to invalidate the in-flight check', () =>
+        stored(walk, 'campaign').messages[0].contents[0].text === edited, 2 * TICK_MS);
+    const inputs = walk.model.of('HistoryCheck').map((call) => JSON.parse(call.user).position);
+    assert.deepEqual(inputs.slice(0, 4), [1, 2, 3, 4]);
+    const progress = REFERENCE.ScribeLog.checkProgress(stored(walk, 'book'), REFERENCE.ScribeIntake.read(walk.site.messages).messages);
+    assert.ok(progress.checkedThrough < 4);
+    assert.equal(stored(walk, 'campaign').messages.length, 373);
+});
+
+/**
+ * @return {Promise<object>}
+ */
+async function roomWithExpiringLinks() {
+    const walk = world();
+    walk.site.open(ROOM, campaign(186));
+    walk.model.answers.Story = (input) => CitedStory.answer(input, '');
+    const zeta = walk.site.rooms.get(ROOM).zeta;
+    const respond = zeta.respond.bind(zeta);
+    let generation = 0;
+    let rotate = false;
+    let expired = 0;
+    zeta.respond = async (receiver, url, options) => {
+        if (!WholeSite.paged(url)) {
+            return respond(receiver, url, options);
+        }
+        const address = new URL(url);
+        const cursor = address.searchParams.get('cursor');
+        if (cursor === null) {
+            if (rotate) {
+                generation++;
+            }
+        } else {
+            const separator = cursor.indexOf(':');
+            if (cursor.slice(0, separator) !== String(generation)) {
+                expired++;
+                return zetaResponse(url, 410, '{}');
+            }
+            address.searchParams.set('cursor', cursor.slice(separator + 1));
+        }
+        const response = await respond(receiver, address.href, options);
+        const body = JSON.parse(await response.text());
+        if (body.nextCursor) {
+            body.nextCursor = generation + ':' + body.nextCursor;
+        }
+        return zetaResponse(url, response.status, JSON.stringify(body));
+    };
+    const tab = await opened(walk);
+    await saveKey(walk, tab);
+    tab.panel.tab('Settings');
+    tab.panel.type('scribe-setting-size', '40');
+    tab.panel.type('scribe-setting-budget', '8');
+    tab.panel.click('scribe-next');
+    await until(walk, 'the stable links to finish reading the room', () => tab.panel.headline() === 'Up to date: 186 of 186 read.', 8 * TICK_MS);
+    tab.panel.tab('Progress');
+    assert.doesNotMatch(tab.panel.text('scribe-checked'), /next background history check/);
+    const cursorReads = () => walk.site.pageRequests().filter((row) => new URL(row.url).searchParams.has('cursor')).length;
+    const scheduleKey = REFERENCE.ScribeStore.name('checkafter', REFERENCE.ScribeStore.room(ROOM));
+    rotate = true;
+    return { walk, tab, cursorReads, scheduleKey, expired: () => expired };
+}
+
+test('expired Zeta page links space out background history checks while new messages still reach the book', async () => {
+    const { walk, tab, cursorReads, expired } = await roomWithExpiringLinks();
+    await until(walk, 'a deadline after repeated historical links expire',
+        () => tab.panel.text('scribe-checked').includes('next background history check'), 8 * TICK_MS);
+    assert.ok(expired() >= 2);
+    const scheduled = tab.panel.text('scribe-checked');
+    const earlierReads = cursorReads();
+    const earlierChecks = walk.model.of('HistoryCheck').length;
+    walk.site.reply(CALM_REPLY);
+    await until(walk, 'the new reply to reach the book during the wait', () => tab.panel.headline() === 'Up to date: 187 of 187 read.', 2 * TICK_MS);
+    await pass(walk, 8 * 60000);
+    assert.equal(tab.panel.text('scribe-checked'), scheduled.replace('of 186', 'of 187'));
+    assert.equal(cursorReads(), earlierReads);
+    assert.equal(walk.model.of('HistoryCheck').length, earlierChecks);
+    await until(walk, 'the next expensive check to resume', () => cursorReads() > earlierReads &&
+        walk.model.of('HistoryCheck').length > earlierChecks, 3 * 60000);
+    await until(walk, 'the next passage to be saved', () => {
+        const book = stored(walk, 'book');
+        const messages = REFERENCE.ScribeIntake.read(walk.site.messages).messages;
+        return REFERENCE.ScribeLog.checkProgress(book, messages).checkedThrough > Number(scheduled.match(/Checker: (\d+)/)[1]);
+    }, 2 * TICK_MS);
+});
+
+test('a silently dropped history deadline cannot start an unreserved scan or a second one after reload', async () => {
+    const { walk, tab, cursorReads, scheduleKey } = await roomWithExpiringLinks();
+    walk.storage.dropSetsMatching(/:checkafter:/);
+    await until(walk, 'the failed schedule write to be visible', () =>
+        tab.panel.text('scribe-problem-details').includes('history-check schedule'), 8 * TICK_MS);
+    assert.equal(walk.storage.get(scheduleKey, null), null);
+    const afterRefusal = cursorReads();
+    const progress = tab.panel.text('scribe-checked');
+    const paid = walk.model.of('HistoryCheck').length;
+    await pass(walk, 2 * 60000);
+    assert.ok(cursorReads() - afterRefusal <= 4, 'at most a stale link probe and one inexpensive page per retry');
+    assert.equal(walk.model.of('HistoryCheck').length, paid);
+    assert.equal(tab.panel.text('scribe-checked'), progress);
+    walk.storage.allow();
+    const fresh = await reload(walk, tab);
+    fresh.panel.tab('Progress');
+    await until(walk, 'confirmed reservation after reload', () => Number(walk.storage.get(scheduleKey, 0)) > walk.clock.now() &&
+        fresh.panel.text('scribe-checked').includes('next background history check'), 8 * TICK_MS);
+    const afterReload = cursorReads();
+    const afterPaid = walk.model.of('HistoryCheck').length;
+    await pass(walk, 8 * 60000);
+    assert.equal(cursorReads(), afterReload);
+    assert.equal(walk.model.of('HistoryCheck').length, afterPaid);
+});
+
+test('unreadable history schedule on reload allows new book entries while historical verification waits', async () => {
+    const { walk, tab, cursorReads, scheduleKey } = await roomWithExpiringLinks();
+    await until(walk, 'the original reservation to settle', () => tab.panel.text('scribe-checked').includes('next background history check'), 8 * TICK_MS);
+    const deadline = walk.storage.get(scheduleKey, 0);
+    walk.storage.refuseGetsMatching(/:checkafter:/);
+    const fresh = await reload(walk, tab);
+    fresh.panel.tab('Progress');
+    await until(walk, 'the unreadable schedule warning', () => fresh.panel.text('scribe-problem-details').includes('history-check schedule'), 3 * TICK_MS);
+    walk.site.reply(CALM_REPLY);
+    await until(walk, 'the new message written while only the schedule is unreadable', () =>
+        fresh.panel.headline() === 'Up to date: 187 of 187 read.', 3 * TICK_MS);
+    await pass(walk, 2 * TICK_MS);
+    const afterRefusal = cursorReads();
+    const paid = walk.model.of('HistoryCheck').length;
+    await pass(walk, 2 * 60000);
+    assert.equal(walk.model.of('HistoryCheck').length, paid);
+    assert.ok(cursorReads() - afterRefusal <= 2, 'blocked attempts should not walk old pages');
+    walk.storage.allow();
+    assert.equal(walk.storage.get(scheduleKey, 0), deadline);
+    await until(walk, 'the saved deadline to become visible again', () =>
+        fresh.panel.text('scribe-checked').includes(new Date(deadline).toLocaleTimeString()), 4 * TICK_MS);
+});
+
+test('an active room rebases its historical check after a backward clock adjustment', async () => {
+    const { walk, tab, cursorReads, scheduleKey } = await roomWithExpiringLinks();
+    await until(walk, 'an active history reservation', () => tab.panel.text('scribe-checked').includes('next background history check'), 8 * TICK_MS);
+    const initial = walk.storage.get(scheduleKey, 0);
+    const shift = 60 * 60000;
+    walk.clock.time -= shift;
+    for (const timer of walk.clock.timers.values()) {
+        timer.at -= shift;
+    }
+    const start = walk.clock.now();
+    const before = cursorReads();
+    const paid = walk.model.of('HistoryCheck').length;
+    await until(walk, 'the room to replace the outdated deadline', () => {
+        const corrected = walk.storage.get(scheduleKey, 0);
+        return corrected < initial && corrected >= start + 600000 && corrected <= walk.clock.now() + 600000 &&
+            tab.panel.text('scribe-checked').includes(new Date(corrected).toLocaleTimeString());
+    }, 2 * TICK_MS);
+    const corrected = walk.storage.get(scheduleKey, 0);
+    await pass(walk, corrected - walk.clock.now() - 100);
+    assert.equal(cursorReads(), before);
+    assert.equal(walk.model.of('HistoryCheck').length, paid);
+    await until(walk, 'historical verification to resume on the corrected clock', () =>
+        cursorReads() > before && walk.model.of('HistoryCheck').length > paid, 2 * TICK_MS);
 });
 
 for (const change of ['quiet room', 'new reply', 'edit ahead of the current batch', 'edit between scheduled polls']) {
@@ -5603,6 +5879,236 @@ for (const layout of ['top', 'frame']) {
         await settle();
         assert.equal(stored(walk, 'live').selection.text, newer);
         assert.equal(await send(walk, tab, 'Next.'), 'Next.\n@: ' + newer);
+    });
+
+    test(`a forbidden ${layout} player send warns and retries its existing reminder exactly once`, async () => {
+        const { walk, tab } = await adopted('8', { layout });
+        const chosen = 'Wait for the ferry.\nBring the lamp.';
+        await queueSelection(tab, chosen);
+        const delivery = stored(walk, 'live').delivery.id;
+        const start = walk.site.messages.length;
+        const respond = walk.site.respond.bind(walk.site);
+        const attempts = [];
+        let forbidden = true;
+        walk.site.respond = (receiver, url, options) => {
+            if (url === WholeSite.Messages && options?.method === 'POST') {
+                attempts.push(JSON.parse(options.body).text);
+                if (forbidden) {
+                    return Promise.resolve(zetaResponse(url, 403, '{"error":"room-private-marker"}'));
+                }
+            }
+            return respond(receiver, url, options);
+        };
+        const attempted = 'Go to the quay.\n@: [Scribe] ' + chosen;
+        assert.equal(await send(walk, tab, 'Go to the quay.'), attempted);
+        await until(walk, 'the rejected send warning', () => tab.panel.text('scribe-problems').includes('403'), 5000);
+        assert.match(tab.panel.text('scribe-problems'), /Zeta.*send.*403/i);
+        assert.equal(walk.site.messages.length, start);
+        assert.deepEqual(attempts, [attempted]);
+        assert.equal(stored(walk, 'live').delivery.id, delivery);
+        assert.deepEqual(plain(stored(walk, 'live').settled), []);
+        const fresh = await reload(walk, tab);
+        assert.match(fresh.panel.text('scribe-problems'), /403/);
+        forbidden = false;
+        const retry = attempted.replace('Go to the quay.', 'Wait at the quay.');
+        assert.equal(await send(walk, fresh, retry), retry);
+        await until(walk, 'the accepted retry to clear the forbidden warning',
+            () => !fresh.panel.text('scribe-problems').includes('403'), TICK_MS);
+        assert.deepEqual(attempts, [attempted, retry]);
+        assert.equal(walk.site.messages.length, start + 1);
+        assert.deepEqual(plain(stored(walk, 'live').settled), [delivery]);
+        assert.equal(stored(walk, 'live').delivery, null);
+        forbidden = true;
+        assert.equal(await send(walk, fresh, 'I stay here.'), 'I stay here.');
+        await until(walk, 'the rejected plain send to warn too', () => fresh.panel.text('scribe-problems').includes('403'), 5000);
+        assert.equal(stored(walk, 'live').delivery, null);
+        assert.doesNotMatch(JSON.stringify(stored(walk, 'live')) + fresh.panel.text('scribe-problem-details'), /room-private-marker/);
+    });
+
+    for (const trackedStatus of [201, 403]) {
+        test(`a delayed ${layout} tracked ${trackedStatus} settles its reminder and preserves the later plain send verdict`, async () => {
+            const { walk, tab } = await adopted('8', { layout });
+            await queueSelection(tab, 'Hold the gate.');
+            const { delivery } = stored(walk, 'live');
+            const respond = walk.site.respond.bind(walk.site);
+            let release;
+            let seed = true;
+            walk.site.respond = (receiver, url, options) => {
+                if (url !== WholeSite.Messages || options?.method !== 'POST') {
+                    return respond(receiver, url, options);
+                }
+                const refusal = () => zetaResponse(url, 403, '{}');
+                if (seed) {
+                    seed = false;
+                    return Promise.resolve(refusal());
+                }
+                if (!release) {
+                    return new Promise((resolve) => {
+                        release = () => resolve(trackedStatus === 403 ? refusal() : respond(receiver, url, options));
+                    });
+                }
+                return trackedStatus === 201 ? Promise.resolve(refusal()) : respond(receiver, url, options);
+            };
+            const warning = () => tab.panel.text('scribe-problems').includes('403');
+            await tab.pagePost('A previously refused plain message.');
+            await until(walk, 'the initial send warning', warning, 5000);
+            tab.type('I wait.');
+            tab.enter();
+            await until(walk, 'the tracked send to begin', () => typeof release === 'function', 2000);
+            await tab.pagePost('A separate plain message.');
+            await until(walk, 'the later plain send verdict', () => warning() === (trackedStatus === 201), 5000);
+            release();
+            await pass(walk, TICK_MS);
+            assert.equal(warning(), trackedStatus === 201);
+            const current = stored(walk, 'live');
+            assert.deepEqual(plain(current.settled), trackedStatus === 201 ? [delivery.id] : []);
+            assert.equal(current.delivery?.id ?? null, trackedStatus === 201 ? null : delivery.id);
+        });
+    }
+
+    for (const [status, code, media] of [
+        [429, 'TOO_MANY_REQUEST', 'application/json'],
+        [403, 'CHAT_ABUSED', 'application/json'],
+        [200, 'CHAT_ABUSED', 'text/event-stream'],
+    ]) {
+        test(`a ${layout} ${status} ${code} reply stream warns only its room and keeps the accepted reminder cleared`, async () => {
+            const { walk, tab } = await adopted('8', { layout });
+            const live = stored(walk, 'live');
+            const start = walk.site.messages.length;
+            walk.site.open(QUARRY, campaign(7));
+            const other = install(walk, '/rooms/' + QUARRY);
+            await other.openPage();
+            other.ready();
+            await until(walk, 'the second room to show its own panel', () => other.panel.host() !== null, TICK_MS);
+            assert.equal(await send(walk, tab, 'Go.'), 'Go.\n@: ' + live.ready);
+            const message = walk.site.messages.at(-1);
+            assert.equal(walk.site.messages.length, start + 1);
+            const endpoint = WholeSite.Messages + '/' + message.id + '/candidates/stream';
+            const otherEndpoint = WholeSite.messagesOf(QUARRY) + '/' + walk.site.messagesIn(QUARRY).at(-1).id + '/candidates/stream';
+            const respond = walk.site.respond.bind(walk.site);
+            const marker = status === 429 ? 'Trying before limit released in chat' : 'private-stream-marker';
+            const error = JSON.stringify({ code, status, message: marker });
+            const refusal = media === 'text/event-stream' ? 'event: error\ndata: ' + error + '\n\n' : error;
+            const success = 'data: {"text":"The ferry arrives."}\n\ndata: [DONE]\n\n';
+            let otherStream;
+            let failed = true;
+            walk.site.respond = (receiver, url, options) => {
+                if (url === otherEndpoint) {
+                    const body = new ReadableStream({ start(controller) {
+                        otherStream = controller;
+                        controller.enqueue(new TextEncoder().encode('data: {"text":"The quarry bell rings."}\n\n'));
+                    } });
+                    return Promise.resolve(zetaResponse(url, 200, body, 'text/event-stream'));
+                }
+                if (url === endpoint) {
+                    return Promise.resolve(failed ? zetaResponse(url, status, refusal, media) :
+                        zetaResponse(url, 200, success, 'text/event-stream'));
+                }
+                return respond(receiver, url, options);
+            };
+            const open = await other.chatWindow.fetch(otherEndpoint, { method: 'POST' });
+            const reader = open.body.getReader();
+            try {
+                assert.equal((await reader.read()).done, false);
+                const result = await tab.chatWindow.fetch(endpoint, { method: 'POST' });
+                assert.equal(await result.text(), refusal);
+                const indicator = code === 'CHAT_ABUSED' ? 'CHAT_ABUSED' : '429';
+                await until(walk, 'the failed reply stage to appear in Scribe', () =>
+                    tab.panel.text('scribe-problems').includes(indicator), 5000);
+                assert.match(tab.panel.text('scribe-problems'), /Zeta.*reply/i);
+                assert.equal(tab.panel.byId('scribe-problems').children.length, 1);
+                assert.ok(!other.panel.text('scribe-problems').includes(indicator));
+                assert.deepEqual(plain(stored(walk, 'live').settled), [live.delivery.id]);
+                assert.equal(stored(walk, 'live').delivery, null);
+                assert.equal(walk.site.messages.length, start + 1);
+                assert.ok(!JSON.stringify(stored(walk, 'live')).includes(marker));
+                assert.ok(!tab.panel.text('scribe-problem-details').includes(marker));
+                assert.ok(!JSON.stringify(walk.posts).includes(marker));
+                failed = false;
+                assert.equal(await (await tab.chatWindow.fetch(endpoint, { method: 'POST' })).text(), success);
+                await until(walk, 'a successful reply retry to clear the warning', () =>
+                    !tab.panel.text('scribe-problems').includes(indicator), 5000);
+                assert.equal(await send(walk, tab, 'I wait.'), 'I wait.');
+                assert.equal(walk.site.messages.length, start + 2);
+                assert.deepEqual(plain(stored(walk, 'live').settled), [live.delivery.id]);
+            } finally {
+                otherStream.close();
+                await reader.read();
+                reader.releaseLock();
+            }
+        });
+    }
+
+    test(`a ${layout} reply warning cannot settle a pending player send or return from an older retry`, async () => {
+        const { walk, tab } = await adopted('8', { layout });
+        const { delivery } = stored(walk, 'live');
+        const start = walk.site.messages.length;
+        const endpoint = WholeSite.Messages + '/MESSAGE-' + (start + 1) + '/candidates/stream';
+        const respond = walk.site.respond.bind(walk.site);
+        let accept;
+        let late;
+        let requests = 0;
+        walk.site.respond = (receiver, url, options) => {
+            if (url === WholeSite.Messages && options?.method === 'POST') {
+                return new Promise((resolve) => { accept = () => resolve(respond(receiver, url, options)); });
+            }
+            if (url === endpoint) {
+                requests++;
+                const refusal = () => zetaResponse(url, 429, '{"code":"TOO_MANY_REQUEST","status":429}');
+                if (requests === 1) {
+                    return Promise.resolve(refusal());
+                }
+                if (requests === 2) {
+                    return new Promise((resolve) => { late = () => resolve(refusal()); });
+                }
+                return Promise.resolve(zetaResponse(url, 200, 'data: [DONE]\n\n', 'text/event-stream'));
+            }
+            return respond(receiver, url, options);
+        };
+        tab.type('I wait.');
+        tab.enter();
+        await until(walk, 'the in-flight player send', () => typeof accept === 'function', 2000);
+        await tab.chatWindow.fetch(endpoint, { method: 'POST' });
+        await until(walk, 'the failed stream to warn while the send receipt is pending',
+            () => tab.panel.text('scribe-problems').includes('429'), 5000);
+        assert.equal(walk.site.messages.length, start);
+        assert.equal(stored(walk, 'live').delivery.id, delivery.id);
+        assert.equal(stored(walk, 'live').settled.includes(delivery.id), false);
+        accept();
+        await until(walk, 'the accepted send to settle exactly once',
+            () => stored(walk, 'live').settled.includes(delivery.id), 2 * TICK_MS);
+        assert.equal(walk.site.messages.length, start + 1);
+        const delayed = tab.chatWindow.fetch(endpoint, { method: 'POST' });
+        const retry = await tab.chatWindow.fetch(endpoint, { method: 'POST' });
+        assert.equal(await retry.text(), 'data: [DONE]\n\n');
+        await until(walk, 'the newest reply attempt to recover', () => !tab.panel.text('scribe-problems').includes('429'), 5000);
+        late();
+        await delayed;
+        await pass(walk, 1000);
+        assert.doesNotMatch(tab.panel.text('scribe-problems'), /429/);
+        assert.deepEqual(plain(stored(walk, 'live').settled), [delivery.id]);
+        assert.equal(stored(walk, 'live').delivery, null);
+    });
+
+    test(`a ${layout} stream response arriving after navigation leaves the new room alone`, async () => {
+        const { walk, tab } = await adopted('8', { layout });
+        const oldRoom = walk.site.messages.at(-1);
+        const endpoint = WholeSite.Messages + '/' + oldRoom.id + '/candidates/stream';
+        const respond = walk.site.respond.bind(walk.site);
+        let release;
+        walk.site.respond = (receiver, url, options) => url === endpoint ? new Promise((resolve) => {
+            release = () => resolve(zetaResponse(url, 429, '{"code":"TOO_MANY_REQUEST","status":429}'));
+        }) : respond(receiver, url, options);
+        const pending = tab.chatWindow.fetch(endpoint, { method: 'POST' });
+        walk.site.open(QUARRY, campaign(7));
+        tab.go('/rooms/' + QUARRY);
+        await tab.openPage();
+        await until(walk, 'the new room to finish opening', () => tab.panel.headline().startsWith('No local book: 7 messages.'), 2 * TICK_MS);
+        release();
+        await pending;
+        await pass(walk, TICK_MS);
+        assert.doesNotMatch(tab.panel.text('scribe-problems') + tab.panel.text('scribe-problem-details'), /429|CHAT_ABUSED/);
+        assert.equal(stored(walk, 'book', QUARRY), null);
     });
 
     test(`a ${layout} POST returning 401 keeps the unsent reminder for a manual retry, even across reload`, async () => {

@@ -37,6 +37,7 @@ const ScribeStore = Object.freeze({
             Spent: 'spent',
             Synced: 'synced',
             Others: 'others',
+            CheckAfter: 'checkafter',
         }),
         Segments: Object.freeze({
             Head: Object.freeze([4]),
@@ -45,6 +46,7 @@ const ScribeStore = Object.freeze({
             Spent: Object.freeze([3]),
             Synced: Object.freeze([3]),
             Others: Object.freeze([3]),
+            CheckAfter: Object.freeze([3]),
         }),
         Position: Object.freeze({
             Prefix: 0,

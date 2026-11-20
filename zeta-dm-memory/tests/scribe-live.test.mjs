@@ -4173,6 +4173,71 @@ test('the box shows only what will go: nothing while the book is held or another
     assert.equal(prepared.live.lines().ready, null);
 });
 
+test('a Checker ruling refreshes a due paragraph in the same scene and preserves the operator draft across reload', async () => {
+    const { live, keeper, model, storage } = rig({ settings: { refresh: 1, budget: 3 } });
+    await live.reply(at(41));
+    const before = live.view().ready;
+    assert.ok(before);
+    await live.force(null, 'The old version of my paragraph.');
+    const previous = live.lines();
+    const calls = model.calls.filter((call) => call.system === ScribeReminder.StoryPrompt).length;
+    const decision = { finding: 'eyes', sequence: 18, version: 'one', status: 'settled', factIds: [AGE, factIn(state, 'scarred and lean')] };
+    keeper.change({ state: { ...state, checkerRulings: [decision] } });
+    model.story = 'The new account has reached the mill.';
+    assert.equal(live.lines().ready, null);
+    assert.equal(live.starting({ ...previous, key: 'old-manual-offer' }), false);
+    assert.equal(live.view().draft, 'The old version of my paragraph.');
+    await ticks();
+    assert.ok(live.view().ready.includes(model.story));
+    const stories = model.calls.filter((call) => call.system === ScribeReminder.StoryPrompt);
+    assert.equal(stories.length, calls + 1);
+    assert.match(stories.at(-1).user, /Halvard.*age.*34/u);
+    assert.doesNotMatch(stories.at(-1).user, /scarred and lean/u);
+    live.close();
+    const reopened = rig({ ...keeper.view(), state: { ...state, checkerRulings: [{ ...decision, status: 'reopened' }] } }, storage);
+    assert.equal(reopened.live.lines().ready, null);
+    assert.equal(reopened.live.view().draft, 'The old version of my paragraph.');
+    await ticks();
+    const recaps = reopened.model.calls.filter((call) => call.system === ScribeReminder.StoryPrompt);
+    assert.equal(recaps.length, 1);
+    assert.doesNotMatch(recaps[0].user, /CURRENT BOOK CORRECTIONS/u);
+    assert.ok(reopened.live.lines().ready);
+});
+
+test('narrowing public evidence withdraws a shared ruling before send and reloads without telling the writer private or unknown claims', async () => {
+    const fixture = (number, wording, finding) => {
+        const passage = at(number);
+        const block = passage.blocks[0];
+        const source = { messageId: passage.id, blockNumber: block.blockNumber, position: number,
+            fingerprint: passage.fingerprint, speaker: block.speaker, quote: block.text };
+        return { finding, sequence: number, version: 'saved', status: 'settled', action: 'explain',
+            shareInReminder: true, canonical: wording, source, earlier: null, support: [ScribeLog.passage(source, passage)], factIds: [] };
+    };
+    const publicRuling = fixture(13, 'The noon bell marks the handover.', 'watch');
+    const hidden = fixture(7, 'The scar identifies the deserter.', 'scar');
+    const uncovered = fixture(41, 'A private letter names the courier.', 'letter');
+    const mentioned = fixture(15, 'Halvard is scarred and lean.', 'appearance');
+    const ruled = { ...state, checkerRulings: [publicRuling, hidden, uncovered, mentioned] };
+    const first = rig({ state: ruled, settings: { refresh: 1, budget: 3 } });
+    await first.live.reply(at(41));
+    const request = first.model.calls.filter((call) => call.system === ScribeReminder.StoryPrompt).at(-1).user;
+    assert.ok(request.includes(publicRuling.canonical));
+    for (const decision of [hidden, uncovered, mentioned]) {
+        assert.ok(!request.includes(decision.canonical));
+    }
+    const narrowed = { ...ruled, scenes: ruled.scenes.map((scene) => ({ ...scene, narrowed: true })) };
+    first.keeper.change({ state: narrowed });
+    assert.equal(first.live.lines().ready, null);
+    first.live.close();
+    const reloaded = rig({ ...first.keeper.view(), state: narrowed }, first.storage);
+    reloaded.live.view();
+    await ticks();
+    const next = reloaded.model.calls.filter((call) => call.system === ScribeReminder.StoryPrompt);
+    assert.equal(next.length, 1);
+    assert.ok(!next[0].user.includes('SHARED RULINGS:'));
+    assert.ok(!next[0].user.includes(publicRuling.canonical));
+});
+
 test('force with a stale waiting reminder rebuilds it, with or without budget left', async () => {
     for (const spent of [0, 5]) {
         const { keeper, live } = rig({ settings: { refresh: 1, budget: 3 } });
@@ -6295,6 +6360,86 @@ test('a delayed unauthorized response releases only its own pending attempt and 
     assert.equal(live.view().sends, 0);
     assert.equal(live.view().ready, null);
     assert.equal(live.view().held, null);
+});
+
+test('a forbidden send keeps the exact selection across reload until a later send is accepted', async () => {
+    const { live, storage, keeper } = await preparedRoom();
+    await live.force(null, 'Count the ships before dawn.');
+    const selected = live.lines();
+    live.outgoing('I wait.');
+    live.sendForbidden();
+    live.rejected(live.posting(), 403);
+    assert.equal(live.view().forbiddenSend, true);
+    assert.equal(live.lines().reminder, selected.reminder);
+    assert.equal(live.view().awaiting, false);
+    live.close();
+    const after = rig(keeper.view(), storage).live;
+    assert.equal(after.view().forbiddenSend, true);
+    const retry = after.outgoing('I wait again.');
+    assert.equal(retry.split('Count the ships before dawn.').length, 2);
+    assert.equal(after.view().forbiddenSend, true);
+    after.sent();
+    after.sendAllowed();
+    assert.equal(after.view().forbiddenSend, false);
+    assert.equal(after.view().selectionId, null);
+    assert.equal(after.view().lastDelivery, selected.reminder);
+});
+
+test('settling an older journal entry preserves the latest observed native send warning', async () => {
+    for (const forbidden of [true, false]) {
+        const { live } = await preparedRoom();
+        live.outgoing('I wait.');
+        const first = live.posting();
+        live.uncertain(first);
+        if (forbidden) {
+            live.sendForbidden();
+            live.went(first);
+            assert.equal(live.view().forbiddenSend, true);
+        } else {
+            live.sendAllowed();
+            live.rejected(first, 403);
+            assert.equal(live.view().forbiddenSend, false);
+        }
+    }
+});
+
+test('stream outcomes change only the room warning on an accepted delivery and keep a newer choice queued', async () => {
+    const { live, storage } = await preparedRoom();
+    const sent = live.lines().reminder;
+    live.outgoing('I wait.');
+    live.sent();
+    const record = () => JSON.parse(JSON.stringify(ScribeStore.read(storage, ROOM, ScribeStore.Kind.Live)));
+    const before = record();
+    for (const cause of ['rateLimited', 'chatAbused', 'ok']) {
+        live.streamResult('MESSAGE-42', cause);
+        const expected = cause === 'ok' ? null : cause;
+        assert.equal(live.view().streamWarning, expected);
+        assert.deepEqual(record(), { ...before, streamWarning: expected });
+        assert.equal(live.view().ready, null);
+        assert.equal(live.view().lastDelivery, sent);
+    }
+    await live.force(null, 'Bring enough water.');
+    const newer = live.lines().reminder;
+    live.streamResult('MESSAGE-42', 'chatAbused');
+    assert.equal(live.lines().reminder, newer);
+    assert.equal(live.view().selected, 'Bring enough water.');
+});
+
+test('a Zeta warning seen by a watching tab stays visible locally without overwriting the reader’s record', async () => {
+    const { live, storage } = await preparedRoom();
+    const watcher = rig({ reader: false, trusted: false }, storage).live;
+    const saved = ScribeStore.read(storage, ROOM, ScribeStore.Kind.Live);
+    watcher.sendForbidden();
+    watcher.streamResult('MESSAGE-42', 'rateLimited');
+    assert.equal(watcher.view().forbiddenSend, true);
+    assert.equal(watcher.view().streamWarning, 'rateLimited');
+    assert.equal(live.view().streamWarning, null);
+    assert.deepEqual(ScribeStore.read(storage, ROOM, ScribeStore.Kind.Live), saved);
+    watcher.sendAllowed();
+    watcher.streamResult('MESSAGE-42', 'ok');
+    assert.equal(watcher.view().forbiddenSend, false);
+    assert.equal(watcher.view().streamWarning, null);
+    assert.deepEqual(ScribeStore.read(storage, ROOM, ScribeStore.Kind.Live), saved);
 });
 
 test('an edited reminder clears when it goes, and a newer edit made meanwhile stays as a draft', async () => {

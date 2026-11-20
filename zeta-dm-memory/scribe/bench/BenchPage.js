@@ -81,6 +81,10 @@ const BenchPage = Object.freeze({
             QuestionsPrevious: 'questions-previous',
             QuestionsPlace: 'questions-place',
             QuestionsNext: 'questions-next',
+            FindingsList: 'findings-list',
+            FindingsPrevious: 'findings-previous',
+            FindingsPlace: 'findings-place',
+            FindingsNext: 'findings-next',
             AliasesList: 'aliases-list',
             AliasesPrevious: 'aliases-previous',
             AliasesPlace: 'aliases-place',
@@ -145,6 +149,7 @@ const BenchPage = Object.freeze({
                 place: 'QuestionsPlace',
                 next: 'QuestionsNext',
             }),
+            Findings: Object.freeze({ list: 'FindingsList', previous: 'FindingsPrevious', place: 'FindingsPlace', next: 'FindingsNext' }),
             Aliases: Object.freeze({
                 list: 'AliasesList',
                 previous: 'AliasesPrevious',
@@ -609,7 +614,18 @@ const BenchPage = Object.freeze({
      * @return {object}
      */
     replay(page, log) {
-        return ScribeReplay.run(log, page.order);
+        const messages = page.campaign?.messages ?? [];
+        return ScribeReplay.run(log, page.order, null, new Map(messages.map((message) => [message.id, message.fingerprint])), null, null, messages);
+    },
+
+    /**
+     * @param {object} log
+     * @param {object[]} messages
+     * @return {object}
+     */
+    checkerBook(log, messages) {
+        return { log, fingerprints: Object.fromEntries(messages.map((message) => [message.id, message.fingerprint])),
+            projections: Object.fromEntries(messages.map((message) => [message.id, message.projection ?? null])) };
     },
 
     /**
@@ -2120,6 +2136,12 @@ const BenchPage = Object.freeze({
             const lists = BenchPage.Settings.Lists;
             const rulings = BenchView.rulings(state);
             const rows = BenchPage.Rows;
+            const messages = page.campaign?.messages ?? [];
+            const checks = log.entries.some((entry) => entry.check || entry.checkerRuling)
+                ? ScribeLog.checkProgress(BenchPage.checkerBook(log, messages), messages).findings : [];
+            const findings = checks.filter((finding) => finding.status !== 'settled');
+            BenchPage.show(page, lists.Findings, BenchView.page(findings, page.pages[lists.Findings.list], 1),
+                (finding) => rows.checker(page, state, finding));
             BenchPage.paged(
                 page,
                 lists.Conflicts,
@@ -2183,7 +2205,7 @@ const BenchPage = Object.freeze({
             BenchPage.paged(
                 page,
                 lists.Made,
-                BenchView.made(log),
+                BenchView.made(log, state),
                 /**
                  * @param {object} made
                  * @return {object}
@@ -2584,6 +2606,65 @@ const BenchPage = Object.freeze({
                 actions,
                 outcome,
             );
+            return item;
+        },
+
+        /**
+         * @param {object} page
+         * @param {object} state
+         * @param {object} finding
+         * @return {object}
+         */
+        checker(page, state, finding) {
+            const settings = BenchPage.Settings;
+            const { item, actions, outcome } = BenchPage.Rows.frame(page);
+            const key = (role) => BenchPage.key('findings', finding.id, finding.version, role);
+            const accounts = BenchView.accounts(finding, state);
+            const note = (line) => item.append(BenchPage.make(page, settings.Tags.Paragraph, line));
+            note(finding.question);
+            if (finding.kind === 'Omission') {
+                note('Missing from the book');
+            }
+            for (const account of accounts) {
+                note(account.text);
+            }
+            if (finding.ruling) {
+                note(BenchView.checkerDecision(finding.ruling));
+            }
+            if (finding.status === 'reopened') {
+                note(finding.actionable === false ? 'Evidence changed. Waiting for the Checker to verify the current passages.' :
+                    'Evidence changed. Review the current passages.');
+            }
+            if (finding.actionable === false) {
+                return item;
+            }
+            const select = BenchPage.make(page, settings.Tags.Select, settings.Nothing);
+            BenchPage.keyed(page, select, key('account'));
+            BenchPage.control(page, select);
+            page.fields.push(select);
+            BenchPage.options(page, select, accounts.map((account) => [account.key, account.text]), accounts[0].key);
+            const label = BenchPage.make(page, settings.Tags.Label, settings.Nothing, settings.Classes.Field);
+            label.append(BenchPage.make(page, settings.Tags.Span, 'Account to keep'), select);
+            const detail = BenchPage.field(page, settings.InputTypes.Text, 'Explanation for keeping both accounts', key('explanation'), true);
+            const share = ScribeKnowledge.shareableFinding(state, finding, page.campaign.messages) ? BenchPage.field(page,
+                settings.InputTypes.Checkbox, 'Include this ruling in reminders for everyone', key('share'), true) : null;
+            if (share) {
+                item.append(share.label);
+            }
+            const apply = (change) => BenchPage.ruling(page, outcome, (log, current) => {
+                const messages = page.campaign.messages;
+                ScribeLog.ruleFinding(BenchPage.checkerBook(log, messages), current, messages,
+                    { finding: finding.id, version: finding.version, ...change,
+                        ...(change.action !== 'open' && share?.input.checked ? { shareInReminder: true } : {}) }, ScribeKnowledge.shareableFinding);
+                return 'Ruling saved.';
+            }, null);
+            const button = (text, act) => BenchPage.button(page, text, act, true, key(text));
+            item.append(label, button('Choose account', () => apply({ action: 'choose', account: select.value })), detail.label,
+                button('Explain how both fit', () => apply({ action: 'explain', explanation: detail.input.value.trim() })));
+            if (finding.status !== 'deferred') {
+                actions.append(button('Leave open', () => apply({ action: 'open' })));
+            }
+            item.append(actions, outcome);
             return item;
         },
 

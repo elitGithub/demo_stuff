@@ -19,6 +19,7 @@ function load() {
         ['core', 'ScribeAnswer'],
         ['core', 'ScribeLog'],
         ['core', 'ScribeReplay'],
+        ['core', 'ScribeKnowledge'],
         ['core', 'ScribeAnalyzer'],
         ['core', 'ScribeAdoption'],
         ['bench', 'BenchView'],
@@ -103,6 +104,53 @@ function checkedModel(onCheck) {
     } };
 }
 
+test('Keeper re-observes both cited accounts before saving a ruling, refuses partial coverage and serializes two clicks', async () => {
+    const chat = new FakeChat(2);
+    chat.edit(1, 'The town is called Talon.').edit(2, 'The town is called Harrow.');
+    const model = checkedModel(() => {});
+    const ask = model.ask;
+    model.ask = async (role, system, user) => {
+        const answer = await ask(role, system, user);
+        if (system === ScribePedant.CheckPrompt) {
+            const page = JSON.parse(user);
+            if (page.position === 2) {
+                const finding = { kind: 'Question', question: 'Did the party move to a different town?',
+                    source: { ref: 'm2b1', quote: 'The town is called Harrow.' },
+                    earlier: { ref: 'm1b1', quote: 'The town is called Talon.' } };
+                answer.text = JSON.stringify({ page: page.page, complete: true, claims: [], findings: [finding] });
+            }
+        }
+        return answer;
+    };
+    const { keeper, storage } = await opened(chat, model, { checkPassage: ScribePedant.checkPassage });
+    await keeper.adopt({});
+    await keeper.tick();
+    await keeper.tick();
+    const row = keeper.view().checkerFindings[0];
+    assert.ok(row?.actionable, JSON.stringify(keeper.view().checkerProblem));
+    const change = { finding: row.id, version: row.version, action: 'open' };
+    chat.hide(1);
+    await assert.rejects(keeper.ruling(change), /could not be confirmed/);
+    assert.equal(savedBook(storage).log.entries.filter((entry) => entry.checkerRuling).length, 0);
+    const release = chat.hold('newest');
+    const pending = keeper.ruling(change);
+    await assert.rejects(keeper.ruling(change), /checked again/);
+    release();
+    await pending;
+    assert.equal(keeper.view().checkerFindings.find((item) => item.id === row.id).status, 'deferred');
+    const decisions = savedBook(storage).log.entries.filter((entry) => entry.checkerRuling);
+    assert.equal(decisions.length, 1);
+    assert.equal(decisions[0].checkerRuling.support.length, 2);
+    assert.equal(model.calls.length, 2);
+    keeper.close();
+    const next = await opened(chat, model, { storage, tabId: 'next', checkPassage: ScribePedant.checkPassage });
+    assert.equal(next.keeper.view().state.checkerRulings[0].status, 'deferred');
+    chat.edit(1, 'The town is called Rowan.');
+    await assert.rejects(next.keeper.ruling({ ...change, action: 'choose', account: 'earlier' }));
+    assert.equal(next.keeper.view().state.checkerRulings[0].status, 'reopened');
+    assert.equal(savedBook(storage).log.entries.filter((entry) => entry.checkerRuling).length, 1);
+});
+
 test('an edit to #1 during a paid independent check is re-observed without a poll and cannot be published', async () => {
     const chat = new FakeChat(80);
     const held = gate();
@@ -119,6 +167,155 @@ test('an edit to #1 during a paid independent check is re-observed without a pol
     assert.equal(savedBook(storage).log.entries.some((entry) => entry.check), false);
     assert.equal(cents(keeper.view().spentToday), 1);
 });
+
+test('expensive checks share a room deadline across reader handoff and verify due work before saving', async () => {
+    const chat = new FakeChat(80);
+    const model = checkedModel(() => {});
+    const clock = clockAt();
+    const zeta = chat.zeta.bind(chat);
+    const starts = [];
+    chat.zeta = (tab) => {
+        const source = zeta(tab);
+        return { ...source, distant: () => true, newest: (through, required, known, check) => {
+            if (check) {
+                if (!check.reserve()) {
+                    return { deferredCheck: true };
+                }
+                starts.push(clock.now());
+            }
+            return source.newest(through, required, known);
+        } };
+    };
+    const options = { checkPassage: ScribePedant.checkPassage, clock };
+    const first = await opened(chat, model, options);
+    await first.keeper.adopt({});
+    await first.keeper.tick();
+    assert.equal(first.keeper.view().checkedThrough, 1);
+    const due = clock.now() + 10 * MINUTE;
+    assert.equal(first.keeper.view().expensiveCheckAt, due);
+    first.keeper.close();
+    const next = await opened(chat, model, { ...options, storage: first.storage, tabId: 'successor' });
+    clock.time = due - 1;
+    await next.keeper.tick();
+    await next.keeper.tick();
+    assert.equal(next.keeper.view().expensiveCheckAt, due);
+    assert.deepEqual(model.calls.map((page) => page.position), [1]);
+    assert.deepEqual(starts, [due - 10 * MINUTE]);
+    clock.time = due;
+    await next.keeper.tick();
+    assert.equal(next.keeper.view().checkedThrough, 2);
+    assert.deepEqual(starts, [due - 10 * MINUTE, due]);
+    assert.deepEqual(model.calls.map((page) => page.position), [1, 2]);
+    await next.keeper.pause();
+    assert.equal(next.keeper.view().expensiveCheckAt, null);
+});
+
+for (const refusal of ['dropSetsMatching', 'refuseSetsMatching', 'refuseGetsMatching']) {
+    test('a failed history schedule ' + refusal + ' keeps intake live and only permits durable expensive checks', async () => {
+        const chat = new FakeChat(80);
+        const model = checkedModel(() => {});
+        const clock = clockAt();
+        const storage = new FakeStorage();
+        const zeta = chat.zeta.bind(chat);
+        let expensive = 0;
+        chat.zeta = (tab) => {
+            const source = zeta(tab);
+            return { ...source, distant: () => true, newest: (through, required, known, check) => {
+                if (check) {
+                    if (!check.reserve()) {
+                        return { deferredCheck: true };
+                    }
+                    expensive++;
+                }
+                return source.newest(through, required, known);
+            } };
+        };
+        storage[refusal](/checkafter/);
+        const { keeper } = await opened(chat, model, { checkPassage: ScribePedant.checkPassage, clock, storage });
+        await keeper.adopt({});
+        await keeper.tick();
+        assert.equal(keeper.view().read, 80);
+        assert.equal(keeper.view().checkedThrough, 0);
+        assert.equal(keeper.view().expensiveCheckAt, null);
+        assert.match(keeper.view().checkerProblem.reason, /Tampermonkey storage/);
+        assert.equal(expensive, 0);
+        assert.equal(model.calls.length, refusal === 'refuseGetsMatching' ? 0 : 1);
+        storage.allow();
+        clock.time += MINUTE;
+        await keeper.tick();
+        assert.equal(keeper.view().checkedThrough, 1);
+        assert.equal(expensive, 1);
+        assert.equal(model.calls.length, 1);
+    });
+}
+
+test('a near Checker target waits before paying for distant evidence across reload and runs when the room fits on the head', async () => {
+    const chat = new FakeChat(64);
+    const model = checkedModel(() => {});
+    const clock = clockAt();
+    const zeta = chat.zeta.bind(chat);
+    let fits = false;
+    chat.zeta = (tab) => {
+        const source = zeta(tab);
+        return { ...source, distant: (id) => !fits && id === 'MESSAGE-1', onHead: () => fits,
+            newest: (through, required, known, check) => {
+                if (check && !fits && required.includes('MESSAGE-1') && !check.reserve()) {
+                    return { deferredCheck: true };
+                }
+                return source.newest(through, required, known);
+            } };
+    };
+    const options = { checkPassage: ScribePedant.checkPassage, clock };
+    const first = await opened(chat, model, options);
+    await first.keeper.adopt({});
+    await first.keeper.tick();
+    await first.keeper.tick();
+    assert.deepEqual(model.calls.map((page) => page.position), [1]);
+    assert.equal(first.keeper.view().expensiveCheckAt, clock.now() + 10 * MINUTE);
+    first.keeper.close();
+    const next = await opened(chat, model, { ...options, storage: first.storage, tabId: 'successor' });
+    await next.keeper.tick();
+    assert.deepEqual(model.calls.map((page) => page.position), [1]);
+    assert.equal(next.keeper.view().expensiveCheckAt, clock.now() + 10 * MINUTE);
+    fits = true;
+    await next.keeper.tick();
+    assert.deepEqual(model.calls.map((page) => page.position), [1, 2]);
+    assert.equal(next.keeper.view().checkedThrough, 2);
+    assert.equal(next.keeper.view().expensiveCheckAt, null);
+});
+
+for (const edit of [false, true]) {
+    test('a full cursor repair certifies unchanged evidence and refuses an edited in-flight source: edit=' + edit, async () => {
+        const chat = new FakeChat(80);
+        const zeta = chat.zeta.bind(chat);
+        let repairs = 0;
+        chat.zeta = (tab) => {
+            const source = zeta(tab);
+            return { ...source, newest: (through) => {
+                if (through !== null) {
+                    repairs++;
+                    return { needsHistory: true };
+                }
+                return source.newest(through);
+            } };
+        };
+        const held = gate();
+        const model = checkedModel(() => held.promise);
+        const { keeper } = await opened(chat, model, { checkPassage: ScribePedant.checkPassage });
+        await keeper.adopt({});
+        const checking = keeper.tick();
+        await until(() => model.calls.length === 1);
+        if (edit) {
+            chat.edit(1, 'The original account is withdrawn.');
+        }
+        const before = repairs;
+        held.release();
+        await checking;
+        assert.equal(repairs - before, 1);
+        assert.equal(keeper.view().checkedThrough, edit ? 0 : 1);
+        assert.equal(model.calls.length, 1);
+    });
+}
 
 test('a historical page cannot publish after losing the lease and the next reader checks the same source', async () => {
     const held = gate();

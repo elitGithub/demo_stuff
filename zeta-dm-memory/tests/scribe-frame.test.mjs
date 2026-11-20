@@ -352,7 +352,7 @@ test('the role is told by where it runs', () => {
             TagName: 'zetaScribe',
             Tag: 1,
             TokenName: 'scribe-bridge',
-            Kind: { Ready: 'ready', Arm: 'arm', Starting: 'starting', Reserved: 'reserved', Cancelled: 'cancelled', Rejected: 'rejected', Uncertain: 'uncertain', Sent: 'sent' },
+            Kind: { Ready: 'ready', Arm: 'arm', Starting: 'starting', Reserved: 'reserved', Cancelled: 'cancelled', Rejected: 'rejected', Uncertain: 'uncertain', Sent: 'sent', Activity: 'activity' },
             ReadyRepeatMs: 1000,
             MessageBytes: 4500,
             LongestLine: 6000,

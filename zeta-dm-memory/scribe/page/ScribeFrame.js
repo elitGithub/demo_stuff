@@ -15,6 +15,7 @@ const ScribeFrame = Object.freeze({
             Rejected: 'rejected',
             Uncertain: 'uncertain',
             Sent: 'sent',
+            Activity: 'activity',
         }),
         ReadyRepeatMs: 1000,
         MessageBytes: 4500,
@@ -178,6 +179,15 @@ const ScribeFrame = Object.freeze({
         if (ScribeFrame.tagged(data, bridge.Kind.Ready)) {
             return Object.freeze({ [bridge.TagName]: bridge.Tag, kind: bridge.Kind.Ready });
         }
+        if (ScribeFrame.tagged(data, bridge.Kind.Activity)) {
+            const { seq, index, room, message, outcome } = data;
+            const outcomes = message === null ? ['start', 'forbidden', 'ok'] : ['start', 'rateLimited', 'chatAbused', 'ok'];
+            if (!ScribeFrame.counted(seq) || !ScribeFrame.counted(index) || typeof room !== 'string' ||
+                !ScribeFrame.named(room) || !ScribeFrame.named(message) || !outcomes.includes(outcome)) {
+                return null;
+            }
+            return Object.freeze({ [bridge.TagName]: bridge.Tag, kind: bridge.Kind.Activity, seq, index, room, message, outcome });
+        }
         if (![bridge.Kind.Starting, bridge.Kind.Sent, bridge.Kind.Cancelled, bridge.Kind.Uncertain, bridge.Kind.Rejected].some((kind) => ScribeFrame.tagged(data, kind))) {
             return null;
         }
@@ -198,6 +208,9 @@ const ScribeFrame = Object.freeze({
         const attempt = data.attempt === undefined ? null : data.attempt;
         const index = Number.isSafeInteger(data.index) && data.index >= settings.FirstIndex ? data.index : null;
         const stamped = data.kind === bridge.Kind.Starting && data.submission !== undefined;
+        if (data.kind === bridge.Kind.Rejected && data.status !== undefined && ![401, 403].includes(data.status)) {
+            return null;
+        }
         const trimmed = stamped && data.trimmedSubmission !== undefined;
         if (
             (stamped && (typeof data.submission !== settings.StringType || !/^[0-9a-f]{8}$/.test(data.submission))) ||
@@ -220,6 +233,7 @@ const ScribeFrame = Object.freeze({
             reminder: ready ? reminder : null,
             attempt: ready ? attempt : null,
             index,
+            ...(data.kind === bridge.Kind.Rejected && data.status === 403 ? { status: 403 } : {}),
             ...(stamped ? { submission: data.submission } : {}),
             ...(stamped && (ready || data.previous === true) && data.retained === true ? { retained: true } : {}),
             ...(!ready && data.previous === true ? { previous: true, previousSuggestion: data.previousSuggestion === true } : {}),
@@ -242,6 +256,7 @@ const ScribeFrame = Object.freeze({
             reserve: null,
             repeat: null,
             index: settings.FirstIndex,
+            activity: settings.FirstIndex,
         };
         /**
          * @param {object} message
@@ -300,7 +315,7 @@ const ScribeFrame = Object.freeze({
          * @param {string} kind
          * @return {void}
          */
-        const report = (kind, went = frame.went) => {
+        const report = (kind, went = frame.went, status = null) => {
             post({
                 [bridge.TagName]: bridge.Tag,
                 kind,
@@ -312,6 +327,7 @@ const ScribeFrame = Object.freeze({
                 reminder: went.reminder,
                 attempt: went.attempt,
                 index: went.index,
+                ...(kind === bridge.Kind.Rejected && status === 403 ? { status } : {}),
                 ...(kind === bridge.Kind.Starting ? { submission: went.submission } : {}),
                 ...(kind === bridge.Kind.Starting && went.retained ? { retained: true } : {}),
                 ...(went.previous ? { previous: true, previousSuggestion: went.previousSuggestion } : {}),
@@ -408,14 +424,28 @@ const ScribeFrame = Object.freeze({
                 } : null,
                 confirmed: () => sent(went),
                 uncertain: () => sent(went, bridge.Kind.Uncertain),
-                rejected: () => report(bridge.Kind.Rejected, went),
+                rejected: (status) => report(bridge.Kind.Rejected, went, status),
                 cancelled: () => report(bridge.Kind.Cancelled, went),
             };
         };
         const hook = ScribeSender.attach({ document, window, outgoing, sent, cancelled, receipt: options.watch ? receipt : null,
             manualClick: () => Boolean(options.watch && (frame.offer.reminder || frame.reserve)), ignore: null });
         const watcher = options.watch?.();
-        watcher?.onPost(hook.posting);
+        const activity = (room, message) => {
+            if (room !== frame.offer.room || !ScribeFrame.named(message) || frame.seq === settings.NoSeq) {
+                return null;
+            }
+            const seq = frame.seq;
+            const index = ++frame.activity;
+            const announce = (outcome) => post({ [bridge.TagName]: bridge.Tag, kind: bridge.Kind.Activity, seq, index, room, message, outcome });
+            announce('start');
+            return announce;
+        };
+        watcher?.onStream?.(activity);
+        watcher?.onPost((room) => {
+            const receipt = hook.posting(room);
+            return ScribeSender.observePost(receipt, activity(room, null));
+        });
         window.addEventListener(settings.Message, heard);
         ready();
         frame.repeat = window.setInterval(ready, bridge.ReadyRepeatMs);

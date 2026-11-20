@@ -535,7 +535,7 @@ const ScribeAnalyzer = Object.freeze({
         const evidence = fact.evidence;
         const account = evidence && evidence.attribution !== 'witnessed'
             ? ' [' + evidence.attribution + ' by ' + evidence.speaker + ']' : '';
-        return category + settings.Colon + fact.text + source + (scope ? ' [scope: ' + scope + ']' : '') + account;
+        return category + settings.Colon + ScribeCategory.displayValue(fact) + source + (scope ? ' [scope: ' + scope + ']' : '') + account;
     },
 
     /**
@@ -588,10 +588,16 @@ const ScribeAnalyzer = Object.freeze({
         for (const [id, lines] of ledgers) {
             ledger.push(settings.SubjectMarker + labels.get(id), ...(lines.length === 0 ? [settings.NoFacts] : lines));
         }
+        const decisions = (state.checkerRulings ?? []).filter((decision) => decision.status !== 'superseded' &&
+            decision.support.every((source) => source.position <= through)).map((decision) => JSON.stringify({
+            disputed: decision.question, status: decision.status, accepted: decision.status === 'settled' ? decision.canonical : null,
+            sources: decision.support.map((source) => ({ message: source.position, speaker: source.speaker, quote: source.quote })),
+        }));
         return Object.freeze([
             ScribeAnalyzer.section(headings.Player, [player]),
             ScribeAnalyzer.section(headings.Subjects, subjects),
             ScribeAnalyzer.section(headings.Ledger, ledger),
+            ...(decisions.length ? [ScribeAnalyzer.section('Operator rulings on cited evidence', decisions)] : []),
         ]);
     },
 

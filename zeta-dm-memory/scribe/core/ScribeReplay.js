@@ -599,6 +599,7 @@ const ScribeReplay = Object.freeze({
         const scope = ScribeCategory.scope(operation);
         return {
             ...scope,
+            ...(operation.ruledAttribute ? { ruledAttribute: operation.ruledAttribute } : {}),
             ...(operation.evidence ? { evidence: operation.evidence } : {}),
             ...(operation.evidence || scope.dimension ? { claims: [{ id, text: operation.text, position,
                 cite: operation.cite ?? null, evidence: operation.evidence ?? null }] } : {}),
@@ -612,7 +613,20 @@ const ScribeReplay = Object.freeze({
      * @return {object|null}
      */
     file(book, item, id) {
-        const operation = item.operation;
+        let operation = item.operation;
+        const correction = book.checkPatches.get(id);
+        if (correction && operation.subject === correction.before.subject && operation.category === correction.before.category &&
+            operation.text === correction.before.text && operation.cite === correction.before.cite &&
+            operation.target === correction.before.target &&
+            (!Object.hasOwn(correction.before, 'targetText') || operation.targetText === correction.before.targetText) &&
+            ScribeCategory.sameScope(operation, correction.before)) {
+            if (correction.after === null) {
+                book.removed.add(id);
+            } else {
+                operation = { ...operation, ...correction.after };
+                item = { ...item, position: book.positions.get(operation.cite) ?? operation.position };
+            }
+        }
         const kind = ScribeReplay.kindOf(operation.category);
         if (kind === null) {
             return null;
@@ -1227,7 +1241,7 @@ const ScribeReplay = Object.freeze({
      * @param {ReadonlyMap<string, object>|null} edits
      * @return {Readonly<{ revision: number, subjects: readonly object[], facts: readonly object[], scenes: readonly object[], nights: readonly object[], threads: readonly object[], conflicts: readonly object[], lookAlikes: readonly object[], stale: readonly object[], refinements: readonly object[], aliases: readonly object[], questions: readonly object[], unaliased: readonly object[], distinct: readonly object[], contradictions: readonly object[] }>}
      */
-    run(log, order, pending = null, fingerprints = null, edits = null, sources = null) {
+    run(log, order, pending = null, fingerprints = null, edits = null, sources = null, messages = null) {
         const settings = ScribeReplay.Settings;
         const status = ScribeReplay.Status;
         const likeness = ScribeReplay.Likeness;
@@ -1241,7 +1255,7 @@ const ScribeReplay = Object.freeze({
                     (operation.type === rulingTypes.EditFact || operation.editedSource)));
             if (corrections.length > 0) {
                 const originals = [];
-                ScribeReplay.run(log, order, pending, fingerprints, edits, originals);
+                ScribeReplay.run(log, order, pending, fingerprints, edits, originals, messages);
                 for (const operation of corrections) {
                     const source = operation.editedSource ?? operation.source;
                     if (source.sourcePrint !== null && fingerprints !== null && fingerprints.get(source.cite) !== source.sourcePrint) {
@@ -1262,7 +1276,22 @@ const ScribeReplay = Object.freeze({
         for (const [index, id] of order.entries()) {
             positions.set(id, index + 1);
         }
+        const lookup = messages instanceof Map ? messages : messages && new Map(messages.map((message) => [message.id, message]));
+        const checkerRulings = ScribeLog.findingHistory(log, positions, fingerprints, lookup);
+        const checkPatches = new Map();
+        const latestFindings = new Map(checkerRulings.map((decision) => [decision.finding, decision]));
+        for (const decision of checkerRulings) {
+            const latest = latestFindings.get(decision.finding);
+            for (const patch of decision.patches) {
+                if (decision.status === 'settled') {
+                    checkPatches.set(patch.id, patch);
+                } else if (latest.status !== 'settled' || !latest.factIds.includes(patch.id)) {
+                    checkPatches.set(patch.id, { ...patch, after: null });
+                }
+            }
+        }
         const book = {
+            checkPatches,
             edits,
             sources,
             positions,
@@ -1432,6 +1461,12 @@ const ScribeReplay = Object.freeze({
                 if (position !== undefined) {
                     counted.push({ operation, position, ruled, sequence: entry.sequence, index, origin: entry.origin });
                 }
+            }
+        }
+        for (const decision of checkerRulings.filter((item) => item.status === 'settled')) {
+            for (const [index, operation] of decision.additions.entries()) {
+                counted.push({ operation, position: positions.get(operation.cite), ruled: true,
+                    sequence: decision.sequence, index, origin: ScribeLog.Origin.Operator });
             }
         }
         ScribeReplay.apply(book, rulings, ScribeReplay.Merging);
@@ -1758,6 +1793,7 @@ const ScribeReplay = Object.freeze({
             ...(edits.size ? { editOrigins: Object.fromEntries([...edits].map(([id, operation]) => [id, { ...operation.source }])) } : {}),
             subjects,
             facts: book.facts,
+            ...(checkerRulings.length ? { checkerRulings: JSON.parse(JSON.stringify(checkerRulings)) } : {}),
             ...(claims.length ? { claims: JSON.parse(JSON.stringify(claims)) } : {}),
             scenes,
             nights: [...book.nights.values()],
@@ -1775,7 +1811,7 @@ const ScribeReplay = Object.freeze({
             legacyDecisions,
             decisionRead: fingerprints === null ? null : (legacyDecisions.length ? { ...log.read } : {}),
         });
-        ScribeReplay.Inputs.set(state, { order, pending, fingerprints });
+        ScribeReplay.Inputs.set(state, { order, pending, fingerprints, messages });
         return state;
     },
 });

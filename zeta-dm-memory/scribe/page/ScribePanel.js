@@ -1358,9 +1358,10 @@ const ScribePanel = Object.freeze({
      * @param {ReadonlyArray<*>} items
      * @param {(row: *, index: number) => object} build
      * @param {((item: object) => string)|null} identify
+     * @param {number} size
      * @return {void}
      */
-    paged(panel, name, items, build, identify) {
+    paged(panel, name, items, build, identify, size = BenchView.PageSize) {
         const settings = ScribePanel.Settings;
         let rows = items;
         if (identify !== null) {
@@ -1389,10 +1390,10 @@ const ScribePanel = Object.freeze({
                 },
             );
             if (follow >= settings.NoCount) {
-                panel.pages[name] = Math.floor(follow / BenchView.PageSize) + settings.FirstPage;
+                panel.pages[name] = Math.floor(follow / size) + settings.FirstPage;
             }
         }
-        ScribePanel.show(panel, name, BenchView.page(rows, panel.pages[name]), build);
+        ScribePanel.show(panel, name, BenchView.page(rows, panel.pages[name], size), build);
     },
 
     /**
@@ -2445,7 +2446,8 @@ const ScribePanel = Object.freeze({
                 ...heard,
                 offer: heard.offer ?? null,
                 understood: heard.understood ?? null,
-                findings: heard.findings ?? [],
+                findings: PanelView.listed(heard.findings).filter((finding) => !view.checkerFindings.some((check) =>
+                    check.id && PanelView.sameFinding(kept.state, check, finding))),
                 problem: mask(heard.problem),
                 ready: heard.ready ?? null,
                 edited: heard.edited ?? false,
@@ -2614,7 +2616,7 @@ const ScribePanel = Object.freeze({
         }
         const needs = PanelView.needs(view.state);
         const ruling = needs.conflicts + needs.lookAlikes + needs.questions;
-        const open = PanelView.listed(view.checkerFindings).length + PanelView.tally(
+        const open = PanelView.listed(view.checkerFindings).filter((finding) => finding.status !== 'settled').length + PanelView.tally(
             live.findings,
             /**
              * @param {{ status: string }} finding
@@ -4119,6 +4121,11 @@ const ScribePanel = Object.freeze({
             parts.OfferActions.replaceChildren(...offering);
             const findings = PanelView.findings(view.state, live);
             for (const finding of PanelView.listed(view.checkerFindings)) {
+                if (finding.id) {
+                    findings.push({ key: finding.id, check: finding, state: view.state, messages: view.messages,
+                        ...(finding.status === 'settled' ? { ruling: finding.ruling } : {}) });
+                    continue;
+                }
                 const citations = [finding.source, finding.earlier].filter(Boolean);
                 const notes = citations.map((citation) => '#' + citation.position + ' · ' + citation.speaker + ' “' + citation.quote + '”');
                 if (finding.record) {
@@ -4138,15 +4145,18 @@ const ScribePanel = Object.freeze({
                  * @param {object} item
                  * @return {object}
                  */
-                (item) => ScribePanel.Rows.finding(panel, item),
+                (item) => item.check ? ScribePanel.Rows.checker(panel, item) : ScribePanel.Rows.finding(panel, item),
                 /**
                  * @param {{ key: string }} item
                  * @return {string}
                  */
                 (item) => ScribePanel.key(settings.Sections.Findings, item.key),
+                findings.some((item) => item?.check && item.ruling === undefined) ? 1 : BenchView.PageSize,
             );
             ScribePanel.paged(panel, settings.Lists.RuledFindings, findings.filter((item) => item?.ruling !== undefined),
-                (item) => ScribePanel.Rows.finding(panel, item), (item) => ScribePanel.key(settings.Sections.Findings, item.key));
+                (item) => item.check ? ScribePanel.Rows.checker(panel, item) : ScribePanel.Rows.finding(panel, item),
+                (item) => ScribePanel.key(settings.Sections.Findings, item.key),
+                findings.some((item) => item?.check && item.ruling !== undefined) ? 1 : BenchView.PageSize);
         },
 
         /**
@@ -4163,8 +4173,13 @@ const ScribePanel = Object.freeze({
                 !view.booked || [ScribeKeeper.Phase.NoBook, ScribeKeeper.Phase.Loading].includes(view.phase);
             parts.Story.hidden = live.notice === null;
             parts.Checked.hidden = !view.booked || !view.checksEnabled;
+            let schedule = settings.Nothing;
+            if (Number.isFinite(view.expensiveCheckAt) && view.expensiveCheckAt > panel.clock.now()) {
+                const time = new Date(view.expensiveCheckAt).toLocaleTimeString();
+                schedule = ' Zeta expired the links to older messages. The next background history check is due at ' + time + ' (local time).';
+            }
             ScribePanel.write(parts.Checked, parts.Checked.hidden ? settings.Nothing :
-                'Checker: ' + view.checkedThrough + ' of ' + view.total + ' messages checked.');
+                'Checker: ' + view.checkedThrough + ' of ' + view.total + ' messages checked.' + schedule);
             ScribePanel.write(parts.Story, live.notice ?? settings.Nothing);
             const pulled = view.pulled;
             let line = pulled === null && !view.reader ? words.NoPullHere : settings.Nothing;
@@ -4557,7 +4572,7 @@ const ScribePanel = Object.freeze({
                 item.append(field.label);
             } else if (fact.expected) {
                 actions.append(ScribePanel.wait(panel, outlet, ScribePanel.button(panel, words.Edit, async () => {
-                    panel.factDraft = { id: fact.id, subject: panel.chosen, room, expected: fact.expected, text: fact.text };
+                    panel.factDraft = { id: fact.id, subject: panel.chosen, room, expected: fact.expected, text: fact.expected.text };
                     panel.factInput = null;
                     ScribePanel.say(panel, outlet, settings.Nothing);
                     ScribePanel.redraw(panel);
@@ -5078,6 +5093,72 @@ const ScribePanel = Object.freeze({
                 actions,
                 outcome,
             );
+            return item;
+        },
+
+        /**
+         * @param {object} panel
+         * @param {{check:object, accounts:object[]}} row
+         * @return {object}
+         */
+        checker(panel, row) {
+            const settings = ScribePanel.Settings;
+            const { check } = row;
+            const accounts = BenchView.accounts(check, row.state);
+            const outlet = ScribePanel.key(settings.Sections.Findings, check.id);
+            const key = (role) => ScribePanel.key(outlet, check.version, role);
+            const { item, actions, outcome } = ScribePanel.Rows.frame(panel, outlet);
+            item.append(ScribePanel.make(panel, settings.Tags.Paragraph, check.question, settings.Classes.Strong));
+            if (check.kind === 'Omission') {
+                item.append(ScribePanel.make(panel, settings.Tags.Paragraph, 'Missing from the book'));
+            }
+            for (const account of accounts) {
+                item.append(ScribePanel.make(panel, settings.Tags.Paragraph, account.text));
+            }
+            if (check.ruling) {
+                item.append(ScribePanel.make(panel, settings.Tags.Paragraph, BenchView.checkerDecision(check.ruling), settings.Classes.Meta));
+            }
+            if (check.status === 'reopened') {
+                item.append(ScribePanel.make(panel, settings.Tags.Paragraph, check.actionable === false ?
+                    'Evidence changed. Waiting for the Checker to verify the current passages.' :
+                    'Evidence changed. Review the current passages.', settings.Classes.Meta));
+            }
+            if (check.status === 'settled' || check.actionable === false) {
+                item.append(outcome);
+                return item;
+            }
+            const account = ScribePanel.select(panel, 'Account to keep', key('account'), true);
+            ScribePanel.options(panel, account.select, accounts.map((option) => [option.key, option.text]), accounts[0].key);
+            ScribePanel.belong(panel, outlet, account.select);
+            const explanation = ScribePanel.field(panel, settings.InputTypes.Text, 'Explanation for keeping both accounts',
+                key('explanation'), false, true);
+            ScribePanel.belong(panel, outlet, explanation.input);
+            const share = ScribeKnowledge.shareableFinding(row.state, check, row.messages) ? ScribePanel.field(panel,
+                settings.InputTypes.Checkbox, 'Include this ruling in reminders for everyone', key('share'), false, true) : null;
+            if (share) {
+                ScribePanel.belong(panel, outlet, share.input);
+                item.append(share.label);
+            }
+            const apply = (change) => ScribePanel.perform(panel, { outlet, question: null, book: true,
+                pending: settings.Words.Saving, done: 'Ruling saved.',
+                call: () => panel.keeper.ruling({ finding: check.id, version: check.version, ...change,
+                    ...(change.action !== 'open' && share?.input.checked ? { shareInReminder: true } : {}) }) });
+            const button = (label, act) => ScribePanel.wait(panel, outlet,
+                ScribePanel.button(panel, label, act, settings.Guard.Book, key(label)));
+            const choose = button('Choose account', () => apply({ action: 'choose', account: account.select.value }));
+            const explain = button('Explain how both fit', async () => {
+                const text = explanation.input.value.trim();
+                if (!text) {
+                    ScribePanel.refuse(panel, outlet, key('explanation'), 'Enter how the two accounts fit together.');
+                    return false;
+                }
+                return apply({ action: 'explain', explanation: text });
+            });
+            item.append(account.label, choose, explanation.label, explain);
+            if (check.status !== 'deferred') {
+                actions.append(button('Leave open', () => apply({ action: 'open' })));
+            }
+            item.append(actions, outcome);
             return item;
         },
 

@@ -36,6 +36,7 @@ const ScribeKeeper = Object.freeze({
         LastLines: 50,
         KeptAnswers: 8,
         RepullMs: 60000,
+        ExpensiveCheckMs: 600000,
         FirstEpoch: 0,
         NoCount: 0,
         NoSpending: 0,
@@ -93,6 +94,7 @@ const ScribeKeeper = Object.freeze({
             BadAnchor: 'The argument is not valid: anchor',
             BadOperations: 'The argument is not valid: operations',
             BadClaim: 'The argument is not valid: claim',
+            CheckSchedule: 'Scribe could not read or save the history-check schedule on this device. Check that Tampermonkey storage is available.',
             BadProfile: 'The argument is not valid: profile',
         }),
         Flight: Object.freeze({
@@ -395,6 +397,15 @@ const ScribeKeeper = Object.freeze({
             keeper.damaged ??
             keeper.cut ?? (pending ? ScribeKeeper.Settings.Messages.Attribution + pending.position : null);
         const history = local === null && problem !== null && problem === keeper.cut;
+        const nextCheck = keeper.checkProgress && messages[keeper.checkProgress.checkedThrough];
+        const waiting = keeper.reader && !keeper.closed && keeper.phase === ScribeKeeper.Phase.Idle &&
+            keeper.book?.adopted && keeper.compared && keeper.historyChecked && !keeper.pausing &&
+            keeper.unloaded === null && !keeper.owed.size && ScribeKeeper.held(keeper) === null &&
+            keeper.writtenThrough > keeper.checkProgress?.checkedThrough && nextCheck &&
+            (keeper.checkPage || keeper.spentToday < keeper.settings.budget) &&
+            keeper.expensiveAfter > keeper.clock.now() &&
+            (keeper.deferredCheck?.id === nextCheck.id && !keeper.zeta.onHead?.(keeper.deferredCheck.sources) ||
+                keeper.zeta.distant?.(nextCheck.id));
         return Object.freeze({
             phase: keeper.phase,
             roomId: keeper.roomId,
@@ -411,6 +422,7 @@ const ScribeKeeper = Object.freeze({
             checkedThrough: keeper.checkProgress?.checkedThrough ?? 0,
             checkerFindings: keeper.checkProgress?.findings ?? [],
             checkerProblem: keeper.checkProblem,
+            expensiveCheckAt: waiting ? keeper.expensiveAfter : null,
             verificationPending: keeper.verificationPending,
             legacyClaims: keeper.legacyClaims,
             made: keeper.made,
@@ -620,6 +632,7 @@ const ScribeKeeper = Object.freeze({
         let settingsRead = null;
         let campaignRead = null;
         let bookRead = null;
+        ScribeKeeper.checkSchedule(keeper);
         try {
             settingsRead = ScribeKeeper.readKind(keeper, kinds.Settings);
             if (settingsRead.damage === null) {
@@ -1065,15 +1078,27 @@ const ScribeKeeper = Object.freeze({
      * @param {boolean} keepAll
      * @param {boolean} emptyRoom
      * @param {boolean} whole
+     * @param {readonly object[]} verified
      * @return {{ fresh: boolean, joined: boolean, shared: boolean, changed: boolean }}
      */
-    takeIn(keeper, pulled, keepAll, emptyRoom = false, whole = false) {
+    takeIn(keeper, pulled, keepAll, emptyRoom = false, whole = false, verified = []) {
         const saved = keeper.campaign.messages;
         const merged = emptyRoom && !keepAll && pulled.length === 0 && saved.length > 0
             ? { messages: [], removed: saved.map((message) => message.id), joined: true, shared: false, changed: true }
             : ScribeKeeper.merge(saved, pulled, keepAll, whole);
         if (!merged.joined) {
             return { fresh: false, joined: false, shared: false, changed: false };
+        }
+        if (verified.length) {
+            const replacements = new Map(verified.map((row) => [row.id, row]));
+            merged.messages = merged.messages.map((row) => {
+                const fresh = replacements.get(row.id);
+                if (fresh && JSON.stringify(fresh) !== JSON.stringify(row)) {
+                    merged.changed = true;
+                    return fresh;
+                }
+                return row;
+            });
         }
         const confirmed = whole && (emptyRoom || pulled.length > 0) && !keepAll;
         if (!merged.changed && !(confirmed && !keeper.campaign.completeHistory)) {
@@ -1187,9 +1212,11 @@ const ScribeKeeper = Object.freeze({
 
     /**
      * @param {object} keeper
+     * @param {Function|null} onComplete
+     * @param {Function|null} allowExpensive
      * @return {Promise<boolean>}
      */
-    async history(keeper) {
+    async history(keeper, onComplete = null, allowExpensive = null) {
         const settings = ScribeKeeper.Settings;
         const flight = settings.Flight;
         const epoch = keeper.epoch;
@@ -1211,6 +1238,7 @@ const ScribeKeeper = Object.freeze({
                         ScribeKeeper.tell(keeper, { kind: ScribeKeeper.Event.Changed });
                     }
                 },
+                allowExpensive,
             );
         } catch (error) {
             if (keeper.epoch === epoch) {
@@ -1221,7 +1249,7 @@ const ScribeKeeper = Object.freeze({
             return false;
         }
         keeper.flight = null;
-        if (result === null) {
+        if (result === null || result.deferredCheck) {
             ScribeKeeper.tell(keeper, { kind: ScribeKeeper.Event.Changed });
             return false;
         }
@@ -1240,6 +1268,9 @@ const ScribeKeeper = Object.freeze({
         }
         if (taken.fresh && whole && !result.skipped && !result.problem && pulled.at(settings.Last)?.id === keeper.campaign.messages.at(settings.Last)?.id) {
             ScribeKeeper.observed(keeper, pulled, result.completeHistory === true);
+            if (result.completeHistory === true && onComplete) {
+                onComplete(pulled);
+            }
         }
         if (taken.fresh) {
             ScribeKeeper.confirmStretch(keeper, pulled, result);
@@ -1265,19 +1296,31 @@ const ScribeKeeper = Object.freeze({
      * @param {object} keeper
      * @param {string|null} anchor
      * @param {object|null} expected
+     * @param {readonly string[]} evidence
+     * @param {object|null} check
      * @return {Promise<boolean>}
      */
-    async newest(keeper, anchor = null, expected = null) {
+    async newest(keeper, anchor = null, expected = null, evidence = [], check = null) {
         const epoch = keeper.epoch;
         const before = ScribeKeeper.issue(keeper);
         keeper.flight = ScribeKeeper.Settings.Flight.Looking;
         keeper.began = keeper.clock.now();
         let page = null;
         let through = null;
+        const required = new Set(evidence);
         try {
             const stretch = keeper.checkStretch && !keeper.pausing && ScribeKeeper.due(keeper) ? ScribeKeeper.nextStretch(keeper) : [];
             through = anchor ?? (stretch.length ? keeper.intake.messages[Math.max(0, stretch[0].position - 2)].id : null);
-            page = await keeper.zeta.newest(through);
+            for (const row of stretch) {
+                required.add(row.id);
+            }
+            if (through !== null) {
+                required.add(through);
+            }
+            if (expected) {
+                required.add(expected.id);
+            }
+            page = await keeper.zeta.newest(through, [...required], keeper.campaign.messages, check);
         } catch (error) {
             if (keeper.epoch === epoch) {
                 keeper.problem = { source: 'Zeta', reason: ScribeKeeper.words(error) };
@@ -1287,22 +1330,51 @@ const ScribeKeeper = Object.freeze({
             return false;
         }
         keeper.flight = null;
+        if (page?.deferredCheck) {
+            return false;
+        }
         if (page === null) {
             if (ScribeKeeper.issue(keeper) !== before) {
                 ScribeKeeper.tell(keeper, { kind: ScribeKeeper.Event.Changed });
             }
             return false;
         }
+        if (page.needsHistory) {
+            if ((keeper.cutShort || keeper.unjoined) && !ScribeKeeper.mayRepull(keeper)) {
+                return false;
+            }
+            const originals = keeper.intake?.messages.filter((row) => required.has(row.id)) ?? [];
+            let confirmed = false;
+            const fresh = await ScribeKeeper.history(keeper, (pulled) => {
+                const received = new Set(pulled.map((row) => row.id));
+                confirmed = originals.length === required.size && originals.every((row) => {
+                    const current = keeper.intake?.messages[row.position - 1];
+                    return received.has(row.id) && current?.id === row.id && current.fingerprint === row.fingerprint &&
+                        current.projection === row.projection && current.attributionPending === row.attributionPending;
+                });
+            }, page.expiredCheck ? check.reserve : null);
+            if (!fresh || keeper.cutShort || keeper.unjoined || keeper.epoch !== epoch) {
+                return false;
+            }
+            if (expected === null) {
+                return true;
+            }
+            const current = keeper.intake?.messages[expected.position - 1];
+            return confirmed && current?.id === expected.id && current.fingerprint === expected.fingerprint &&
+                current.projection === expected.projection && !current.attributionPending;
+        }
         keeper.problem = null;
-        const pulled = ScribeKeeper.single(page.messages);
+        const head = ScribeKeeper.single(page.messages);
+        const verified = page.verified ?? [];
+        const pulled = [...verified, ...head];
         const complete = ScribeKeeper.whole(page) && !page.skipped && !page.problem && page.completeHistory === true;
         if (anchor && !complete && !pulled.some((message) => message.id === anchor)) {
             keeper.problem = page.problem ? { source: 'Zeta', reason: page.problem } : ScribeKeeper.Settings.Messages.Unsettled;
             ScribeKeeper.tell(keeper, { kind: ScribeKeeper.Event.Changed });
             return false;
         }
-        const taken = ScribeKeeper.takeIn(keeper, pulled, page.skipped > ScribeKeeper.Settings.NoCount,
-            ScribeKeeper.whole(page) && page.problem === null && page.emptyRoom === true, complete);
+        const taken = ScribeKeeper.takeIn(keeper, head, page.skipped > ScribeKeeper.Settings.NoCount,
+            ScribeKeeper.whole(page) && page.problem === null && page.emptyRoom === true, complete, verified);
         if (keeper.epoch !== epoch) {
             return false;
         }
@@ -1337,7 +1409,8 @@ const ScribeKeeper = Object.freeze({
         }
         if (expected !== null) {
             const current = keeper.intake?.messages[expected.position - 1];
-            return observed && pulled.some((message) => message.id === expected.id) && current?.id === expected.id &&
+            const received = new Set(pulled.map((message) => message.id));
+            return observed && received.has(expected.id) && evidence.every((id) => received.has(id)) && current?.id === expected.id &&
                 current.fingerprint === expected.fingerprint && !current.attributionPending && current.projection === expected.projection;
         }
         return taken.fresh;
@@ -1677,7 +1750,8 @@ const ScribeKeeper = Object.freeze({
                         const positions = new Set(entry.messageIds);
                         const first = room.find((message) => positions.has(message.id)) ?? room[0];
                         const anchor = first ? room[Math.max(0, first.position - 2)].id : null;
-                        const fresh = await ScribeKeeper.newest(keeper, anchor);
+                        const fresh = await ScribeKeeper.newest(keeper, anchor, null, [...entry.messageIds,
+                            ...questions.map((question) => room[question.position - 1].id)]);
                         if (keeper.epoch !== epoch || !ScribeKeeper.writable(keeper)) {
                             throw new Error(settings.Messages.ThrownAway);
                         }
@@ -1914,9 +1988,53 @@ const ScribeKeeper = Object.freeze({
 
     /**
      * @param {object} keeper
+     * @param {boolean} reserve
+     * @return {boolean}
+     */
+    checkSchedule(keeper, reserve = false) {
+        const now = keeper.clock.now();
+        const maximum = now + ScribeKeeper.Settings.ExpensiveCheckMs;
+        try {
+            const saved = keeper.storage.get(keeper.checkAfterKey, 0);
+            let deadline = Number.isSafeInteger(saved) && saved > 0 ? saved : 0;
+            const due = reserve && deadline <= now;
+            if (due || deadline > maximum) {
+                deadline = maximum;
+                if (keeper.reader && ScribeKeeper.still(keeper)) {
+                    keeper.storage.set(keeper.checkAfterKey, deadline);
+                    if (keeper.storage.get(keeper.checkAfterKey, 0) !== deadline) {
+                        throw new Error(ScribeKeeper.Settings.Messages.CheckSchedule);
+                    }
+                } else if (reserve) {
+                    return false;
+                }
+            }
+            keeper.expensiveAfter = deadline;
+            if (keeper.checkProblem?.reason === ScribeKeeper.Settings.Messages.CheckSchedule) {
+                keeper.checkProblem = null;
+            }
+            return due;
+        } catch {
+            keeper.expensiveAfter = null;
+            keeper.scheduleReadAt = now + ScribeKeeper.Settings.RepullMs;
+            keeper.checkProblem = { source: 'Scribe', reason: ScribeKeeper.Settings.Messages.CheckSchedule };
+            if (reserve) {
+                keeper.checkRetryAt = now + ScribeKeeper.Settings.RepullMs;
+            }
+            return false;
+        }
+    },
+
+    /**
+     * @param {object} keeper
      * @return {Promise<void>}
      */
     async check(keeper) {
+        const now = keeper.clock.now();
+        if (keeper.expensiveAfter > now + ScribeKeeper.Settings.ExpensiveCheckMs ||
+            keeper.expensiveAfter === null && (now >= keeper.scheduleReadAt || keeper.scheduleReadAt > now + ScribeKeeper.Settings.RepullMs)) {
+            ScribeKeeper.checkSchedule(keeper);
+        }
         if (!keeper.checkPassage || keeper.phase !== ScribeKeeper.Phase.Idle ||
             !keeper.book?.adopted || !keeper.compared || !keeper.historyChecked || keeper.pausing ||
             keeper.unloaded !== null || keeper.owed.size || ScribeKeeper.held(keeper) !== null ||
@@ -1937,6 +2055,12 @@ const ScribeKeeper = Object.freeze({
         }
         const epoch = keeper.epoch;
         const target = work.message;
+        if ((keeper.expensiveAfter === null || keeper.clock.now() < keeper.expensiveAfter) &&
+            (keeper.deferredCheck?.id === target.id && keeper.deferredCheck.version === work.version &&
+                !keeper.zeta.onHead?.(keeper.deferredCheck.sources) || keeper.zeta.distant?.(target.id))) {
+            return;
+        }
+        keeper.deferredCheck = null;
         const selected = keeper.settings.pedant;
         const modelKey = 'model:' + selected;
         const limit = keeper.book.log.checkLimits?.[modelKey];
@@ -1972,18 +2096,37 @@ const ScribeKeeper = Object.freeze({
             ScribeKeeper.store(keeper, ScribeStore.Kind.Book, book);
             keeper.book = book;
         };
-        const save = async (page) => {
+        const save = async (page, sources = null) => {
             if (!current()) {
                 throw yieldPage;
             }
-            keeper.checkPage = { id: target.id, version: work.version, model: selected, page };
+            keeper.checkPage = { id: target.id, version: work.version, model: selected, page, sources };
             if (keeper.owed.size) {
                 throw new Error(keeper.owing);
             }
             keeper.pollPending = false;
             const first = Math.min(target.position, page.verifyFrom ?? target.position,
                 ...page.findings.map((finding) => finding.earlier?.position ?? target.position));
-            if (!messages[first - 1] || !await ScribeKeeper.newest(keeper, messages[first - 1].id, target) || !current()) {
+            const evidence = sources ?? messages.slice(first - 1, target.position).map((message) => message.position);
+            const cited = [...evidence, ...page.findings.map((finding) => finding.earlier?.position ?? target.position)];
+            const ids = cited.map((position) => messages[position - 1].id);
+            const check = {
+                previouslyLimited: keeper.expensiveAfter !== 0,
+                cooling: keeper.expensiveAfter > keeper.clock.now(),
+                reserve: () => {
+                    if (!current()) {
+                        return false;
+                    }
+                    if (!ScribeKeeper.checkSchedule(keeper, true)) {
+                        keeper.deferredCheck = { id: target.id, version: work.version,
+                            sources: [target.id, messages[first - 1].id, messages.at(-1).id, ...ids] };
+                        return false;
+                    }
+                    return true;
+                },
+            };
+            if (!messages[first - 1] || !await ScribeKeeper.newest(keeper, messages[first - 1].id, target,
+                ids, check) || !current()) {
                 throw yieldPage;
             }
             const book = durableBook();
@@ -2008,16 +2151,23 @@ const ScribeKeeper = Object.freeze({
         ScribeKeeper.occupy(keeper, ScribeKeeper.Busy.Checking);
         try {
             if (keeper.checkPage?.id === target.id && keeper.checkPage.version === work.version && keeper.checkPage.model === selected) {
-                await save(keeper.checkPage.page);
+                await save(keeper.checkPage.page, keeper.checkPage.sources);
             }
             keeper.checkPage = null;
             await keeper.checkPassage({
                 message: target, written: work.written, earlierClaims: work.earlierClaims, rulings: work.rulings,
                 completedPages: work.completed, completedSegments: work.segments, savePage: save, saveSegment: save, learnLimit,
                 ...(Number.isSafeInteger(limit?.bytes) && limit.bytes > 0 ? { pageBytes: limit.bytes } : {}),
-                ask: async (system, input) => {
+                ask: async (system, input, sources = []) => {
                     if (!current()) {
                         throw yieldPage;
+                    }
+                    if (keeper.expensiveAfter === null || keeper.clock.now() < keeper.expensiveAfter) {
+                        const ids = [...sources].map((position) => messages[position - 1].id);
+                        if (ids.some((id) => keeper.zeta.distant?.(id))) {
+                            keeper.deferredCheck = { id: target.id, version: work.version, sources: ids };
+                            throw yieldPage;
+                        }
                     }
                     const failure = ScribeKeeper.recount(keeper);
                     if (failure || keeper.owed.size || keeper.spentToday >= keeper.settings.budget) {
@@ -2130,7 +2280,7 @@ const ScribeKeeper = Object.freeze({
             ScribeKeeper.lose(keeper);
             return;
         }
-        if (keeper.busy !== null) {
+        if (keeper.busy !== null || keeper.deciding) {
             if (poll && [ScribeKeeper.Busy.Reading, ScribeKeeper.Busy.Checking].includes(keeper.busy)) {
                 keeper.pollPending = true;
             }
@@ -2161,7 +2311,7 @@ const ScribeKeeper = Object.freeze({
                     const requested = target && keeper.intake?.messages.find((message) => message.id === target.id);
                     const first = requested ? Math.min(requested.position, keeper.writtenThrough + 1) : null;
                     const anchor = first ? keeper.intake.messages[Math.max(0, first - 2)].id : null;
-                    fresh = await ScribeKeeper.newest(keeper, anchor);
+                    fresh = await ScribeKeeper.newest(keeper, anchor, null, requested ? [requested.id] : []);
                 }
             }
             if (keeper.epoch === epoch && fresh) {
@@ -2547,12 +2697,58 @@ const ScribeKeeper = Object.freeze({
     replay(keeper, log) {
         const messages = keeper.intake?.messages ?? [];
         const order = messages.map((message) => message.id);
-        return ScribeReplay.run(log, order, null, new Map(messages.map((message) => [message.id, message.fingerprint])));
+        return ScribeReplay.run(log, order, null, new Map(messages.map((message) => [message.id, message.fingerprint])), null, null, messages);
     },
 
     /**
      * @param {object} keeper
-     * @param {(log: object, state: object) => *} change
+     * @param {object} change
+     * @return {Promise<void>}
+     * @throws {Error}
+     */
+    async decide(keeper, change) {
+        ScribeKeeper.guard(keeper, true);
+        ScribeKeeper.needBook(keeper);
+        ScribeKeeper.readable(keeper);
+        const findings = keeper.checkProgress?.findings ?? [];
+        const finding = typeof change?.finding === 'string' && typeof change.version === 'string'
+            && findings.find((row) => row.id === change.finding && row.version === change.version);
+        if (!finding || !keeper.historyChecked || keeper.deciding || keeper.owed.size) {
+            throw new Error('The evidence for this question needs to be checked again. Reopen it in Findings.');
+        }
+        const record = ScribeLog.checkRecord(finding.record);
+        const evidence = new Set([finding.source?.messageId, finding.earlier?.messageId, ...finding.support.map((source) => source.messageId),
+            record?.cite, record?.evidence?.messageId].filter(Boolean));
+        const messages = keeper.intake.messages;
+        const cited = messages.filter((message) => evidence.has(message.id));
+        if (!cited.length || cited.length !== evidence.size) {
+            throw new Error('The cited messages are unavailable. Refresh this room before ruling.');
+        }
+        const epoch = keeper.epoch;
+        keeper.deciding = true;
+        try {
+            const latest = cited.at(-1);
+            const seen = await ScribeKeeper.newest(keeper, cited[0].id, latest, cited.map((message) => message.id));
+            if (!seen || keeper.epoch !== epoch || keeper.closed || !ScribeKeeper.writable(keeper)) {
+                throw new Error('The cited messages could not be confirmed. Refresh the question and try again.');
+            }
+            ScribeKeeper.guard(keeper, true);
+            ScribeKeeper.readable(keeper);
+            const saved = ScribeKeeper.readKind(keeper, ScribeStore.Kind.Book);
+            if (saved.damage || !saved.value || !ScribeKeeper.soundBook(saved.value)) {
+                throw new Error(saved.damage ?? ScribeKeeper.damagedBook());
+            }
+            const book = saved.value;
+            ScribeLog.ruleFinding(book, ScribeKeeper.replay(keeper, book.log), keeper.intake.messages, change, ScribeKnowledge.shareableFinding);
+            ScribeKeeper.saveBook(keeper, book, ScribeKeeper.Settings.Flight.Ruling);
+        } finally {
+            keeper.deciding = false;
+        }
+    },
+
+    /**
+     * @param {object} keeper
+     * @param {Function} change
      * @return {Promise<void>}
      * @throws {Error}
      */
@@ -2788,6 +2984,12 @@ const ScribeKeeper = Object.freeze({
                 ),
 
             /**
+             * @param {object} change
+             * @return {Promise<void>}
+             */
+            ruling: (change) => ScribeKeeper.decide(keeper, change),
+
+            /**
              * @param {readonly object[]|null} resolution
              * @return {Promise<void>}
              */
@@ -2880,9 +3082,14 @@ const ScribeKeeper = Object.freeze({
             ask,
             checkPassage: options.checkPassage ?? null,
             checkProgress: null,
+            deciding: false,
             checkPage: null,
             checkProblem: null,
             checkRetryAt: 0,
+            checkAfterKey: ScribeStore.name(ScribeStore.Settings.Types.CheckAfter, ScribeStore.room(roomId)),
+            expensiveAfter: 0,
+            scheduleReadAt: 0,
+            deferredCheck: null,
             clock,
             notify,
             claim,

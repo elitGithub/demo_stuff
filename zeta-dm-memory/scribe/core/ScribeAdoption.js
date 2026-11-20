@@ -580,7 +580,8 @@ const ScribeAdoption = Object.freeze({
         const answers = step.pass === ScribeAdoption.Pass.Answers;
         const order = answers ? job.roomOrder : job.order;
         const pending = answers ? job.pending : null;
-        const state = step.state.revision === job.log.revision ? step.state : ScribeReplay.run(job.log, order, pending, job.fingerprints);
+        const state = step.state.revision === job.log.revision ? step.state :
+            ScribeReplay.run(job.log, order, pending, job.fingerprints, null, null, job.room);
         let filing = operations;
         if (story) {
             for (const { operation } of unquoted) {
@@ -618,7 +619,7 @@ const ScribeAdoption = Object.freeze({
             job.log.notes.push(note.text);
         }
         for (const question of step.questions) {
-            const state = ScribeReplay.run(job.log, order, pending, job.fingerprints);
+            const state = ScribeReplay.run(job.log, order, pending, job.fingerprints, null, null, job.room);
             const entry = ScribeLog.rule(job.log, state, {
                 type: ScribeLog.Ruling.Dismiss,
                 question: question.id,
@@ -654,6 +655,7 @@ const ScribeAdoption = Object.freeze({
             const roomOrder = room.map((message) => message.id);
             const end = options.readThrough ?? room.length;
             Object.assign(job, options, {
+                room,
                 messages: room.slice(0, end),
                 order: roomOrder.slice(0, end),
                 roomOrder,
@@ -664,9 +666,9 @@ const ScribeAdoption = Object.freeze({
                 unpriced: 0,
             });
             while (!(await job.paused())) {
-                let state = ScribeReplay.run(job.log, job.order, null, job.fingerprints);
+                let state = ScribeReplay.run(job.log, job.order, null, job.fingerprints, null, null, room);
                 const answerState = job.log.nextQuestion > 1 && (end < room.length || job.pending.size)
-                    ? ScribeReplay.run(job.log, roomOrder, job.pending, job.fingerprints) : state;
+                    ? ScribeReplay.run(job.log, roomOrder, job.pending, job.fingerprints, null, null, room) : state;
                 const answered = answerState.questions.filter(
                     /**
                      * @param {{ answer: string|null, dismissed: boolean }} question
@@ -748,7 +750,7 @@ const ScribeAdoption = Object.freeze({
                     if (notesStop !== null) {
                         return notesStop;
                     }
-                    state = ScribeReplay.run(job.log, job.order, null, job.fingerprints);
+                    state = ScribeReplay.run(job.log, job.order, null, job.fingerprints, null, null, room);
                 }
                 if (!reading) {
                     return ScribeAdoption.finish(job, stops.Done, null);

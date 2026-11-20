@@ -2,6 +2,7 @@ import assert from 'node:assert/strict';
 import { readdirSync, readFileSync } from 'node:fs';
 import test from 'node:test';
 import CampaignBuilder from './support/CampaignBuilder.mjs';
+import CitedStory from './support/CitedStory.mjs';
 import FakePage from './support/FakePage.mjs';
 import FakeServer from './support/FakeServer.mjs';
 
@@ -9,10 +10,11 @@ const { ScribeIntake, ScribeAnswer, ScribeLog, ScribeReplay, ScribeAnalyzer, Ben
 
 const builder = new CampaignBuilder('Orla');
 for (let number = 1; number <= 100; number++) {
+    const duties = ` Halvard keeps watch from line ${number}. Mirelle counts coins to line ${number}.`;
     if (number % 2 === 0) {
-        builder.player(`I answer the ferryman, line ${number}.`);
+        builder.player(`I answer the ferryman, line ${number}.` + duties);
     } else {
-        builder.narrator(`The tale goes on, line ${number}.`);
+        builder.narrator(`The tale goes on, line ${number}.` + duties);
     }
 }
 const story = ScribeIntake.read(builder.messages).messages;
@@ -118,15 +120,13 @@ function scripted(call) {
         const first = Number(range[1]);
         const last = Number(range[2]);
         return {
-            content: answer({
-                SUBJECTS: ['Halvard | character', 'Mirelle | character'],
+            content: CitedStory.answer(call.user, answer({
+                SUBJECTS: first === 1 ? ['Halvard | character', 'Mirelle | character'] : [],
                 FACTS: [
                     `Halvard | trait | keeps watch from line ${first} | #${first}`,
                     `Mirelle | trait | counts coins to line ${last} | #${last}`,
-                    'Halvard | trait | #5',
-                    'Halvard | trait | stern | #999',
                 ],
-            }),
+            }), [first, last]),
             cost: 0.01,
         };
     }
@@ -430,6 +430,32 @@ test('the timeline pages scenes', () => {
     assert.equal(first.rows[3].reach, 'private');
     assert.equal(second.rows[0].range, '#41-#42');
     assert.deepEqual(plain(BenchView.timeline(state, 7)), plain(second));
+});
+
+test('a shifted fact and its equivalent reading retain both current and original citation numbers', () => {
+    const log = apply(ScribeLog.create(), answer({
+        SUBJECTS: ['Sera | character'],
+        FACTS: ['Sera | build | 20 m long in full dragon form | #2', 'Sera | build | 2,000 cm long in full dragon form | #3'],
+        SCENES: ['Day 1 | #2-#3 | Harbour | public | present: Sera | Sera measures the dock'],
+    }), 1, 3);
+    for (const operation of log.entries[0].operations.filter((item) => item.type === 'Fact')) {
+        operation.evidence = {
+            messageId: operation.cite, messageNumber: operation.position, blockNumber: 1, speaker: 'Sera',
+            quote: operation.text, attribution: 'claimed',
+        };
+    }
+    log.entries[0].operations.find((item) => item.type === 'Scene').evidence = {
+        messageId: story[2].id, messageNumber: 3, blockNumber: 1, speaker: 'Narrator',
+        quote: 'Sera measures the dock.', attribution: 'witnessed',
+    };
+    const state = ScribeReplay.run(log, storyOrder.slice(1));
+    const row = BenchView.subject(state, 'S1').facts[0];
+    assert.match(row.source, /#1 \(originally #2\), block 1, Sera \(claimed\) “20 m/);
+    assert.match(row.source, /#2 \(originally #3\), block 1, Sera \(claimed\) “2,000 cm/);
+    const audited = BenchView.audit(state, story.slice(1), 5);
+    assert.equal(audited[0].source, row.source);
+    assert.equal(audited[0].message, story[1].text);
+    assert.match(BenchView.timeline(state, 1).rows[0].summary, /#2 \(originally #3\), block 1, Narrator/);
 });
 
 test('rulings lists what the owner must decide', () => {
@@ -920,11 +946,8 @@ test('a run saves after every step', async () => {
         assert.equal(record.input, call.user);
         assert.equal(record.answer, scripted(call).content);
         assert.equal(record.readable, true);
-        assert.deepEqual(record.refusedLines, [{ block: 'FACTS', line: 'Halvard | trait | #5', reason: 'Shape' }]);
-        assert.deepEqual(
-            record.refusedOperations.map((item) => [item.operation.text, item.reason]),
-            [['stern', 'Citation']],
-        );
+        assert.deepEqual(record.refusedLines, []);
+        assert.deepEqual(record.refusedOperations, []);
     }
     assert.equal(page.text('status'), 'Done: every message is read.');
     const rows = page.rows('progress-list');
@@ -932,9 +955,9 @@ test('a run saves after every step', async () => {
         rows.map((row) => row.children[0].textContent),
         [
             'Done: every message is read.',
-            '#81 to #100: 2 stored, 2 refused, $0.0300 spent, 100 of 100 read',
-            '#41 to #80: 2 stored, 2 refused, $0.0200 spent, 80 of 100 read',
-            '#1 to #40: 4 stored, 2 refused, $0.0100 spent, 40 of 100 read',
+            '#81 to #100: 2 stored, 0 refused, $0.0300 spent, 100 of 100 read',
+            '#41 to #80: 2 stored, 0 refused, $0.0200 spent, 80 of 100 read',
+            '#1 to #40: 4 stored, 0 refused, $0.0100 spent, 40 of 100 read',
         ],
     );
     assert.deepEqual(
@@ -942,7 +965,7 @@ test('a run saves after every step', async () => {
             .descendants()
             .filter((element) => element.tagName === 'LI')
             .map((element) => element.textContent),
-        ['Halvard | trait | #5 (Shape)', 'Fact | Halvard | trait | stern (Citation)'],
+        [],
     );
 });
 
@@ -1090,6 +1113,22 @@ test('a failed call shows why and can be resumed', async () => {
     assert.equal(page.server.modelCalls.length, 4);
     assert.match(page.server.modelCalls[2].user, /NEW MESSAGES \(#41 to #80\):/);
     assert.equal(page.text('status'), 'Done: every message is read.');
+});
+
+test('a malformed extra row keeps the stretch owed and appears in the saved reading', async () => {
+    const page = await opened(null);
+    const bad = 'Halvard | trait | #5';
+    page.server.model = (call) => {
+        const response = scripted(call);
+        return { ...response, content: response.content.replace('=== EVIDENCE', bad + '\n=== EVIDENCE') };
+    };
+    page.click('start');
+    await page.idle();
+    assert.equal(page.server.postsOf('log-a.json').length, 0);
+    const diagnostic = page.saved(`calls-a-unreadable-${FakePage.StartTime}.json`);
+    assert.equal(diagnostic.readable, false);
+    assert.ok(diagnostic.refusedLines.some((line) => line.line === bad));
+    assert.match(page.rows('progress-list').at(-1).textContent, /0 of 100 read/);
 });
 
 test('a failed save reloads the saved book', async () => {
@@ -1251,6 +1290,27 @@ test('choosing a value pins it', async () => {
     assert.equal(page.rows('conflicts-list').length, 0);
     assert.equal(page.text('tab-rulings'), 'Rulings');
     assert.deepEqual(plain(replay(page.saved('log-a.json')).conflicts), []);
+});
+
+test('the bench saves a dragon-length ruling and keeps the human height', async () => {
+    const log = apply(ScribeLog.create(), answer({
+        SUBJECTS: ['Sera | character'],
+        FACTS: ['Sera | build | in her human form 5 ft 9 in tall | #1',
+            'Sera | build | in her full dragon form 20 m long | #2',
+            'Sera | build | in her full dragon form 12 m long | #3'],
+    }), 1, 3);
+    const page = await opened(log);
+    page.click('tab-rulings');
+    await page.idle();
+    const dragon = rowSaying(page, 'conflicts-list', 'full dragon / length');
+    page.inputs(dragon, 'text')[0].value = '18 m';
+    page.button(dragon, 'Pin this value').click();
+    await page.idle();
+    const saved = page.saved('log-a.json');
+    const operation = lastOperation(saved);
+    assert.deepEqual([operation.form, operation.dimension, operation.text], ['full dragon', 'length', '18 m']);
+    const standing = replay(saved).facts.filter((fact) => fact.status === 'InForce');
+    assert.deepEqual(plain(standing.map((fact) => fact.text)), ['in her human form 5 ft 9 in tall', '18 m']);
 });
 
 test('keep the first value clears every conflict', async () => {
@@ -1648,9 +1708,9 @@ test('calls without a price are counted', async () => {
         page.rows('progress-list').map((row) => row.children[0].textContent),
         [
             done,
-            '#81 to #100: 2 stored, 2 refused, $0.0100 spent, 2 calls unpriced, 100 of 100 read',
-            '#41 to #80: 2 stored, 2 refused, $0.0100 spent, 1 call unpriced, 80 of 100 read',
-            '#1 to #40: 4 stored, 2 refused, $0.0100 spent, 40 of 100 read',
+            '#81 to #100: 2 stored, 0 refused, $0.0100 spent, 2 calls unpriced, 100 of 100 read',
+            '#41 to #80: 2 stored, 0 refused, $0.0100 spent, 1 call unpriced, 80 of 100 read',
+            '#1 to #40: 4 stored, 0 refused, $0.0100 spent, 40 of 100 read',
         ],
     );
 });
@@ -1880,7 +1940,7 @@ test('a new book starts clean', async () => {
     assert.equal(page.text('status'), 'Done: every message is read.');
     assert.equal(
         page.rows('progress-list').at(-1).children[0].textContent,
-        '#1 to #40: 4 stored, 2 refused, $0.0100 spent, 40 of 100 read',
+        '#1 to #40: 4 stored, 0 refused, $0.0100 spent, 40 of 100 read',
     );
     page.click('tab-book');
     await page.idle();

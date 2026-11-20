@@ -70,7 +70,7 @@ const ScribeReplay = Object.freeze({
         const settings = ScribeReplay.Settings;
         const wording = ScribeReplay.wording(statement.text);
         if (statement.category !== ScribeCategory.Settings.RelationCategory) {
-            return [JSON.stringify([statement.subject, statement.category, wording])];
+            return [ScribeReplay.disputeKey(statement, wording)];
         }
         const keys = [];
         if (statement.target !== null) {
@@ -94,6 +94,7 @@ const ScribeReplay = Object.freeze({
         return ScribeReplay.statementKeys({
             subject: ScribeReplay.resolve(book, mark.subject),
             category: mark.category,
+            ...ScribeCategory.scope(mark),
             target: mark.target === null ? null : ScribeReplay.resolve(book, mark.target),
             targetText: mark.targetText,
             text: mark.text,
@@ -109,8 +110,11 @@ const ScribeReplay = Object.freeze({
         const candidates = facts.filter((fact) => fact.subject === issue.subject &&
             fact.category === issue.category && fact.target === issue.target && fact.targetText === issue.targetText &&
             fact.cite === issue.cite && ScribeCategory.same(fact.text, issue.book));
-        return candidates.find((fact) => fact.id === issue.fact) ??
-            (issue.cite !== null && candidates.length === 1 ? candidates[0] : null);
+        const scope = ScribeCategory.scope({ ...issue, text: issue.book });
+        const eligible = scope.form || scope.dimension ? candidates.filter((fact) =>
+            ScribeCategory.sameScope(fact, { ...issue, text: issue.book })) : candidates;
+        return eligible.find((fact) => fact.id === issue.fact) ??
+            (issue.cite !== null && eligible.length === 1 ? eligible[0] : null);
     },
 
     /**
@@ -179,7 +183,18 @@ const ScribeReplay = Object.freeze({
         if (!fixed || !book.subjects.has(operation.subject)) {
             return null;
         }
-        return JSON.stringify([ScribeReplay.resolve(book, operation.subject), operation.category]);
+        let source = book.byId.get(operation.winner);
+        if (!source && operation.category === 'build' && operation.winner && operation.cite && !('form' in operation)) {
+            const matching = book.facts.filter((fact) => fact.cite === operation.cite &&
+                fact.category === operation.category && fact.subject === ScribeReplay.resolve(book, operation.subject) &&
+                ScribeCategory.same(fact.text, operation.text));
+            if (matching.length === 1) {
+                [source] = matching;
+            }
+        }
+        const scope = ScribeCategory.scope(source ?? operation);
+        return ScribeReplay.keys({ ...operation, ...scope, subject: ScribeReplay.resolve(book, operation.subject) },
+            ScribeCategory.Kind.Fixed)[0];
     },
 
     /**
@@ -244,6 +259,10 @@ const ScribeReplay = Object.freeze({
         }
         if (kind === ScribeCategory.Kind.List) {
             return [JSON.stringify([fact.subject, fact.category, ScribeReplay.wording(fact.text)])];
+        }
+        const { form, dimension } = ScribeCategory.scope(fact);
+        if (form || dimension) {
+            return [JSON.stringify([fact.subject, fact.category, form, dimension])];
         }
         return [JSON.stringify([fact.subject, fact.category])];
     },
@@ -328,7 +347,9 @@ const ScribeReplay = Object.freeze({
      * @return {string}
      */
     disputeKey(fact, wording) {
-        return JSON.stringify([fact.subject, fact.category, wording]);
+        const { form, dimension } = ScribeCategory.scope(fact);
+        return form || dimension ? JSON.stringify([fact.subject, fact.category, form, dimension, wording]) :
+            JSON.stringify([fact.subject, fact.category, wording]);
     },
 
     /**
@@ -455,13 +476,15 @@ const ScribeReplay = Object.freeze({
         Fixed(book, fact, keys) {
             const status = ScribeReplay.Status;
             const [slot] = keys;
-            const wording = ScribeReplay.wording(fact.text);
+            const wording = ScribeCategory.value(fact);
             const said = book.said.get(slot);
             if (said !== undefined && said.has(wording)) {
+                ScribeReplay.combine(book.fixedClaims.get(ScribeReplay.disputeKey(fact, wording)), fact);
                 return false;
             }
             ScribeReplay.say(book, slot, wording);
             book.wordings.set(fact.id, wording);
+            book.fixedClaims.set(ScribeReplay.disputeKey(fact, wording), fact);
             const holders = book.inForce.get(slot) ?? new Set();
             if (holders.size === 0) {
                 fact.status = status.InForce;
@@ -510,6 +533,7 @@ const ScribeReplay = Object.freeze({
             const [slot] = keys;
             const holders = book.inForce.get(slot) ?? new Set();
             if (holders.size > 0) {
+                ScribeReplay.combine(holders.values().next().value, fact);
                 return false;
             }
             fact.status = ScribeReplay.Status.InForce;
@@ -528,6 +552,60 @@ const ScribeReplay = Object.freeze({
     }),
 
     /**
+     * @param {object} holder
+     * @param {object} fact
+     * @return {void}
+     */
+    combine(holder, fact) {
+        if (holder && (holder.claims || fact.claims)) {
+            holder.claims ??= [{ id: holder.id, text: holder.text, cite: holder.cite, position: holder.position, evidence: holder.evidence ?? null }];
+            holder.claims.push(...(fact.claims ?? [{ id: fact.id, text: fact.text, cite: fact.cite, position: fact.position, evidence: null }]));
+        }
+    },
+
+    /**
+     * @param {object} book
+     * @return {object[]}
+     */
+    contradictions(book) {
+        if (!book.contradictions.size) {
+            return [];
+        }
+        const measurements = new Map();
+        for (const fact of book.facts) {
+            if (fact.category !== 'build' || !fact.form || !fact.dimension || fact.status === ScribeReplay.Status.Removed) {
+                continue;
+            }
+            for (const claim of fact.claims ?? []) {
+                const key = JSON.stringify([claim.cite, ScribeReplay.wording(claim.text)]);
+                measurements.set(key, measurements.has(key) ? null : { ...fact, text: claim.text });
+            }
+        }
+        return [...book.contradictions.values()].filter((issue) => {
+            const earlier = measurements.get(JSON.stringify([issue.earlier, ScribeReplay.wording(issue.before)]));
+            const later = measurements.get(JSON.stringify([issue.cite, ScribeReplay.wording(issue.said)]));
+            return issue.dismissed || !earlier || !later || earlier.subject !== later.subject ||
+                (ScribeCategory.sameScope(earlier, later) && ScribeCategory.value(earlier) !== ScribeCategory.value(later));
+        });
+    },
+
+    /**
+     * @param {object} operation
+     * @param {string} id
+     * @param {number} position
+     * @return {object}
+     */
+    claim(operation, id, position) {
+        const scope = ScribeCategory.scope(operation);
+        return {
+            ...scope,
+            ...(operation.evidence ? { evidence: operation.evidence } : {}),
+            ...(operation.evidence || scope.dimension ? { claims: [{ id, text: operation.text, position,
+                cite: operation.cite ?? null, evidence: operation.evidence ?? null }] } : {}),
+        };
+    },
+
+    /**
      * @param {object} book
      * @param {{ operation: object, position: number, origin: string }} item
      * @param {string} id
@@ -541,6 +619,8 @@ const ScribeReplay = Object.freeze({
         }
         const fact = {
             id,
+            ...ScribeReplay.claim(operation, id, item.position),
+            ...ScribeCategory.scope({ ...book.edits.get(id), category: operation.category }),
             subject: ScribeReplay.owner(book, id, operation.subject),
             category: operation.category,
             target: operation.target === null ? null : ScribeReplay.resolve(book, operation.target),
@@ -584,9 +664,11 @@ const ScribeReplay = Object.freeze({
      * @return {boolean}
      */
     takes(book, operation, named) {
-        return (
-            ScribeReplay.live(named) && ScribeReplay.owner(book, operation.becomes, named.subject) === named.subject
-        );
+        if (!ScribeReplay.live(named) || ScribeReplay.owner(book, operation.becomes, named.subject) !== named.subject) {
+            return false;
+        }
+        const scope = ScribeCategory.scope(operation);
+        return (!scope.form || named.form === scope.form) && (!scope.dimension || named.dimension === scope.dimension);
     },
 
     /**
@@ -600,6 +682,8 @@ const ScribeReplay = Object.freeze({
         const operation = item.operation;
         const fact = {
             id: operation.becomes,
+            ...ScribeReplay.claim({ ...operation, ...ScribeCategory.scope(named) }, operation.becomes, item.position),
+            ...ScribeCategory.scope({ ...book.edits.get(operation.becomes), category: named.category }),
             subject: named.subject,
             category: named.category,
             target: named.target,
@@ -636,9 +720,10 @@ const ScribeReplay = Object.freeze({
         }
         if (kind === ScribeCategory.Kind.Fixed) {
             const [slot] = ScribeReplay.keys(fact, kind);
-            const wording = ScribeReplay.wording(fact.text);
+            const wording = ScribeCategory.value(fact);
             ScribeReplay.say(book, slot, wording);
             book.wordings.set(fact.id, wording);
+            book.fixedClaims.set(ScribeReplay.disputeKey(fact, wording), fact);
             if (fact.status === status.Disputed) {
                 ScribeReplay.contest(book, fact);
             }
@@ -735,7 +820,8 @@ const ScribeReplay = Object.freeze({
                 ScribeReplay.unsay(book, fact);
             }
             fact.status = status.Ended;
-            fact.ended = { reason: operation.reason, cite: operation.cite, position: item.position };
+            fact.ended = { reason: operation.reason, cite: operation.cite, position: item.position,
+                ...(operation.evidence ? { evidence: operation.evidence } : {}) };
             ScribeReplay.mark(book, fact, item.position);
         },
 
@@ -768,6 +854,7 @@ const ScribeReplay = Object.freeze({
                 cite: operation.cite,
                 position: item.position,
                 marker: operation.marker,
+                ...(operation.evidence ? { evidence: operation.evidence } : {}),
             });
             for (const fact of book.passing) {
                 if (fact.status === status.InForce && fact.position < item.position) {
@@ -798,7 +885,8 @@ const ScribeReplay = Object.freeze({
             ScribeReplay.mention(book, subject, operation.name, null);
             if (!book.aliased.has(key)) {
                 book.aliased.add(key);
-                book.aliases.push({ subject, name: operation.name, cite: operation.cite });
+                book.aliases.push({ subject, name: operation.name, cite: operation.cite,
+                    ...(operation.evidence ? { evidence: operation.evidence } : {}) });
             }
         },
 
@@ -828,6 +916,7 @@ const ScribeReplay = Object.freeze({
                 cite: operation.cite,
                 position: item.position,
                 closed: null,
+                ...(operation.evidence ? { evidence: operation.evidence } : {}),
             });
         },
 
@@ -853,6 +942,7 @@ const ScribeReplay = Object.freeze({
                 cite: operation.cite,
                 position: item.position,
                 answer: null,
+                ...(operation.evidence ? { evidence: operation.evidence } : {}),
                 dismissed: false,
             });
         },
@@ -877,6 +967,7 @@ const ScribeReplay = Object.freeze({
                 said: operation.said,
                 before: operation.before,
                 why: operation.why,
+                ...(operation.evidence ? { evidence: operation.evidence } : {}),
                 dismissed: false,
             });
         },
@@ -979,7 +1070,8 @@ const ScribeReplay = Object.freeze({
                 const edit = book.edits.get(fact.id);
                 const kept = operation.winner === fact.id && operation.editedSource ||
                     edit && (operation.winner === fact.id || operation.winner === edit.source.fact);
-                if ((kept || ScribeCategory.same(fact.text, operation.text)) && ScribeReplay.live(standing)) {
+                const pinned = { ...operation, ...ScribeCategory.scope(fact) };
+                if ((kept || ScribeCategory.value(fact) === ScribeCategory.value(pinned)) && ScribeReplay.live(standing)) {
                     candidates.add(standing);
                 }
             }
@@ -996,6 +1088,8 @@ const ScribeReplay = Object.freeze({
                 const located = operation.origin !== undefined;
                 winner = {
                     id: operation.fact,
+                    ...ScribeReplay.claim(operation, operation.fact, book.positions.get(operation.cite) ?? operation.position ?? 0),
+                    ...ScribeCategory.scope({ ...book.edits.get(operation.fact), category: operation.category }),
                     subject: ScribeReplay.resolve(book, operation.subject),
                     category: operation.category,
                     target: null,
@@ -1177,6 +1271,7 @@ const ScribeReplay = Object.freeze({
             byId: new Map(),
             inForce: new Map(),
             said: new Map(),
+            fixedClaims: new Map(),
             wordings: new Map(),
             behind: new Map(),
             fuller: new Map(),
@@ -1214,6 +1309,7 @@ const ScribeReplay = Object.freeze({
         const showings = [];
         const rulings = [];
         const decisions = [];
+        const claims = [];
         const legacyDecisions = [];
         const withdrawnQuestions = new Map();
         const previousQuestions = new Map();
@@ -1222,8 +1318,16 @@ const ScribeReplay = Object.freeze({
         const ambiguousQuestions = new Set();
         for (const entry of log.entries) {
             const ruled = entry.kind === ScribeLog.Kind.Operator;
+            const retired = new Set(entry.retired);
             for (const [index, operation] of entry.operations.entries()) {
                 if (operation.revoked === true) {
+                    continue;
+                }
+                const evidence = operation.evidence;
+                const withdrawn = entry.withdrawn || retired.has(operation.cite) || retired.has(evidence?.messageId) ||
+                    retired.has(operation.first) || retired.has(operation.last) || retired.has(operation.earlier);
+                if (!ruled && evidence && (!positions.has(evidence.messageId) ||
+                    (fingerprints !== null && fingerprints.get(evidence.messageId) !== evidence.fingerprint))) {
                     continue;
                 }
                 if (pending && (pending.has(operation.cite) ||
@@ -1233,7 +1337,11 @@ const ScribeReplay = Object.freeze({
                 }
                 if (operation.type === types.Subject) {
                     const declared = book.subjects.get(operation.subject) ?? { label: operation.label, kind: null };
-                    if (!entry.withdrawn && declared.kind === null) {
+                    if (operation.evidence && !withdrawn) {
+                        declared.evidence = operation.evidence;
+                        claims.push(operation);
+                    }
+                    if (!withdrawn && declared.kind === null) {
                         declared.kind = operation.kind;
                     }
                     book.subjects.set(operation.subject, declared);
@@ -1251,7 +1359,7 @@ const ScribeReplay = Object.freeze({
                 if (operation.type === types.Question && typeof operation.cite === 'string') {
                     const key = JSON.stringify([entry.origin, operation.cite, ScribeReplay.wording(operation.text)]);
                     const previous = withdrawnQuestions.get(key);
-                    if (entry.withdrawn) {
+                    if (withdrawn) {
                         const ids = previous ?? [];
                         if (ids.at(-1)?.sequence === entry.sequence) {
                             ambiguousQuestions.add(key);
@@ -1264,12 +1372,15 @@ const ScribeReplay = Object.freeze({
                         previousQuestions.set(operation.question, previous.map((item) => item.id));
                     }
                 }
-                if (entry.withdrawn || (ruling && !ruled)) {
+                if (withdrawn || (ruling && !ruled)) {
                     continue;
                 }
                 if (operation.passages?.some((passage) => !positions.has(passage.id) ||
                     (fingerprints !== null && fingerprints.get(passage.id) !== passage.fingerprint))) {
                     continue;
+                }
+                if (operation.evidence && !ruled) {
+                    claims.push(operation);
                 }
                 if (ruled || entry.origin === ScribeLog.Origin.Notes) {
                     for (const issue of operation.resolutions ?? []) {
@@ -1345,6 +1456,7 @@ const ScribeReplay = Object.freeze({
             if (thread !== undefined && thread.closed === null) {
                 thread.closed = {
                     how: operation.how,
+                    ...(operation.evidence ? { evidence: operation.evidence } : {}),
                     cite: operation.cite,
                     position: positions.get(operation.cite) ?? operation.position,
                 };
@@ -1436,6 +1548,7 @@ const ScribeReplay = Object.freeze({
                 narrowed: false,
                 present,
                 summary: operation.summary,
+                ...(operation.evidence ? { evidence: operation.evidence } : {}),
             });
         }
         const scenes = [...book.scenes.values()].sort(
@@ -1532,6 +1645,7 @@ const ScribeReplay = Object.freeze({
             const subject = {
                 id,
                 label: declared.label,
+                ...(declared.evidence ? { evidence: declared.evidence } : {}),
                 name,
                 kind,
                 assumed,
@@ -1590,6 +1704,7 @@ const ScribeReplay = Object.freeze({
                 conflicts.set(slot, {
                     subject: fact.subject,
                     category: fact.category,
+                    ...ScribeCategory.scope(fact),
                     target: null,
                     established: holder === undefined ? null : holder.id,
                     others: [],
@@ -1612,7 +1727,8 @@ const ScribeReplay = Object.freeze({
             if (issue.contradiction !== null && book.contradictions.has(issue.contradiction)) {
                 book.contradictions.get(issue.contradiction).dismissed = true;
             }
-            const slot = JSON.stringify([issue.subject, issue.category]);
+            const [slot] = ScribeReplay.keys(book.byId.get(issue.activeFact) ?? { ...issue, text: issue.book },
+                ScribeCategory.Kind.Fixed);
             const conflict = conflicts.get(slot);
             if (issue.kind !== 'Contradiction' || !conflict) {
                 continue;
@@ -1628,7 +1744,7 @@ const ScribeReplay = Object.freeze({
                 conflicts.delete(slot);
             }
         }
-        const contradictions = [...book.contradictions.values()].sort(
+        const contradictions = ScribeReplay.contradictions(book).sort(
             /**
              * @param {{ position: number, earlierPosition: number }} first
              * @param {{ position: number, earlierPosition: number }} second
@@ -1642,6 +1758,7 @@ const ScribeReplay = Object.freeze({
             ...(edits.size ? { editOrigins: Object.fromEntries([...edits].map(([id, operation]) => [id, { ...operation.source }])) } : {}),
             subjects,
             facts: book.facts,
+            ...(claims.length ? { claims: JSON.parse(JSON.stringify(claims)) } : {}),
             scenes,
             nights: [...book.nights.values()],
             threads: [...book.threads.values()],

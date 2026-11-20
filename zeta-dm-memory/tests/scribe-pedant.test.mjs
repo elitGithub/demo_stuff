@@ -31,6 +31,355 @@ function loadAll() {
 
 const { ScribeIntake, ScribeAnswer, ScribeLog, ScribeReplay, ScribeKnowledge, ScribePedant } = loadAll();
 
+function passage(position, lines, fromPlayer = false) {
+    return { id: 'room-' + position, position, fingerprint: 'print-' + position, fromPlayer,
+        blocks: lines.map(([speaker, text], index) => ({ speaker, text, blockNumber: index + 1 })) };
+}
+
+function earlier(position, speaker, quote) {
+    return { messageId: 'room-' + position, fingerprint: 'print-' + position, position, blockNumber: 1, speaker, quote };
+}
+
+function checkInput(position, lines, extra = {}) {
+    return { message: passage(position, lines), written: [], earlierClaims: [], rulings: [], ...extra };
+}
+
+test('character testimony and observed speech retain their distinct attributions through real intake blocks', async () => {
+    const history = new CampaignBuilder('Frost');
+    for (let number = 1; number < 209; number++) {
+        history.narrator('It rains.');
+    }
+    const report = 'I have guarded it for a thousand years.';
+    history.says('Magera', report).narrator('Magera guarded the staff for a thousand years.').player('I take the staff.');
+    const { messages } = ScribeIntake.read(history.messages);
+    const run = (index, role, quote, fields) => ScribePedant.checkPassage(checkInput(209, [], {
+        message: messages[index], ask: async (system, input) => {
+            const page = JSON.parse(input);
+            assert.equal(page.target[0].role, role);
+            return { text: JSON.stringify({ page: page.page, complete: true, findings: [], claims: [{
+                source: { ref: page.target[0].ref, quote }, ...fields,
+            }] }) };
+        },
+    }));
+    const claim = { subject: 'Magera', attribute: 'guarded', value: 'a thousand years' };
+    for (const quote of [report, 'guarded it for a thousand years']) {
+        await assert.rejects(run(208, 'Character', quote, { ...claim, attribution: 'witnessed' }), /unsupported/);
+        assert.equal((await run(208, 'Character', quote, { ...claim, attribution: 'claimed' })).claims[0].attribution, 'claimed');
+    }
+    assert.equal((await run(208, 'Character', report, { subject: 'Magera', attribute: 'said', value: report, attribution: 'witnessed' }))
+        .claims[0].attribute, 'said');
+    assert.equal((await run(209, 'Narrator', messages[209].blocks[0].text, { ...claim, attribution: 'witnessed' })).claims.length, 1);
+    assert.equal((await run(210, 'Player', 'I take the staff.', { subject: 'Frost', attribute: 'take', value: 'the staff',
+        attribution: 'witnessed' })).claims.length, 1);
+});
+
+test('source phrases require complete Unicode words and quantities', async () => {
+    const line = 'Joanna and Élodie May saw an undead guardian carrying 2,000 gold.';
+    const run = (fields) => ScribePedant.checkPassage(checkInput(12, [['Narrator', line]], {
+        ask: async (system, input) => {
+            const page = JSON.parse(input);
+            return { text: JSON.stringify({ page: page.page, complete: true, findings: [],
+                claims: [{ source: { ref: 'm12b1', quote: line }, attribution: 'witnessed', ...fields }] }) };
+        },
+    }));
+    for (const fields of [{ subject: 'Ann' }, { value: 'dead' }, { subject: 'lodie' }, { value: '2' }, { value: '000' }]) {
+        await assert.rejects(run(fields), /unsupported/);
+    }
+    assert.equal((await run({ subject: 'E\u0301lodie May', attribute: 'carrying', value: '2,000 gold' })).claims.length, 1);
+});
+
+test('removed reminder text cannot bridge an original citation in either current or historical evidence', async () => {
+    const history = new CampaignBuilder('Frost');
+    history.player('The gate was closed.\n[Scribe] The secret reminder.\nThe sea was calm.').narrator('The gate opened.');
+    const { messages } = ScribeIntake.read(history.messages);
+    const block = messages[0].blocks[0];
+    const original = history.messages[0].contents[0].text;
+    const pieces = ScribeIntake.sourcePieces(block);
+    assert.equal(pieces.map((piece) => piece.quote).join(''), block.text);
+    assert.ok(pieces.length > 1 && pieces.every((piece) => original.includes(piece.quote) && !piece.quote.includes('secret reminder')));
+    const old = pieces.map((piece) => ({ ...earlier(1, block.speaker, piece.quote), ...piece }));
+    for (const [index, previous] of [[0, []], [1, old]]) {
+        const run = (quote) => ScribePedant.checkPassage(checkInput(1, [], { message: messages[index], earlierClaims: previous,
+            ask: async (system, input) => {
+                const row = JSON.parse(input);
+                const actual = index ? row.evidence : row.target;
+                assert.ok(actual.every((source) => original.includes(source.quote)));
+                const source = { ref: 'm1b1', quote };
+                return { text: JSON.stringify({ page: row.page, complete: true, claims: index ? [] :
+                    [{ source, attribution: 'claimed' }], findings: index ? [{ kind: 'Question',
+                        question: 'When was it opened?', source: { ref: 'm2b1', quote: 'The gate opened.' }, earlier: source }] : [] }) };
+            } }));
+        await assert.rejects(run(block.text), /unsupported/);
+        assert.equal((await run('The gate was closed.')).complete, true);
+    }
+});
+
+test('context-limit refusals shrink the page and a restart keeps previously certified parents and segments', async () => {
+    const work = checkInput(99, [['Riven', 'The gate has changed.']], {
+        earlierClaims: Array.from({ length: 45 }, (_, index) => earlier(index + 1, 'Narrator',
+            'The gate appears in the earlier record ' + index + '. ' + 'Wet stones. '.repeat(116))),
+    });
+    let bound = 24576;
+    const good = new Set();
+    const bad = new Set();
+    const saved = [];
+    const segments = [];
+    let first = true;
+    const ask = async (system, input) => {
+        const row = JSON.parse(input);
+        assert.ok(!good.has(row.page), 'a paid successful page ran twice');
+        assert.ok(!bad.has(row.page), 'the identical rejected request was retried');
+        if (!first && Buffer.byteLength(input) > 4096) {
+            bad.add(row.page);
+            throw Object.assign(new Error('context_length_exceeded'), { status: 400 });
+        }
+        first = false;
+        good.add(row.page);
+        return { text: JSON.stringify({ page: row.page, complete: true, claims: [], findings: [] }) };
+    };
+    const invoke = (interrupt) => ScribePedant.checkPassage({ ...work, ask, pageBytes: bound,
+        completedPages: JSON.parse(JSON.stringify(saved)), completedSegments: JSON.parse(JSON.stringify(segments)),
+        savePage: (page) => saved.push(page), learnLimit: (next) => {
+            assert.ok(next < bound);
+            bound = next;
+        },
+        saveSegment: (segment) => {
+            segments.push(segment);
+            if (interrupt) { throw new Error('reader yielded after a checkpoint'); }
+        } });
+    await assert.rejects(invoke(true), /yielded after a checkpoint/);
+    assert.equal(saved.length, 1);
+    assert.equal(segments.length, 1);
+    assert.ok(bad.size && bound < 24576);
+    const final = await invoke(false);
+    assert.equal(final.complete, true);
+    assert.equal(final.pages.length, saved.length);
+    assert.ok(saved.length > 1 && segments.length > 1);
+    let calls = 0;
+    await assert.rejects(ScribePedant.checkPassage({ ...work, ask: () => {
+        calls++;
+        throw Object.assign(new Error('User not found.'), { status: 401 });
+    }, learnLimit: () => assert.fail('an auth error must not reduce context') }), /User not found/);
+    assert.equal(calls, 1);
+    const tiny = checkInput(1, [['Riven', 'No.']]);
+    await assert.rejects(ScribePedant.checkPassage({ ...tiny, ask: () => {
+        throw Object.assign(new Error('context_length_exceeded'), { status: 400 });
+    } }), (error) => error.checkerContextFloor === true);
+});
+
+test('the checker distinguishes a reported fact from witnessing the report and requires an independently extracted omission', async () => {
+    const line = 'Magera claimed Frost stole the orb. Frost then opens the gate.';
+    const run = (quote, subject, attribute, attribution, extra = {}) => ScribePedant.checkPassage(checkInput(9,
+        [['Narrator', line]], { ask: async (system, input) => {
+            const page = JSON.parse(input);
+            const source = { ref: page.target[0].ref, quote };
+            return { text: JSON.stringify({ page: page.page, complete: true,
+                claims: [{ source, subject, attribute, attribution }], findings: [], ...extra }) };
+        } }));
+    for (const quote of ['Magera claimed Frost stole the orb.', 'Frost stole the orb.']) {
+        await assert.rejects(run(quote, 'Frost', 'stole', 'witnessed'), /unsupported/);
+        assert.equal((await run(quote, 'Frost', 'stole', 'claimed')).claims[0].attribution, 'claimed');
+    }
+    assert.equal((await run('Magera claimed Frost stole the orb.', 'Magera', 'claimed', 'witnessed')).claims.length, 1);
+    assert.equal((await run('Frost then opens the gate.', 'Frost', 'opens', 'witnessed')).claims.length, 1);
+    await assert.rejects(run('the orb', null, null, 'claimed', { claims: [], findings: [{ kind: 'Omission', source:
+        { ref: 'm9b1', quote: 'the orb' }, question: 'Who sank the ship?' }] }), /unsupported/);
+});
+
+test('all pages fit a UTF-8 request budget; the last failed page alone retries after persisted progress is restored', async () => {
+    const cap = 3600;
+    const first = 'The chain is red. '.repeat(12);
+    const second = 'A second length of rope remains on the bank. '.repeat(14);
+    const prior = Array.from({ length: 13 }, (_, i) => earlier(i + 1, 'Keeper',
+        'Café remains open. ' + '\u{1d11e}'.repeat(140) + ' End of source ' + (i + 1)));
+    const input = checkInput(15, [['Narrator', first], ['Keeper', second]], { earlierClaims: prior, pageBytes: cap });
+    const expected = [...ScribePedant.passagePages(input)];
+    assert.ok(expected.length > 2);
+    const covered = new Map();
+    const target = new Map();
+    let comparedEarlierInMessage = false;
+    for (const row of expected) {
+        assert.ok(Buffer.byteLength(ScribePedant.CheckPrompt + row.input) <= cap);
+        const request = JSON.parse(row.input);
+        for (const block of request.target) {
+            if (!target.has(block.ref)) { target.set(block.ref, new Map()); }
+            target.get(block.ref).set(block.offset ?? 0, block.quote);
+        }
+        for (const block of request.evidence) {
+            if (block.messageId === 'room-15') {
+                comparedEarlierInMessage = true;
+            } else {
+                if (!covered.has(block.messageId)) { covered.set(block.messageId, new Map()); }
+                covered.get(block.messageId).set(block.offset ?? 0, block.quote);
+            }
+        }
+    }
+    const full = (pieces) => [...pieces].sort(([left], [right]) => left - right).map(([, text]) => text).join('');
+    for (const block of prior) {
+        assert.equal(full(covered.get(block.messageId)), block.quote);
+    }
+    assert.equal(full(target.get('m15b1')), first);
+    assert.equal(full(target.get('m15b2')), second);
+    assert.ok(comparedEarlierInMessage);
+    let attempts = 0;
+    const saved = [];
+    const ask = async (system, user) => {
+        attempts++;
+        assert.equal(system, ScribePedant.CheckPrompt);
+        assert.ok(Buffer.byteLength(system + user) <= cap);
+        const page = JSON.parse(user);
+        if (attempts === expected.length) {
+            return { text: 'The last comparison could not finish.' };
+        }
+        return { text: JSON.stringify({ page: page.page, complete: true, claims: [], findings: [] }) };
+    };
+    await assert.rejects(ScribePedant.checkPassage({ ...input, ask, savePage: (page) => saved.push(page) }));
+    assert.equal(saved.length, expected.length - 1);
+    const final = await ScribePedant.checkPassage({ ...input, ask, completedPages: JSON.parse(JSON.stringify(saved)), savePage: (page) => saved.push(page) });
+    assert.equal(final.complete, true);
+    assert.equal(saved.length, expected.length);
+    assert.equal(attempts, expected.length + 1);
+    assert.equal(new Set(saved.map((page) => page.id)).size, expected.length);
+    await assert.rejects(ScribePedant.checkPassage({ ...input, pageBytes: 1, ask: () => assert.fail('oversize request issued') }), /too small/);
+});
+
+test('a claim present on a different written page never becomes a durable omission', async () => {
+    const work = checkInput(55, [['Riven', 'I own a bell.']], { pageBytes: 3600,
+        written: Array.from({ length: 9 }, (_, i) => ({ text: ('Old entry ' + i + '. ').repeat(28) +
+            (i === 8 ? 'Riven owns a bell.' : '') })) });
+    const pages = [];
+    const result = await ScribePedant.checkPassage({ ...work, savePage: (page) => pages.push(page),
+        ask: async (system, input) => {
+            const row = JSON.parse(input);
+            const source = { ref: row.target[0].ref, quote: 'I own a bell.' };
+            return { text: JSON.stringify({ page: row.page, complete: true, claims: [{ source, attribution: 'claimed' }],
+                findings: row.written.some((item) => item.text.includes('Riven owns a bell.')) ? [] :
+                    [{ kind: 'Omission', question: 'Add the bell?', source }] }) };
+        } });
+    assert.ok(pages.length > 1);
+    assert.equal(result.claims.length, 1);
+    assert.equal(result.findings.length, 0);
+    assert.ok(pages.every((page) => !page.findings.length));
+});
+
+test('independent comparison receives old attributed and ended facts, current entry and original before its verdict', async () => {
+    const prior = [
+        earlier(129, 'Mavan', "I've used it on dozens of mages."),
+        earlier(131, 'Mavan', "I've had that Staff for two centuries."),
+        earlier(166, 'Frost', 'Destroy the lich, spell and phylactery.'),
+        earlier(167, 'Narrator', 'The staff was gone.'),
+        earlier(174, 'Frost', 'Something is guarding that staff.'),
+        earlier(188, 'Frost', 'Probably a hatchling they set.'),
+        earlier(192, 'Frost', 'The Lichj used it.'),
+        earlier(199, 'Magera', 'They meant to raise me as a weapon for their war.'),
+        { id: 'F67', text: 'Ended: the Staff belonged to the former elven owners.' },
+        { id: 'F120', text: 'Filed at #199: raised to be a weapon and given the artifact as a reward.' },
+    ];
+    const work = checkInput(209, [['Magera', 'I have guarded it for a thousand years. They gave it to me as a reward.']], {
+        earlierClaims: prior, written: [{ text: 'She mentions the artifact.' }],
+        rulings: [{ text: 'Mavan and the lich are aliases.' }],
+        ask: async (system, input) => {
+            assert.equal(system, ScribePedant.CheckPrompt);
+            const page = JSON.parse(input);
+            for (const row of prior) {
+                assert.ok(page.evidence.some((entry) => row.quote ? entry.quote === row.quote : entry.text?.includes(row.id)));
+            }
+            assert.ok(page.evidence.some((entry) => entry.text === 'Mavan and the lich are aliases.'));
+            assert.equal(page.written[0].text, 'She mentions the artifact.');
+            assert.equal(page.target[0].speaker, 'Magera');
+            const source = { ref: page.target[0].ref, quote: 'I have guarded it for a thousand years.' };
+            return { text: JSON.stringify({ page: page.page, complete: true,
+                claims: [{ source, attribution: 'claimed', subject: 'Magera' }],
+                findings: [
+                    { kind: 'Question', question: 'How did Mavan gain access?', source,
+                        earlier: { ref: 'm131b1', quote: prior[1].quote } },
+                    { kind: 'Citation', question: 'Was the reward first mentioned at #209?', source: {
+                        ref: page.target[0].ref, quote: 'They gave it to me as a reward.' },
+                        record: page.evidence.find((entry) => entry.text?.includes('F120')).ref },
+                    { kind: 'Omission', question: 'Did the book omit her account of guarding it?', source },
+                ] }) };
+        },
+    });
+    const checked = await ScribePedant.checkPassage(work);
+    assert.equal(checked.findings.length, 3);
+    assert.equal(checked.findings[0].earlier.messageId, 'room-131');
+    assert.equal(checked.findings[1].source.messageId, 'room-209');
+    assert.equal(checked.claims[0].source.speaker, 'Magera');
+    assert.equal(checked.claims[0].attribution, 'claimed');
+});
+
+test('a filed destruction is challenged at the original player passage without borrowing the next narration', async () => {
+    const work = checkInput(166, [], { message: passage(166, [['Frost', 'Destroy the lich, spell and phylactery.']], true),
+        written: [{ id: 'T2', text: 'Staff of Elders destroyed with Mavan.' }],
+        ask: async (system, input) => {
+            const page = JSON.parse(input);
+            assert.equal(page.fromPlayer, true);
+            assert.equal(page.target.length, 1);
+            assert.equal(page.evidence.length, 0);
+            assert.ok(page.written[0].text.includes('Staff of Elders'));
+            return { text: JSON.stringify({ page: page.page, complete: true, claims: [], findings: [
+                { kind: 'Citation', source: { ref: 'm166b1', quote: 'lich, spell and phylactery' },
+                    record: page.written[0].ref, question: 'Which words establish that the Staff of Elders was destroyed?' },
+            ] }) };
+        } });
+    const result = await ScribePedant.checkPassage(work);
+    assert.equal(result.findings.length, 1);
+    assert.equal(result.findings[0].source.fingerprint, 'print-166');
+    await assert.rejects(ScribePedant.checkPassage({ ...work, earlierClaims: [earlier(167, 'Narrator', 'The staff was gone.')] }), /future/);
+});
+
+test('compatible accounts reach the checker with the chronology, speaker and form visible', async () => {
+    for (const [position, lines, evidence, written] of [
+        [33, [['Narrator', 'She has amber eyes.']], [earlier(3, 'Narrator', 'Her eyes are amber.')], [{ text: 'eyes: amber' }]],
+        [196, [['Narrator', 'In full dragon form Sera is 20 m long.']], [earlier(148, 'Narrator', 'In human form Sera is 5 ft 9 in tall.')],
+            [{ text: 'Sera build [full dragon / length] 20 m' }]],
+        [223, [['Narrator', 'Thessaly stands holding the staff.']], [earlier(217, 'Narrator', 'The chains break. Magera takes cat form.'),
+            earlier(221, 'Narrator', 'Thessaly takes the staff.')], [{ text: 'current carrier: Thessaly' }]],
+    ]) {
+        const checked = await ScribePedant.checkPassage(checkInput(position, lines, { earlierClaims: evidence, written,
+            ask: async (system, input) => {
+                const page = JSON.parse(input);
+                assert.ok(evidence.every((row) => page.evidence.some((candidate) => candidate.quote === row.quote)));
+                assert.equal(page.target[0].quote, lines[0][1]);
+                assert.equal(page.written[0].text, written[0].text);
+                return { text: JSON.stringify({ page: page.page, complete: true, claims: [
+                    { source: { ref: page.target[0].ref, quote: lines[0][1] }, attribution: 'witnessed' },
+                ], findings: [] }) };
+            } }));
+        assert.equal(checked.claims.length, 1);
+        assert.equal(checked.findings.length, 0);
+    }
+});
+
+test('refusals, invented or wrong-speaker quotes, future block comparisons and incomplete answers never checkpoint', async () => {
+    const parts = [['Narrator', 'The gate was closed.'], ['Riven', 'I saw the gate open.']];
+    const good = { ref: 'm12b2', quote: 'I saw the gate open.' };
+    const askWith = (verdict) => async (system, input) => {
+        const page = JSON.parse(input);
+        const answer = { page: page.page, complete: true, claims: [], findings: [] };
+        return { text: verdict(answer) };
+    };
+    for (const verdict of [
+        () => 'I can summarize instead.', (answer) => JSON.stringify({ ...answer, page: 'another page' }),
+        (answer) => JSON.stringify({ ...answer, complete: false }), (answer) => JSON.stringify({ ...answer, error: 'No history' }),
+        (answer) => JSON.stringify({ ...answer, claims: [{ source: { ...good, ref: 'm12b1' }, attribution: 'claimed' }] }),
+        (answer) => JSON.stringify({ ...answer, claims: [{ source: good, attribution: 'claimed', value: 'steel' }] }),
+        (answer) => JSON.stringify({ ...answer, findings: [{ kind: 'Citation', source: good, question: 'Which gate?', record: 'w999' }] }),
+        (answer) => JSON.stringify({ ...answer, findings: [{ kind: 'Question', question: 'Who closed it?', source: {
+            ref: 'm12b1', quote: 'The gate was closed.' }, earlier: good }] }),
+    ]) {
+        let saved = 0;
+        const work = checkInput(12, parts, { ask: askWith(verdict), savePage: () => { saved++; } });
+        await assert.rejects(ScribePedant.checkPassage(work), /incomplete|unsupported/);
+        assert.equal(saved, 0);
+    }
+    const checked = await ScribePedant.checkPassage(checkInput(12, parts, { ask: askWith((answer) => JSON.stringify({
+        ...answer, findings: [{ kind: 'Question', question: 'When did it open?', source: good,
+            earlier: { ref: 'm12b1', quote: 'The gate was closed.' } }],
+    })) }));
+    assert.equal(checked.findings[0].earlier.blockNumber, 1);
+});
+
 const separator = String.fromCodePoint(0x2028);
 const zeroWidth = String.fromCodePoint(0x200b);
 const astral = String.fromCodePoint(0x1d400);

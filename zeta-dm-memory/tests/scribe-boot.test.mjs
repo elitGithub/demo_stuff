@@ -21,6 +21,7 @@ function load() {
     const files = [
         ['core', 'ScribeText'],
         ['core', 'ScribeGateway'],
+        ['core', 'ScribeAdoption'],
         ['page', 'ZetaSource'],
         ['page', 'ScribeStore'],
         ['page', 'ScribeFrame'],
@@ -368,6 +369,7 @@ function standIns(timers) {
         },
     };
     context.ScribeKeeper = {
+        Busy: { Reading: 'Reading' },
         Defaults: DEFAULTS,
         Event: Object.freeze({ Changed: 'Changed', Progress: 'Progress', Reply: 'Reply' }),
         Phase: Object.freeze({ Idle: 'Idle', Reading: 'Reading', Watching: 'Watching' }),
@@ -381,12 +383,13 @@ function standIns(timers) {
             record.claimed = typeof options.claim === 'function' ? options.claim() : null;
             world.order.push(`keeper ${options.roomId}`);
             world.keepers.push(record);
-            record.reader = true;
+            record.reader = record.claimed ?? ScribeStore.claim(options.storage, options.roomId, options.tabId, options.clock.now());
             record.handle = {
                 /**
                  * @return {{ phase: string, reader: boolean }}
                  */
-                view: () => ({ phase: record.phase, reader: record.reader }),
+                view: () => ({ phase: record.phase, reader: record.reader, stop: record.stop }),
+                rekey: () => { record.rekeys = (record.rekeys ?? 0) + 1; },
 
                 /**
                  * @return {Promise<void>}
@@ -446,6 +449,8 @@ function standIns(timers) {
             world.order.push(`live ${options.roomId}`);
             world.lives.push(record);
             const live = {
+                keyWork: () => () => true,
+                rekey: () => { record.rekeys = (record.rekeys ?? 0) + 1; },
                 /**
                  * @return {Promise<string>}
                  */
@@ -562,6 +567,10 @@ function standIns(timers) {
                 throw new Error(world.mountFailure);
             }
             const panel = {
+                keyChanged: () => {
+                    record.keyChanges = (record.keyChanges ?? 0) + 1;
+                    record.onKeyChange?.();
+                },
                 /**
                  * @return {void}
                  */
@@ -1106,7 +1115,7 @@ test('the watcher is installed before anything else', async () => {
         touched.push(`${what} ${run.page.fetch === run.original ? 'unwrapped' : 'wrapped'}`);
     };
     run.environment.timers = noted(run.environment.timers, ['setTimeout', 'clearTimeout', 'setInterval', 'clearInterval'], 'timer', note);
-    run.environment.storage = noted(run.storage, ['get', 'set', 'remove', 'list'], 'storage', note);
+    run.environment.storage = noted(run.storage, ['get', 'set', 'remove', 'list', 'watch'], 'storage', note);
     const document = run.document;
     run.environment.document = {
         /**
@@ -1408,6 +1417,244 @@ test('a session that cannot start is tried again', async () => {
     assert.equal(run.timers.count, 1);
     run.boot.stop();
 });
+
+test('queued key notices reread once per value across navigation, sleep, and stop', async () => {
+    const run = harness({ locks: new FakeLocks() });
+    start(run);
+    await settle();
+    const storage = run.storage;
+    const first = run.world.panels[0];
+    const baseline = first.options.keyVersion();
+    assert.equal(storage.listeners.size, 1);
+    storage.queued = [];
+    ScribeStore.setKey(storage, 'test-first');
+    ScribeStore.setKey(storage, 'test-second');
+    assert.equal(first.options.saveKey('stale-draft', baseline), false);
+    assert.equal(ScribeStore.key(storage), 'test-second');
+    assert.equal(run.world.keepers[0].rekeys, 1);
+    assert.equal(run.world.lives[0].rekeys, 1);
+    assert.equal(first.keyChanges, 1);
+    for (const deliver of storage.queued.reverse()) {
+        deliver();
+        deliver();
+    }
+    assert.equal(first.keyChanges, 1);
+    assert.equal(first.options.saveKey('test-second', first.options.keyVersion()), true);
+    assert.equal(run.world.keepers[0].rekeys, 2);
+    go(run, '/rooms/quay');
+    await pass(run, 1000);
+    const second = run.world.panels.at(-1);
+    assert.equal(storage.listeners.size, 1);
+    ScribeStore.setKey(storage, 'test-third');
+    storage.queued[0]();
+    assert.equal(second.keyChanges, 1);
+    assert.equal(first.keyChanges, 1);
+    ScribeStore.setKey(storage, 'test-fourth');
+    run.page.listeners.find((entry) => entry.type === 'pageshow').listener();
+    assert.equal(second.keyChanges, 2);
+    ScribeStore.setKey(storage, 'test-fifth');
+    const asking = run.world.keepers.at(-1).options.ask(ScribeBoot.Role.Analyzer, SYSTEM, USER);
+    await settle();
+    assert.equal(run.sent.calls.length, 1);
+    assert.equal(run.sent.calls[0].details.headers.Authorization, 'Bearer test-fifth');
+    answer(run.sent.calls[0], 200, completion('Answer', 0));
+    await asking;
+    storage.refuseGetsMatching(/^scribe:key$/);
+    const error = await failureOf(run.world.keepers.at(-1).options.ask(ScribeBoot.Role.Analyzer, SYSTEM, USER));
+    assert.equal(error.source, 'Scribe');
+    assert.equal(error.code, ScribeStore.KeyStorageSource);
+    assert.equal(error.message, ScribeBoot.Settings.Messages.KeyStorage);
+    assert.equal(run.sent.calls.length, 1);
+    storage.allow();
+    run.boot.stop();
+    assert.equal(storage.listeners.size, 0);
+    for (const deliver of storage.queued) {
+        deliver();
+    }
+    assert.equal(second.keyChanges, 3);
+    start(run);
+    await settle();
+    assert.equal(storage.listeners.size, 1);
+    assert.equal(run.sent.calls.length, 1);
+    run.boot.stop();
+});
+
+for (const [helper, role] of [['keepers', 'Analyzer'], ['lives', 'Pedant']]) {
+    test(helper + ' select the saved key at dispatch, after gateway backoff and after Force stop', async () => {
+        const run = harness({ locks: new FakeLocks() });
+        ScribeStore.setKey(run.storage, KEY);
+        start(run);
+        await settle();
+        run.storage.queued = [];
+        const asking = run.world[helper][0].options.ask(role, SYSTEM, USER);
+        ScribeStore.setKey(run.storage, 'queued-test-key');
+        await settle();
+        assert.deepEqual(run.sent.calls.map((call) => call.details.headers.Authorization), ['Bearer queued-test-key']);
+        answer(run.sent.calls[0], 503, '{"error":"busy","usage":{"cost":0.125}}');
+        await pass(run, 1999);
+        ScribeStore.setKey(run.storage, 'backoff-test-key');
+        await pass(run, 1);
+        assert.equal(run.sent.calls.length, 2);
+        assert.equal(run.sent.calls[1].details.headers.Authorization, 'Bearer backoff-test-key');
+        await pass(run, ScribeBoot.Settings.ForceAfterMs);
+        run.world.panels[0].options.calls.stop();
+        ScribeStore.setKey(run.storage, 'nudged-test-key');
+        await settle();
+        assert.equal(run.sent.calls.length, 3);
+        assert.equal(run.sent.calls[2].details.headers.Authorization, 'Bearer nudged-test-key');
+        assert.equal(JSON.parse(run.sent.calls[2].details.data).messages[1].content, USER + '\n\nAnswer now, without more thinking.');
+        ScribeStore.setKey(run.storage, 'newer-than-valid-result');
+        answer(run.sent.calls[2], 200, completion('Keep this result.', 0.25));
+        const result = await asking;
+        assert.equal(result.text, 'Keep this result.');
+        assert.equal(result.stopped, 1);
+        assert.equal(result.cost, 0.375);
+        assert.equal(ScribeStore.spent(run.storage, 'harbour', DAY), helper === 'keepers' ? 0 : 0.375);
+        assert.equal(ScribeStore.spent(run.storage, 'quay', DAY), 0);
+        run.boot.stop();
+    });
+
+    test(helper + ' replace late 401s once per observed rotation and preserve the current masked rejection', async () => {
+        const run = harness({ locks: new FakeLocks() });
+        ScribeStore.setKey(run.storage, KEY);
+        start(run);
+        await settle();
+        run.storage.queued = [];
+        const pending = failureOf(run.world[helper][0].options.ask(role, SYSTEM, USER));
+        await settle();
+        const keys = [KEY, 'second-synthetic-key', 'final-synthetic-key'];
+        for (const [index, key] of keys.entries()) {
+            assert.equal(run.sent.calls.length, index + 1);
+            assert.equal(run.sent.calls[index].details.headers.Authorization, 'Bearer ' + key);
+            ScribeStore.setKey(run.storage, keys[index + 1] ?? key);
+            answer(run.sent.calls[index], 401, JSON.stringify({
+                error: { message: 'Rejection ' + index + ' ' + keys.slice(0, index + 1).join(', ') },
+                usage: { cost: 0.125 },
+            }));
+            await settle();
+        }
+        const error = await pending;
+        assert.equal(error.status, 401);
+        assert.equal(error.source, 'OpenRouter');
+        assert.match(error.reason, /^Rejection 2 /);
+        assert.equal(carries(error, keys), false);
+        for (const deliver of run.storage.queued.reverse()) {
+            deliver();
+            deliver();
+        }
+        await pass(run, 20000);
+        assert.equal(run.sent.calls.length, 3);
+        assert.equal(ScribeStore.spent(run.storage, 'harbour', DAY), 0.375);
+        assert.equal(ScribeStore.spent(run.storage, 'quay', DAY), 0);
+        run.boot.stop();
+    });
+
+    for (const barrier of ['cleared', 'unreadable', 'paused', 'reader', 'claim', 'lease', 'budget', 'route']) {
+        test(helper + ' discard an obsolete 401 when blocked by ' + barrier, async () => {
+            const run = harness();
+            ScribeStore.setKey(run.storage, KEY);
+            start(run);
+            await settle();
+            const pending = failureOf(run.world[helper][0].options.ask(role, SYSTEM, USER));
+            await settle();
+            run.storage.queued = [];
+            ScribeStore.setKey(run.storage, barrier === 'cleared' ? '' : 'rotated-test-key');
+            const keeper = run.world.keepers[0];
+            const barriers = {
+                cleared: [() => {}, ScribeBoot.Settings.Messages.NoKey],
+                unreadable: [() => run.storage.refuseGetsMatching(/^scribe:key$/), ScribeBoot.Settings.Messages.KeyStorage],
+                paused: [() => { keeper.stop = { reason: 'Paused' }; }, ScribeBoot.Settings.Messages.Paused],
+                reader: [() => { keeper.reader = false; }, ScribeBoot.Settings.Messages.NotReader],
+                claim: [() => run.storage.set('scribe:claim:harbour', JSON.stringify({ tabId: 'second-tab', at: run.clock.now() })), ScribeBoot.Settings.Messages.NotReader],
+                lease: [() => { run.world.leads = false; }, ScribeBoot.Settings.Messages.NotReader],
+                budget: [() => ScribeStore.setOthers(run.storage, 'harbour', DAY, 2.875), ScribeBoot.Settings.Messages.Spent],
+                route: [() => go(run, '/rooms/quay'), ScribeBoot.Settings.Messages.Left],
+            };
+            const [block, reason] = barriers[barrier];
+            block();
+            answer(run.sent.calls[0], 401, '{"error":"obsolete rejection","usage":{"cost":0.125}}');
+            const error = await pending;
+            assert.equal(error.message, reason);
+            assert.equal(error.source, 'Scribe');
+            assert.equal(error.status, undefined);
+            assert.equal(run.sent.calls.length, 1);
+            assert.equal(ScribeStore.spent(run.storage, 'harbour', DAY), 0.125);
+            assert.equal(ScribeStore.spent(run.storage, 'quay', DAY), 0);
+            run.boot.stop();
+        });
+    }
+}
+
+for (const unavailable of ['empty', 'unreadable']) {
+    test('queued first dispatches send nothing if the saved key becomes ' + unavailable, async () => {
+        const run = harness({ locks: new FakeLocks() });
+        ScribeStore.setKey(run.storage, KEY);
+        start(run);
+        await settle();
+        const pending = [run.world.keepers[0], run.world.lives[0]].map((helper) =>
+            failureOf(helper.options.ask('Scribe', SYSTEM, USER)));
+        run.storage.queued = [];
+        if (unavailable === 'empty') {
+            ScribeStore.setKey(run.storage, '');
+        } else {
+            run.storage.refuseGetsMatching(/^scribe:key$/);
+        }
+        for (const error of await Promise.all(pending)) {
+            assert.equal(error.message, unavailable === 'empty' ? ScribeBoot.Settings.Messages.NoKey : ScribeBoot.Settings.Messages.KeyStorage);
+            assert.equal(error.source, 'Scribe');
+        }
+        assert.equal(run.sent.calls.length, 0);
+        run.boot.stop();
+    });
+}
+
+test('a handoff while a gateway retry reconciles its key cancels the outgoing dispatch', async () => {
+    const run = harness();
+    ScribeStore.setKey(run.storage, KEY);
+    start(run);
+    await settle();
+    const pending = failureOf(run.world.lives[0].options.ask('Pedant', SYSTEM, USER));
+    await settle();
+    answer(run.sent.calls[0], 503, '{"error":"temporary"}');
+    await pass(run, 1999);
+    run.storage.queued = [];
+    ScribeStore.setKey(run.storage, 'key-before-handoff');
+    run.world.panels[0].onKeyChange = () => run.storage.set('scribe:claim:harbour',
+        JSON.stringify({ tabId: 'new-reader', at: run.clock.now() }));
+    await pass(run, 1);
+    assert.equal((await pending).message, ScribeBoot.Settings.Messages.NotReader);
+    assert.equal(run.sent.calls.length, 1);
+    run.boot.stop();
+});
+
+for (const envelope of ['top-level', 'choice', 'message only']) {
+    test('a rotated key uses the structured provider code in a ' + envelope + ' error', async () => {
+        const run = harness({ locks: new FakeLocks() });
+        ScribeStore.setKey(run.storage, KEY);
+        start(run);
+        await settle();
+        const pending = failureOf(run.world.lives[0].options.ask('Pedant', SYSTEM, USER));
+        await settle();
+        ScribeStore.setKey(run.storage, 'new-test-key');
+        const provider = { code: envelope === 'message only' ? 400 : '401', message: 'Provider reference 401' };
+        const body = envelope === 'choice' ? { choices: [{ error: provider, finish_reason: 'error' }] } : { error: provider };
+        answer(run.sent.calls[0], 200, JSON.stringify(body));
+        await settle();
+        if (envelope !== 'message only') {
+            assert.equal(run.sent.calls.length, 2);
+            assert.equal(run.sent.calls[1].details.headers.Authorization, 'Bearer new-test-key');
+            answer(run.sent.calls[1], 200, JSON.stringify(body));
+        } else {
+            assert.equal(run.sent.calls.length, 1);
+        }
+        const error = await pending;
+        assert.equal(error.status, 200);
+        assert.equal(error.reason, provider.message);
+        assert.equal(error.providerCode, Number(provider.code));
+        assert.equal(error.source, 'OpenRouter');
+        run.boot.stop();
+    });
+}
 
 test('the model is asked by role', async () => {
     const run = harness();
@@ -1769,14 +2016,14 @@ test('keys typed in the panel stay in the panel', async () => {
         adding(...values);
     };
     run.environment.timers = noted(run.environment.timers, ['setTimeout', 'clearTimeout', 'setInterval', 'clearInterval'], 'timer', note);
-    run.environment.storage = noted(run.storage, ['get', 'set', 'remove', 'list'], 'storage', note);
+    run.environment.storage = noted(run.storage, ['get', 'set', 'remove', 'list', 'watch'], 'storage', note);
     start(run);
     await settle();
-    assert.deepEqual(touched.slice(0, 6), ['listener wrapped', 'listener wrapped', 'listener wrapped', 'listener wrapped', 'storage wrapped', 'storage wrapped']);
+    assert.deepEqual(touched.slice(0, 7), [...Array(5).fill('listener wrapped'), 'storage wrapped', 'storage wrapped']);
     assert.equal(touched.includes('timer wrapped'), true);
     assert.deepEqual(
         run.page.listeners.map((entry) => `${entry.type} ${entry.capture}`),
-        ['keydown true', 'keyup true', 'keypress true', 'message false'],
+        ['keydown true', 'keyup true', 'keypress true', 'message false', 'pageshow false'],
     );
     const host = run.world.panels[0].host;
     const field = { name: 'the key field', parentNode: host };
@@ -2059,10 +2306,13 @@ test('say does not read the key', async () => {
         set: (name, value) => storage.set(name, value),
         remove: (name) => storage.remove(name),
         list: () => storage.list(),
+        watch: (name, changed) => storage.watch(name, changed),
     };
     ScribeStore.setKey(storage, KEY);
     start(run);
     await settle();
+    assert.equal(keyReads, 1);
+    keyReads = 0;
     await run.page.fetch(`${API}/v1/users/me`, { headers: { Authorization: TOKEN } });
     await pass(run, 1000);
     const renewed = 'Bearer RENEWEDRENEWEDRENEWED';
@@ -2318,7 +2568,7 @@ test('one boot per page', async () => {
     await pass(run, 3000);
     assert.equal(run.world.keepers.length, 1);
     assert.deepEqual(run.lines, ['The scribe is already running on this page']);
-    assert.equal(run.page.listeners.length, 4);
+    assert.equal(run.page.listeners.length, 5);
     second.stop();
     assert.equal(run.page.fetch === run.original, false);
     assert.equal(run.world.order.length, 4);
@@ -3814,6 +4064,7 @@ test('the cloud opens before the keeper, ticks before it and closes with the ses
     assert.equal(fired, 0);
     await pass(run, 1);
     assert.equal(fired, 1);
+    run.storage.remove('scribe:claim:harbour');
     assert.equal(cloud.options.chosen(), false);
     ScribeStore.claim(run.storage, 'harbour', 'tab-one', run.timers.now());
     assert.equal(cloud.options.chosen(), true);

@@ -1,5 +1,25 @@
 # Scribe page verification
 
+## Cross-tab OpenRouter key recovery, 2026-11-20
+
+**Simulated in Node.** Two rooms ran the delivered `scribe/scribe.user.js` against synthetic Tampermonkey storage, Zeta, OpenRouter and a Worker. The scenario ran twice, with the chat box in the frame and in the top document. Both the scene update and the story check received a 401 echoing the old credential. At a simulated width of 320 CSS pixels, the strip showed **OpenRouter key rejected**. The focused native **Scribe** button expanded the panel using a simulated Enter activation. One warning named both jobs, and **Progress** showed the provider reason with the credential replaced by `[key]`.
+
+Saving the replacement in the other room let each failed role retry once with the new authorization header. The reader stayed on **Progress** throughout recovery. The active warning, details and compact label cleared, and the password fields were blank. The saving tab issued zero model requests.
+
+The checks inspected all model request URLs, headers and bodies, Worker uploads and headers, Zeta requests, page/frame messages, GM storage writes, console calls and DOM writes. Both **Progress** exports activated a download named `scribe-harbour.json`. The first contained the masked failure, and both exported files were free of the credentials. Apart from deliberate password entry, the synthetic keys appeared only in the private GM key slot and in OpenRouter's authorization header. The pack suite also compared the delivered file with an in-memory build of the current sources after normalizing CRLF.
+
+**Regression results.** Node.js 24.11.0 passed 962 tests across ten named suites with zero failures or skips. Each suite ran with `node --test tests/scribe-<suite>.test.mjs`.
+
+| Suite | Passed | Suite | Passed |
+| --- | ---: | --- | ---: |
+| gateway | 33 | panel | 144 |
+| store | 45 | frame | 21 |
+| cloud | 49 | boot | 119 |
+| keeper | 121 | whole | 238 |
+| live | 172 | pack | 20 |
+
+**Live browser check pending.** With both rooms open in the same Tampermonkey profile and one showing a rejected key, narrow its window to 320 CSS pixels. Tab to **Scribe**, press Enter and confirm the full warning wraps with the toggle still visible. Leave that room on **Progress** and save the working key in the other room. Confirm the affected work completes and the warning disappears without reloading the reader. Browser layout, native keyboard activation and delivery of actual Tampermonkey notifications still need observation.
+
 ## Automated checks
 
 Run from the demo directory, one file at a time. On a machine with little memory put this in front of each run: `NODE_OPTIONS=--max-old-space-size=600 prlimit --as=3000000000 timeout -s KILL 120`.

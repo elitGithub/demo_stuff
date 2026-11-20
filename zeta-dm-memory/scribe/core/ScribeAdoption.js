@@ -50,67 +50,6 @@ const ScribeAdoption = Object.freeze({
         SharedId: 'Two messages share the id ',
         FullStop: '.',
         TextType: 'string',
-        ShortestContentWord: 4,
-        CommonWords: Object.freeze([
-            'about',
-            'after',
-            'again',
-            'also',
-            'been',
-            'before',
-            'being',
-            'come',
-            'could',
-            'does',
-            'each',
-            'even',
-            'ever',
-            'from',
-            'have',
-            'here',
-            'into',
-            'just',
-            'like',
-            'made',
-            'make',
-            'many',
-            'more',
-            'most',
-            'much',
-            'must',
-            'never',
-            'only',
-            'other',
-            'over',
-            'said',
-            'same',
-            'says',
-            'should',
-            'some',
-            'still',
-            'such',
-            'than',
-            'that',
-            'their',
-            'them',
-            'then',
-            'there',
-            'these',
-            'they',
-            'this',
-            'those',
-            'very',
-            'were',
-            'what',
-            'when',
-            'where',
-            'which',
-            'while',
-            'will',
-            'with',
-            'would',
-            'your',
-        ]),
         Apostrophe: "'",
         DoubleQuote: '"',
         NormalForm: 'NFC',
@@ -247,9 +186,10 @@ const ScribeAdoption = Object.freeze({
     /**
      * @param {object} message
      * @param {string} quote
+     * @param {number} minimum
      * @return {boolean}
      */
-    quoted(message, quote) {
+    quoted(message, quote, minimum = ScribeAdoption.Settings.FewestQuoteWords) {
         const settings = ScribeAdoption.Settings;
         let current = ScribeAdoption.clean(quote);
         for (let pass = 0; pass < settings.DressPasses; pass++) {
@@ -267,7 +207,7 @@ const ScribeAdoption = Object.freeze({
             }
             current = next;
         }
-        if (ScribeText.words(current).length < settings.FewestQuoteWords) {
+        if (ScribeText.words(current).length < minimum) {
             return false;
         }
         const text = ScribeAdoption.folded(ScribeIntake.transcript([message]));
@@ -341,85 +281,6 @@ const ScribeAdoption = Object.freeze({
     },
 
     /**
-     * @param {object} state
-     * @param {string} id
-     * @return {{ text: string, cite: string, position: number, about: string[] }|null}
-     */
-    entry(state, id) {
-        const settings = ScribeAdoption.Settings;
-        const statuses = ScribeReplay.Status;
-        const fact = state.facts.find(
-            /**
-             * @param {{ id: string, status: string }} item
-             * @return {boolean}
-             */
-            (item) => item.id === id && (item.status === statuses.InForce || item.status === statuses.Ended),
-        );
-        if (fact !== undefined) {
-            const subject = state.subjects.find(
-                /**
-                 * @param {{ id: string }} item
-                 * @return {boolean}
-                 */
-                (item) => item.id === fact.subject,
-            );
-            const names = subject === undefined ? [] : [subject.label, subject.name, ...subject.aka];
-            if (typeof fact.cite !== settings.TextType) {
-                return null;
-            }
-            return { text: fact.text, cite: fact.cite, position: fact.position, about: [fact.text, ...names] };
-        }
-        const thread = state.threads.find(
-            /**
-             * @param {{ id: string }} item
-             * @return {boolean}
-             */
-            (item) => item.id === id,
-        );
-        if (thread === undefined) {
-            return null;
-        }
-        const closed = thread.closed;
-        const how = closed === null || closed.how.trim() === settings.Nothing ? null : closed.how;
-        const cite = closed === null ? thread.cite : closed.cite;
-        const position = closed === null ? thread.position : closed.position;
-        if (typeof cite !== settings.TextType || !Number.isSafeInteger(position)) {
-            return null;
-        }
-        return { text: how ?? thread.text, cite, position, about: [thread.text, how ?? settings.Nothing] };
-    },
-
-    /**
-     * @param {string} said
-     * @param {readonly string[]} about
-     * @return {boolean}
-     */
-    related(said, about) {
-        const settings = ScribeAdoption.Settings;
-        /**
-         * @param {string} text
-         * @return {string[]}
-         */
-        const content = (text) =>
-            ScribeText.words(text).filter(
-                /**
-                 * @param {string} word
-                 * @return {boolean}
-                 */
-                (word) =>
-                    Array.from(word).length >= settings.ShortestContentWord && !settings.CommonWords.includes(word),
-            );
-        const held = new Set(about.flatMap(content));
-        return content(said).some(
-            /**
-             * @param {string} word
-             * @return {boolean}
-             */
-            (word) => held.has(word),
-        );
-    },
-
-    /**
      * @param {object} job
      * @param {{ pass: string, first: number|null, last: number|null }} step
      * @param {number} stored
@@ -481,6 +342,142 @@ const ScribeAdoption = Object.freeze({
     },
 
     /**
+     * @param {object} operation
+     * @param {object} item
+     * @param {object} message
+     * @param {object} state
+     * @param {Map<number, object>} sources
+     * @return {object|null}
+     */
+    bind(operation, item, message, state, sources) {
+        const block = message.blocks.find((source) => source.blockNumber === item.blockNumber);
+        if (!block || !block.text.includes(item.quote) ||
+            !(ScribeIntake.Originals.get(block) ?? block.text).includes(item.quote) ||
+            !ScribeAdoption.quoted({ ...message, text: block.text }, item.quote, 1)) {
+            return null;
+        }
+        const types = ScribeAnswer.Type;
+        if (operation.position !== undefined && operation.position !== item.messageNumber ||
+            operation.type === types.Scene && (item.messageNumber < operation.first || item.messageNumber > operation.last)) {
+            return null;
+        }
+        const statement = operation.text ?? operation.reason ?? operation.summary ?? operation.marker ?? operation.how;
+        const quote = ScribeAdoption.folded(item.quote);
+        const quotedWords = ScribeAnalyzer.index(quote);
+        const supports = (text) => ScribeAnalyzer.found(quote, quotedWords, ScribeAdoption.folded(text));
+        const excerpt = statement && item.quote.includes(statement) ? statement : item.quote;
+        const quoteStart = block.text.indexOf(item.quote) + item.quote.indexOf(excerpt);
+        const before = block.text.slice(0, quoteStart).split(/[.!?\n]/).at(-1);
+        const after = block.text.slice(quoteStart + excerpt.length).split(/[.!?\n]/)[0];
+        const sentence = ScribeAdoption.folded(before + excerpt + after);
+        const indexedSentence = ScribeAnalyzer.index(sentence);
+        const pronoun = /^(?:she|he|they|it|her|his|their|its)\b/.test(sentence);
+        const antecedent = pronoun ? ScribeAdoption.folded(block.text.slice(0, quoteStart - before.length)
+            .trim().split(/[.!?\n]+/).filter(Boolean).at(-1) ?? '') : '';
+        const named = (label) => {
+            const subject = state.subjects.find((entry) => entry.label === label);
+            const names = subject ? [subject.label, subject.name, ...subject.aka] : [label];
+            return names.some((name) => {
+                const folded = ScribeAdoption.folded(name);
+                return ScribeAnalyzer.found(sentence, indexedSentence, folded) ||
+                    folded === ScribeAdoption.folded(block.speaker) && (operation.type === types.Subject ||
+                        /\b(?:i|me|my|mine|we|our|us)\b/.test(sentence) || item.attribution === 'claimed') ||
+                    antecedent && ScribeAnalyzer.found(antecedent, ScribeAnalyzer.index(antecedent), folded);
+            });
+        };
+        if (operation.label && !named(operation.label) || operation.target && !named(operation.target) ||
+            operation.owner && !named(operation.owner) || operation.name && !named(operation.name)) {
+            return null;
+        }
+        if (operation.type === types.Scene) {
+            const earlier = state.scenes.find((scene) => scene.firstPosition === operation.first);
+            const names = new Set();
+            const text = [];
+            for (const [number, source] of sources) {
+                if (number >= operation.first && number <= operation.last && !source.attributionPending) {
+                    for (const part of source.blocks) {
+                        names.add(ScribeAdoption.folded(part.speaker));
+                        text.push(part.text);
+                    }
+                }
+            }
+            const sceneText = ScribeAdoption.folded(text.join('\n'));
+            const index = ScribeAnalyzer.index(sceneText);
+            const present = (name) => names.has(ScribeAdoption.folded(name)) ||
+                ScribeAnalyzer.found(sceneText, index, ScribeAdoption.folded(name));
+            if (operation.place !== earlier?.place && !present(operation.place) ||
+                operation.present.some((person) => !present(person.label) && !earlier?.present.some((prior) =>
+                    state.subjects.some((subject) => subject.id === prior.subject && subject.label === person.label)))) {
+                return null;
+            }
+        }
+        const promised = /\b(?:promise(?:s|d)?|offer(?:s|ed)? to|will (?:give|hand|bring|return|lend)|(?:i|we)'ll (?:give|hand|bring|return|lend))\b/.test(sentence);
+        const inferred = /\b(?:suspect(?:s|ed)?|guess(?:es|ed)?|probably|perhaps|might be|wonder(?:s|ed)? (?:if|whether))\b/.test(sentence);
+        const reporting = /\b(?:claim(?:s|ed)?|says?|said|report(?:s|ed)?|allege(?:s|d)?|insist(?:s|ed)?|told)\b/;
+        const clauseBefore = before.split(/(?:;|,\s*(?:but|while|then|and then|meanwhile)\s+|\s+and then\s+)/i).at(-1);
+        const report = reporting.test(clauseBefore + excerpt) && !reporting.test(statement ?? '');
+        if (statement && report && item.attribution === 'witnessed') {
+            return null;
+        }
+        if (promised && item.attribution !== 'promised' || inferred && !promised && item.attribution !== 'inferred' ||
+            item.attribution === 'ruled' && (!message.fromPlayer || block.role !== ScribeIntake.Role.Player ||
+                !/\b(?:i rule|my ruling|canonically|retcon|correction|out of character)\b/.test(sentence)) ||
+            operation.category === 'belonging' && (promised || inferred || ['promised', 'inferred'].includes(item.attribution))) {
+            return null;
+        }
+        const scope = ScribeCategory.scope({ category: operation.category, text: sentence });
+        if ((item.form || item.dimension) && operation.category !== 'build' ||
+            item.form && item.form !== scope.form && (scope.form || !supports(item.form + ' form')) ||
+            item.dimension && item.dimension !== scope.dimension && (scope.dimension || !supports(item.dimension))) {
+            return null;
+        }
+        const form = scope.form ?? item.form;
+        const dimension = scope.dimension ?? item.dimension;
+        const physical = { eyes: /\b(?:eyes?|irises?|iris)\b/, hair: /\b(?:hair|braid|curls|locks)\b/,
+            skin: /\b(?:skin|complexion)\b/ };
+        if (Object.hasOwn(physical, operation.category) && !physical[operation.category].test(sentence) &&
+            Object.values(physical).some((pattern) => pattern.test(sentence))) {
+            return null;
+        }
+        if (item.event && !supports(item.event) || item.time && !supports(item.time) ||
+            item.day && item.day !== operation.day && !supports(String(item.day)) ||
+            item.related?.some((name) => name !== block.speaker && !supports(name)) ||
+            item.subject && item.subject !== operation.label && item.subject !== block.speaker && !supports(item.subject) ||
+            item.attribute && item.attribute !== operation.category && item.attribute !== operation.type && !supports(item.attribute)) {
+            return null;
+        }
+        if (operation.type !== types.Question && statement) {
+            const claim = ScribeAdoption.folded(statement);
+            const words = new Set(ScribeText.words(quote + ' ' + block.speaker + ' ' + operation.label));
+            const grammar = new Set(['a', 'an', 'the', 'and', 'of', 'to', 'at', 'for', 'in', 'as', 'is', 'was', 'has',
+                'her', 'his', 'they', 'their', 'she', 'he', 'it', 'its', 'my', 'me', 'i', 'am', 'had', 'by', 'with']);
+            if (!supports(statement) &&
+                ScribeText.words(claim).some((word) => !grammar.has(word) && !words.has(word))) {
+                return null;
+            }
+            const negative = /\b(?:not|never|no longer|without|cannot|can't|isn't|wasn't|didn't)\b/;
+            if (negative.test(sentence) && !negative.test(claim)) {
+                return null;
+            }
+        }
+        const value = statement ?? operation.summary ?? operation.marker ?? operation.how ?? operation.name ??
+            operation.said ?? operation.kind ?? operation.label;
+        if (item.value !== undefined && item.value !== null && value !== undefined &&
+            !ScribeAdoption.folded(value).includes(ScribeAdoption.folded(item.value))) {
+            return null;
+        }
+        const evidence = {
+            section: item.section, row: item.row, messageNumber: message.position, messageId: message.id,
+            fingerprint: message.fingerprint, blockNumber: block.blockNumber, speaker: block.speaker,
+            quote: item.quote, attribution: item.attribution, form, dimension,
+            event: item.event ?? null, day: item.day ?? operation.day ?? null, time: item.time ?? null,
+            subject: item.subject ?? operation.label ?? null, attribute: item.attribute ?? operation.category ?? operation.type,
+            value: item.value ?? value ?? null, related: item.related ?? (operation.target ? [operation.target] : []),
+        };
+        return { ...operation, form, dimension, evidence };
+    },
+
+    /**
      * @param {object} job
      * @param {{ pass: string, origin: string, first: number|null, last: number|null, system: string, user: string, messages: readonly object[], state: object, notes: readonly object[], questions: readonly object[] }} step
      * @return {Promise<Readonly<{ stop: string, problem: string|null, spent: number, calls: number, unpriced: number }>|null>}
@@ -509,7 +506,58 @@ const ScribeAdoption = Object.freeze({
         } else {
             job.unpriced++;
         }
-        const parsed = ScribeAnswer.parse(answer.text);
+        const story = step.pass === ScribeAdoption.Pass.Story;
+        const protocol = story ? ScribeAnswer.parseStory(answer.text) : null;
+        const parsed = story ? { operations: [], refused: protocol.refused } : ScribeAnswer.parse(answer.text);
+        const shown = new Map(step.messages.map((message) => [message.position, message]));
+        const owes = new Set();
+        const unquoted = [];
+        if (story) {
+            const claimed = new Set();
+            let unassigned = [...protocol.read.keys()].some((number) => !shown.has(number));
+            for (const problem of parsed.refused) {
+                const item = protocol.evidence.get(protocol.rejectedRows.get(problem));
+                if (item && shown.has(item.messageNumber)) {
+                    owes.add(item.messageNumber);
+                } else {
+                    unassigned = true;
+                }
+            }
+            for (const [key, item] of protocol.evidence) {
+                if (!shown.has(item.messageNumber)) {
+                    unassigned = true;
+                } else if (!protocol.rows.has(key)) {
+                    owes.add(item.messageNumber);
+                }
+            }
+            for (const [key, operation] of protocol.rows) {
+                if (operation.type === ScribeAnswer.Type.Contradiction) {
+                    continue;
+                }
+                const item = protocol.evidence.get(key);
+                const number = item?.messageNumber ?? operation.position ?? operation.last;
+                const message = shown.get(number);
+                const bound = item && message ? ScribeAdoption.bind(operation, item, message, step.state, job.places) : null;
+                if (bound) {
+                    parsed.operations.push(bound);
+                    claimed.add(number);
+                } else {
+                    unquoted.push({ operation, reason: item && message ? ScribeLog.Reason.Quote : ScribeLog.Reason.Citation });
+                    if (!message) {
+                        unassigned = true;
+                    }
+                    owes.add(number);
+                    if (operation.position !== undefined) {
+                        owes.add(operation.position);
+                    }
+                }
+            }
+            for (const number of shown.keys()) {
+                if (unassigned || protocol.read.get(number) !== (claimed.has(number) ? 'read' : 'no change')) {
+                    owes.add(number);
+                }
+            }
+        }
         const wordy = answer.text.split(ScribeAnswer.Settings.LineBreak).some(
             /**
              * @param {string} line
@@ -518,7 +566,7 @@ const ScribeAdoption = Object.freeze({
             (line) => Array.from(line.trim()).length > settings.LongestEmptyLine,
         );
         const kept = { pass: step.pass, system: step.system, input: step.user, answer: answer.text };
-        if (parsed.operations.length === 0 && (parsed.refused.length > 0 || wordy)) {
+        if (!story && parsed.operations.length === 0 && (parsed.refused.length > 0 || wordy)) {
             await job.record(Object.freeze({ sequence: null, ...kept, readable: false }));
             await ScribeAdoption.report(job, step, 0, parsed.refused, []);
             const range =
@@ -527,64 +575,45 @@ const ScribeAdoption = Object.freeze({
                     : settings.Stretch[step.pass] + step.first + settings.RangeTo + step.last;
             return ScribeAdoption.finish(job, stops.Failed, settings.Unreadable[step.pass] + range + settings.NoLine);
         }
-        const story = step.pass === ScribeAdoption.Pass.Story;
-        const operations = [];
-        const unquoted = [];
-        const shown = new Map();
-        for (const message of step.messages) {
-            shown.set(message.position, message);
-        }
-        for (const operation of parsed.operations) {
-            if (!story || operation.type !== ScribeAnswer.Type.Contradiction) {
-                operations.push(operation);
-                continue;
-            }
-            const said = shown.get(operation.position);
-            if (said === undefined) {
-                unquoted.push(Object.freeze({ operation, reason: ScribeLog.Reason.Citation }));
-                continue;
-            }
-            const saidFound = ScribeAdoption.quoted(said, operation.said);
-            if (operation.entry !== null) {
-                const entry = ScribeAdoption.entry(step.state, operation.entry);
-                if (entry === null || entry.position >= operation.position) {
-                    unquoted.push(Object.freeze({ operation, reason: ScribeLog.Reason.Reference }));
-                } else if (!saidFound) {
-                    unquoted.push(Object.freeze({ operation, reason: ScribeLog.Reason.Quote }));
-                } else if (!ScribeAdoption.related(operation.said, entry.about)) {
-                    unquoted.push(Object.freeze({ operation, reason: ScribeLog.Reason.Mismatch }));
-                } else {
-                    operations.push(
-                        Object.freeze({
-                            ...operation,
-                            earlier: entry.position,
-                            before: entry.text,
-                            earlierCite: entry.cite,
-                        }),
-                    );
-                }
-                continue;
-            }
-            const before = shown.get(operation.earlier);
-            if (saidFound && before !== undefined && ScribeAdoption.quoted(before, operation.before)) {
-                operations.push(Object.freeze({ ...operation, earlierCite: before.id }));
-            } else {
-                unquoted.push(Object.freeze({ operation, reason: ScribeLog.Reason.Quote }));
-            }
-        }
-        const stretch = { messages: step.messages, origin: step.origin, sources: job.places };
+        const operations = parsed.operations;
+        const stretch = { messages: step.messages, origin: step.origin, sources: job.places, results: protocol?.read };
         const answers = step.pass === ScribeAdoption.Pass.Answers;
         const order = answers ? job.roomOrder : job.order;
         const pending = answers ? job.pending : null;
-        let result = null;
-        try {
-            result = ScribeLog.append(job.log, step.state, operations, stretch);
-        } catch (error) {
-            if (error.message !== ScribeLog.Settings.StaleState) {
-                throw error;
+        const state = step.state.revision === job.log.revision ? step.state : ScribeReplay.run(job.log, order, pending, job.fingerprints);
+        let filing = operations;
+        if (story) {
+            for (const { operation } of unquoted) {
+                if (operation.evidence) {
+                    owes.add(operation.evidence.messageNumber);
+                }
             }
-            result = ScribeLog.append(job.log, ScribeReplay.run(job.log, order, pending, job.fingerprints), operations, stretch);
+            while (true) {
+                const gap = step.messages.findIndex((message) => owes.has(message.position));
+                stretch.messages = gap < 0 ? step.messages : step.messages.slice(0, gap);
+                if (!stretch.messages.length) {
+                    break;
+                }
+                const end = stretch.messages.at(-1).position;
+                filing = operations.filter((operation) => operation.evidence.messageNumber <= end);
+                const staged = { ...job.log, entries: [...job.log.entries], read: { ...job.log.read } };
+                const trial = ScribeLog.append(staged, state, filing, stretch);
+                if (!trial.refused.length) {
+                    break;
+                }
+                unquoted.push(...trial.refused);
+                for (const { operation } of trial.refused) {
+                    owes.add(operation.evidence.messageNumber);
+                }
+            }
+            if (!stretch.messages.length) {
+                await job.record(Object.freeze({ sequence: null, ...kept, readable: false }));
+                await ScribeAdoption.report(job, step, 0, parsed.refused, unquoted);
+                return ScribeAdoption.finish(job, stops.Failed, settings.Unreadable.Story + ' #' + step.first +
+                    settings.RangeTo + step.last + settings.NoLine);
+            }
         }
+        const result = ScribeLog.append(job.log, state, filing, stretch);
         for (const note of step.notes) {
             job.log.notes.push(note.text);
         }
@@ -597,10 +626,11 @@ const ScribeAdoption = Object.freeze({
             ScribeLog.link(entry, state, [], step.messages);
         }
         await job.save(job.log, step.questions);
-        await job.record(Object.freeze({ sequence: result.entry.sequence, ...kept, readable: true }));
+        await job.record(Object.freeze({ sequence: result.entry.sequence, ...kept, readable: !owes.size }));
         const refused = Object.freeze([...result.refused, ...unquoted]);
         await ScribeAdoption.report(job, step, result.entry.operations.length, parsed.refused, refused);
-        return null;
+        return owes.size ? ScribeAdoption.finish(job, stops.Failed, 'Missing supported Story evidence at #' +
+            step.messages[stretch.messages.length].position + '.') : null;
     },
 
     /**
@@ -724,7 +754,8 @@ const ScribeAdoption = Object.freeze({
                     return ScribeAdoption.finish(job, stops.Done, null);
                 }
                 if (ScribeIntake.transcript(stretch) === settings.Nothing) {
-                    const result = ScribeLog.append(job.log, state, [], { messages: stretch, origin: origins.Story });
+                    const result = ScribeLog.append(job.log, state, [], { messages: stretch, origin: origins.Story,
+                        results: new Map(stretch.map((message) => [message.position, 'no change'])) });
                     await job.save(job.log);
                     await ScribeAdoption.report(
                         job,

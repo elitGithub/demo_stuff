@@ -1,4 +1,22 @@
 const ScribeStore = Object.freeze({
+    KeyStorageSource: 'Scribe key storage',
+
+    /**
+     * @param {*} source
+     * @return {boolean}
+     */
+    localSource(source) {
+        return source === 'Scribe' || source === ScribeStore.KeyStorageSource;
+    },
+
+    /**
+     * @param {*} error
+     * @return {string|undefined}
+     */
+    errorSource(error) {
+        return error?.source === 'Scribe' && error.code === ScribeStore.KeyStorageSource ? error.code : error?.source;
+    },
+
     Kind: Object.freeze({
         Campaign: 'campaign',
         Book: 'book',
@@ -96,6 +114,7 @@ const ScribeStore = Object.freeze({
             PartNotKept: 'A part did not read back as written',
             HeadNotKept: 'The head did not read back as written',
             Overtaken: 'Another save came first',
+            AuthorityLost: 'The reader no longer owns this room',
         }),
     }),
 
@@ -477,17 +496,18 @@ const ScribeStore = Object.freeze({
      * @param {string} roomId
      * @param {string} kind
      * @param {Object} value
+     * @param {Function|null} mayPublish
      * @return {number}
      * @throws {Error}
      */
-    write(storage, roomId, kind, value) {
+    write(storage, roomId, kind, value, mayPublish = null) {
         let text = null;
         try {
             text = JSON.stringify(value);
         } catch {
             text = null;
         }
-        return ScribeStore.writeText(storage, roomId, kind, text);
+        return ScribeStore.writeText(storage, roomId, kind, text, mayPublish);
     },
 
     /**
@@ -518,10 +538,11 @@ const ScribeStore = Object.freeze({
      * @param {string} roomId
      * @param {string} kind
      * @param {*} text
+     * @param {Function|null} mayPublish
      * @return {number}
      * @throws {Error}
      */
-    writeText(storage, roomId, kind, text) {
+    writeText(storage, roomId, kind, text, mayPublish = null) {
         const settings = ScribeStore.Settings;
         const messages = settings.Messages;
         const types = settings.Types;
@@ -539,7 +560,8 @@ const ScribeStore = Object.freeze({
         let headText = null;
         let leave = false;
         try {
-            const previous = ScribeStore.headOf(ScribeStore.fetch(storage, headName));
+            const previousText = ScribeStore.fetch(storage, headName);
+            const previous = ScribeStore.headOf(previousText);
             let highest = settings.NoGeneration;
             for (const described of ScribeStore.stored(storage)) {
                 if (described.type !== types.Part || described.room !== room || described.kind !== kind) {
@@ -576,11 +598,19 @@ const ScribeStore = Object.freeze({
                     throw new Error(messages.PartNotKept);
                 }
             }
-            const standing = ScribeStore.headOf(ScribeStore.fetch(storage, headName));
-            leave = true;
-            if (standing !== null && standing.generation >= generation) {
+            if (mayPublish !== null && mayPublish() !== true) {
+                throw new Error(messages.AuthorityLost);
+            }
+            const standingText = ScribeStore.fetch(storage, headName);
+            const standing = ScribeStore.headOf(standingText);
+            if ((standing !== null && standing.generation >= generation) || (mayPublish !== null && standingText !== previousText)) {
+                leave = mayPublish === null;
                 throw new Error(messages.Overtaken);
             }
+            if (mayPublish !== null && mayPublish() !== true) {
+                throw new Error(messages.AuthorityLost);
+            }
+            leave = true;
             let refused = null;
             try {
                 storage.set(headName, headText);

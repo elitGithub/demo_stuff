@@ -1,5 +1,6 @@
 const BenchView = Object.freeze({
     PageSize: 20,
+    CitationPositions: new WeakMap(),
 
     Settings: Object.freeze({
         FirstPage: 1,
@@ -151,9 +152,77 @@ const BenchView = Object.freeze({
      */
     category(fact, labels) {
         if (fact.category !== ScribeCategory.Settings.RelationCategory) {
-            return fact.category;
+            return BenchView.scoped(fact, fact.category);
         }
         return BenchView.Settings.RelationTo + (fact.target === null ? fact.targetText : labels.get(fact.target));
+    },
+
+    /**
+     * @param {object} record
+     * @param {string} label
+     * @return {string}
+     */
+    scoped(record, label) {
+        const scope = [record.form, record.dimension].filter(Boolean);
+        return scope.length ? label + ' (' + scope.join(' / ') + ')' : label;
+    },
+
+    /**
+     * @param {object} conflict
+     * @return {string[]}
+     */
+    conflictKey(conflict) {
+        const key = [conflict.subject, conflict.category];
+        if (conflict.form || conflict.dimension) {
+            key.push(conflict.form, conflict.dimension);
+        }
+        return key;
+    },
+
+    /**
+     * @param {object} conflict
+     * @param {string} text
+     * @param {boolean} hidden
+     * @return {object}
+     */
+    pin(conflict, text, hidden) {
+        return {
+            type: ScribeLog.Ruling.Pin,
+            subject: conflict.subject,
+            category: conflict.category,
+            ...(conflict.form || conflict.dimension ? { form: conflict.form, dimension: conflict.dimension } : {}),
+            target: null,
+            text,
+            hidden,
+        };
+    },
+
+    /**
+     * @param {object} record
+     * @param {object|null} state
+     * @return {string}
+     */
+    citations(record, state = null) {
+        let positions = BenchView.CitationPositions.get(state);
+        const order = ScribeReplay.Inputs.get(state)?.order;
+        if (!positions && record.evidence && order) {
+            positions = new Map(order.map((id, index) => [id, index + 1]));
+            BenchView.CitationPositions.set(state, positions);
+        }
+        const sources = new Set();
+        for (const claim of [record, ...(record.claims ?? [])]) {
+            const evidence = claim.evidence;
+            if (evidence?.quote) {
+                const position = positions?.get(evidence.messageId) ??
+                    (claim.cite === evidence.messageId ? claim.position : null) ?? evidence.messageNumber;
+                const citation = '#' + position + (position === evidence.messageNumber ? '' : ' (originally #' + evidence.messageNumber + ')');
+                sources.add(citation + ', block ' + evidence.blockNumber + ', ' +
+                    evidence.speaker + ' (' + evidence.attribution + ') “' + evidence.quote + '”');
+            } else if (record.claims?.length > 1 && claim.position > 0 && claim.text) {
+                sources.add('#' + claim.position + ' (book wording: ' + claim.text + ')');
+            }
+        }
+        return [...sources].join(' · ');
     },
 
     /**
@@ -162,6 +231,10 @@ const BenchView = Object.freeze({
      */
     source(fact) {
         const settings = BenchView.Settings;
+        const citations = BenchView.citations(fact);
+        if (citations) {
+            return fact.origin === ScribeLog.Origin.Operator ? settings.OwnerSource + ' · ' + citations : citations;
+        }
         if (fact.origin === ScribeLog.Origin.Operator) {
             return settings.OwnerSource;
         }
@@ -308,15 +381,17 @@ const BenchView = Object.freeze({
                     pinned: fact.pinned,
                 }),
             );
-        return { id: subject.id, heading: subject.label, kind: subject.kind, aka: subject.aka, facts };
+        return { id: subject.id, heading: subject.label, kind: subject.kind, aka: subject.aka, facts,
+            ...(subject.evidence ? { source: BenchView.citations(subject, state) } : {}) };
     },
 
     /**
      * @param {object} scene
      * @param {Map<string, string>} labels
+     * @param {object|null} state
      * @return {{ id: string, day: number, range: string, place: string, reach: string, present: string, summary: string }}
      */
-    scene(scene, labels) {
+    scene(scene, labels, state = null) {
         const settings = BenchView.Settings;
         let reach = settings.Private;
         if (scene.reach === ScribeAnswer.Reach.Public) {
@@ -348,7 +423,7 @@ const BenchView = Object.freeze({
             place: scene.place,
             reach,
             present: present.length === 0 ? settings.Nobody : present.join(settings.Joiner),
-            summary: scene.summary,
+            summary: [scene.summary, BenchView.citations(scene, state)].filter(Boolean).join(' · '),
         };
     },
 
@@ -365,7 +440,7 @@ const BenchView = Object.freeze({
                  * @param {object} scene
                  * @return {object}
                  */
-                (scene) => BenchView.scene(scene, labels),
+                (scene) => BenchView.scene(scene, labels, state),
             ),
             page,
         );
@@ -389,6 +464,7 @@ const BenchView = Object.freeze({
                     subject: conflict.subject,
                     label: labels.get(conflict.subject),
                     category: conflict.category,
+                    ...(conflict.form || conflict.dimension ? { form: conflict.form, dimension: conflict.dimension } : {}),
                     established: conflict.established,
                     values: ids.map(
                         /**
@@ -435,7 +511,7 @@ const BenchView = Object.freeze({
                  * @param {object} scene
                  * @return {object}
                  */
-                (scene) => BenchView.scene(scene, labels),
+                (scene) => BenchView.scene(scene, labels, state),
             );
         const questions = state.questions
             .filter(
@@ -452,7 +528,7 @@ const BenchView = Object.freeze({
                  */
                 (question) => ({
                     id: question.id,
-                    text: question.text,
+                    text: [question.text, BenchView.citations(question)].filter(Boolean).join(' · '),
                     position: question.position,
                     answer: question.answer,
                 }),
@@ -467,8 +543,8 @@ const BenchView = Object.freeze({
                 return {
                     label: labels.get(fuller.subject),
                     category: BenchView.category(fuller, labels),
-                    from: facts.get(refinement.from).text,
-                    to: fuller.text,
+                    from: [facts.get(refinement.from).text, BenchView.citations(facts.get(refinement.from))].filter(Boolean).join(' · '),
+                    to: [fuller.text, BenchView.citations(fuller)].filter(Boolean).join(' · '),
                 };
             },
         );
@@ -477,7 +553,8 @@ const BenchView = Object.freeze({
              * @param {{ subject: string, name: string }} alias
              * @return {object}
              */
-            (alias) => ({ subject: alias.subject, label: labels.get(alias.subject), name: alias.name }),
+            (alias) => ({ subject: alias.subject, label: labels.get(alias.subject), name: alias.name,
+                ...(alias.evidence ? { source: BenchView.citations(alias, state) } : {}) }),
         );
         return { conflicts, lookAlikes, publicScenes, questions, refinements, aliases };
     },
@@ -497,7 +574,7 @@ const BenchView = Object.freeze({
          */
         Pin(operation) {
             const settings = BenchView.Settings;
-            return settings.Words.Pin + operation.category + settings.Colon + operation.text;
+            return settings.Words.Pin + BenchView.scoped(operation, operation.category) + settings.Colon + operation.text;
         },
 
         /**
@@ -563,7 +640,7 @@ const BenchView = Object.freeze({
                 operation.category === ScribeCategory.Settings.RelationCategory
                     ? settings.RelationTo + operation.targetText
                     : operation.category;
-            return settings.Words.Add + category + settings.Colon + operation.text;
+            return settings.Words.Add + BenchView.scoped(operation, category) + settings.Colon + operation.text;
         },
 
         /**
@@ -726,6 +803,7 @@ const BenchView = Object.freeze({
                 text: fact.text,
                 position: fact.position,
                 message: texts.get(fact.cite) ?? settings.Nothing,
+                ...(fact.evidence || fact.claims?.length > 1 ? { source: BenchView.citations(fact) } : {}),
             }),
         );
     },

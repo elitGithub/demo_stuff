@@ -1,4 +1,5 @@
 import assert from 'node:assert/strict';
+import { randomUUID } from 'node:crypto';
 import { readFileSync } from 'node:fs';
 import test from 'node:test';
 import vm from 'node:vm';
@@ -12,7 +13,7 @@ import StandInKeeper from './support/StandInKeeper.mjs';
  * @return {Object<string, object>}
  */
 function load(core, page) {
-    const context = vm.createContext({ TextEncoder });
+    const context = vm.createContext({ TextEncoder, crypto: { randomUUID } });
     const loaded = {};
     const sources = [...core.map((name) => ['core', name]), ...page.map((name) => ['page', name])];
     for (const [folder, name] of sources) {
@@ -5109,6 +5110,186 @@ test('the story so far leads the reminder, is reused while the timeline and the 
     assert.equal(live.view().ready.startsWith('[Scribe] The story so far: Orla came to the mill, then pitched a tent. '), true);
 });
 
+test('a writer refusal parks its paid input until an intentional retry', async () => {
+    const { model, moment, storage, live } = timed();
+    model.story = "I can't write this story.\n\n[Summary goes here.]";
+    await live.reply(at(41));
+    await live.force();
+    const calls = model.calls.length;
+    const reason = ScribeLive.Settings.Messages.StoryDeclined;
+    assert.deepEqual(plain(live.view().failing), [{ role: 'recap', reason, retrying: false }]);
+    assert.equal(live.view().held, null);
+    assert.equal(live.outgoing('I wait.'), 'I wait.');
+    live.sent();
+    for (const time of [15000, 75000, 5000000]) {
+        await moveTo(live, moment, time);
+    }
+    const saved = ScribeStore.read(storage, ROOM, ScribeStore.Kind.Live);
+    assert.equal(saved.story, null);
+    assert.equal(saved.ready, null);
+    assert.equal(saved.forced, true);
+    assert.equal(saved.sends, 1);
+    assert.equal(saved.untold.tries, ScribeLive.Settings.RetryMs.length);
+    assert.equal(model.calls.length, calls);
+    assert.equal(tellings(model), 1);
+    model.story = '“I can’t write this story,” said Mirra.';
+    live.rekey();
+    await ticks();
+    assert.equal(model.calls.length, calls + 1);
+    assert.deepEqual(plain(live.view().failing), []);
+    const ready = live.lines().ready;
+    assert.ok(ready.includes(model.story));
+    assert.equal(live.outgoing('Go.'), 'Go.' + lineOf(ready));
+    live.sent();
+    assert.equal(live.view().sends, 0);
+    assert.equal(live.outgoing('Again.'), 'Again.');
+});
+
+test('cold automatic cache and preview cleanup leaves edits, selections, drafts and independent offers intact', async () => {
+    const fields = { messages: story.slice(0, 41), unread: story.slice(40, 41) };
+    const original = await preparedRoom(fields);
+    const base = ScribeStore.read(original.storage, ROOM, ScribeStore.Kind.Live);
+    original.live.close();
+    const text = 'I can’t write this story.';
+    const preview = '[Scribe] The story so far: ' + text;
+    const cache = { ...base.story, text };
+    for (const variant of ['cache only', 'preview only', 'edit', 'selection', 'failed write', 'different cache', 'development']) {
+        const storage = new FakeStorage();
+        const saved = { ...base, ready: preview, story: cache, draft: '[Scribe] My unsaved draft.' };
+        if (variant === 'cache only') {
+            Object.assign(saved, { ready: null, basis: null });
+        } else if (variant === 'preview only') {
+            saved.story = null;
+        } else if (variant === 'edit') {
+            Object.assign(saved, { selection: null, edited: preview, editedFor: { id: at(41).id, fingerprint: at(41).fingerprint } });
+        } else if (variant === 'selection') {
+            saved.selection = { id: base.delivery.id, text: preview };
+        } else if (variant === 'different cache') {
+            saved.story = { key: 'older story', text };
+            saved.ready = base.ready;
+        } else if (variant === 'development') {
+            saved.suggestion = COURIER;
+        }
+        ScribeStore.write(storage, ROOM, ScribeStore.Kind.Live, saved);
+        if (variant === 'failed write') {
+            storage.refuseSetsMatching(/live/);
+        }
+        const { live, model } = rig(fields, storage);
+        const expected = ['selection', 'edit'].includes(variant) ? preview :
+            variant === 'different cache' ? base.ready : null;
+        assert.equal(live.lines().ready, expected, variant);
+        if (variant === 'different cache') {
+            assert.deepEqual(plain(live.view().failing), []);
+        }
+        const result = 'Now.' + (expected ? lineOf(expected) : '') + (variant === 'development' ? '\n@: ' + COURIER : '');
+        assert.equal(live.outgoing('Now.'), result, variant);
+        live.sent();
+        assert.equal(live.outgoing('Later.'), 'Later.', variant);
+        assert.equal(live.view().due, expected === null, variant);
+        if (variant !== 'failed write') {
+            const kept = ScribeStore.read(storage, ROOM, ScribeStore.Kind.Live);
+            assert.equal(kept.draft, saved.draft, variant);
+            assert.equal(kept.sends, expected ? 0 : 1, variant);
+            assert.equal(kept.ready, null, variant);
+            assert.equal(kept.story, null, variant);
+        }
+        await ticks();
+        assert.equal(model.calls.length, 0, variant);
+        live.close();
+    }
+});
+
+test('confirming a manual replacement clears the refusal warning while its original key stays parked', async () => {
+    const { live, model } = rig({ settings: { refresh: 1, budget: 3 } });
+    model.story = "I can't write this story.";
+    await live.reply(at(41));
+    assert.equal(live.view().failing.length, 1);
+    await live.force(null, 'Orla stayed at the mill.');
+    assert.deepEqual(plain(live.view().failing), []);
+    assert.equal(live.outgoing('First.'), 'First.' + lineOf('[Scribe] Orla stayed at the mill.'));
+    live.sent();
+    live.view();
+    await ticks();
+    assert.deepEqual(plain(live.view().failing), []);
+    assert.equal(live.outgoing('Next.'), 'Next.');
+    assert.equal(tellings(model), 1);
+});
+
+test('a refusal from another story key cannot disturb the current one-send interval', async () => {
+    const fields = { messages: story.slice(0, 41), unread: story.slice(40, 41), settings: { refresh: 1, budget: 3 } };
+    for (const rejected of ['cache', 'preview']) {
+        const original = await preparedRoom(fields);
+        original.live.close();
+        const saved = ScribeStore.read(original.storage, ROOM, ScribeStore.Kind.Live);
+        const valid = saved.ready;
+        const refusal = "I can't write this story.";
+        if (rejected === 'cache') {
+            saved.story = { key: 'earlier story key', text: refusal };
+        } else {
+            saved.basis.story = 'earlier story key';
+            saved.ready = '[Scribe] The story so far: ' + refusal;
+        }
+        ScribeStore.write(original.storage, ROOM, ScribeStore.Kind.Live, saved);
+        const { live, model } = rig(fields, original.storage);
+        live.view();
+        await ticks();
+        assert.equal(live.outgoing('First.'), 'First.' + lineOf(valid));
+        live.sent();
+        live.view();
+        await ticks();
+        assert.equal(live.outgoing('Again.'), 'Again.');
+        assert.equal(model.calls.length, 0);
+    }
+});
+
+test('a legacy refusal receipt survives reload and explicit resend retains its identity', async () => {
+    const fields = { messages: story.slice(0, 41), unread: story.slice(40, 41) };
+    for (const resend of [false, true]) {
+        const { live, storage } = await preparedRoom(fields);
+        live.outgoing('Originally.');
+        const post = live.posting();
+        live.uncertain(post);
+        live.close();
+        const saved = ScribeStore.read(storage, ROOM, ScribeStore.Kind.Live);
+        saved.story.text = "I can't write this story.";
+        saved.ready = '[Scribe] The story so far: ' + saved.story.text;
+        Object.assign(saved.posts[0], { ready: saved.ready, carried: saved.ready });
+        ScribeStore.write(storage, ROOM, ScribeStore.Kind.Live, saved);
+        const restored = rig(fields, storage);
+        assert.equal(restored.live.view().unconfirmed.text, saved.ready);
+        assert.equal(restored.live.lines().ready, null);
+        if (resend) {
+            await restored.live.force(post.reminder);
+            assert.deepEqual(plain(restored.live.lines()), { ready: saved.ready, manual: true, ends: [], suggestion: null,
+                reminder: post.reminder, attempt: post.attempt });
+            assert.equal(restored.live.outgoing('Retry.'), 'Retry.' + lineOf(saved.ready));
+            restored.live.sent();
+        }
+        restored.live.went(post);
+        restored.live.went(post);
+        const after = ScribeStore.read(storage, ROOM, ScribeStore.Kind.Live);
+        assert.deepEqual(plain(after.settled), [post.reminder]);
+        assert.equal(after.sends, resend ? 1 : 0);
+        assert.equal(restored.live.outgoing('After.'), 'After.');
+        assert.equal(tellings(restored.model), 0);
+    }
+});
+
+test('a legacy cache with a normalized quoted heading preserves the named character’s refusal', async () => {
+    const fields = { messages: story.slice(0, 41), unread: story.slice(40, 41) };
+    const generated = rig(fields);
+    generated.model.story = "“The story so far: I can't write this story,” Mirra admitted.";
+    await generated.live.reply(at(41));
+    await generated.live.force();
+    const ready = generated.live.lines().ready;
+    assert.ok(ready.includes("I can't write this story,” Mirra admitted."));
+    generated.live.close();
+    const restored = rig(fields, generated.storage);
+    assert.deepEqual(plain(restored.live.view().failing), []);
+    assert.equal(restored.live.outgoing('Yes.'), 'Yes.' + lineOf(ready));
+    assert.equal(restored.model.calls.length, 0);
+});
+
 test('no story so far, no reminder: the failure is said, retried on the schedule, and the reminder follows', async () => {
     const { model, moment, live } = timed();
     model.refusals.set(ScribeReminder.StoryPrompt, 'story offline');
@@ -5390,6 +5571,34 @@ test('a trimmed reminder marks as reminded only what it carried, on both paths',
     crowded.live.went({ ready: whole.ready, suggestion: null, carried: whole.ready, crowded: false });
     assert.equal(crowded.live.view().held, null);
     assert.equal(statuses(crowded.live).some(([, , status]) => status === 'Reminded'), true);
+});
+
+test('an old recovery snapshot cannot rerun newer identical failures at the same instant after rehydration', async () => {
+    const { live, model, keeper, moment } = timed();
+    model.refusals.set(ScribePedant.Prompt, cutOff);
+    model.refusals.set(ScribeReminder.StoryPrompt, cutOff);
+    await live.reply(at(41));
+    await live.force();
+    live.rekey();
+    await ticks();
+    const previous = live.keyWork();
+    keeper.change({ reader: false, trusted: false });
+    live.view();
+    keeper.change({ reader: true, trusted: true });
+    live.view();
+    const before = model.calls.length;
+    live.rekey();
+    await ticks();
+    assert.equal(model.calls.length, before + 2);
+    for (let duplicate = 0; duplicate < 3; duplicate++) {
+        live.rekey(previous);
+        await ticks();
+        assert.equal(model.calls.length, before + 2);
+    }
+    live.rekey();
+    await ticks();
+    assert.equal(model.calls.length, before + 4);
+    assert.equal(moment.value, 0);
 });
 
 test('a key save reruns only the scene, the story and the latest check, once', async () => {

@@ -100,6 +100,81 @@ function apply(log, order, answerText, messages, origin = 'Story') {
     return { state: ScribeReplay.run(log, order), result, parsed };
 }
 
+test('Sera keeps both cited forms through a transformation and compares only matching measurements', () => {
+    const campaign = new CampaignBuilder('Sera');
+    const readings = new Map([[148, '5 ft 9 in'], [196, '20 m'], [197, '2,000 cm'], [198, '12 m']]);
+    for (let position = 1; position <= 199; position++) {
+        campaign.narrator(readings.get(position) ?? 'She takes human form.');
+    }
+    const messages = ScribeIntake.read(campaign.messages).messages;
+    const order = messages.map((message) => message.id);
+    const log = ScribeLog.create();
+    const replay = () => ScribeReplay.run(plain(log), order);
+    for (const [position, text] of readings) {
+        const message = messages[position - 1];
+        const scope = position === 148 ? { form: 'human', dimension: 'height' } : { form: 'full dragon', dimension: 'length' };
+        const evidence = { ...scope, section: 'FACTS', row: 1, messageId: message.id, messageNumber: position,
+            fingerprint: message.fingerprint, blockNumber: 1, speaker: message.blocks[0].speaker,
+            attribution: position === 197 ? 'claimed' : 'witnessed', quote: text };
+        const [fact] = ScribeAnswer.parse(answer({ FACTS: [`Sera | build | ${text} | #${position}`] })).operations;
+        const result = ScribeLog.append(log, replay(), [{ ...fact, ...scope, evidence }], { messages: [message], origin: 'Story' });
+        assert.equal(result.refused.length, 0);
+        const state = replay();
+        assert.equal(state.conflicts.length, Number(position === 198));
+        if (position >= 196) {
+            assert.deepEqual(plain(state.facts.filter((item) => item.status === 'InForce').map((item) =>
+                [item.text, item.form, item.dimension, item.evidence.messageNumber])),
+            [['5 ft 9 in', 'human', 'height', 148], ['20 m', 'full dragon', 'length', 196]]);
+        }
+    }
+    apply(log, order, answer({ FACTS: ['Sera | status | takes human form | #199'] }), [messages[198]]);
+    const state = replay();
+    const dragon = state.facts.find((item) => item.text === '20 m');
+    assert.deepEqual(plain(dragon.claims.map(({ id, text, cite, evidence }) => [id, text, cite, evidence.quote, evidence.attribution])),
+        [['F2', '20 m', order[195], '20 m', 'witnessed'], ['F3', '2,000 cm', order[196], '2,000 cm', 'claimed']]);
+    assert.deepEqual(plain(state.conflicts), [{ subject: 'S1', category: 'build', target: null, form: 'full dragon',
+        dimension: 'length', established: 'F2', others: ['F4'] }]);
+    assert.deepEqual(plain(state.claims.map((claim) => claim.evidence.messageId)), [order[147], order[195], order[196], order[197]]);
+});
+
+test('legacy build wording identifies the two forms without guessing a form for unqualified records', () => {
+    const log = ScribeLog.create();
+    const human = 'five foot nine in human form';
+    const dragon = 'twenty meters long in full dragon form';
+    const state = apply(log, storyOrder, answer({ FACTS: [
+        `Sera | build | ${human} | #1`, `Sera | build | ${dragon} | #2`,
+        'Sera | build | 2,000 cm long in full dragon form | #3', 'Sera | build | 12 m long | #4',
+    ] }), pick(1, 2, 3, 4)).state;
+    for (const entry of log.entries) {
+        for (const operation of entry.operations) {
+            delete operation.form;
+            delete operation.dimension;
+        }
+    }
+    const old = ScribeReplay.run(plain(log), storyOrder);
+    assert.deepEqual(plain(old.facts), plain(state.facts));
+    assert.deepEqual(plain(old.facts.map((item) => [item.id, item.status, item.form, item.dimension])),
+        [['F1', 'InForce', 'human', 'height'], ['F2', 'InForce', 'full dragon', 'length'], ['F4', 'InForce', null, 'length']]);
+    assert.equal(old.conflicts.length, 0);
+    const savedAdvice = contradiction(`#2 "${dragon}" | #1 "${human}" | conflicting measurements`, 'MESSAGE-1');
+    ScribeLog.append(log, old, [savedAdvice], { origin: 'Notes', messages: pick(2) });
+    assert.equal(ScribeReplay.run(plain(log), storyOrder).contradictions.length, 0);
+    assert.ok(log.entries.at(-1).operations.some((operation) => operation.type === 'Contradiction'));
+});
+
+test('a sentence and a bare quantity agree while ranges, approximations and additional values stay distinct', () => {
+    const log = ScribeLog.create();
+    const values = ['Her full dragon form is 20 m long', 'Her full dragon form is 2,000 cm long', '2,000 cm long',
+        'Her full dragon form is at least 20 m long', 'Her full dragon form is 19–20 m long',
+        'Her full dragon form is 20 m long with a 3 m tail'];
+    const rows = ScribeAnswer.parse(answer({ FACTS: values.map((text, index) => `Sera | build | ${text} | #${index + 1}`) })).operations;
+    const operations = rows.map((row, index) => index === 2 ? { ...row, form: 'full dragon', dimension: 'length' } : row);
+    ScribeLog.append(log, ScribeReplay.run(log, storyOrder), operations, { origin: 'Story', messages: story.slice(0, rows.length) });
+    const state = ScribeReplay.run(plain(log), storyOrder);
+    assert.deepEqual(plain(state.facts[0].claims.map((claim) => [claim.text, claim.position])), values.slice(0, 3).map((text, index) => [text, index + 1]));
+    assert.deepEqual(plain(state.conflicts[0].others), ['F4', 'F5', 'F6']);
+});
+
 test('only accepted matching operations carry resolution evidence and material supporting edits reopen the issue', () => {
     const log = ScribeLog.create();
     const state = apply(log, storyOrder, answer({ FACTS: ['Mira | eyes | blue | #1', 'Mira | hair | black | #2'] }),

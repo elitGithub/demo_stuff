@@ -3,6 +3,7 @@ import { readFileSync } from 'node:fs';
 import test from 'node:test';
 import vm from 'node:vm';
 import FakeChat from './support/FakeChat.mjs';
+import CitedStory from './support/CitedStory.mjs';
 import FakeStorage from './support/FakeStorage.mjs';
 
 /**
@@ -21,6 +22,7 @@ function load() {
         ['core', 'ScribeAnalyzer'],
         ['core', 'ScribeAdoption'],
         ['bench', 'BenchView'],
+        ['page', 'ScribePedant'],
         ['page', 'ScribeStore'],
         ['page', 'ScribeKeeper'],
     ];
@@ -32,7 +34,7 @@ function load() {
     return loaded;
 }
 
-const { ScribeAnswer, ScribeIntake, ScribeLog, ScribeReplay, ScribeAnalyzer, ScribeStore, ScribeKeeper } = load();
+const { ScribeAnswer, ScribeIntake, ScribeLog, ScribeReplay, ScribeAnalyzer, ScribeStore, ScribeKeeper, ScribePedant } = load();
 
 const ROOM = 'harbour';
 const OTHER_ROOM = 'quarry';
@@ -81,6 +83,188 @@ const prompts = new Map([
     [ScribeAnalyzer.NotesPrompt, 'Notes'],
     [ScribeAnalyzer.AnswersPrompt, 'Answers'],
 ]);
+
+/**
+ * @param {Function} onCheck
+ * @return {object}
+ */
+function checkedModel(onCheck) {
+    const writer = analyst({ blank: true, cost: 0 });
+    const calls = [];
+    return { calls, async ask(role, system, input) {
+        if (system !== ScribePedant.CheckPrompt) {
+            return writer.ask(role, system, input);
+        }
+        assert.equal(role, 'Pedant');
+        const page = JSON.parse(input);
+        calls.push(page);
+        await onCheck(page, input);
+        return { text: JSON.stringify({ page: page.page, complete: true, claims: [], findings: [] }), cost: 0.01 };
+    } };
+}
+
+test('an edit to #1 during a paid independent check is re-observed without a poll and cannot be published', async () => {
+    const chat = new FakeChat(80);
+    const held = gate();
+    const model = checkedModel(() => held.promise);
+    const { keeper, storage } = await opened(chat, model, { checkPassage: ScribePedant.checkPassage });
+    await keeper.adopt({});
+    const checking = keeper.tick();
+    await until(() => model.calls.length === 1);
+    chat.edit(1, 'Orla withdraws her original claim.');
+    held.release();
+    await checking;
+    assert.equal(keeper.view().checkedThrough, 0);
+    assert.equal(keeper.view().writtenThrough, 0);
+    assert.equal(savedBook(storage).log.entries.some((entry) => entry.check), false);
+    assert.equal(cents(keeper.view().spentToday), 1);
+});
+
+test('a historical page cannot publish after losing the lease and the next reader checks the same source', async () => {
+    const held = gate();
+    const chat = new FakeChat(3);
+    const model = checkedModel(() => held.promise);
+    const first = await opened(chat, model, { checkPassage: ScribePedant.checkPassage });
+    await first.keeper.adopt({});
+    const pending = first.keeper.tick();
+    await until(() => model.calls.length === 1);
+    first.keeper.close();
+    const second = await opened(chat, model, { checkPassage: ScribePedant.checkPassage, storage: first.storage, tabId: 'tab-2' });
+    held.release();
+    await pending;
+    assert.equal(second.keeper.view().checkedThrough, 0);
+    await second.keeper.tick();
+    assert.deepEqual(model.calls.map((page) => page.position), [1, 1]);
+    assert.equal(second.keeper.view().checkedThrough, 1);
+    assert.equal(cents(second.keeper.view().spentToday), 2);
+});
+
+test('a refused current page reports verification failure and backs off while a failed storage write reuses its paid answer', async () => {
+    const chat = new FakeChat(3);
+    const model = checkedModel(() => {});
+    let corrupt = true;
+    const checkPassage = (work) => ScribePedant.checkPassage({ ...work, savePage: (page) =>
+        work.savePage(corrupt ? { ...page, answer: '{}' } : page) });
+    const { keeper, clock, storage } = await opened(chat, model, { checkPassage });
+    await keeper.adopt({});
+    await keeper.tick();
+    assert.equal(keeper.view().checkedThrough, 0);
+    assert.match(keeper.view().checkerProblem.reason, /could not be verified/);
+    await keeper.tick();
+    assert.equal(model.calls.length, 1);
+    corrupt = false;
+    clock.time += MINUTE;
+    storage.refuseSetsMatching(BOOK_HEAD);
+    await keeper.tick();
+    assert.equal(model.calls.length, 2);
+    assert.equal(keeper.view().checkedThrough, 0);
+    storage.allow();
+    clock.time += MINUTE;
+    await keeper.tick();
+    assert.equal(keeper.view().checkedThrough, 1);
+    assert.equal(model.calls.length, 2);
+    assert.equal(keeper.view().checkerProblem, null);
+});
+
+test('a smaller pedant context is learned for this room and model, and successful segments survive reload', async () => {
+    const chat = new FakeChat(2);
+    chat.edit(1, 'Orla surveys the city walls. '.repeat(400));
+    let refused = 0;
+    const accepted = [];
+    const model = checkedModel((page, input) => {
+        if (Buffer.byteLength(input) > 4096) {
+            refused++;
+            throw Object.assign(new Error('maximum context length exceeded'), { status: 400 });
+        }
+        accepted.push(page.page);
+    });
+    const first = await opened(chat, model, { checkPassage: ScribePedant.checkPassage });
+    await first.keeper.adopt({});
+    await first.keeper.tick();
+    assert.ok(refused > 0);
+    assert.equal(accepted.length, 1);
+    const limits = savedBook(first.storage).log.checkLimits;
+    assert.ok(limits['model:' + first.keeper.view().settings.pedant].bytes < ScribePedant.Settings.PassageBytes);
+    first.keeper.close();
+    const second = await opened(chat, model, { storage: first.storage, tabId: 'tab-2', checkPassage: ScribePedant.checkPassage });
+    for (let attempt = 0; attempt < 200 && second.keeper.view().checkedThrough === 0; attempt++) {
+        await second.keeper.tick();
+    }
+    assert.equal(second.keeper.view().checkedThrough, 1, JSON.stringify(second.keeper.view().checkerProblem));
+    assert.equal(new Set(accepted).size, accepted.length);
+});
+
+test('a recent-only comparison verifies its own source range without pulling the first room page', async () => {
+    const chat = new FakeChat(100);
+    const model = checkedModel(() => {});
+    const original = await opened(chat, model);
+    await original.keeper.adopt({});
+    const book = savedBook(original.storage);
+    const messages = original.keeper.view().messages;
+    original.keeper.close();
+    for (let position = 1; position < 100; position++) {
+        const work = ScribeLog.checkWork(book, messages, false);
+        const id = 'checked-' + position;
+        const answer = JSON.stringify({ page: id, complete: true, claims: [], findings: [] });
+        assert.equal(ScribeLog.saveCheck(book, messages, work, { id, index: 0, total: 1, complete: true, answer, claims: [], findings: [] }), true);
+    }
+    ScribeStore.write(original.storage, ROOM, ScribeStore.Kind.Book, book);
+    const anchors = [];
+    const zeta = chat.zeta.bind(chat);
+    chat.zeta = (tab) => {
+        const source = zeta(tab);
+        return { ...source, newest: (through) => { anchors.push(through); return source.newest(through); } };
+    };
+    const checkPassage = (work) => ScribePedant.checkPassage({ ...work, earlierClaims: work.earlierClaims.filter((row) => row.position === 99) });
+    const current = await opened(chat, model, { storage: original.storage, tabId: 'tab-2', checkPassage });
+    anchors.length = 0;
+    await current.keeper.tick();
+    assert.equal(current.keeper.view().checkedThrough, 100);
+    assert.equal(anchors.at(-1), FakeChat.id(99));
+    assert.equal(anchors.includes(FakeChat.id(1)), false);
+});
+
+test('a permanent provider context floor pauses this source and model across reload, while switching models resumes', async () => {
+    const chat = new FakeChat(1);
+    let narrow = true;
+    const model = checkedModel(() => {
+        if (narrow) {
+            throw Object.assign(new Error('context_length_exceeded'), { status: 400 });
+        }
+    });
+    const first = await opened(chat, model, { checkPassage: ScribePedant.checkPassage });
+    await first.keeper.adopt({});
+    await first.keeper.tick();
+    assert.match(first.keeper.view().checkerProblem.reason, /too small/);
+    const attempts = model.calls.length;
+    first.keeper.close();
+    const next = await opened(chat, model, { storage: first.storage, tabId: 'tab-2', checkPassage: ScribePedant.checkPassage });
+    await next.keeper.tick();
+    assert.match(next.keeper.view().checkerProblem.reason, /too small/);
+    assert.equal(model.calls.length, attempts);
+    narrow = false;
+    await next.keeper.configure({ pedant: 'operator/another-model' });
+    await next.keeper.tick();
+    assert.equal(next.keeper.view().checkedThrough, 1);
+    assert.equal(model.calls.length, attempts + 1);
+});
+
+test('the saved valid answer survives a failed charge write and can publish when the budget is already spent', async () => {
+    const chat = new FakeChat(1);
+    const model = checkedModel(() => {});
+    const { keeper, clock, storage } = await opened(chat, model, { checkPassage: ScribePedant.checkPassage });
+    await keeper.adopt({ budget: 0.01 });
+    storage.refuseSetsMatching(SPENT);
+    await keeper.tick();
+    assert.equal(keeper.view().checkedThrough, 0);
+    assert.equal(model.calls.length, 1);
+    storage.allow();
+    clock.time += MINUTE;
+    await keeper.tick();
+    assert.equal(keeper.view().checkedThrough, 1);
+    assert.equal(cents(keeper.view().spentToday), 1);
+    assert.equal(model.calls.length, 1);
+});
 
 /**
  * @param {*} value
@@ -180,22 +364,29 @@ function marksOf(pass, user) {
  * @param {{ conflict?: boolean, question?: boolean }} options
  * @return {string}
  */
-function scripted(call, options) {
+function scripted(call, options, input) {
     if (call.pass !== 'Story') {
         return answer({
             FACTS: call.marks.map((mark) => `Halvard | trait | settled by the answers at line ${mark} | #${mark}`),
         });
     }
     if (options.blank === true) {
-        return '=== FACTS';
+        return CitedStory.answer(input, '');
     }
     const [first, last] = call.marks;
+    const messages = CitedStory.messages(input);
+    const available = [...messages].filter(([, source]) => source.some((block) => block.quote.includes('Halvard keeps watch from line')));
+    if (!available.length) {
+        return CitedStory.answer(input, '');
+    }
+    const [start, opening] = available[0];
+    const [end, closing] = available.at(-1);
     const facts = [
-        `Halvard | trait | keeps watch from line ${first} | #${first}`,
-        `Mirelle | trait | counts coins to line ${last} | #${last}`,
+        `Halvard | trait | ${/keeps watch from line \d+/.exec(opening[0].quote)[0]} | #${start}`,
+        `Mirelle | trait | ${/counts coins to line \d+/.exec(closing[0].quote)[0]} | #${end}`,
     ];
     const blocks = { SUBJECTS: ['Halvard | character', 'Mirelle | character'], FACTS: facts };
-    if (first === 1 && options.conflict === true) {
+    if (first === 1 && options.conflict === true && messages.get(3)?.[0].quote.includes('twenty-five')) {
         facts.push('Halvard | age | twenty-five | #3', 'Halvard | age | thirty | #5');
     }
     if (first === 1 && options.question === true) {
@@ -204,7 +395,7 @@ function scripted(call, options) {
     if (options.asks !== undefined && first <= options.asks && options.asks <= last) {
         blocks.QUESTIONS = [`Who rang the harbour bell? | #${options.asks}`];
     }
-    return answer(blocks);
+    return CitedStory.answer(input, answer(blocks), [start, end]);
 }
 
 /**
@@ -241,7 +432,7 @@ function analyst(options = {}) {
         if (model.unreadable !== null && model.unreadable(call)) {
             return { text: PROSE, cost: model.cost };
         }
-        return { text: scripted(call, options), cost: model.cost };
+        return { text: scripted(call, options, user), cost: model.cost };
     };
     return model;
 }
@@ -284,6 +475,7 @@ async function opened(chat, model, extra = {}) {
         tabId,
         zeta: chat.zeta(tabId),
         ask: model.ask,
+        checkPassage: extra.checkPassage,
         clock,
         /**
          * @param {object} event
@@ -648,6 +840,274 @@ test('the newest reply is read without another message', async () => {
     assert.equal(savedRead(storage, 'MESSAGE-141'), true);
 });
 
+test('catchUp joins a slow live read and saves every arriving source through the requested target', async () => {
+    const held = gate();
+    const { chat, model, keeper, storage } = await adopted({ count: 4,
+        hold: (call) => call.marks[0] === 5 ? held.promise : null });
+    chat.add(1);
+    const reading = keeper.tick();
+    await until(() => model.calls.length === 2);
+    chat.add(5);
+    const target = ScribeIntake.read(chat.raw).messages.at(-1);
+    const first = keeper.catchUp(target);
+    const joined = keeper.catchUp({ id: target.id, fingerprint: target.fingerprint });
+    assert.equal(first, joined);
+    held.release();
+    assert.equal(await first, true);
+    await reading;
+    assert.equal(keeper.view().writtenThrough, 10);
+    assert.deepEqual(ranges(model), ['Story 1-4', 'Story 5-5', 'Story 6-10']);
+    const book = savedBook(storage);
+    assert.deepEqual(plain(book.log.entries.flatMap((entry) => entry.messageIds)), plain(ScribeIntake.read(chat.raw).messages.map((row) => row.id)));
+    assert.equal(book.fingerprints[target.id], target.fingerprint);
+});
+
+test('catchUp only confirms the version in the in-flight refresh', async () => {
+    const { chat, keeper, model } = await adopted({ count: 4 });
+    const old = keeper.view().messages.at(-1);
+    chat.edit(4, 'The lamp is lit.');
+    const current = ScribeIntake.read(chat.raw).messages.at(-1);
+    const release = chat.hold('newest');
+    const polling = keeper.tick();
+    await until(() => keeper.view().busy === 'Looking');
+    const stale = keeper.catchUp(old);
+    const valid = keeper.catchUp(current);
+    release();
+    assert.deepEqual(await Promise.all([stale, valid]), [false, true]);
+    await polling;
+    assert.deepEqual(ranges(model), ['Story 1-4', 'Story 4-4']);
+});
+
+test('joining an unrelated recent-page poll still verifies the requested historical version', async () => {
+    const { chat, keeper, model, storage } = await adopted({ count: 100 });
+    const old = keeper.view().messages[3];
+    chat.edit(4, 'The lamp was repaired.');
+    const updated = ScribeIntake.read(chat.raw).messages[3];
+    const release = chat.hold('newest');
+    const polling = keeper.tick();
+    await until(() => keeper.view().busy === 'Looking');
+    const stale = keeper.catchUp(old);
+    const current = keeper.catchUp(updated);
+    release();
+    assert.deepEqual(await Promise.all([stale, current]), [false, true]);
+    await polling;
+    assert.equal(savedBook(storage).fingerprints[updated.id], updated.fingerprint);
+    assert.deepEqual(ranges(model).slice(3), ['Story 4-4']);
+});
+
+test('catchUp refuses a deleted first source and preserves it until a complete search proves the deletion', async () => {
+    const { chat, keeper, storage, model } = await adopted({ count: 80 });
+    const target = keeper.view().messages[0];
+    chat.remove(1);
+    chat.hide(2);
+    assert.equal(await keeper.catchUp(target), false);
+    assert.equal(savedRead(storage, target.id), true);
+    assert.equal(keeper.view().total, 80);
+    assert.equal(await keeper.catchUp(target), false);
+    assert.equal(savedRead(storage, target.id), false);
+    assert.equal(keeper.view().messages[0].id, 'MESSAGE-2');
+    assert.equal(keeper.view().writtenThrough, 0);
+    assert.deepEqual(ranges(model), ['Story 1-40', 'Story 41-80']);
+});
+
+test('a claim or lease exception during extraction retains the durable prefix until authority returns', async () => {
+    for (const kind of ['lease', 'claim']) {
+        let failing = false;
+        let armed = true;
+        const source = await adopted({ count: 4, [kind]: () => {
+            if (failing) {
+                throw new Error('reader authority unavailable');
+            }
+            return true;
+        }, hold: (call) => {
+            if (call.marks[0] === 5 && armed) {
+                failing = true;
+                armed = false;
+            }
+            return null;
+        } });
+        source.chat.add(1);
+        await source.keeper.tick();
+        assert.equal(savedReads(source.storage), 4, kind);
+        assert.equal(source.keeper.view().writtenThrough, 4, kind);
+        assert.equal(source.keeper.view().stop.problem, 'reader authority unavailable', kind);
+        failing = false;
+        await source.keeper.tick();
+        assert.equal(savedReads(source.storage), 5, kind);
+        assert.deepEqual(ranges(source.model), ['Story 1-4', 'Story 5-5'], kind);
+    }
+});
+
+test('the book head cannot advance if authority changes after its parts were staged', async () => {
+    for (const mode of ['lost', 'unreadable']) {
+        const storage = new FakeStorage();
+        const set = storage.set.bind(storage);
+        let armed = false;
+        let valid = true;
+        storage.set = (name, value) => {
+            set(name, value);
+            if (armed && BOOK_PART.test(name)) {
+                valid = false;
+            }
+        };
+        const { chat, keeper, model } = await adopted({ count: 4, storage, lease: () => {
+            if (!valid && mode === 'unreadable') {
+                throw new Error('lease unreadable');
+            }
+            return valid;
+        } });
+        chat.add(1);
+        armed = true;
+        await keeper.tick();
+        assert.equal(savedReads(storage), 4, mode);
+        assert.equal(keeper.view().writtenThrough, 4, mode);
+        armed = false;
+        valid = true;
+        await keeper.tick();
+        await keeper.tick();
+        assert.equal(savedReads(storage), 5, mode);
+        assert.deepEqual(ranges(model), ['Story 1-4', 'Story 5-5'], mode);
+    }
+});
+
+test('catchUp stops at the requested source and rejects failed saves and stale targets', async () => {
+    const { chat, keeper, storage, clock, model } = await adopted({ count: 4 });
+    chat.add(5);
+    const sources = ScribeIntake.read(chat.raw).messages;
+    const target = sources[6];
+    storage.refuseSetsMatching(BOOK_HEAD);
+    assert.equal(await keeper.catchUp(target), false);
+    assert.equal(keeper.view().writtenThrough, 4);
+    assert.equal(savedReads(storage), 4);
+    storage.allow();
+    clock.time += MINUTE;
+    assert.equal(await keeper.catchUp(target), true);
+    assert.equal(keeper.view().writtenThrough, 7);
+    assert.equal(savedReads(storage), 7);
+    assert.deepEqual(ranges(model), ['Story 1-4', 'Story 5-7']);
+    assert.equal(await keeper.catchUp({ id: target.id, fingerprint: 'replaced' }), false);
+    assert.equal(await keeper.catchUp({ id: 'missing', fingerprint: target.fingerprint }), false);
+    assert.equal(savedReads(storage), 7);
+});
+
+test('closing a room resolves a catchUp waiting on an outstanding pull', async () => {
+    const { chat, keeper, storage } = await adopted({ count: 4 });
+    chat.add(1);
+    const target = ScribeIntake.read(chat.raw).messages.at(-1);
+    const release = chat.hold('newest');
+    const waiting = keeper.catchUp(target);
+    await until(() => keeper.view().busy === 'Looking');
+    keeper.close();
+    assert.equal(await waiting, false);
+    release();
+    await settle();
+    assert.equal(savedReads(storage), 4);
+});
+
+test('a poll during extraction rejects the replaced source before its read receipt is made visible', async () => {
+    const held = gate();
+    const storage = new FakeStorage();
+    const observed = new Set();
+    const { chat, keeper, model } = await adopted({ count: 4, storage,
+        hold: (call) => call.marks[0] === 5 ? held.promise : null,
+        onNotify: () => {
+            const fingerprint = savedBook(storage)?.fingerprints['MESSAGE-5'];
+            if (fingerprint) {
+                observed.add(fingerprint);
+            }
+        } });
+    chat.add(1);
+    const before = ScribeIntake.read(chat.raw).messages.at(-1);
+    const reading = keeper.tick();
+    await until(() => model.calls.length === 2);
+    chat.edit(5, 'The lantern has been replaced.');
+    const after = ScribeIntake.read(chat.raw).messages.at(-1);
+    await keeper.tick();
+    held.release();
+    await reading;
+    assert.deepEqual([...observed], [after.fingerprint]);
+    assert.notEqual(before.fingerprint, after.fingerprint);
+    assert.equal(savedBook(storage).fingerprints[after.id], after.fingerprint);
+    assert.equal(keeper.view().writtenThrough, 5);
+    assert.deepEqual(ranges(model), ['Story 1-4', 'Story 5-5', 'Story 5-5']);
+});
+
+test('catchUp cannot confirm a later saved message across disputed authorship', async () => {
+    const prefix = 'I wait.';
+    const chat = new FakeChat(5).edit(4, prefix + '\n@: [Scribe] A reminder.');
+    const { keeper, storage } = await adopted({ chat });
+    const sources = keeper.view().messages;
+    ScribeStore.write(storage, ROOM, 'live', { attachments: [{
+        id: sources[3].id, fingerprint: sources[3].fingerprint, length: prefix.length, contested: true,
+    }] });
+    keeper.attributionChanged();
+    assert.equal(await keeper.catchUp(sources[4]), false);
+    assert.equal(keeper.view().writtenThrough, 3);
+    assert.equal(savedRead(storage, sources[3].id), false);
+    assert.equal(savedRead(storage, sources[4].id), true);
+});
+
+test('a full history applies leading deletions and same-time reordering to the stored book', async () => {
+    const chat = new FakeChat(6);
+    chat.retime(3, FakeChat.time(4));
+    const { keeper, storage } = await adopted({ chat });
+    chat.remove(1);
+    await keeper.pull();
+    assert.equal(savedRead(storage, 'MESSAGE-1'), false);
+    assert.equal(keeper.view().writtenThrough, 0);
+    await keeper.tick();
+    [chat.raw[1], chat.raw[2]] = [chat.raw[2], chat.raw[1]];
+    await keeper.pull();
+    assert.deepEqual(plain(savedIds(storage)), ['MESSAGE-2', 'MESSAGE-4', 'MESSAGE-3', 'MESSAGE-5', 'MESSAGE-6']);
+    assert.equal(keeper.view().writtenThrough, 1);
+    await keeper.tick();
+    assert.equal(keeper.view().writtenThrough, 5);
+});
+
+test('a prepended source invalidates a legacy prefix across reload and interrupted book publication', async () => {
+    for (const interrupt of [false, true]) {
+        const { chat, storage, keeper, clock } = await adopted({ count: 5 });
+        keeper.close();
+        const legacy = savedBook(storage);
+        for (const entry of legacy.log.entries) {
+            delete entry.sources;
+            entry.operations = [];
+        }
+        ScribeStore.write(storage, ROOM, 'book', legacy);
+        ScribeStore.write(storage, ROOM, 'campaign', { messages: chat.raw, gone: [] });
+        const prior = await opened(chat, analyst(), { storage, clock });
+        assert.equal(ScribeStore.read(storage, ROOM, 'campaign').completeHistory, true);
+        if (!interrupt) {
+            prior.keeper.close();
+        }
+        chat.raw.unshift({ ...chat.raw[0], id: 'NEW-PREFIX', messageTime: FakeChat.time(0) });
+        if (interrupt) {
+            storage.refuseSetsMatching(BOOK_HEAD);
+            await prior.keeper.pull();
+            assert.equal(savedReads(storage), 5);
+            assert.deepEqual(plain(ScribeStore.read(storage, ROOM, 'campaign').recheck), Object.keys(legacy.log.read));
+            prior.keeper.close();
+            storage.allow();
+        }
+        const model = analyst();
+        const restored = await opened(chat, model, { storage, clock });
+        assert.equal(restored.keeper.view().writtenThrough, 0);
+        await restored.keeper.tick();
+        assert.deepEqual(ranges(model), ['Story 1-6']);
+        assert.equal(restored.keeper.view().writtenThrough, 6);
+        const book = savedBook(storage);
+        for (const id of Object.keys(legacy.log.read)) {
+            assert.notEqual(book.log.read[id], legacy.log.read[id]);
+        }
+        assert.equal(ScribeStore.read(storage, ROOM, 'campaign').recheck, undefined);
+        restored.keeper.close();
+        const quiet = await opened(chat, model, { storage, clock });
+        await quiet.keeper.tick();
+        assert.deepEqual(ranges(model), ['Story 1-6']);
+        quiet.keeper.close();
+    }
+});
+
 test('zero, singleton, exact-size and one-over rooms save every available row once', async () => {
     const empty = new FakeStorage();
     ScribeStore.write(empty, ROOM, 'campaign', { messages: [], gone: [] });
@@ -747,7 +1207,7 @@ test('an edited message is read again', async () => {
          * @param {{ marks: number[] }} call
          * @return {Promise<void>|null}
          */
-        hold: (call) => (rereading && call.marks[0] === 1 ? held.promise : null),
+        hold: (call) => (rereading && call.marks[0] === 20 ? held.promise : null),
     });
     assert.deepEqual(ranges(model), ['Story 1-40', 'Story 41-45']);
     assert.equal(keeper.view().state.conflicts.length, 1);
@@ -757,16 +1217,16 @@ test('an edited message is read again', async () => {
     rereading = true;
     const ticking = keeper.tick();
     await until(() => model.calls.length === 3);
-    assert.equal(keeper.view().read, 5);
-    assert.equal(savedReads(storage), 5);
-    assert.equal(savedRead(storage, 'MESSAGE-1'), false);
+    assert.equal(keeper.view().read, 19);
+    assert.equal(savedReads(storage), 19);
+    assert.equal(savedRead(storage, 'MESSAGE-1'), true);
     assert.equal(savedRead(storage, 'MESSAGE-40'), false);
-    assert.equal(savedRead(storage, 'MESSAGE-41'), true);
+    assert.equal(savedRead(storage, 'MESSAGE-41'), false);
     assert.equal(Object.hasOwn(savedBook(storage).fingerprints, 'MESSAGE-20'), false);
     held.release();
     await ticking;
     await keeper.tick();
-    assert.deepEqual(ranges(model), ['Story 1-40', 'Story 41-45', 'Story 1-40']);
+    assert.deepEqual(ranges(model), ['Story 1-40', 'Story 41-45', 'Story 20-45']);
     assert.equal(keeper.view().read, 45);
     assert.equal(keeper.view().state.conflicts.length, 0);
     const pinned = factsSaying(keeper, 'thirty');
@@ -1087,10 +1547,10 @@ test('one thing at a time', async () => {
     await adopting;
     assert.equal(model.calls.length, 3);
 
-    assert.equal(chat.count('tab-1', 'newest'), 2);
+    assert.equal(chat.count('tab-1', 'newest'), 3);
     await keeper.tick();
     await keeper.tick();
-    assert.equal(chat.count('tab-1', 'newest'), 4);
+    assert.equal(chat.count('tab-1', 'newest'), 5);
     assert.equal(model.calls.length, 3);
 });
 
@@ -1346,9 +1806,9 @@ test('a pull cut short withdraws nothing outside it', async () => {
     assert.equal(view.problem, null);
     assert.equal(view.total, 119);
     assert.equal(savedIds(storage).includes('MESSAGE-5'), false);
-    assert.equal(savedRead(storage, 'MESSAGE-1'), false);
-    assert.equal(savedRead(storage, 'MESSAGE-41'), true);
-    assert.equal(view.read, 80);
+    assert.equal(savedRead(storage, 'MESSAGE-1'), true);
+    assert.equal(savedRead(storage, 'MESSAGE-41'), false);
+    assert.equal(view.read, 4);
 });
 
 test('a partial pull still notices what changed inside it', async () => {
@@ -1363,10 +1823,10 @@ test('a partial pull still notices what changed inside it', async () => {
     assert.equal(savedIds(storage).length, 119);
     assert.equal(savedIds(storage).includes('MESSAGE-110'), false);
     assert.equal(savedRead(storage, 'MESSAGE-100'), false);
-    assert.equal(savedRead(storage, 'MESSAGE-81'), false);
+    assert.equal(savedRead(storage, 'MESSAGE-81'), true);
     assert.equal(savedRead(storage, 'MESSAGE-80'), true);
     assert.equal(savedRead(storage, 'MESSAGE-1'), true);
-    assert.equal(view.read, 80);
+    assert.equal(view.read, 99);
 });
 
 test('skipped messages are reported', async () => {
@@ -1415,8 +1875,8 @@ test('the view tells what is unread and what was read last', async () => {
     chat.edit(20, 'The tale turns another way, line 20.');
     await keeper.pull();
     view = keeper.view();
-    assert.deepEqual(plain(view.unread.map((message) => message.position)), [...numbers(1, 40), ...numbers(81, 121)]);
-    assert.deepEqual(plain(view.lastRead), { id: 'MESSAGE-80', position: 80 });
+    assert.deepEqual(plain(view.unread.map((message) => message.position)), numbers(20, 121));
+    assert.deepEqual(plain(view.lastRead), { id: 'MESSAGE-19', position: 19 });
 });
 
 test("the view lists the owner's rulings", async () => {
@@ -1498,9 +1958,9 @@ test("the player's words are filed as their own", async () => {
 
     chat.edit(20, 'The tale turns another way, line 20.');
     await keeper.pull();
-    assert.equal(savedRead(storage, 'MESSAGE-12'), false);
+    assert.equal(savedRead(storage, 'MESSAGE-12'), true);
     await keeper.tick();
-    assert.equal(ranges(model).at(-1), 'Story 1-40');
+    assert.deepEqual(ranges(model).slice(-4), ['Story 20-59', 'Story 60-99', 'Story 100-139', 'Story 140-140']);
     assert.equal(savedRead(storage, 'MESSAGE-12'), true);
     assert.equal(savedNotes(storage), 1);
     const kept = factsSaying(keeper, 'swore an oath to the harbour guild');
@@ -1698,10 +2158,9 @@ test('a book read masks credentials seen at dispatch, response, and retention wi
     let changedAfterResponse = false;
     const reply = [
         '=== FACTS', 'Riven | trait | checks the bell or-fixture | #1',
-        'Riven | trait | ' + pairs.flat().join(' / ') + ' | #9919',
-        'private-worker-fixture',
+        'Riven | trait | ' + pairs.flat().join(' / ') + ' | #2',
     ].join('\n');
-    const model = { ask: async () => {
+    const model = { ask: async (role, system, input) => {
         dispatched.release();
         await held.promise;
         const set = storage.set.bind(storage);
@@ -1712,9 +2171,9 @@ test('a book read masks credentials seen at dispatch, response, and retention wi
             }
             return set(name, value);
         };
-        return { text: reply, cost: 0.01 };
+        return { text: CitedStory.answer(input, reply), cost: 0.01 };
     } };
-    const { keeper } = await opened(new FakeChat(8), model, { storage });
+    const { keeper } = await opened(new FakeChat(8).edit(1, 'Riven checks the bell or-fixture.'), model, { storage });
     const reading = keeper.adopt({});
     await dispatched.promise;
     rotate(pairs[1]);
@@ -1724,7 +2183,8 @@ test('a book read masks credentials seen at dispatch, response, and retention wi
     const { calls, lines, state } = keeper.view();
     assert.equal(calls[0].sequence, 1);
     assert.equal(lines[0].first, 1);
-    assert.equal(lines[0].refusedLines[0].line, '[key]');
+    assert.equal(keeper.view().read, 1);
+    assert.deepEqual(plain(lines[0].refusedLines), []);
     assert.equal(lines[0].refusedOperations[0].operation.text, pairs.flat().map(() => '[key]').join(' / '));
     assert.equal(state.facts[0].text, 'checks the bell or-fixture');
     for (const key of pairs.flat()) {
@@ -1738,19 +2198,19 @@ test('refusing either key read withholds book diagnostics without losing their c
         const storage = new FakeStorage();
         ScribeStore.setKey(storage, 'or-fixture');
         ScribeStore.setCloudKey(storage, 'private-worker-fixture');
-        const model = { ask: async () => {
+        const model = { ask: async (role, system, input) => {
             storage.refuseGetsMatching(slot);
-            return { text: '=== FACTS\nRiven | trait | checks the bell | #1\nRiven | trait | or-fixture | #9919\nprivate-worker-fixture', cost: 0 };
+            return { text: CitedStory.answer(input, '=== FACTS\nRiven | trait | checks the bell | #1\nRiven | trait | or-fixture | #2'), cost: 0 };
         } };
-        const { keeper } = await opened(new FakeChat(8), model, { storage });
+        const { keeper } = await opened(new FakeChat(8).edit(1, 'Riven checks the bell.'), model, { storage });
         await keeper.adopt({});
         storage.allow();
         const { calls, lines } = keeper.view();
         assert.equal(calls[0].sequence, 1);
-        assert.equal(lines[0].refusedLines.length, 1);
+        assert.equal(lines[0].refusedLines.length, 0);
         assert.equal(lines[0].refusedOperations.length, 1);
         for (const field of [calls[0].system, calls[0].input, calls[0].answer,
-            lines[0].refusedLines[0].line, lines[0].refusedOperations[0].operation.text]) {
+            lines[0].refusedOperations[0].operation.text]) {
             assert.match(field, /Diagnostic withheld/);
         }
         assert.doesNotMatch(JSON.stringify([calls, lines]), /or-fixture|private-worker-fixture/);
@@ -1927,10 +2387,10 @@ test('a removal is not lost by a crash', async () => {
     keeper.close();
     storage.allow();
     const again = await opened(chat, analyst(), { storage, clock, tabId: 'tab-2' });
-    assert.equal(savedRead(storage, 'MESSAGE-81'), false);
+    assert.equal(savedRead(storage, 'MESSAGE-81'), true);
     assert.equal(savedRead(storage, 'MESSAGE-80'), true);
     assert.deepEqual(plain(ScribeStore.read(storage, ROOM, ScribeStore.Kind.Campaign).gone), []);
-    assert.equal(again.keeper.view().read, 80);
+    assert.equal(again.keeper.view().read, 89);
 });
 
 test('no reading on a chat known to be incomplete', async () => {
@@ -1992,7 +2452,7 @@ test('keep-up reads an interior gap and each available tail', async () => {
     await keeper.pull();
     chat.add(1);
     await keeper.tick();
-    assert.deepEqual(ranges(model).slice(3), ['Story 41-79', 'Story 120-120']);
+    assert.deepEqual(ranges(model).slice(3), ['Story 50-89', 'Story 90-120']);
     assert.equal(keeper.view().read, 120);
     chat.add(30);
     await keeper.tick();
@@ -2734,13 +3194,14 @@ test('an unsaved stretch is not bought again', async () => {
 test('kept answers end with a confirmed save and with adopt', async () => {
     const chat = new FakeChat(40);
     const model = analyst({ blank: true });
+    const original = chat.find(20).contents[0].text;
     const { keeper } = await opened(chat, model);
     await keeper.adopt({});
     assert.equal(model.calls.length, 1);
     chat.edit(20, 'The tale turns another way, line 20.');
     await keeper.tick();
     assert.equal(model.calls.length, 2);
-    chat.edit(20, 'I answer the ferryman, line 20.');
+    chat.edit(20, original);
     await keeper.tick();
     assert.equal(model.calls.length, 3);
     assert.equal(keeper.view().read, 40);
@@ -3143,7 +3604,7 @@ test('the opening compares before it pulls', async () => {
     chat.fail('history', new Error('Zeta could not be reached'));
     const again = await opened(chat, analyst(), { storage, clock, tabId: 'tab-2' });
     assert.equal(again.keeper.view().problem, 'Zeta could not be reached');
-    assert.equal(savedReads(storage), 80);
+    assert.equal(savedReads(storage), 89);
 });
 
 test('the budget lifts only above it', async () => {
@@ -3210,9 +3671,9 @@ test("the chat's start closes a run", async () => {
     await keeper.configure({ size: 40 });
     chat.edit(5, 'The tale turns at the well, line 5.');
     await keeper.pull();
-    assert.equal(keeper.view().read, 90);
+    assert.equal(keeper.view().read, 4);
     await keeper.tick();
-    assert.equal(ranges(model).at(-1), 'Story 1-10');
+    assert.deepEqual(ranges(model).slice(-3), ['Story 5-44', 'Story 45-84', 'Story 85-100']);
     assert.equal(keeper.view().read, 100);
 });
 
@@ -3302,14 +3763,14 @@ test('an Answers response is discarded when its newest citation becomes disputed
     assert.deepEqual(filed(), []);
     await keeper.tick();
     await keeper.tick();
-    assert.deepEqual(ranges(model), ['Answers 99-100', 'Answers 99', 'Story 81-99']);
+    assert.deepEqual(ranges(model), ['Answers 99-100', 'Answers 99']);
     assert.deepEqual(dismissed(), [true, false]);
     assert.deepEqual(filed(), [rows[98].id]);
     chat.edit(100, 'The ferryman is here.');
     await keeper.pull();
     await keeper.tick();
     await keeper.tick();
-    assert.deepEqual(ranges(model), ['Answers 99-100', 'Answers 99', 'Story 81-99', 'Answers 100', 'Story 100-100']);
+    assert.deepEqual(ranges(model), ['Answers 99-100', 'Answers 99', 'Answers 100', 'Story 100-100']);
     assert.deepEqual(dismissed(), [true, true]);
     assert.deepEqual(filed(), [rows[98].id, rows[99].id]);
 });
@@ -3367,6 +3828,9 @@ test('a failed claim check is not a lost claim', async () => {
         },
     });
     await grow(opening, 40);
+    assert.equal(savedReads(base), 100);
+    assert.equal(opening.keeper.view().reader, true);
+    await opening.keeper.tick();
     assert.equal(savedReads(base), 140);
     assert.equal(opening.keeper.view().reader, true);
     assert.equal(opening.model.calls.length, 4);
@@ -3380,8 +3844,8 @@ test('ids are compared as strings', async () => {
     chat.edit(20, 'The tale turns another way, line 20.');
     await keeper.pull();
     assert.equal(savedRead(storage, '20'), false);
-    assert.equal(savedRead(storage, '41'), true);
-    assert.equal(savedReads(storage), 60);
+    assert.equal(savedRead(storage, '41'), false);
+    assert.equal(savedReads(storage), 19);
 });
 
 test('a stale reader saves no campaign', async () => {
@@ -3958,7 +4422,7 @@ test('the edition names the book', async () => {
     model.broken = 'No key';
     chat.edit(20, 'The tale turns another way, line 20.');
     await keeper.tick();
-    assert.equal(keeper.view().read, 0);
+    assert.equal(keeper.view().read, 19);
     assert.equal(keeper.view().edition, 1, 'a withdrawn stretch');
     model.broken = null;
     await keeper.resume();

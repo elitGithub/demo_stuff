@@ -240,6 +240,27 @@ const ScribeText = Object.freeze({
 
     /**
      * @param {string} text
+     * @param {string|null} paragraph
+     * @param {string|null} suggestion
+     * @return {object|null}
+     */
+    reminderSpan(text, paragraph, suggestion = null) {
+        if (!paragraph || !ScribeText.reminderLine(paragraph.split(/\r?\n/, 1)[0])) {
+            return null;
+        }
+        const literal = (value) => value.split(/\r?\n/).map((line) =>
+            line.replace(/[.*+?^${}()|[\]\\]/g, '\\$&')).join('\\r?\\n');
+        const lead = '(?:[\\p{Zs}\\t]*@:[\\p{Zs}\\t]*)?';
+        const extra = suggestion ? '(\\r?\\n[\\p{Zs}\\t]*@:[\\p{Zs}\\t]*' + literal(suggestion) + ')?' : '';
+        const match = new RegExp('(?:^|\\r?\\n)' + lead + literal(paragraph) + extra + '(?=\\r?\\n|$)', 'u').exec(text);
+        if (!match) {
+            return null;
+        }
+        return { start: match.index, end: match.index + match[0].length, suggestion: Boolean(match[1]) };
+    },
+
+    /**
+     * @param {string} text
      * @return {number}
      */
     bytes(text) {

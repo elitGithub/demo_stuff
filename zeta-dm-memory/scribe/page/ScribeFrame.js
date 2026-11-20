@@ -157,6 +157,9 @@ const ScribeFrame = Object.freeze({
             ...(typeof data.room === 'string' && ScribeFrame.named(data.room) ? { room: data.room } : {}),
             token,
             ready,
+            ...(data.onlyExisting === true ? { onlyExisting: true } : {}),
+            ...(typeof data.previous === 'string' && data.previous.length <= bridge.LongestLine ? { previous: data.previous } : {}),
+            ...(typeof data.previousSuggestion === 'string' && data.previousSuggestion.length <= bridge.LongestLine ? { previousSuggestion: data.previousSuggestion } : {}),
             ...(data.manual === true && ready !== null && reminder !== null ? { manual: true } : {}),
             suggestion,
             ends,
@@ -218,6 +221,8 @@ const ScribeFrame = Object.freeze({
             attempt: ready ? attempt : null,
             index,
             ...(stamped ? { submission: data.submission } : {}),
+            ...(stamped && (ready || data.previous === true) && data.retained === true ? { retained: true } : {}),
+            ...(!ready && data.previous === true ? { previous: true, previousSuggestion: data.previousSuggestion === true } : {}),
             ...(trimmed ? { trimmedSubmission: data.trimmedSubmission } : {}),
         });
     },
@@ -280,6 +285,9 @@ const ScribeFrame = Object.freeze({
                 room: arm.room,
                 ready: arm.ready,
                 manual: arm.manual === true,
+                onlyExisting: arm.onlyExisting === true,
+                previous: arm.previous,
+                previousSuggestion: arm.previousSuggestion,
                 suggestion: arm.suggestion,
                 ends: arm.ends,
                 reminder: arm.reminder,
@@ -305,6 +313,8 @@ const ScribeFrame = Object.freeze({
                 attempt: went.attempt,
                 index: went.index,
                 ...(kind === bridge.Kind.Starting ? { submission: went.submission } : {}),
+                ...(kind === bridge.Kind.Starting && went.retained ? { retained: true } : {}),
+                ...(went.previous ? { previous: true, previousSuggestion: went.previousSuggestion } : {}),
                 ...(kind === bridge.Kind.Starting && went.trimmedSubmission ? { trimmedSubmission: went.trimmedSubmission } : {}),
             });
         };
@@ -323,7 +333,9 @@ const ScribeFrame = Object.freeze({
                 seq: frame.seq,
                 index: frame.index,
                 manual: made.ready && offer.manual === true,
-                ...(made.ready && offer.manual ? ScribeText.playerSubmission(text) : { submission: ScribeText.submission(made.text) }),
+                ...(made.previous || (made.ready && offer.manual) ? ScribeText.playerSubmission(made.playerText ?? text) : { submission: ScribeText.submission(made.text) }),
+                ...(made.playerText !== undefined ? { retained: true } : {}),
+                ...(made.previous ? { previous: true, previousSuggestion: made.previousSuggestion } : {}),
                 ready: made.ready ? offer.ready : null,
                 suggestion: made.suggestion ? offer.suggestion : null,
                 cut: offer.manual || made.carried === null || made.carried === offer.ready ? null : made.carried.length,
@@ -348,10 +360,17 @@ const ScribeFrame = Object.freeze({
             }
             const offer = frame.offer;
             const same = offer.ready === went.ready && offer.reminder === went.reminder && offer.attempt === went.attempt;
+            if (kind === bridge.Kind.Uncertain && same && went.ready) {
+                frame.offer = Object.freeze({ ...offer, onlyExisting: true });
+                return;
+            }
             const kept = same ? null : offer.ready;
             frame.offer = Object.freeze({
                 room: offer.room,
                 ready: kept,
+                previous: offer.previous,
+                previousSuggestion: offer.previousSuggestion,
+                onlyExisting: kept !== null && offer.onlyExisting,
                 manual: kept !== null && offer.manual,
                 suggestion: offer.suggestion === went.suggestion ? null : offer.suggestion,
                 ends: kept === null ? Object.freeze([]) : offer.ends,

@@ -19,6 +19,7 @@ export default class WholeDocument extends PanelDocument {
     constructor(window) {
         super(window.innerWidth);
         this.defaultView = window;
+        this.downloads = [];
         this.documentElement = this.createElement('html');
         this.visibilityState = 'visible';
         this.heard = [];
@@ -34,6 +35,13 @@ export default class WholeDocument extends PanelDocument {
         const element = new WholeElement(tag);
         element.ownerDocument = this;
         this.elements.push(element);
+        if (element.tagName === 'A') {
+            element.addEventListener('click', () => {
+                if (element.download) {
+                    this.downloads.push({ name: element.download, href: element.href });
+                }
+            });
+        }
         return element;
     }
 

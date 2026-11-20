@@ -1195,7 +1195,6 @@ test('the prompts teach only what the parser accepts', () => {
         ['SUBJECTS', ' | #3'],
         ['SCENES', ' | #5'],
         ['NIGHTS', ' | #5'],
-        ['CONTRADICTIONS', ' | #5'],
     ]) {
         const own = lines[lines.indexOf(`=== ${block}`) + 1];
         const accepted = ScribeAnswer.parse(`=== ${block}\n${own}`);
@@ -1212,7 +1211,8 @@ test('the prompts teach only what the parser accepts', () => {
 test('the prompt names every block and no removed one', () => {
     const prompt = ScribeAnalyzer.Prompt;
     let previous = -1;
-    for (const block of ScribeAnswer.Blocks) {
+    assert.equal(prompt.includes('=== CONTRADICTIONS'), false);
+    for (const block of ScribeAnswer.Blocks.filter((block) => block !== 'CONTRADICTIONS')) {
         const index = prompt.indexOf(`\n=== ${block}\n`);
         assert.ok(index > previous, `=== ${block} at ${index}, after ${previous}`);
         previous = index;
@@ -1256,8 +1256,6 @@ test('every example line in the prompts parses', () => {
                 'ThreadOpen',
                 'ThreadClose',
                 'Question',
-                'Contradiction',
-                'Contradiction',
             ],
         ],
         [
@@ -1293,13 +1291,17 @@ test('every example line in the prompts parses', () => {
 });
 
 test('the prompts are exact', () => {
+    assert.match(ScribeAnalyzer.Prompt, /=== EVIDENCE\n/);
+    assert.match(ScribeAnalyzer.Prompt, /=== READ\n/);
+    assert.ok(ScribeAnalyzer.Prompt.includes('blockNumber'));
+    assert.ok(ScribeAnalyzer.Prompt.includes('full dragon / length'));
     const prompts = [
         [
-            ScribeAnalyzer.Prompt,
-            "15. CONTRADICTIONS. One line for each place where the NEW MESSAGES contradict the LEDGER, an ENDED FACT, a CLOSED THREAD or an earlier message, about any subject and in any category, objects and events included (who holds an item and since when, who did what). The first quote is copied exactly from the new message, its number before it. The second part is where the other version comes from: when it is an earlier message among the NEW MESSAGES, that message's number and words copied exactly from it; otherwise the id of the entry it contradicts, as shown in LEDGER, ENDED FACTS, OPEN THREADS or CLOSED THREADS (F12 or T3), with nothing else. The line ends with the sentence, not a number. A value that rule 6 files as a plain FACTS line is still filed there too. Nothing goes here when nothing disagrees.",
+            ScribeAnalyzer.Prompt.split('\nEvery row in every block')[0],
+            '15. Preserve each account and its speaker when the sources disagree. Leave comparisons and discrepancy findings to the independent Checker.',
             15,
-            10250,
-            'aff4b458',
+            9352,
+            '9454efae',
         ],
         [
             ScribeAnalyzer.NotesPrompt,

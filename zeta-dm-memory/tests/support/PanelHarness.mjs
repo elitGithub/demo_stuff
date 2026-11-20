@@ -153,6 +153,17 @@ export default class PanelHarness {
                 },
             }),
             storage: this.storage,
+            keyVersion: () => 0,
+            keyProblem: () => false,
+            keyRecoveryProblem: () => false,
+            saveKey: (value) => {
+                if (value.trim()) {
+                    this.scripts.ScribeStore.setKey(this.storage, value);
+                    this.keeper.rekey();
+                    this.live.rekey();
+                }
+                return true;
+            },
             /**
              * @param {string} text
              * @return {boolean}

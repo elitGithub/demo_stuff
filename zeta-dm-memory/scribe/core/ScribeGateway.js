@@ -69,6 +69,7 @@ const ScribeGateway = Object.freeze({
             BadStatus: 'unexpected HTTP status',
             NotObject: 'response body is not a JSON object',
             ProviderError: 'provider reported an error',
+            ProviderAuth: 'provider reported an authentication error (code 401)',
             Cut: 'answer was cut off',
             Errored: 'answer ended in an error',
             WrongFinish: 'answer did not finish with stop',
@@ -360,12 +361,14 @@ const ScribeGateway = Object.freeze({
         for (const candidate of [parsed.error, choice?.error]) {
             const provider = ScribeGateway.reported(candidate);
             if (provider !== null && failed === null) {
-                failed = ScribeGateway.failure(key, settings.Messages.ProviderError, {
+                const what = provider.code === 401 ? settings.Messages.ProviderAuth : settings.Messages.ProviderError;
+                failed = ScribeGateway.failure(key, what, {
                     retryable: provider.code !== null && ScribeGateway.transient(provider.code),
                     status,
                     finish,
                     reason: provider.reason,
                 });
+                failed.providerCode = provider.code;
             }
         }
         const fatal = { retryable: false, status, finish, reason: null };

@@ -172,6 +172,7 @@ export default class FakeScribeWorker {
         const query = Object.fromEntries(url.searchParams);
         const entry = {
             method: details.method,
+            url: details.url,
             path: url.pathname,
             query,
             body: typeof details.data === 'string' ? details.data : null,

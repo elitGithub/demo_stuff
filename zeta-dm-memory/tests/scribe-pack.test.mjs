@@ -193,6 +193,7 @@ test('a missing file passes through with its path', () => {
 
 test('the real files pack and compile', () => {
     const output = ScribePack.build((relativePath) => readFileSync(`${ROOT}${relativePath}`, 'utf8'));
+    assert.ok(realRead(ScribePack.Settings.Output).replaceAll('\r\n', '\n') === output, 'the delivered userscript must match the current sources');
     assert.equal(output.length > 0, true);
     assert.doesNotThrow(() => new vm.Script(output));
     for (const file of ScribePack.Files) {
@@ -315,6 +316,11 @@ function stage(output, choices = {}) {
             calls.push('GM_listValues');
             return [...store.keys()];
         },
+        GM_addValueChangeListener: () => {
+            calls.push('GM_addValueChangeListener');
+            return 1;
+        },
+        GM_removeValueChangeListener: () => calls.push('GM_removeValueChangeListener'),
         GM_xmlhttpRequest: (details) => {
             calls.push('GM_xmlhttpRequest');
             requests.push(details);
@@ -602,6 +608,8 @@ test('the header grants what the script uses', () => {
         '// @grant GM_setValue',
         '// @grant GM_deleteValue',
         '// @grant GM_listValues',
+        '// @grant GM_addValueChangeListener',
+        '// @grant GM_removeValueChangeListener',
         '// @grant GM_xmlhttpRequest',
         '// @grant GM_registerMenuCommand',
         '// @grant unsafeWindow',
@@ -682,6 +690,26 @@ function environmentOf(output, choices = {}) {
     assert.equal(world.seen.length, 1);
     return { environment: world.seen[0], world };
 }
+
+test('the top adapter forwards key notifications without the stored values and removes its listener', () => {
+    let deliver;
+    let removed;
+    const extras = {
+        GM_addValueChangeListener: (name, callback) => {
+            assert.equal(name, 'scribe:key');
+            deliver = callback;
+            return 37;
+        },
+        GM_removeValueChangeListener: (listener) => { removed = listener; },
+    };
+    const { environment } = environmentOf(ScribePack.build(realRead), { extras });
+    let argumentsReceived;
+    const unsubscribe = environment.storage.watch('scribe:key', (...values) => { argumentsReceived = values; });
+    deliver('scribe:key', 'synthetic-before', 'synthetic-after', true);
+    assert.deepEqual(argumentsReceived, []);
+    unsubscribe();
+    assert.equal(removed, 37);
+});
 
 test('the start hands the boot what the page has', () => {
     const output = ScribePack.build(realRead);

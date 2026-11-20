@@ -1,5 +1,6 @@
 const ScribeIntake = Object.freeze({
     Submissions: new WeakMap(),
+    Originals: new WeakMap(),
     Role: Object.freeze({
         Player: 'Player',
         Narrator: 'Narrator',
@@ -109,13 +110,43 @@ const ScribeIntake = Object.freeze({
      * @return {number|null}
      */
     playerLength(wire, post) {
+        return ScribeIntake.playerRange(wire, post)?.start ?? null;
+    },
+
+    /**
+     * @param {string|undefined} wire
+     * @param {object} post
+     * @return {object|null}
+     */
+    playerRange(wire, post) {
+        if (typeof wire !== 'string') {
+            return null;
+        }
+        if (post.retained) {
+            const span = ScribeText.reminderSpan(wire, post.carried, post.suggestion);
+            if (!span || (Boolean(post.suggestion) !== span.suggestion)) {
+                return null;
+            }
+            const player = wire.slice(0, span.start) + wire.slice(span.end);
+            const hashes = [player, player.replace(/\r\n/g, '\n')].map(ScribeText.fingerprint);
+            return hashes.some((hash) => hash === post.submission || hash === post.trimmedSubmission) ? span : null;
+        }
         const tail = '\n@: ' + post.carried + (post.suggestion === null ? '' : '\n@: ' + post.suggestion);
-        if (typeof wire !== 'string' || !wire.endsWith(tail)) {
+        if (!wire.endsWith(tail)) {
             return null;
         }
         const prefix = wire.slice(0, -tail.length);
         const fingerprint = ScribeText.fingerprint(prefix);
-        return (fingerprint === post.submission || fingerprint === post.trimmedSubmission) ? prefix.length : null;
+        return (fingerprint === post.submission || fingerprint === post.trimmedSubmission) ? { start: prefix.length, end: wire.length } : null;
+    },
+
+    /**
+     * @param {object|null} range
+     * @param {string} wire
+     * @return {string|number|null}
+     */
+    projection(range, wire) {
+        return !range ? null : range.end === wire.length ? range.start : range.start + ':' + range.end;
     },
 
     /**
@@ -133,7 +164,8 @@ const ScribeIntake = Object.freeze({
         }
         const copies = new Map();
         const parsed = rawMessages.map((raw, index) => {
-            const blocks = raw.contents.filter((block) => block.type === settings.TextType);
+            const blocks = raw.contents.flatMap((block, index) =>
+                block.type === settings.TextType ? [{ ...block, blockNumber: index + 1 }] : []);
             const fromPlayer = raw.sender.type === settings.PlayerSender;
             const posted = fromPlayer ? blocks.map((block) => block.text).join(settings.Newline) : null;
             const parts = posted?.includes(settings.OwnMarker) ? blocks.map((block) =>
@@ -192,43 +224,50 @@ const ScribeIntake = Object.freeze({
             const { posted, parts, wire } = message;
             const bound = saved.get(message.id);
             let length = null;
+            let end = wire?.length;
             let interchangeable = uncertainCopies.has(wire);
             let awaiting = interchangeable;
             if (wire !== null && !awaiting) {
-                if (bound?.fingerprint === fingerprint && wire[bound.length] === settings.Newline &&
-                    ScribeIntake.own(wire.slice(bound.length + 1).split(settings.LineBreak, 1)[0])) {
+                if (bound?.fingerprint === fingerprint && bound.length < wire.length &&
+                    (bound.end === undefined || (Number.isSafeInteger(bound.end) && bound.length < bound.end && bound.end <= wire.length)) &&
+                    ScribeIntake.own(wire.slice(bound.length).replace(/^\r?\n/, '').split(settings.LineBreak, 1)[0])) {
                     awaiting = bound.contested === true;
                     length = awaiting ? null : bound.length;
+                    end = bound.end ?? wire.length;
                 } else {
                     const matches = pending.filter((post) => post.floor < message.position &&
                         (post.after === null || parsed[post.floor - 1]?.id === post.after) && ScribeIntake.playerLength(wire, post) !== null);
                     const confirmed = matches.filter((post) => post.confirmed);
                     const candidates = confirmed.length ? confirmed : matches;
-                    const lengths = new Set(candidates.map((post) => ScribeIntake.playerLength(wire, post)));
-                    interchangeable = new Set(matches.map((post) => ScribeIntake.playerLength(wire, post))).size > 1 &&
+                    const projection = (post) => ScribeIntake.projection(ScribeIntake.playerRange(wire, post), wire);
+                    const lengths = new Set(candidates.map(projection));
+                    interchangeable = new Set(matches.map(projection)).size > 1 &&
                         copies.get(wire).some((position) => position !== message.position &&
                             matches.filter((post) => post.floor < position).length > 1);
                     awaiting = lengths.size > 1 || interchangeable || candidates.some((post) => post.contested);
                     if (!awaiting && candidates.length) {
-                        length = ScribeIntake.playerLength(wire, candidates[0]);
+                        const range = ScribeIntake.playerRange(wire, candidates[0]);
+                        length = range.start;
+                        end = range.end;
                         pending.splice(pending.indexOf(candidates[0]), 1);
                     }
                 }
             }
-            let remaining = length;
+            let offset = 0;
             const sources = message.blocks.flatMap((block, index) => {
                 if (awaiting) {
                     return [];
                 }
-                if (remaining === null) {
+                if (length === null) {
                     return [{ block, kept: block.text }];
                 }
-                const end = remaining - (parts[index].length - block.text.length);
-                remaining -= parts[index].length + settings.Newline.length;
-                return end <= 0 ? [] : [{ block, kept: block.text.slice(0, end) }];
+                const start = offset + parts[index].length - block.text.length;
+                offset += parts[index].length + settings.Newline.length;
+                const kept = block.text.slice(0, Math.max(0, length - start)) + block.text.slice(Math.max(0, end - start));
+                return kept ? [{ block, kept }] : [];
             });
             if (length !== null) {
-                lifted.push(Object.freeze({ text: wire.slice(length + 1).split(settings.LineBreak, 1)[0], position: message.position }));
+                lifted.push(Object.freeze({ text: wire.slice(length).replace(/^\r?\n/, '').split(settings.LineBreak, 1)[0], position: message.position }));
             } else if (message.fromPlayer && !bound) {
                 for (const { block } of sources) {
                     for (const line of block.text.split(settings.LineBreak)) {
@@ -328,7 +367,11 @@ const ScribeIntake = Object.freeze({
                 } else if (block.position === settings.NarratorPosition || block.speakerName === settings.NarratorName) {
                     role = ScribeIntake.Role.Narrator;
                 }
-                blocks.push(Object.freeze({ speaker: block.speakerName, role, text }));
+                const retained = Object.freeze({ blockNumber: block.blockNumber, speaker: block.speakerName, role, text });
+                if (text !== block.text) {
+                    ScribeIntake.Originals.set(retained, block.text);
+                }
+                blocks.push(retained);
             });
             for (const note of found) {
                 const key = ScribeText.words(note).join(settings.Space);
@@ -347,7 +390,7 @@ const ScribeIntake = Object.freeze({
                 edited: message.edited,
                 submission: posted === null ? null : ScribeText.submission(posted),
                 completeSubmission: posted === null ? null : ScribeText.submission(posted, true),
-                ...(length === null ? {} : { projection: length }),
+                ...(length === null ? {} : { projection: ScribeIntake.projection({ start: length, end }, wire) }),
                 ...(awaiting ? { attributionPending: true } : {}),
                 ...(interchangeable ? { interchangeable: true } : {}),
                 blocks: Object.freeze(blocks),
@@ -382,6 +425,40 @@ const ScribeIntake = Object.freeze({
             .filter((message) => message.text !== settings.Nothing)
             .map((message) => settings.PositionOpen + message.position + settings.PositionClose + message.text)
             .join(settings.BlankLine);
+    },
+
+    /**
+     * @param {object} block
+     * @return {object[]}
+     */
+    sourcePieces(block) {
+        const original = ScribeIntake.Originals.get(block);
+        const text = block.text;
+        if (original === undefined || original.includes(text)) {
+            return [{ offset: 0, quote: text }];
+        }
+        const pieces = [];
+        let offset = 0;
+        while (offset < text.length) {
+            let minimum = 1;
+            let maximum = text.length - offset;
+            let fit = 0;
+            while (minimum <= maximum) {
+                const size = Math.floor((minimum + maximum) / 2);
+                if (original.includes(text.slice(offset, offset + size))) {
+                    fit = size;
+                    minimum = size + 1;
+                } else {
+                    maximum = size - 1;
+                }
+            }
+            if (!fit) {
+                throw new Error('The original passage could not be matched to the retained chat text.');
+            }
+            pieces.push({ offset, quote: text.slice(offset, offset + fit) });
+            offset += fit;
+        }
+        return pieces;
     },
 
     /**

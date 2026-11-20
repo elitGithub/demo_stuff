@@ -346,7 +346,7 @@ const ScribeReminder = Object.freeze({
          * @return {RegExp}
          */
         get EchoedLabel() {
-            return /^[\s>*_"'“”‘’`]*(?:the\s+)?(?:story\s+)?so\s+far[*_"'“”‘’`]*\s*(?::|[—–]|-\s)[\s>*_"'“”‘’`]*/iu;
+            return /^[\s>*_"'“”‘’`]*(?:the\s+)?(?:story\s+)?so\s+far[*_"'“”‘’`]*\s*(?::|[—–]|-\s)(?:["'”’](?=\s))?[\s>*_`]*/iu;
         },
 
         /**
@@ -557,6 +557,30 @@ const ScribeReminder = Object.freeze({
                 .replace(settings.Backslashes, settings.Slash),
         );
         return said === settings.Nothing ? null : said;
+    },
+
+    /**
+     * @param {string} text
+     * @return {boolean}
+     */
+    declined(text) {
+        const said = ScribeReminder.told(text);
+        if (said === null) {
+            return false;
+        }
+        const opening = said.replace(/^(?:(?:i(?:['’]m| am) )?sorry|i apologize)[,.!:\s—–-]+(?:but\s+)?/iu, '')
+            .replace(/^instead[,\s]+/iu, '');
+        if (/^[^.!?,"“”]*[,!?.]["'”’]\s+\p{L}/u.test(opening)) {
+            return false;
+        }
+        const refusal = /^i(?: (?:can(?:not|['’]t| not)|won['’]t)|(?:['’]m| am) unable to) /iu.exec(opening);
+        if (refusal) {
+            const task = opening.slice(refusal[0].length);
+            return /^(?:help (?:to )?)?(?:write|continue(?: with| writing)?|generate|provide|produce|summari[sz]e|recap) (?:this|that|the|your) (?:story|role[\s-]?play|recap|summary|narrative|scene|content|request)\b/iu.test(task) ||
+                /^(?:assist|help|comply) with (?:this|that|your|the) request\b/iu.test(task);
+        }
+        return /^i (?:can|could) (?:offer|provide|give|write) (?:you )?a (?:brief |short )?(?:summary|recap)\b/iu.test(opening) ||
+            /^i (?:can|could) (?:summari[sz]e|recap) (?:this|that|the|your) (?:story|role[\s-]?play|events|scene|narrative) instead\b/iu.test(opening);
     },
 
     /**

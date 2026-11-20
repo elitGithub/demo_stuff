@@ -133,9 +133,6 @@ const ScribeAnalyzer = Object.freeze({
             'CLOSE T3 | how it resolved | #n',
             '=== QUESTIONS',
             'A question for the player | #n',
-            '=== CONTRADICTIONS',
-            '#n "words copied from the new message" | #n "words copied from an earlier message in NEW MESSAGES" | one sentence on what disagrees',
-            '#n "words copied from the new message" | F12 | one sentence on what disagrees',
             '',
             'Categories. Use exactly these words.',
             'One value at a time:',
@@ -181,7 +178,17 @@ const ScribeAnalyzer = Object.freeze({
             '12. NIGHTS: only nights slept through and stated time skips. Conditions need no tidying: they expire at the next night by themselves.',
             '13. THREADS: something left hanging that the story could pick up later: a threat, a promise, a plan, a mystery, someone due back. A fact, a feeling or something already finished is not a thread. At most two new threads per stretch. Never repeat the open list.',
             '14. QUESTIONS. When the story leaves something unclear and a guess would matter (does she like him or love him; is this the same man as before), write no fact for it. Ask the player one short question instead. At most two questions per stretch.',
-            '15. CONTRADICTIONS. One line for each place where the NEW MESSAGES contradict the LEDGER, an ENDED FACT, a CLOSED THREAD or an earlier message, about any subject and in any category, objects and events included (who holds an item and since when, who did what). The first quote is copied exactly from the new message, its number before it. The second part is where the other version comes from: when it is an earlier message among the NEW MESSAGES, that message\'s number and words copied exactly from it; otherwise the id of the entry it contradicts, as shown in LEDGER, ENDED FACTS, OPEN THREADS or CLOSED THREADS (F12 or T3), with nothing else. The line ends with the sentence, not a number. A value that rule 6 files as a plain FACTS line is still filed there too. Nothing goes here when nothing disagrees.',
+            '15. Preserve each account and its speaker when the sources disagree. Leave comparisons and discrepancy findings to the independent Checker.',
+        ]),
+
+        EvidencePromptLines: Object.freeze([
+            'Every row in every block above, including SUBJECTS and SCENES, needs exactly one supporting source block. Split assertions from different messages or speakers into separate rows. Separate an observation from an inference, an account from a witnessed event, and an offer or promise from actual possession.',
+            '=== EVIDENCE',
+            'Write one JSON object per line with section (uppercase heading), row (one-based within that section), messageNumber, blockNumber, quote, attribution, form and dimension. Use the original block number printed in the transcript, or 1 when none is printed. Copy an exact contiguous quote from that block without its speaker label.',
+            'For FACTS and CHANGES copy the statement intact from this quote. Keep words of suspicion, attribution, uncertainty, and future intent. Never file a promise or a suspicion as possession. Include event, day and time when given, subject, attribute (or action), value and related (an array of people/items). Use null for unknown values. Attribution is witnessed, claimed, inferred, promised or ruled.',
+            'For measurements identify an explicit form and dimension, for example human / height and full dragon / length. Preserve original units and words. Otherwise use null for form and dimension. A change to one form does not end a measurement for another.',
+            '=== READ',
+            'One line per input message: #n | read if supported rows cite it, or #n | no change if it adds nothing. A bare heading or an omitted message is incomplete.',
         ]),
 
         NotesPromptLines: Object.freeze([
@@ -274,7 +281,8 @@ const ScribeAnalyzer = Object.freeze({
      * @return {string}
      */
     get Prompt() {
-        return ScribeAnalyzer.Settings.PromptLines.join(ScribeAnalyzer.Settings.Newline);
+        const settings = ScribeAnalyzer.Settings;
+        return [...settings.PromptLines, ...settings.EvidencePromptLines].join(settings.Newline);
     },
 
     /**
@@ -523,7 +531,11 @@ const ScribeAnalyzer = Object.freeze({
         }
         const owned = fact.origin === ScribeLog.Origin.Operator;
         const source = owned ? settings.Owner : settings.CiteOpen + fact.position + settings.Closing;
-        return category + settings.Colon + fact.text + source;
+        const scope = [fact.form, fact.dimension].filter(Boolean).join(' / ');
+        const evidence = fact.evidence;
+        const account = evidence && evidence.attribution !== 'witnessed'
+            ? ' [' + evidence.attribution + ' by ' + evidence.speaker + ']' : '';
+        return category + settings.Colon + fact.text + source + (scope ? ' [scope: ' + scope + ']' : '') + account;
     },
 
     /**
@@ -595,7 +607,19 @@ const ScribeAnalyzer = Object.freeze({
         const headings = settings.Headings;
         const first = stretch[0].position;
         const last = stretch.at(settings.Last).position;
-        const transcript = ScribeIntake.transcript(stretch);
+        const transcript = stretch.map((message) => {
+            if (message.blocks.length === 0) {
+                return '[#' + message.position + '] (no story text)';
+            }
+            if (message.blocks.length === 1 && message.blocks[0].blockNumber === 1) {
+                return ScribeIntake.transcript([message]);
+            }
+            const lines = message.blocks.map((block) => {
+                const playerMark = block.role === ScribeIntake.Role.Player ? ' (player)' : '';
+                return '[block ' + block.blockNumber + '] ' + block.speaker + playerMark + ': ' + block.text;
+            });
+            return '[#' + message.position + '] ' + lines.join(settings.Newline);
+        }).join(settings.BlankLine);
         const labels = ScribeAnalyzer.labels(state);
         const scenes = [];
         for (const scene of ScribeAnalyzer.earlier(state, first).slice(-settings.ShownScenes)) {

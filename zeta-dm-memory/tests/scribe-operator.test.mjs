@@ -176,6 +176,73 @@ function pin(subject, category, text, hidden = false) {
     return { type: 'Pin', subject, category, target: null, text, hidden };
 }
 
+test('merged measurement slots resolve independently, including equivalent-unit pins and keep first', () => {
+    const log = ScribeLog.create();
+    const human = { form: 'human', dimension: 'height' };
+    const dragon = { form: 'full dragon', dimension: 'length' };
+    const parsed = ScribeAnswer.parse(answer({ FACTS: ['Sera | build | 5 ft 9 in | #1', 'Sera | build | 6 ft | #2',
+        'Wing | build | 20 m | #3', 'Wing | build | 12 m | #4'] })).operations;
+    ScribeLog.append(log, ScribeReplay.run(log, storyOrder), parsed.map((operation, index) =>
+        ({ ...operation, ...(index < 2 ? human : dragon) })), { messages: stretch(1, 4), origin: 'Story' });
+    const { state: merged } = rule(log, { type: 'Merge', from: 'S2', into: 'S1' });
+    assert.deepEqual(plain(merged.conflicts.map((issue) => [issue.subject, issue.form, issue.dimension, issue.established])),
+        [['S1', 'human', 'height', 'F1'], ['S1', 'full dragon', 'length', 'F3']]);
+    const { entry } = rule(log, { ...pin('S1', 'build', '1,200 cm'), ...dragon });
+    assert.equal(entry.operations[0].winner, 'F4');
+    ScribeLog.link(entry, merged, [], story);
+    assert.deepEqual(plain(entry.operations[0].dispute.map((fact) => [fact.id, fact.form])), [['F3', 'full dragon'], ['F4', 'full dragon']]);
+    const replay = () => ScribeReplay.run(plain(log), storyOrder);
+    assert.deepEqual(plain(replay().conflicts.map((issue) => issue.form)), ['human']);
+    assert.deepEqual(plain(replay().facts.map((fact) => [fact.id, fact.status, fact.pinned])),
+        [['F1', 'InForce', false], ['F2', 'Disputed', false], ['F3', 'Disputed', false], ['F4', 'InForce', true]]);
+    const [kept] = ScribeLog.keepFirst(log, replay());
+    assert.equal(kept.operations[0].form, 'human');
+    assert.equal(replay().conflicts.length, 0);
+    ScribeLog.revoke(log, entry.sequence);
+    assert.deepEqual(plain(replay().conflicts.map((issue) => issue.form)), ['full dragon']);
+    assert.equal(replay().facts.find((fact) => fact.id === 'F1').pinned, true);
+});
+
+test('equal wording in another form survives edit, widening, removal and changes targeting a fact ID', () => {
+    const log = ScribeLog.create();
+    const human = { form: 'human', dimension: 'height' };
+    const dragon = { form: 'full dragon', dimension: 'length' };
+    const replay = () => ScribeReplay.run(plain(log), storyOrder);
+    const rows = ScribeAnswer.parse(answer({ FACTS: ['Sera | build | 2 m | #1', 'Sera | build | 20 m | #2'] })).operations;
+    ScribeLog.append(log, replay(), [{ ...rows[0], ...human }, { ...rows[1], ...dragon }], { messages: pick(1, 2), origin: 'Story' });
+    const before = replay();
+    rule(log, { type: 'EditFact', fact: 'F2', expected: ScribeLog.editExpected(before.facts[1]), text: '2 m' });
+    assert.deepEqual(plain(replay().facts.map((fact) => [fact.text, fact.form])), [['2 m', 'human'], ['2 m', 'full dragon']]);
+    rule(log, { type: 'Widen', fact: 'F2', to: ScribeLog.Settings.Everyone });
+    assert.equal(replay().facts[0].widened, null);
+    const changed = ScribeAnswer.parse(answer({ CHANGES: ['F1 | Sera | build | 12 m | #3'] })).operations[0];
+    assert.equal(ScribeLog.append(log, replay(), [{ ...changed, ...dragon }], { messages: pick(3), origin: 'Notes' }).refused.length, 1);
+    rule(log, { type: 'RemoveFact', fact: 'F2' });
+    assert.deepEqual(plain(replay().facts.map((fact) => [fact.id, fact.status])), [['F1', 'InForce'], ['F2', 'Removed']]);
+    const accepted = ScribeLog.append(log, replay(), [{ ...changed, ...human }], { messages: pick(3), origin: 'Story' });
+    assert.equal(accepted.refused.length, 0);
+    assert.deepEqual(plain(replay().facts.filter((fact) => fact.status === 'InForce').map((fact) => [fact.text, fact.form])), [['12 m', 'human']]);
+});
+
+test('an older pin follows its original citation when a reread establishes form', () => {
+    const log = ScribeLog.create();
+    const replay = () => ScribeReplay.run(plain(log), storyOrder);
+    apply(log, storyOrder, answer({ FACTS: ['Sera | build | 20 m | #1', 'Sera | build | 5 ft 9 in | #2'] }), pick(1, 2));
+    const { entry } = rule(log, pin('S1', 'build', '20 m'));
+    ScribeLog.withdraw(log, story[0].id);
+    const rows = ScribeAnswer.parse(answer({ FACTS: ['Sera | build | 20 m | #1', 'Sera | build | 5 ft 9 in | #2'] })).operations;
+    ScribeLog.append(log, replay(), [{ ...rows[0], form: 'full dragon', dimension: 'length' },
+        { ...rows[1], form: 'human', dimension: 'height' }], { messages: pick(1, 2), origin: 'Story' });
+    assert.deepEqual(plain(replay().facts.map((fact) => [fact.cite, fact.form, fact.status, fact.pinned])),
+        [[story[0].id, 'full dragon', 'InForce', true], [story[1].id, 'human', 'InForce', false]]);
+    assert.equal(entry.operations[0].winner, 'F1');
+    const [fact] = replay().facts;
+    assert.throws(() => ScribeLog.rule(log, replay(), { type: 'EditFact', fact: fact.id,
+        expected: ScribeLog.editExpected(fact), text: 'five foot nine in human form' }), /Mismatch/);
+    ScribeLog.revoke(log, entry.sequence);
+    assert.ok(replay().facts.every((item) => !item.pinned));
+});
+
 /**
  * @param {object} state
  * @param {string} label

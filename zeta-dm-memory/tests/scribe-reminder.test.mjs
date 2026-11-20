@@ -1786,6 +1786,33 @@ test('a story so far alone over 3,000 characters is cut at a sentence end, and t
     assert.equal(brief, '[Scribe] The story so far: Halvard came to the hall. The party: find the lost mage.');
 });
 
+test('the writer declining a recap is distinct from a refusal in the story', () => {
+    for (const text of [
+        "I can't write this story.",
+        "# The story so far\nI’M SORRY, BUT I CANNOT CONTINUE THIS ROLEPLAY.",
+        "I can't continue with this roleplay.",
+        "I can't help write this story.",
+        'Instead, I can offer a short recap.',
+        "I can offer a summary instead.",
+        "I can provide a brief summary if you’d like.",
+        "Sorry, I can’t help with that request. I can summarize the events instead.",
+        "I can summarize the story instead.",
+        "**The story so far:** I can’t write this story.\n\n[Template]\nMirra reached the gate.",
+    ]) {
+        assert.equal(ScribeReminder.declined(text), true, text);
+    }
+    for (const text of [
+        '', 'Mirra refused to continue the roleplay.', "Mirra can't write the letter.",
+        '“I can’t write this story,” Mirra said.', 'The story so far: “I can offer a summary instead,” said Mirra.',
+        "“The story so far: I can't write this story,” Mirra admitted.",
+        "I can't write this story,” Mirra admitted.",
+        'Mirra said, "I cannot continue with this roleplay."',
+        'The riders arrived at the gate.',
+    ]) {
+        assert.equal(ScribeReminder.declined(text), false, text);
+    }
+});
+
 test('the story so far is one clean line that cannot break the frame', () => {
     assert.equal(
         ScribeReminder.told('The story so far: Halvard [came] to @Mira\nand  left.​'),

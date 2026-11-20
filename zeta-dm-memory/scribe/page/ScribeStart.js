@@ -39,6 +39,16 @@ switch (
                  * @return {string[]}
                  */
                 list: () => GM_listValues(),
+
+                /**
+                 * @param {string} name
+                 * @param {() => void} changed
+                 * @return {() => void}
+                 */
+                watch: (name, changed) => {
+                    const listener = GM_addValueChangeListener(name, () => changed());
+                    return () => GM_removeValueChangeListener(listener);
+                },
             },
             xmlHttpRequest: GM_xmlhttpRequest,
             exporter:

@@ -445,6 +445,17 @@ test('a boundary refresh follows only the cursors needed for the next stretch', 
     }
 });
 
+test('a target search proves the complete history only when it actually reaches the start', async () => {
+    const messages = FakeZeta.messages(100);
+    const reached = await latest(new FakeZeta(messages).fetch, { through: 'missing-at-start' });
+    assert.equal(reached.completeHistory, true);
+    assert.deepEqual(ids(reached.messages), ids(messages));
+    const bounded = await latest(new FakeZeta(messages).fetch, { through: 'm040' });
+    assert.equal(bounded.completeHistory, undefined);
+    const recent = await latest(new FakeZeta(messages).fetch);
+    assert.equal(recent.completeHistory, undefined);
+});
+
 test('the status-only watcher reads only the room and HTTP result for player message POSTs', async () => {
     const page = FakeZeta.window();
     const headerSetter = page.XMLHttpRequest.prototype.setRequestHeader;

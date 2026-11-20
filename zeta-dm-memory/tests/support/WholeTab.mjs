@@ -1,4 +1,5 @@
 import vm from 'node:vm';
+import { inspect } from 'node:util';
 import FakeEvent from './FakeEvent.mjs';
 import FakeTextArea from './FakeTextArea.mjs';
 import FakeTextInput from './FakeTextInput.mjs';
@@ -40,6 +41,7 @@ export default class WholeTab {
         this.packed = options.packed;
         this.clock = options.clock;
         this.storage = options.storage;
+        this.subscriptions = new Set();
         this.site = options.site;
         this.model = options.model;
         this.worker = options.worker ?? null;
@@ -95,10 +97,7 @@ export default class WholeTab {
         if (this.layout === 'frame') {
             this.buildFrame(options.width);
         } else if (this.layout === 'top') {
-            this.box = this.document.add(new FakeTextArea({ name: 'message' }));
-            this.chatWindow = this.window;
-            this.chatDocument = this.document;
-            this.wireBox();
+            this.buildComposer(this.window, this.document);
         } else {
             this.box = null;
             this.chatWindow = this.window;
@@ -131,6 +130,15 @@ export default class WholeTab {
         this.iframe = this.document.add(new WholeNode('iframe', { src: WholeTab.FrameAddress }, { width: 420, height: 720, bottom: 800 }));
         this.iframe.contentWindow = toFrame;
         this.frame = { window, document, ...timers, logs: [], gm: [], context: null, started: false, toTop, toFrame };
+        this.buildComposer(window, document);
+    }
+
+    /**
+     * @param {WholeWindow} window
+     * @param {WholeDocument} document
+     * @return {void}
+     */
+    buildComposer(window, document) {
         const form = new WholeNode('form', {}, { width: 420, height: 120, bottom: 790 });
         this.box = new FakeTextArea({ name: 'message' });
         form.append(this.box);
@@ -361,7 +369,10 @@ export default class WholeTab {
          * @return {void}
          */
         const record = (...values) => {
-            copy.logs.push(String(values[0]));
+            const parts = values.map((value) => typeof value === 'string' ? value : inspect(value, {
+                depth: null, maxArrayLength: null, maxStringLength: null, customInspect: false, getters: false,
+            }));
+            copy.logs.push(parts.join(' '));
         };
         const locks = top
             ? this.lockManager()
@@ -380,6 +391,15 @@ export default class WholeTab {
                 storage.remove(name);
             }),
             GM_listValues: WholeTab.counted(calls, 'GM_listValues', () => storage.list()),
+            GM_addValueChangeListener: WholeTab.counted(calls, 'GM_addValueChangeListener', (name, changed) => {
+                const remove = storage.watch(name, changed);
+                this.subscriptions.add(remove);
+                return remove;
+            }),
+            GM_removeValueChangeListener: WholeTab.counted(calls, 'GM_removeValueChangeListener', (remove) => {
+                remove();
+                this.subscriptions.delete(remove);
+            }),
             GM_xmlhttpRequest: WholeTab.counted(calls, 'GM_xmlhttpRequest', (details) =>
                 top ? this.route(details) : { abort: () => undefined },
             ),
@@ -641,6 +661,10 @@ export default class WholeTab {
      * @return {void}
      */
     unload() {
+        for (const remove of this.subscriptions) {
+            remove();
+        }
+        this.subscriptions.clear();
         this.dead = true;
         this.window.dead = true;
         this.scriptTimers.stop();

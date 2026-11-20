@@ -3,6 +3,7 @@ import { readFileSync } from 'node:fs';
 import test from 'node:test';
 import CampaignBuilder from './support/CampaignBuilder.mjs';
 import FakeChat from './support/FakeChat.mjs';
+import CitedStory from './support/CitedStory.mjs';
 import FakeStorage from './support/FakeStorage.mjs';
 import PanelHarness from './support/PanelHarness.mjs';
 import PanelLive from './support/PanelLive.mjs';
@@ -274,6 +275,29 @@ function contradiction() {
         can: { told: false, spent: false },
     };
 }
+
+test('independent findings show the two cited passages, count once alongside live decisions and expose checked progress', async () => {
+    const known = { ...contradiction(), fingerprint: 'current' };
+    const source = { messageId: known.message, fingerprint: known.fingerprint, position: 99, speaker: 'Mirelle', quote: 'My eyes are blue' };
+    const earlier = { messageId: 'MESSAGE-2', fingerprint: 'old', position: 2, speaker: 'Orla', quote: 'Her eyes were grey' };
+    const verified = { kind: 'Contradiction', source, earlier, question: 'Which eye colour is correct?', record: { ref: 'w1', text: '{"fact":"F3"}' } };
+    const independent = { ...verified, source: { ...source, quote: 'I received the sword' }, record: null, question: 'Who first received the sword?' };
+    assert.deepEqual(plain(PanelView.checkerFindings({ resolutions: [known] }, [verified, independent], [])), [independent]);
+    const shorter = { ...verified, source: { ...source, quote: 'red as rust' } };
+    const longer = { ...known, said: 'her hair was red as rust' };
+    assert.deepEqual(plain(PanelView.checkerFindings({}, [shorter], [longer])), []);
+    const distinct = { ...shorter, record: { ref: 'w2', text: '{"fact":"F8"}' } };
+    assert.deepEqual(plain(PanelView.checkerFindings({}, [distinct], [longer])), [distinct]);
+    const room = mounted(findingsBook(), { keeper: { checkedThrough: 99, checksEnabled: true, checkerFindings: [verified, independent] }, live: liveView([known]) });
+    await room.tab('Findings');
+    assert.equal(room.rows('findings').length, 2);
+    assert.equal(room.text('scribe-badge'), '2 findings');
+    const shown = room.rowSaying('findings', independent.question).textContent;
+    assert.match(shown, /#99.*Mirelle.*I received the sword/);
+    assert.match(shown, /#2.*Orla.*Her eyes were grey/);
+    await room.tab('Progress');
+    assert.match(room.text('scribe-checked'), /99 of \d+ messages checked/);
+});
 
 /**
  * @return {object}
@@ -840,6 +864,43 @@ test('a ruling goes through the keeper and is shown after it is saved', async ()
         true,
     );
     assert.equal(panel.keeper.calls.length, 3);
+});
+
+test('the Book shows each attributed quote and pins the selected form when both forms have disputes', async () => {
+    const log = apply(ScribeLog.create(), answer({
+        SUBJECTS: ['Sera | character'],
+        FACTS: ['Sera | build | 5 ft 9 in | #1', 'Sera | build | 6 ft | #2',
+            'Sera | build | 20 m | #3', 'Sera | build | 12 m | #4'],
+    }), 1, 4);
+    const state = plain(replay(log));
+    for (const [index, fact] of state.facts.entries()) {
+        const human = index < 2;
+        Object.assign(fact, {
+            form: human ? 'human' : 'full dragon', dimension: human ? 'height' : 'length',
+            evidence: { messageNumber: fact.position, blockNumber: 2, speaker: 'Sera', attribution: 'claimed',
+                quote: 'I measure ' + fact.text + '.' },
+        });
+    }
+    state.conflicts = [0, 2].map((index) => {
+        const { subject, category, form, dimension, id } = state.facts[index];
+        return { subject, category, form, dimension, established: id, others: [state.facts[index + 1].id] };
+    });
+    const panel = mounted(log, { keeper: { state } });
+    await panel.tab('Book');
+    panel.button(panel.byId('scribe-list-subjects'), 'Sera').click();
+    await panel.flush();
+    assert.match(panel.rowSaying('facts', '5 ft 9 in').textContent, /human \/ height.*#1, block 2, Sera \(claimed\) “I measure 5 ft 9 in\.”/);
+    assert.match(panel.rowSaying('facts', '20 m').textContent, /full dragon \/ length.*#3, block 2, Sera \(claimed\) “I measure 20 m\.”/);
+    await panel.tab('Rulings');
+    const human = panel.rowSaying('conflicts', 'human / height');
+    const dragon = panel.rowSaying('conflicts', 'full dragon / length');
+    panel.inputs(human, 'text')[0].value = '5 ft 10 in';
+    panel.inputs(dragon, 'text')[0].value = '18 m';
+    panel.button(dragon, 'Pin this value').click();
+    assert.deepEqual(plain(panel.keeper.calls.at(-1).args[0]), {
+        type: 'Pin', subject: 'S1', category: 'build', form: 'full dragon', dimension: 'length',
+        target: null, text: '18 m', hidden: false,
+    });
 });
 
 test('every ruling control reaches the keeper', async () => {
@@ -1633,7 +1694,7 @@ test('everything is locked while the keeper is busy', async () => {
     assert.equal(empty.byId('scribe-pause').disabled, false);
 });
 
-test('a watching tab changes nothing', async () => {
+test('a watching tab can save the shared key while room changes stay locked', async () => {
     const log = rulingsBook();
     const panel = mounted(log, {
         keeper: { phase: Phase.Watching, reader: false },
@@ -1679,8 +1740,8 @@ test('a watching tab changes nothing', async () => {
         'Start the book over',
     ]);
     await panel.tab('Settings');
-    assert.deepEqual(panel.actionsWhere('Settings', false), []);
-    assert.deepEqual(panel.actionsWhere('Settings', true).sort(), ['Save key', 'Save settings']);
+    assert.deepEqual(panel.actionsWhere('Settings', false), ['Save key']);
+    assert.deepEqual(panel.actionsWhere('Settings', true), ['Save settings']);
     for (const name of ['summary', 'book', 'timeline', 'rulings', 'findings', 'progress', 'settings']) {
         assert.equal(panel.byId(`scribe-tab-${name}`).disabled, false, name);
     }
@@ -4366,7 +4427,7 @@ async function realKeeper(length, hold = null, wrap = (keeper) => keeper) {
         roomId: 'harbour',
         tabId: 'tab-1',
         zeta: chat.zeta('tab-1'),
-        ask: async () => ({ text: '=== FACTS', cost: 0.01 }),
+        ask: async (role, system, input) => ({ text: CitedStory.answer(input, ''), cost: 0.01 }),
         clock: { now: () => clock.now(), today: () => '2026-11-15' },
         notify: () => {
             if (harness.handle !== null) {
@@ -4920,6 +4981,26 @@ test('the header says which live calls keep failing, and the reminder line says 
     assert.equal(panel.byId('scribe-reminder').getAttribute('placeholder'), held);
 });
 
+test('a writer refusal has one warning across Findings and Progress and clears with its recap', async () => {
+    const failure = { role: 'recap', reason: scripts.ScribeLive.Settings.Messages.StoryDeclined, retrying: false };
+    const room = mounted(ScribeLog.create(), { keeper: working(40, 864), live: liveView([], { due: true, failing: [failure] }) });
+    for (const screen of ['Findings', 'Progress']) {
+        await room.tab(screen);
+        room.redraw();
+        assert.equal(room.byId('scribe-problems').children.length, 1);
+        assert.equal(room.text('scribe-problems'), 'The writer declined to produce a recap. Your reminder is still due.');
+        assert.equal(room.text('scribe-problem-details'), '');
+        assert.doesNotMatch(room.root.textContent, /The story recap is unavailable/);
+    }
+    assert.match(room.text('scribe-counts'), /messages? read/);
+    room.live.current = liveView([], { failing: [failure, { role: 'scene', reason: 'HTTP 401' }] });
+    room.redraw();
+    assert.equal(room.byId('scribe-problems').children.length, 2);
+    room.live.current = liveView([], { ready: '[Scribe] The riders returned.', failing: [] });
+    room.redraw();
+    assert.equal(room.byId('scribe-problems').hidden, true);
+});
+
 test('the phone strip groups and clears only the affected work while Progress retains masked detail', async () => {
     const key = 'example-test-secret-for-this-browser';
     const storage = new FakeStorage();
@@ -4967,6 +5048,28 @@ test('the phone strip groups and clears only the affected work while Progress re
     room.redraw();
     assert.equal(room.byId('scribe-problems-compact').hidden, true);
     assert.equal(room.text('scribe-problem-details'), '');
+});
+
+test('the previous book rejection offers an action available with this tab and its saved key', () => {
+    const storage = new FakeStorage();
+    const failed = { reason: 'Failed', problem: 'unexpected HTTP status; status 401; finish none; reason: User not found.' };
+    const keeper = { phase: Phase.Stopped, reader: true, restoredStop: true, stop: failed };
+    const room = mounted(ScribeLog.create(), { storage, keeper });
+    assert.match(room.text('scribe-problems'), /previous book reading.*Open Settings.*Save key/);
+    assert.doesNotMatch(room.text('scribe-problems'), /Press Resume/);
+    ScribeStore.setKey(storage, 'synthetic-local-value');
+    room.keeper.current = { ...room.keeper.current, reader: false, phase: Phase.Watching };
+    room.redraw();
+    assert.match(room.text('scribe-problems'), /Use Resume in the reading tab/);
+    storage.refuseGetsMatching(/^scribe:key$/);
+    room.redraw();
+    assert.match(room.text('scribe-problems'), /previous book reading.*Tampermonkey can read its local storage/);
+    assert.doesNotMatch(room.text('scribe-problem-details'), /User not found/);
+    storage.allow();
+    room.keeper.current = { ...room.keeper.current, stop: { reason: 'Failed', problem: 'site said status 401' } };
+    room.redraw();
+    assert.match(room.text('scribe-problem-details'), /Scribe · book reading/);
+    assert.doesNotMatch(room.text('scribe-problems'), /OpenRouter/);
 });
 
 test('an unreadable key slot keeps a raw diagnostic out of the panel', () => {

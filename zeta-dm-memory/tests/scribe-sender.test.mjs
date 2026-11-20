@@ -1298,6 +1298,45 @@ test('only the chat box is the chat box', () => {
     assert.equal(window.timerCount, 0);
 });
 
+test('a restored reminder uses the existing bytes including at the limit, with player text before and after it', () => {
+    const selection = 'Keep the lantern [lit].\nMind its oil.';
+    const offer = { ready: selection, manual: true, suggestion: 'Ask Orla.' };
+    const carried = '[Scribe] ' + selection;
+    for (const lead of ['@: ', '']) {
+        const attachment = '\r\n' + lead + carried.replace('\n', '\r\n') + '\r\n@: Ask Orla.';
+        const trailing = '\r\nI wait for snow 雪.';
+        const padding = 'x'.repeat(4500 - Buffer.byteLength(attachment + trailing));
+        const draft = padding + attachment + trailing;
+        const retry = ScribeSender.compose(draft, offer, 4500);
+        assert.equal(retry.text, draft);
+        assert.equal(retry.playerText, padding + '\nI wait for snow 雪.');
+        assert.deepEqual([retry.ready, retry.carried, retry.suggestion, retry.crowded], [true, carried, true, false]);
+        const changed = { ...offer, ready: 'A newer choice.', previous: carried };
+        const older = ScribeSender.compose(draft, changed, 4500);
+        assert.deepEqual([older.text, older.ready, older.suggestion], [draft, false, false]);
+    }
+    for (const quote of ['She copies “[Scribe] Keep the lantern [lit].”', '@: [Scribe] My own words.']) {
+        assert.equal(ScribeSender.compose(quote, offer, 4500).text, quote + '\n@: ' + carried + '\n@: Ask Orla.');
+    }
+});
+
+test('an automatic retry keeps its original shortened paragraph without introducing a newly offered suggestion', () => {
+    const shorter = '[Scribe] Keep the lantern.';
+    const offer = { ready: shorter + ' Mind its oil.', ends: [shorter.length], suggestion: null };
+    const original = ScribeSender.compose('Go.', offer, Buffer.byteLength('Go.\n@: ' + shorter));
+    const retry = ScribeSender.compose(original.text, { ...offer, suggestion: 'Ask Orla.' }, 4500);
+    assert.deepEqual([retry.text, retry.carried, retry.suggestion], [original.text, shorter, false]);
+    assert.equal(ScribeSender.compose('Bare.', { ...offer, onlyExisting: true }, 4500).text, 'Bare.');
+});
+
+test('a retained older paragraph takes precedence over a newer selection equal to its first line', () => {
+    const previous = '[Scribe] I know the gate.\nThe iron gate.';
+    const body = 'I wait.\n@: ' + previous + '\nafter';
+    const retry = ScribeSender.compose(body, { ready: 'I know the gate.', manual: true, previous, suggestion: null }, 4500);
+    assert.deepEqual([retry.text, retry.ready, retry.previous, retry.carried, retry.playerText],
+        [body, false, true, previous, 'I wait.\nafter']);
+});
+
 test('compose adds, drops and reports', () => {
     const lines = Object.freeze({ ready: '[Scribe] Day 1, the mill.', suggestion: 'Ask the miller.' });
     const blanks = ['', '   ', String.fromCodePoint(0xa0, 0x200b), String.fromCodePoint(0x200b), ' \n\t'];

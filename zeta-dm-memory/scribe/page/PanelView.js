@@ -79,6 +79,10 @@ const PanelView = Object.freeze({
         ModelOperations: Object.freeze({ scene: 'scene updates', check: 'story checks', recap: 'story recap' }),
         Problems: Object.freeze({
             key: ['OpenRouter key rejected', 'OpenRouter rejected the saved API key.', 'Open Settings, enter your current OpenRouter key, and press Save key.'],
+            providerAuth: ['Model provider authentication error', 'The model provider reported an authentication error.', 'Check your provider settings in OpenRouter. If your OpenRouter key changed, enter it in Settings and press Save key.'],
+            previousKey: ['Previous OpenRouter key rejection', 'The previous book reading stopped because OpenRouter rejected the key used then.', ''],
+            keyStorage: ['Key storage unavailable', 'Scribe could not read the saved OpenRouter key from local storage.', 'Check that Tampermonkey can read its local storage, then retry.'],
+            keyRecovery: ['Room recovery pending', 'The key is saved. Scribe could not resume work in this room and will try again.', ''],
             missingKey: ['OpenRouter key needed', 'Scribe needs an OpenRouter API key.', 'Open Settings, enter your OpenRouter key, and press Save key.'],
             credit: ['OpenRouter spending limit', 'OpenRouter reported a credit or spending limit.', 'Check the balance and spending limit for your OpenRouter account or key.'],
             rate: ['OpenRouter rate limit', 'OpenRouter is limiting requests.', ''],
@@ -86,6 +90,7 @@ const PanelView = Object.freeze({
             connection: ['OpenRouter connection failed', 'The request to OpenRouter did not complete.', 'Check your connection.'],
             length: ['OpenRouter answer cut short', 'The model answer ended early.', 'See Progress for details.'],
             unusable: ['Unusable model answer', 'The model supplied no usable result.', 'See Progress for details.'],
+            declined: ['Writer declined the recap', 'The writer declined to produce a recap. Your reminder is still due.', ''],
             unknown: ['OpenRouter request failed', '', 'See the OpenRouter detail in Progress.'],
             budget: ['Scribe daily budget spent', "Scribe reached its local daily budget.", ''],
             login: ['Zeta sign-in needed', 'Sign in to Zeta and open the chat.', ''],
@@ -355,6 +360,8 @@ const PanelView = Object.freeze({
         let cause = 'unknown';
         if (status === 401) {
             cause = 'key';
+        } else if (diagnostic && status >= 200 && status < 300 && parsed[1] === gateway.ProviderAuth) {
+            cause = 'providerAuth';
         } else if (status === 402) {
             cause = 'credit';
         } else if (status === 429) {
@@ -373,6 +380,20 @@ const PanelView = Object.freeze({
             cause = 'budget';
         }
         return { cause, provider: cause === 'unknown' ? reason : provider };
+    },
+
+    /**
+     * @param {object} keeperView
+     * @return {boolean}
+     */
+    previousKey(keeperView) {
+        const stop = keeperView.stop;
+        if (!keeperView.restoredStop || stop?.reason !== ScribeAdoption.Stop.Failed || typeof stop.problem !== 'string') {
+            return false;
+        }
+        const detail = stop.problem.trim();
+        return stop.source === 'OpenRouter' ? PanelView.modelProblem(detail).cause === 'key' :
+            !stop.source && /^unexpected HTTP status; status 401; finish none(?:; reason: .+)?$/.test(detail);
     },
 
     /**
@@ -400,7 +421,9 @@ const PanelView = Object.freeze({
         };
         const model = (operation, detail, retrying = false, source = 'OpenRouter') => {
             const { cause, provider } = PanelView.modelProblem(detail);
-            if (cause === 'budget' || cause === 'missingKey') {
+            if (source === ScribeStore.KeyStorageSource) {
+                add('Scribe', 'keyStorage', operation, null);
+            } else if (cause === 'budget' || cause === 'missingKey') {
                 add('Scribe', cause, operation, detail);
             } else if (source === 'Scribe') {
                 add('Scribe', 'local', operation, detail, detail);
@@ -408,6 +431,12 @@ const PanelView = Object.freeze({
                 add('OpenRouter', cause, operation, detail, provider, retrying);
             }
         };
+        if (keeperView.keyProblem) {
+            add('Scribe', 'keyStorage', 'key access', null);
+        }
+        if (keeperView.keyRecoveryProblem) {
+            add('Scribe', 'keyRecovery', 'room recovery', null);
+        }
         const keeper = keeperView.problem;
         if (keeper) {
             if (keeper === ZetaSource.Settings.Messages.NoLogin) {
@@ -421,16 +450,23 @@ const PanelView = Object.freeze({
         const stop = keeperView.stop;
         if (stop?.reason === ScribeAdoption.Stop.Failed) {
             const detail = stop.problem?.trim() || 'The reason was not recorded.';
-            if (stop.source === 'OpenRouter' || stop.source === 'Scribe') {
+            if (keeperView.previousKey ?? PanelView.previousKey(keeperView)) {
+                add('OpenRouter', 'previousKey', 'book reading', detail);
+            } else if (stop.source === 'OpenRouter' || ScribeStore.localSource(stop.source)) {
                 model('book reading', detail, false, stop.source);
             } else {
                 add('Scribe', 'local', 'book reading', detail, detail);
             }
         }
+        if (keeperView.checkerProblem?.reason) {
+            model('story checks', keeperView.checkerProblem.reason, false, keeperView.checkerProblem.source);
+        }
         const failing = PanelView.listed(liveView.failing);
         for (const failure of failing) {
             const operation = PanelView.Settings.ModelOperations[failure?.role];
-            if (operation && typeof failure.reason === 'string') {
+            if (failure?.role === 'recap' && failure.reason === ScribeLive.Settings.Messages.StoryDeclined) {
+                add('Scribe', 'declined', operation, null);
+            } else if (operation && typeof failure.reason === 'string') {
                 model(operation, failure.reason, failure.retrying === true, failure.source);
             }
         }
@@ -449,11 +485,23 @@ const PanelView = Object.freeze({
         }
         const result = [];
         for (const group of groups.values()) {
-            const [, opening, action] = copy[group.cause];
+            const [, opening, guidance] = copy[group.cause];
+            let action = guidance;
+            if (group.cause === 'previousKey') {
+                if (keeperView.keyProblem || keeperView.hasKey == null) {
+                    action = 'Check that Tampermonkey can read its local storage before retrying.';
+                } else if (!keeperView.hasKey) {
+                    action = copy.missingKey[2];
+                } else {
+                    action = keeperView.reader && PanelView.next(keeperView) === PanelView.Step.Resume ?
+                        'Press Resume to try the saved key.' : 'Use Resume in the reading tab to try the saved key.';
+                }
+            }
             const names = new Intl.ListFormat('en', { style: 'long', type: 'conjunction' }).format(group.operations);
             const affected = names[0].toUpperCase() + names.slice(1) + ' could not run.';
             const retry = group.retrying && group.cause === 'rate' ? ' A retry is scheduled.' : '';
-            const explanation = [opening, affected, action].filter(Boolean).join(' ') + retry;
+            const description = ['declined', 'previousKey', 'keyStorage', 'keyRecovery'].includes(group.cause) ? '' : affected;
+            const explanation = [opening, description, action].filter(Boolean).join(' ') + retry;
             result.push({ ...group, explanation });
         }
         return result;
@@ -504,6 +552,8 @@ const PanelView = Object.freeze({
                           {
                               subject: fact.subject,
                               category: fact.category,
+                              form: fact.form,
+                              dimension: fact.dimension,
                               target: fact.target,
                               targetText: fact.targetText,
                               text: fact.text,
@@ -567,7 +617,7 @@ const PanelView = Object.freeze({
                     (fact) => {
                         const mark = fact.hidden ? words.Hidden : words.Nothing;
                         if (fact.category !== relation) {
-                            return PanelView.said(fact.category) + words.Colon + PanelView.said(fact.text) + mark;
+                            return BenchView.scoped(fact, PanelView.said(fact.category)) + words.Colon + PanelView.said(fact.text) + mark;
                         }
                         const target = fact.target === null ? PanelView.named(fact.targetText) : names.get(fact.target);
                         return words.TowardLine + target + words.Colon + PanelView.said(fact.text) + mark;
@@ -621,7 +671,7 @@ const PanelView = Object.freeze({
              * @param {{ day: number, lastPosition: number }} scene
              * @return {Array<{ day: number, last: number, row: object }>}
              */
-            (scene) => [{ day: scene.day, last: scene.lastPosition, row: BenchView.scene(scene, names) }],
+            (scene) => [{ day: scene.day, last: scene.lastPosition, row: BenchView.scene(scene, names, state) }],
         );
         const placed = scenes.filter(
             /**
@@ -684,7 +734,11 @@ const PanelView = Object.freeze({
              * @return {Array<{ id: string, text: string, position: number }>}
              */
             (thread) =>
-                thread.closed === null ? [{ id: thread.id, text: thread.text, position: thread.position }] : [],
+                thread.closed === null ? [{
+                    id: thread.id,
+                    text: [thread.text, BenchView.citations(thread)].filter(Boolean).join(' · '),
+                    position: thread.position,
+                }] : [],
         );
         return { needs: PanelView.needs(state), cast, standing, days, threads };
     },
@@ -922,7 +976,7 @@ const PanelView = Object.freeze({
                  * @param {object} scene
                  * @return {object[]}
                  */
-                (scene) => [BenchView.scene(scene, names)],
+                (scene) => [BenchView.scene(scene, names, state)],
             ),
             page,
         );
@@ -1146,6 +1200,30 @@ const PanelView = Object.freeze({
         }
         const target = fact.target === null ? PanelView.named(fact.targetText) : names.get(fact.target);
         return label + words.Toward + target;
+    },
+
+    /**
+     * @param {object} state
+     * @param {object[]} verified
+     * @param {object[]} live
+     * @return {object[]}
+     */
+    checkerFindings(state, verified, live) {
+        const known = [...PanelView.listed(live), ...PanelView.listed(state?.resolutions)];
+        const includes = (text, words) => Boolean(text && words &&
+            (' ' + ScribeReplay.wording(text) + ' ').includes(' ' + ScribeReplay.wording(words) + ' '));
+        return PanelView.listed(verified).filter((check) => !known.some((finding) => {
+            if (check.kind !== 'Contradiction' || !['Contradiction', 'Situation'].includes(finding.kind) ||
+                check.source.messageId !== finding.message || check.source.fingerprint !== finding.fingerprint ||
+                !(includes(check.source.quote, finding.said) || includes(finding.said, check.source.quote))) {
+                return false;
+            }
+            if (finding.fact && check.record?.text.includes(JSON.stringify(finding.fact))) {
+                return true;
+            }
+            return includes(check.earlier?.quote, finding.book) &&
+                (!finding.fact || state.facts?.some((fact) => fact.id === finding.fact && fact.cite === check.earlier.messageId));
+        }));
     },
 
     /**

@@ -387,6 +387,51 @@ test('the old generation is removed after the new one is in', () => {
     assertSame(ScribeStore.read(storage, 'tide', Kind.Book), third, 'after the sweep');
 });
 
+test('a lost room lease after staging cannot publish its book or strand its parts', () => {
+    for (const mode of ['false', 'throw', 'undefined']) {
+        const storage = new FakeStorage();
+        const old = sample('before');
+        ScribeStore.write(storage, 'harbour', Kind.Book, old);
+        const original = names(storage);
+        let owns = true;
+        const set = storage.set.bind(storage);
+        storage.set = (name, value) => {
+            set(name, value);
+            if (name.startsWith('scribe:part:harbour:book:2:')) {
+                owns = false;
+            }
+        };
+        const guard = () => {
+            assert.equal(owns, false);
+            if (mode === 'throw') {
+                throw new Error('Lease unreadable');
+            }
+            return mode === 'false' ? false : undefined;
+        };
+        assert.throws(() => ScribeStore.write(storage, 'harbour', Kind.Book, MEDIUM, guard), /save failed/);
+        assert.deepEqual(names(storage), original);
+        assertSame(ScribeStore.read(storage, 'harbour', Kind.Book), old, mode);
+        ScribeStore.write(storage, 'harbour', Kind.Book, MEDIUM, () => true);
+        assertSame(ScribeStore.read(storage, 'harbour', Kind.Book), MEDIUM, 'authorized retry');
+    }
+});
+
+test('a guarded book save leaves an overlapping winner readable even when their candidate parts match', () => {
+    for (const same of [true, false]) {
+        const storage = new FakeStorage();
+        ScribeStore.write(storage, 'harbour', Kind.Book, sample('original'));
+        const candidate = sample('proposed');
+        const winner = same ? candidate : sample('winner');
+        const guard = () => {
+            ScribeStore.write(storage, 'harbour', Kind.Book, winner);
+            return !same;
+        };
+        assert.throws(() => ScribeStore.write(storage, 'harbour', Kind.Book, candidate, guard), /save failed/);
+        assertSame(ScribeStore.read(storage, 'harbour', Kind.Book), winner, 'published winner');
+        assert.deepEqual(partsOf(storage, 'harbour', Kind.Book), [partOf('harbour', Kind.Book, 2, winner, 0)]);
+    }
+});
+
 test('damage is reported, never repaired', () => {
     const tail = MEDIUM.text.length + '{"text":""}'.length - 500000;
     const second = partOf('worn', Kind.Book, 1, MEDIUM, 1);

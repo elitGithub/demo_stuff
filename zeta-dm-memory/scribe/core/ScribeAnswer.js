@@ -844,6 +844,85 @@ const ScribeAnswer = Object.freeze({
 
     /**
      * @param {string} text
+     * @return {object}
+     */
+    parseStory(text) {
+        const sections = new Set([...ScribeAnswer.Blocks, 'READ', 'EVIDENCE']);
+        const counts = new Map();
+        const evidence = new Map();
+        const read = new Map();
+        const rows = new Map();
+        const refused = [];
+        const rejectedRows = new Map();
+        let block = ScribeAnswer.Settings.Preamble;
+        for (const raw of text.split(ScribeAnswer.Settings.LineBreak)) {
+            const line = raw.trim();
+            if (!line) {
+                continue;
+            }
+            const heading = /^===\s+([A-Z]+)$/.exec(line);
+            if (heading && sections.has(heading[1])) {
+                block = heading[1];
+                continue;
+            }
+            if (block === 'EVIDENCE') {
+                let item = null;
+                try {
+                    item = JSON.parse(line);
+                } catch {
+                    refused.push({ block, line, reason: ScribeAnswer.Reason.Shape });
+                    continue;
+                }
+                const string = (value) => typeof value === 'string' && value.trim() !== '';
+                const nullable = (value) => value === null || string(value);
+                const shape = item && ScribeAnswer.Blocks.includes(item.section) &&
+                    [item.row, item.messageNumber, item.blockNumber].every((number) => Number.isSafeInteger(number) && number > 0) &&
+                    string(item.quote) && ['witnessed', 'claimed', 'inferred', 'promised', 'ruled'].includes(item.attribution) &&
+                    nullable(item.form) && nullable(item.dimension) &&
+                    ['event', 'time', 'subject', 'attribute', 'value'].every((key) => item[key] === undefined || nullable(item[key])) &&
+                    (item.day === undefined || nullable(item.day) || Number.isSafeInteger(item.day) && item.day > 0) &&
+                    (item.related === undefined || Array.isArray(item.related) && item.related.every(string));
+                const key = shape ? item.section + ':' + item.row : null;
+                if (!shape || evidence.has(key)) {
+                    refused.push({ block, line, reason: ScribeAnswer.Reason.Shape });
+                } else {
+                    evidence.set(key, item);
+                }
+                continue;
+            }
+            if (block === 'READ') {
+                const mark = /^#([1-9]\d*)\s*\|\s*(read|no change)$/i.exec(line);
+                const number = mark ? Number(mark[1]) : null;
+                if (!mark || !Number.isSafeInteger(number) || read.has(number)) {
+                    refused.push({ block, line, reason: ScribeAnswer.Reason.Shape });
+                } else {
+                    read.set(number, mark[2].toLowerCase());
+                }
+                continue;
+            }
+            const row = (counts.get(block) ?? 0) + 1;
+            counts.set(block, row);
+            const result = ScribeAnswer.parse('=== ' + block + '\n' + line);
+            let singleCite = true;
+            if (['FACTS', 'NAMES', 'CHANGES', 'TOLD', 'THREADS', 'QUESTIONS', 'NIGHTS'].includes(block)) {
+                const fields = line.split('|').map((field) => field.trim());
+                const field = block === 'NIGHTS' ? fields[0].split(':')[0] :
+                    fields.at(-1).toLowerCase() === 'hidden' ? fields.at(-2) : fields.at(-1);
+                singleCite = /^#[1-9]\d*$/.test(field);
+            }
+            if (result.operations.length !== 1 || result.refused.length || !singleCite) {
+                const problem = { block, line, reason: result.refused.at(-1)?.reason ?? ScribeAnswer.Reason.Shape };
+                refused.push(problem);
+                rejectedRows.set(problem, block + ':' + row);
+            } else {
+                rows.set(block + ':' + row, result.operations[0]);
+            }
+        }
+        return { rows, read, evidence, refused, rejectedRows };
+    },
+
+    /**
+     * @param {string} text
      * @return {Readonly<{ operations: readonly object[], refused: ReadonlyArray<Readonly<{ block: string, line: string, reason: string }>> }>}
      */
     parse(text) {

@@ -61,6 +61,25 @@ const ScribeSender = Object.freeze({
                 versions.push(ready.slice(settings.NoLength, end));
             }
         }
+        if (text.includes('[Scribe]')) {
+            const previous = ScribeText.reminderSpan(text, lines.previous, lines.previousSuggestion);
+            for (const version of versions) {
+                const carried = manual ? ScribeSender.paragraph(version) : version;
+                const span = ScribeText.reminderSpan(text, carried, lines.suggestion);
+                if (span && (!previous || (span.start === previous.start && span.end > previous.end))) {
+                    return Object.freeze({ text, ready: true, suggestion: span.suggestion, carried, crowded: false,
+                        playerText: (text.slice(0, span.start) + text.slice(span.end)).replace(/\r\n/g, '\n') });
+                }
+            }
+            if (previous) {
+                return Object.freeze({ text, ready: false, suggestion: false, carried: lines.previous, crowded: false,
+                    previous: true, previousSuggestion: previous.suggestion,
+                    playerText: (text.slice(0, previous.start) + text.slice(previous.end)).replace(/\r\n/g, '\n') });
+            }
+        }
+        if (lines.onlyExisting) {
+            return Object.freeze({ text, ready: false, suggestion: false, carried: null, crowded: false });
+        }
         /**
          * @param {string|null} carried
          * @param {string|null} suggestion
@@ -633,7 +652,13 @@ const ScribeSender = Object.freeze({
                 pending.bound = true;
                 return (status) => {
                     pending.status = Number.isInteger(status) ? status : null;
-                    if (pending.finished || status === settings.Unauthorized || settings.Refused.includes(status)) {
+                    if (pending.finished || status === settings.Unauthorized || settings.Refused.includes(status) ||
+                        !Number.isInteger(status) || status < 200 || status >= 300 || status === settings.AcceptedForProcessing) {
+                        if (!pending.finished && sender.pending === pending && status !== settings.Unauthorized && !settings.Refused.includes(status)) {
+                            sender.window.clearTimeout(sender.timer);
+                            sender.timer = null;
+                            sender.pending = null;
+                        }
                         if (pending.event?.eventPhase > 0) {
                             Promise.resolve().then(() => ScribeSender.finish(sender, pending, true));
                         } else {

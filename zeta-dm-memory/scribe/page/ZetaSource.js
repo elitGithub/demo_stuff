@@ -965,7 +965,9 @@ const ZetaSource = Object.freeze({
             }
             if (end !== null) {
                 const result = ZetaSource.outcome(received, end, null, skipped);
-                return page.emptyRoom ? Object.freeze({ ...result, emptyRoom: true }) : result;
+                const complete = !skipped && (end === ends.NoCursor || end === ends.EmptyPage);
+                return Object.freeze({ ...result, ...(complete ? { completeHistory: true } : {}),
+                    ...(page.emptyRoom ? { emptyRoom: true } : {}) });
             }
             cursor = next;
             used.add(cursor);

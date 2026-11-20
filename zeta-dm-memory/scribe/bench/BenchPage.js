@@ -2052,7 +2052,7 @@ const BenchPage = Object.freeze({
                 return;
             }
             page.chosen = subject.id;
-            elements.Heading.textContent = subject.heading + words.Open + subject.kind + words.Close;
+            elements.Heading.textContent = [subject.heading + words.Open + subject.kind + words.Close, subject.source].filter(Boolean).join(' · ');
             elements.Names.textContent =
                 words.OtherNames + (subject.aka.length === 0 ? words.NoOtherNames : subject.aka.join(words.Comma));
             BenchPage.paged(
@@ -2438,7 +2438,7 @@ const BenchPage = Object.freeze({
              * @param {...string} more
              * @return {string}
              */
-            const key = (role, ...more) => BenchPage.key(section, conflict.subject, conflict.category, role, ...more);
+            const key = (role, ...more) => BenchPage.key(section, ...BenchView.conflictKey(conflict), role, ...more);
 
             /**
              * @param {string} text
@@ -2449,14 +2449,7 @@ const BenchPage = Object.freeze({
                 BenchPage.ruling(
                     page,
                     outcome,
-                    BenchPage.rule({
-                        type: ScribeLog.Ruling.Pin,
-                        subject: conflict.subject,
-                        category: conflict.category,
-                        target: null,
-                        text,
-                        hidden,
-                    }),
+                    BenchPage.rule(BenchView.pin(conflict, text, hidden)),
                     null,
                 );
             const choices = BenchPage.make(page, settings.Tags.Block, settings.Nothing, settings.Classes.Choices);
@@ -2496,7 +2489,7 @@ const BenchPage = Object.freeze({
                 ),
             );
             item.append(
-                BenchPage.make(page, settings.Tags.Paragraph, conflict.label + words.Comma + conflict.category),
+                BenchPage.make(page, settings.Tags.Paragraph, conflict.label + words.Comma + BenchView.scoped(conflict, conflict.category)),
                 choices,
                 other.label,
                 hidden.label,
@@ -2705,7 +2698,7 @@ const BenchPage = Object.freeze({
                 ),
             );
             item.append(
-                BenchPage.make(page, settings.Tags.Paragraph, alias.name + words.JoinedTo + alias.label),
+                BenchPage.make(page, settings.Tags.Paragraph, [alias.name + words.JoinedTo + alias.label, alias.source].filter(Boolean).join(' · ')),
                 actions,
                 outcome,
             );
@@ -2799,6 +2792,9 @@ const BenchPage = Object.freeze({
             const { item, actions } = BenchPage.Rows.frame(page);
             item.setAttribute(settings.Attributes.Fact, audited.fact);
             const heading = [audited.fact, audited.subject, audited.category, audited.text, words.Hash + audited.position];
+            if (audited.source) {
+                heading.push(audited.source);
+            }
             if (!standing) {
                 heading.push(words.NoLongerInForce);
             }

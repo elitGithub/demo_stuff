@@ -518,11 +518,12 @@ test('the fingerprint is taken before notes are removed', () => {
 test('non-text blocks are ignored', () => {
     const plainBuilder = new CampaignBuilder('Orla').player('Hello.');
     const withImage = new CampaignBuilder('Orla').player('Hello.');
-    withImage.messages[0].contents.push({ type: 'IMAGE', speakerName: 'Maren', position: 'LEFT', text: 'picture' });
+    withImage.messages[0].contents.unshift({ type: 'IMAGE', speakerName: 'Maren', position: 'LEFT', text: 'picture' });
     const base = ScribeIntake.read(plainBuilder.messages);
     const result = ScribeIntake.read(withImage.messages);
     assert.equal(result.messages[0].text, 'Orla (player): Hello.');
     assert.equal(result.messages[0].blocks.length, 1);
+    assert.equal(result.messages[0].blocks[0].blockNumber, 2);
     assert.equal(result.messages[0].fingerprint, base.messages[0].fingerprint);
 });
 
@@ -836,6 +837,31 @@ test('saved manual attribution preserves authored markers, validates the raw row
     const edited = ScribeIntake.read(builder.messages, saved).messages[0];
     assert.notEqual(edited.fingerprint, entry.fingerprint);
     assert.deepEqual(plain(edited.blocks.map((block) => block.text)), [player, 'No attachment.\nA new authored line.']);
+});
+
+test('a retried multiline reminder in the middle excludes only the carried lines after reload', () => {
+    const before = 'I hold it.';
+    const carried = '[Scribe] Keep the lantern.\nUse its oil.';
+    const after = 'My authored ending.';
+    for (const split of [false, true]) {
+        const builder = new CampaignBuilder('Orla');
+        const wire = before + '\n@: ' + carried + '\n' + after;
+        if (split) {
+            builder.playerBlocks([['Orla', 'RIGHT', before], ['Narrator', 'NARRATOR', carried], ['Orla', 'RIGHT', after]]);
+        } else {
+            builder.player(wire);
+        }
+        const post = { ...ScribeText.playerSubmission(before + '\n' + after), retained: true, manual: true,
+            floor: 0, after: null, carried, suggestion: null };
+        const message = ScribeIntake.read(builder.messages, { posts: [post] }).messages[0];
+        assert.equal(ScribeIntake.carried(message, post), true);
+        assert.deepEqual(plain(message.blocks.map((block) => block.text)), split ? [before, after] : [before + '\n' + after]);
+        const end = wire.lastIndexOf('\n');
+        const saved = { attachments: [{ id: message.id, fingerprint: message.fingerprint, length: before.length, end }] };
+        assert.equal(message.projection, before.length + ':' + end);
+        assert.equal(ScribeIntake.read(builder.messages, saved).messages[0].text, message.text);
+        assert.equal(ScribeIntake.carried(message, { ...post, submission: ScribeText.fingerprint(before) }), false);
+    }
 });
 
 test('two identical raw rows with different possible author boundaries cannot be assigned by queue order', () => {

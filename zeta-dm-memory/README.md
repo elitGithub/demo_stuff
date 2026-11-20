@@ -361,7 +361,7 @@ The chat box lives inside a frame served by `frame.pingpong.ai`, so the script r
 
 ### First evening
 
-1. **Settings** tab: paste your OpenRouter key and press **Save key**. The key is kept in Tampermonkey's storage and sent only in the request to OpenRouter. Decline the browser's offer to save it as a password.
+1. In **Settings**, enter your OpenRouter key and press **Save key**. Tampermonkey keeps it in private userscript storage. Scribe sends it only in the authorization header of a model request to OpenRouter. Decline the browser's offer to save it as a password.
 2. On the same tab, check the three models, the messages per stretch (40), the sends between reminders (6) and the day's budget in dollars (3), then press **Adopt this chat** in the panel header. The scribe pulls the whole chat with the page's own login, then reads it stretch by stretch. A long chat takes a while and costs most of what the scribe will ever cost for it. **Pause** stops after the stretch in flight; **Resume** goes on.
 3. **Rulings** tab: rule what the engine could not decide (conflicts, look-alikes, questions). Your rulings outrank the story and survive every later reading.
 4. Play. From then on the scribe works at the newest message.
@@ -386,7 +386,11 @@ No model call has a token cap (the model's own limit applies) and none has a tim
 
 ### One tab per chat reads
 
-Each chat has its own book, and for each chat one tab reads and checks. Several chats can be open in several tabs at once; a tab keeps working while it is hidden. A second tab on the same chat shows the book and changes nothing; when the first tab is hidden, it hands that chat to the second.
+Each chat has its own book. One tab per chat reads and checks, so different rooms can keep working in parallel. A second tab on the same chat shows the book and watches. When the reader hands off the room, the watching tab takes over.
+
+If the compact strip says **OpenRouter key rejected**, expand **Scribe** to see which work stopped. The activity line still shows what Zeta or the room is doing. **Progress** shows the masked provider reason. Save the replacement once in **Settings** in any Zeta Scribe tab in the same Tampermonkey installation and browser profile. The open rooms use the new key without a reload, and an older unsaved key entry clears. Eligible readers retry the affected work within their budget. Its warning clears when that work recovers.
+
+Changing the OpenRouter key sends no validation request. A **Worker key rejected** warning has its own remedy in the Tampermonkey menu under **Zeta Scribe → Set DM API key**. The standalone Scribe bench keeps a separate session key.
 
 ### The book in your Worker
 

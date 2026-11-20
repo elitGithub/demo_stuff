@@ -5,6 +5,8 @@ export default class FakeStorage {
         this.refusals = [];
         this.interruptions = [];
         this.interrupting = false;
+        this.listeners = new Map();
+        this.queued = null;
         this.allow();
     }
 
@@ -15,6 +17,33 @@ export default class FakeStorage {
     refuseSetNumber(count) {
         this.setsBeforeRefusal = count;
         return this;
+    }
+
+    /**
+     * @param {string} name
+     * @param {Function} changed
+     * @return {Function}
+     */
+    watch(name, changed) {
+        const remove = () => this.listeners.delete(remove);
+        this.listeners.set(remove, { name, changed });
+        return remove;
+    }
+
+    /**
+     * @param {string} name
+     * @return {void}
+     */
+    notify(name) {
+        for (const entry of this.listeners.values()) {
+            if (entry.name === name) {
+                if (this.queued) {
+                    this.queued.push(entry.changed);
+                } else {
+                    entry.changed();
+                }
+            }
+        }
     }
 
     /**
@@ -270,6 +299,7 @@ export default class FakeStorage {
         if (this.failingAfterSets !== null && this.failingAfterSets.test(name)) {
             this.refuse('set', name);
         }
+        this.notify(name);
     }
 
     /**
@@ -284,6 +314,7 @@ export default class FakeStorage {
             this.refuse('remove', name);
         }
         this.values.delete(name);
+        this.notify(name);
     }
 
     /**

@@ -17,6 +17,7 @@ export default class WholeModel {
         this.silenced = 0;
         this.watch = null;
         this.holding = null;
+        this.held = new Map();
     }
 
     /**
@@ -66,6 +67,7 @@ export default class WholeModel {
             abort: () => {
                 if (!call.ended) {
                     call.ended = true;
+                    this.held.delete(call);
                     details.onabort({ status: 0 });
                 }
             },
@@ -96,6 +98,13 @@ export default class WholeModel {
             return handle;
         }
         if (call.role === this.holding) {
+            this.held.set(call, (status, responseText) => {
+                this.held.delete(call);
+                if (!call.ended && !tab.dead) {
+                    call.ended = true;
+                    details.onload({ status, responseText });
+                }
+            });
             return handle;
         }
         const answer = Object.hasOwn(this.answers, call.role) ? this.answers[call.role] : null;

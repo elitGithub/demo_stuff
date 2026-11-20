@@ -6,6 +6,7 @@ import vm from 'node:vm';
 import FakeScribeWorker from './support/FakeScribeWorker.mjs';
 import FakeStorage from './support/FakeStorage.mjs';
 import FakeTimers from './support/FakeTimers.mjs';
+import ScribeCore from './support/ScribeCore.mjs';
 
 /**
  * @return {Object<string, object>}
@@ -332,7 +333,22 @@ test('opening: loading at once, the lease before the heads, moved kinds download
 
 test('two PCs: the first upload goes in one commit, the second PC opens the same book', async () => {
     const place = world();
-    const pcA = await leading(place);
+    const { ScribeLog } = ScribeCore.load(['ScribeLog']);
+    const messages = [
+        { id: 'm1', fingerprint: 'first' },
+        { id: 'm2', fingerprint: 'second' },
+        { id: 'm3', fingerprint: 'third' },
+    ];
+    const book = {
+        ...BOOK,
+        log: { ...LOG, nextSequence: 3, revision: 2, read: { m1: 1, m2: 2 }, entries: [
+            { sequence: 1, kind: 'Update', origin: 'Story', messageIds: ['m1'], operations: [], withdrawn: false },
+            { sequence: 2, kind: 'Update', origin: 'Story', messageIds: ['m2'], operations: [], withdrawn: false,
+                sources: [{ ...messages[1], result: 'no change' }] },
+        ] },
+        fingerprints: { m1: 'first', m2: 'second' },
+    };
+    const pcA = await leading(place, { kinds: { settings: SETTINGS, book, live: LIVE } });
     const paths = place.worker.log.map((entry) => `${entry.method} ${entry.path}`);
     assert.deepEqual(paths.slice(0, 6), [`POST ${LEASE}`, `GET ${HEADS}`, `PUT ${PART}`, `PUT ${PART}`, `PUT ${PART}`, `POST ${COMMIT}`]);
     const [commit] = bodies(place.worker, COMMIT);
@@ -353,6 +369,9 @@ test('two PCs: the first upload goes in one commit, the second PC opens the same
     for (const kind of ['settings', 'book', 'live']) {
         assert.equal(localText(pcB, kind), localText(pcA, kind));
     }
+    const restored = JSON.parse(localText(pcB, 'book'));
+    assert.deepEqual(plain(ScribeLog.coverage(restored, messages)), { writtenThrough: 2, verificationPending: ['m1'], legacyClaims: [] });
+    assert.equal(JSON.parse(localText(pcB, 'live')).seen.id, 'm3');
     const parts = place.worker.calls(PART, 'GET').length;
     for (let tick = 0; tick < 3; tick++) {
         await pass(place.timers, 20000);

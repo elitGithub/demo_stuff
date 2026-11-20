@@ -7,6 +7,26 @@ const { ScribeAnswer } = ScribeCore.load(['ScribeText', 'ScribeCategory', 'Scrib
 const factLine = 'Halvard | trait | stubborn | #1';
 const sceneBase = ['Day 4', '#12', 'The hall', 'public', 'present: Halvard', 'They talk'];
 
+test('live evidence preserves literal JSON and one-based section row identities', () => {
+    const row = { section: 'FACTS', row: 2, messageNumber: 44, blockNumber: 3,
+        quote: 'A | B: **unchanged**.', form: null, dimension: null, attribution: 'claimed' };
+    const story = ScribeAnswer.parseStory(['=== FACTS', 'Halvard | trait | calm | #43',
+        '=== FACTS', 'Halvard | trait | sturdy | #44', '=== EVIDENCE', JSON.stringify(row),
+        '=== READ', '#43 | read', '#44 | read', '#45 | no change'].join('\n'));
+    assert.deepEqual([...story.rows.keys()], ['FACTS:1', 'FACTS:2']);
+    assert.deepEqual(plain(story.evidence.get('FACTS:2')), row);
+    assert.equal(story.read.get(45), 'no change');
+    assert.deepEqual(plain(story.refused), []);
+    for (const bad of [{ row: 0 }, { blockNumber: 0 }, { messageNumber: '44' }, { quote: ' ' },
+        { attribution: 'true' }, { form: [] }, { day: {} }, { related: 'Tamsin' }]) {
+        const result = ScribeAnswer.parseStory('=== EVIDENCE\n' + JSON.stringify({ ...row, ...bad }));
+        assert.equal(result.refused.length, 1);
+    }
+    for (const bad of ['=== READ\n#1 | read\n#1 | no change', '=== EVIDENCE\n{', '=== FACTS\nSera | hair | silver | #1-#3']) {
+        assert.equal(ScribeAnswer.parseStory(bad).refused.length, 1);
+    }
+});
+
 /**
  * @param {*} value
  * @return {*}

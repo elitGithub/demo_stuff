@@ -1,4 +1,5 @@
 import assert from 'node:assert/strict';
+import { resolveObjectURL } from 'node:buffer';
 import { readFileSync } from 'node:fs';
 import test from 'node:test';
 import vm from 'node:vm';
@@ -8,6 +9,7 @@ import FakeScribeWorker from './support/FakeScribeWorker.mjs';
 import FakeStorage from './support/FakeStorage.mjs';
 import FakeTimers from './support/FakeTimers.mjs';
 import WholeModel from './support/WholeModel.mjs';
+import CitedStory from './support/CitedStory.mjs';
 import WholeSite from './support/WholeSite.mjs';
 import WholeTab from './support/WholeTab.mjs';
 
@@ -91,30 +93,35 @@ const PROMPTS = new Map([
     [REFERENCE.ScribeAnalyzer.AnswersPrompt, 'Answers'],
     [REFERENCE.ScribeScene.Prompt, 'Scene'],
     [REFERENCE.ScribePedant.Prompt, 'Pedant'],
+    [REFERENCE.ScribePedant.DetailsPrompt, 'Pedant'],
+    [REFERENCE.ScribePedant.CheckPrompt, 'HistoryCheck'],
     [REFERENCE.ScribeMuse.SuggestPrompt, 'Suggest'],
     [REFERENCE.ScribeReminder.StoryPrompt, 'Told'],
 ]);
 
 const NARRATION = Object.freeze({
-    1: [['Narrator', 'The harbour market wakes. Mirelle, her black hair worn in a braid, counts coins at her stall.']],
-    3: [['Narrator', 'Tamsin, grey-eyed, mends nets by the water.']],
+    1: [['Narrator', 'The harbour market wakes. Mirelle’s hair is black, worn in a braid. She counts coins at her stall.']],
+    3: [['Narrator', 'Tamsin, a grey-eyed net-mender, mends nets by the water.']],
     5: [['Oswin', 'I am Oswin, harbourmaster here. Keep the peace, guard.']],
-    7: [['Narrator', 'Mirelle changes foreign coin for the traders.']],
-    9: [['Mirelle', 'I owe Brandt more than this stall earns in a season.']],
+    7: [['Narrator', 'Mirelle, a money-changer, changes foreign coin for the traders.']],
+    9: [['Mirelle', 'The debt Mirelle owes to Brandt, the one he wrote in his ledger, is more than this stall earns in a season.']],
     11: [['Narrator', 'Mirelle looks up, her brown eyes narrowed.']],
     13: [['Narrator', 'Mirelle is short and broad-shouldered.']],
-    15: [['Narrator', 'Mirelle counts every coin twice, as always.']],
-    17: [['Narrator', 'Halvard remembers the siege he ran from, and tells no one.']],
+    15: [['Narrator', 'Mirelle counts every coin twice, as always. After the haircut Mirelle’s hair is black, cut short.']],
+    17: [['Narrator', 'Halvard deserted at the siege and tells no one.']],
     41: [['Narrator', 'Tamsin turns, her blue eyes bright in the sun.']],
-    43: [['Oswin', 'Fifty-one years I have kept this harbour.']],
+    43: [['Oswin', 'I am 51 years old and have kept this harbour since I was young.']],
     45: [['Narrator', 'Mirelle opens a ledger bound in red.']],
-    47: [['Narrator', 'A scar runs across the palm of her left hand, Mirelle says.']],
-    71: [['Narrator', 'Halvard hums, as he does when he is nervous.']],
+    47: [['Narrator', 'Mirelle shows a scar across her left palm.']],
+    71: [['Narrator', 'Halvard hums when he is nervous.']],
     73: [['Mirelle', 'I sleep in a room above the market.']],
-    81: [['Narrator', 'A stranger in a grey hood asks after Oswin.']],
+    81: [['Narrator', 'A stranger asks after Oswin, pulling up a grey hood.']],
 });
 const SPOKEN = Object.freeze({
-    2: 'I am Halvard, thirty-four winters old, and I guard this harbour.',
+    2: 'I am Halvard, a harbour guard, 34 winters old.',
+    30: 'The market opens and Mirelle changes coin. Halvard, Mirelle, Tamsin and Oswin stand in the harbour market.',
+    60: 'Oswin inspects the stalls. Halvard, Mirelle and Tamsin watch him in the harbour market.',
+    90: 'Night falls over the market. Halvard, Mirelle and Tamsin remain in the harbour market.',
 });
 const SUBJECTS = Object.freeze([
     [1, 'Mirelle | character'],
@@ -157,6 +164,7 @@ const COSTS = Object.freeze({
     Notes: 0.04,
     Scene: 0.01,
     Pedant: 0.02,
+    HistoryCheck: 0,
     Suggest: 0.03,
 });
 
@@ -200,16 +208,23 @@ function storyAnswer(user, known) {
     }
     const first = Number(heading[1]);
     const last = Number(heading[2]);
+    const sources = CitedStory.messages(user);
     /**
      * @param {number} position
      * @return {boolean}
      */
     const inside = (position) => position >= first && position <= last;
+    const scriptedSource = (position) => {
+        const quote = sources.get(position)?.[0]?.quote;
+        const original = NARRATION[position]?.[0][1] ?? SPOKEN[position];
+        return original && (quote === original || quote === original.replace(OLD_HAIR, NEW_HAIR));
+    };
     const blocks = [];
-    const subjects = SUBJECTS.filter(([position]) => inside(position)).map(([, line]) => line);
-    const facts = known.filter(([position]) => inside(position)).map(([position, line]) => `${line} | #${position}`);
+    const declaring = SUBJECTS.filter(([position]) => scriptedSource(position));
+    const subjects = declaring.map(([, line]) => line);
+    const facts = known.filter(([position]) => scriptedSource(position)).map(([position, line]) => `${line} | #${position}`);
     const scenes = SCENES.filter(([from, to]) => from >= first && to <= last).map(([, , line]) => line);
-    const threads = THREADS.filter(([position]) => inside(position)).map(([position, line]) => `${line} | #${position}`);
+    const threads = THREADS.filter(([position]) => scriptedSource(position)).map(([position, line]) => `${line} | #${position}`);
     for (const [name, lines] of [
         ['SUBJECTS', subjects],
         ['FACTS', facts],
@@ -220,7 +235,7 @@ function storyAnswer(user, known) {
             blocks.push([`=== ${name}`, ...lines].join('\n'));
         }
     }
-    return blocks.length === 0 ? '=== FACTS' : blocks.join('\n');
+    return CitedStory.answer(user, blocks.join('\n'), declaring.map(([position]) => position));
 }
 
 /**
@@ -258,6 +273,7 @@ const ANSWERS = Object.freeze({
     Notes: notesAnswer,
     Scene: sceneAnswer,
     Pedant: pedantAnswer,
+    HistoryCheck: (input) => JSON.stringify({ page: JSON.parse(input).page, complete: true, claims: [], findings: [] }),
     Suggest: () => `LINE: ${RIDER}`,
     Told: () => TOLD,
 });
@@ -578,7 +594,9 @@ async function quiet(walk, label) {
     for (let round = 0; round < MOST_QUIET; round++) {
         const before = walk.model.calls.length;
         await pass(walk, TICK_MS);
-        if (walk.model.calls.length === before) {
+        await until(walk, label + ': a background comparison to finish', () =>
+            walk.tabs.every((tab) => tab.dead || !tab.panel.host() || !tab.panel.headline().startsWith('Checking message #')), TICK_MS);
+        if (walk.model.calls.slice(before).every((call) => call.role === 'HistoryCheck' && call.ended)) {
             return;
         }
     }
@@ -818,6 +836,315 @@ test('4. adopt', async () => {
     ]);
 });
 
+test('the installed Checker resumes its own cited history in order after its budget and a reload', async () => {
+    const walk = world();
+    const lantern = 'Mirelle owns a silver lantern.';
+    const offer = 'I will give the lantern to Oswin.';
+    const ending = 'Oswin puts the silver lantern on the table.';
+    walk.site.open(ROOM, new CampaignBuilder(PLAYER).narrator(lantern).player(offer).narrator(ending));
+    walk.model.answers.Story = (input) => CitedStory.answer(input, '');
+    walk.model.costs.HistoryCheck = 0.125;
+    walk.model.costs.Scene = 0;
+    walk.model.costs.Pedant = 0;
+    const inputs = [];
+    walk.model.answers.HistoryCheck = (input) => {
+        const request = JSON.parse(input);
+        const target = request.target[0];
+        const source = { ref: target.ref, quote: target.quote };
+        inputs.push(request);
+        const claims = [{ source, attribution: request.fromPlayer ? 'promised' : 'witnessed' }];
+        const findings = request.position === 1 ? [{ kind: 'Omission', question: 'Does Mirelle own the lantern?', source }] : [];
+        return JSON.stringify({ page: request.page, complete: true, claims, findings });
+    };
+    const note = 'The operator leaves a private test note about a brass lantern.';
+    walk.worker.setNotes(CHAT, note);
+    let tab = await opened(walk);
+    tab.setDmKey(DM_KEY);
+    tab.panel.tab('Settings');
+    await until(walk, 'the room Worker note to load',
+        () => tab.panel.text('scribe-notes').startsWith(note.length + ' characters'), 2 * TICK_MS);
+    await saveKey(walk, tab);
+    tab.panel.tab('Settings');
+    tab.panel.type('scribe-setting-analyzer', 'fiction/book-reader');
+    tab.panel.type('scribe-setting-pedant', 'fiction/history-checker');
+    tab.panel.type('scribe-setting-budget', '0.36');
+    tab.panel.click('scribe-next');
+    const status = () => REFERENCE.ScribeLog.checkProgress(stored(walk, 'book'), REFERENCE.ScribeIntake.read(walk.site.messages).messages);
+    await until(walk, 'the first historical passage to be checked', () => status().checkedThrough === 1, 3 * TICK_MS);
+    const written = plain(stored(walk, 'book').log.read);
+    assert.equal(status().writtenThrough, 3);
+    assert.equal(status().findings.length, 1);
+    assert.deepEqual(inputs.map((request) => request.position), [1]);
+    assert.equal(inputs[0].written.length, 0);
+    assert.ok(walk.model.of('Story')[0].user.includes(note));
+    assert.equal(inputs[0].target[0].quote, lantern);
+    await pass(walk, 3 * TICK_MS);
+    assert.deepEqual(inputs.map((request) => request.position), [1]);
+    assert.equal(spentToday(walk), 0.375);
+    tab = await reload(walk, tab);
+    tab.panel.tab('Progress');
+    assert.equal(tab.panel.text('scribe-checked'), 'Checker: 1 of 3 messages checked.');
+    tab.panel.tab('Settings');
+    tab.panel.type('scribe-setting-budget', '2');
+    tab.panel.click('scribe-save-settings');
+    await until(walk, 'both remaining historical passages to be checked', () => status().checkedThrough === 3, 4 * TICK_MS);
+    assert.deepEqual(inputs.map((request) => [request.position, request.fromPlayer]), [[1, false], [2, true], [3, false]]);
+    assert.equal(inputs[1].target[0].quote, offer);
+    assert.ok(inputs[1].evidence.some((row) => row.quote === lantern));
+    assert.equal(inputs[2].target[0].quote, ending);
+    assert.ok(inputs[2].evidence.some((row) => row.quote === offer));
+    assert.equal(walk.model.of('Story').length, 1);
+    assert.equal(walk.model.of('Story')[0].model, 'fiction/book-reader');
+    assert.ok(walk.model.of('HistoryCheck').every((call) => call.model === 'fiction/history-checker' && !call.user.includes(note)));
+    assert.deepEqual(plain(stored(walk, 'book').log.read), written);
+    assert.equal(bookState(walk).facts.length, 0);
+    assert.equal(status().findings.length, 1);
+    tab.panel.tab('Findings');
+    assert.equal(tab.panel.rows('findings').filter((row) => row.textContent.includes(lantern)).length, 1);
+    await pass(walk, 2 * TICK_MS);
+    assert.equal(inputs.length, 3);
+});
+
+test('a verified historical contradiction shares the existing live finding and its ruling action', async () => {
+    const walk = world();
+    walk.site.open(ROOM, campaign(1));
+    const tab = await opened(walk);
+    await saveKey(walk, tab);
+    await adopt(walk, tab, '3');
+    walk.model.answers.HistoryCheck = (input) => {
+        const request = JSON.parse(input);
+        const findings = [];
+        if (request.position === 3) {
+            const target = request.target.find((row) => row.quote.includes('red as rust'));
+            const earlier = request.evidence.find((row) => row.quote?.includes(OLD_HAIR));
+            if (target && earlier) {
+                findings.push({ kind: 'Contradiction', question: 'Which hair description is correct?',
+                    source: { ref: target.ref, quote: 'red as rust' }, earlier: { ref: earlier.ref, quote: OLD_HAIR } });
+            }
+        }
+        return JSON.stringify({ page: request.page, complete: true, claims: [], findings });
+    };
+    await arrive(walk, tab, ASKED, REPLY);
+    const status = () => REFERENCE.ScribeLog.checkProgress(stored(walk, 'book'), REFERENCE.ScribeIntake.read(walk.site.messages).messages);
+    await until(walk, 'the live alert for Mirelle', () => stored(walk, 'live').findings.some((row) => row.said === 'red as rust'), 3 * TICK_MS);
+    await until(walk, 'the independent historical finding', () => status().findings.length === 1 && status().checkedThrough === 3, 5 * TICK_MS);
+    tab.panel.tab('Findings');
+    assert.equal(tab.panel.rows('findings').length, 1);
+    const only = tab.panel.rows('findings')[0];
+    assert.ok(only.textContent.includes('red as rust'));
+    assert.ok(tab.panel.button(only, 'Rule it...'));
+    assert.equal(tab.panel.text('scribe-badge'), '1 finding');
+});
+
+for (const layout of ['top', 'frame']) {
+    for (const status of [422, 503, 'connection lost']) {
+        test(`the ${layout} retry after ${status} keeps one retained reminder and the edited player text`, async () => {
+            const { walk, tab } = await adopted('8', { layout });
+            const manual = status !== 'connection lost';
+            if (manual) {
+                await queueSelection(tab, 'The lantern stays on the quay.\nKeep both lines.');
+            }
+            const roomStart = walk.site.messages.length;
+            const live = stored(walk, 'live');
+            const delivery = live.delivery.id;
+            const paragraph = manual ? '[Scribe] ' + live.selection.text : live.ready;
+            const bodies = [];
+            const respond = walk.site.respond.bind(walk.site);
+            walk.site.respond = (receiver, url, options) => {
+                if (url === WholeSite.Messages && options?.method === 'POST') {
+                    bodies.push(JSON.parse(options.body).text);
+                    if (bodies.length === 1) {
+                        return status === 'connection lost' ? Promise.reject(new Error('Connection interrupted')) : Promise.resolve({ status });
+                    }
+                }
+                return respond(receiver, url, options);
+            };
+            const pagePost = tab.pagePost.bind(tab);
+            tab.pagePost = (body) => pagePost(body).catch(() => null);
+            tab.type('At the quay.');
+            tab.enter();
+            await until(walk, 'the failed first POST', () => bodies.length > 0, 2000);
+            await pass(walk, 2000);
+            assert.deepEqual(bodies, ['At the quay.\n@: ' + paragraph]);
+            assert.equal(walk.site.messages.length, roomStart);
+            assert.ok(!stored(walk, 'live').settled.includes(delivery));
+            tab.type(bodies[0]);
+            if (status === 'connection lost') {
+                tab.panel.tab('Findings');
+                assert.equal(tab.panel.text('scribe-force'), 'Resend this reminder with my next message');
+                tab.panel.click('scribe-force');
+                await pass(walk, 200);
+            }
+            const changed = 'My corrected answer at the quay.';
+            const addition = status === 422 ? '\nI also wait for the ferry.' : '';
+            const retryBody = tab.box.value.replace('At the quay.', changed) + addition;
+            tab.type(retryBody);
+            if (status === 503) {
+                tab.enter();
+            } else {
+                tab.press('Send', true);
+            }
+            await until(walk, 'the deliberate retry', () => bodies.length >= 2, 2000);
+            await pass(walk, 2 * TICK_MS);
+            assert.deepEqual(bodies, ['At the quay.\n@: ' + paragraph, retryBody]);
+            assert.equal(walk.site.messages.length, roomStart + 1);
+            assert.equal(walk.site.messages.at(-1).contents[0].text, bodies[1]);
+            const accepted = stored(walk, 'live');
+            assert.deepEqual(plain(accepted.settled), [delivery]);
+            assert.deepEqual(plain(accepted.counted), playerReceipts(walk, roomStart));
+            assert.equal(accepted.ready, null);
+            assert.equal(accepted.sends, 0);
+        });
+    }
+}
+
+for (const layout of ['top', 'frame']) {
+    test(`retrying an old restored ${layout} paragraph preserves the newer selection after reload`, async () => {
+        const { walk, tab } = await adopted('8', { layout });
+        const original = 'The silver lantern stays on the quay.\nSecret continuation belonging only to the reminder.';
+        const newer = 'The silver lantern stays on the quay.';
+        await queueSelection(tab, original);
+        const before = walk.site.messages.length;
+        const respond = walk.site.respond.bind(walk.site);
+        const bodies = [];
+        walk.site.respond = (receiver, url, options) => {
+            if (url === WholeSite.Messages && options?.method === 'POST') {
+                bodies.push(JSON.parse(options.body).text);
+                if (bodies.length === 1) {
+                    return Promise.resolve({ status: 422 });
+                }
+            }
+            return respond(receiver, url, options);
+        };
+        const tried = await send(walk, tab, 'At first light.');
+        assert.deepEqual(bodies, ['At first light.\n@: [Scribe] ' + original]);
+        assert.equal(walk.site.messages.length, before);
+        await queueSelection(tab, newer);
+        const nextId = stored(walk, 'live').selection.id;
+        const fresh = await reload(walk, tab);
+        const retried = tried + '\nI pack my maps.';
+        const from = walk.model.calls.length;
+        fresh.type(retried);
+        fresh.press('Send', true);
+        await until(walk, 'the old retained paragraph to be accepted', () => walk.site.messages.length === before + 1, 2000);
+        await pass(walk, 2 * TICK_MS);
+        assert.deepEqual(bodies, [tried, retried]);
+        const story = walk.model.calls.slice(from).filter((call) => call.role === 'Story' && call.user.includes('NEW MESSAGES (#92 to #92):'));
+        assert.equal(story.length, 1);
+        const source = story[0].user.split('NEW MESSAGES (#92 to #92):').at(-1);
+        assert.ok(source.includes('At first light.') && source.includes('I pack my maps.'));
+        assert.ok(!source.includes('silver lantern') && !source.includes('Secret continuation'), source);
+        const queued = stored(walk, 'live');
+        assert.equal(queued.selection.id, nextId);
+        assert.equal(queued.selection.text, newer);
+        assert.ok(!queued.settled.includes(nextId));
+        assert.equal(await send(walk, fresh, 'Second dispatch.'), 'Second dispatch.\n@: [Scribe] ' + newer);
+        await until(walk, 'both accepted message IDs to be recorded', () => stored(walk, 'live').counted.length === 2, 3 * TICK_MS);
+        const accepted = stored(walk, 'live');
+        assert.deepEqual(bodies, [tried, retried, 'Second dispatch.\n@: [Scribe] ' + newer]);
+        assert.deepEqual(plain(accepted.counted), playerReceipts(walk, before));
+        assert.equal(accepted.settled.filter((id) => id === nextId).length, 1);
+        assert.equal(accepted.selection, null);
+    });
+}
+
+test('the installed reader keeps five arrivals during a delayed call and a failed Book save', async () => {
+    const { walk, tab } = await adopted('8');
+    const prior = plain(stored(walk, 'book'));
+    const from = walk.model.calls.length;
+    const held = holdCompletion(walk, (role, input) => role === 'Story' && rangeOf(input) === '92-92');
+    walk.site.reply([['Narrator', 'Mirelle lights the first lamp.']]);
+    await tab.pageGet();
+    await until(walk, 'the first unaccompanied arrival to be read', () => held.release !== null, 2 * TICK_MS);
+    for (let position = 93; position <= 97; position++) {
+        walk.site.reply([['Narrator', `Mirelle lights lamp ${position}.`]]);
+    }
+    await tab.pageGet();
+    walk.storage.refuseSetsMatching(/book/);
+    held.release();
+    await until(walk, 'the book write to fail', () => walk.storage.refusals.length > 0, 2 * TICK_MS);
+    assert.deepEqual(plain(stored(walk, 'book')), prior);
+    walk.storage.allow();
+    const fresh = await reload(walk, tab);
+    await until(walk, 'all five later arrivals to be saved after reload',
+        () => fresh.panel.headline() === 'Up to date: 97 of 97 read.', 5 * TICK_MS);
+    const saved = stored(walk, 'book');
+    for (const source of REFERENCE.ScribeIntake.read(walk.site.messages).messages.slice(91)) {
+        const entries = saved.log.entries.filter((entry) => !entry.withdrawn && entry.messageIds.includes(source.id));
+        assert.equal(entries.length, 1, source.id);
+        assert.equal(saved.log.read[source.id], entries[0].sequence);
+        assert.equal(saved.fingerprints[source.id], source.fingerprint);
+    }
+    const calls = walk.model.calls.slice(from).filter((call) => call.role === 'Story');
+    assert.equal(rangeOf(calls[0].user), '92-92');
+    assert.match(calls[1].user, /NEW MESSAGES \(#92 to #\d+\)/);
+    const after = walk.model.calls.length;
+    await pass(walk, 2 * TICK_MS);
+    assert.equal(asked(walk, 'Story', after), 0);
+});
+
+test('leaving mid-read keeps the source owed in its own room until the reader returns', async () => {
+    const { walk, tab } = await adopted('8');
+    walk.site.open(QUARRY, campaign(3));
+    const prior = plain(stored(walk, 'book'));
+    const held = holdCompletion(walk, (role, input) => role === 'Story' && rangeOf(input) === '92-92');
+    walk.site.reply([['Narrator', 'The harbour lamps are lit.']]);
+    await tab.pageGet();
+    await until(walk, 'the harbour read to begin', () => held.release !== null, 2 * TICK_MS);
+    tab.go('/rooms/' + QUARRY);
+    await tab.openPage();
+    await until(walk, 'the quarry to open', () => tab.panel.headline().startsWith('No local book: 3 messages.'), 2 * TICK_MS);
+    held.release();
+    await pass(walk, TICK_MS);
+    assert.deepEqual(plain(stored(walk, 'book')), prior);
+    assert.equal(stored(walk, 'book', QUARRY), null);
+    tab.go(CHAT);
+    await tab.openPage();
+    await until(walk, 'the harbour to recover its own gap', () => tab.panel.headline() === 'Up to date: 92 of 92 read.', 3 * TICK_MS);
+    const last = REFERENCE.ScribeIntake.read(walk.site.messages).messages.at(-1);
+    const saved = stored(walk, 'book');
+    assert.ok(saved.log.read[last.id]);
+    assert.equal(saved.fingerprints[last.id], last.fingerprint);
+});
+
+test('a short history keeps the old prefix until a complete history confirms its deletion', async () => {
+    const walk = world();
+    walk.site.open(ROOM, campaign(7));
+    const tab = await opened(walk);
+    await saveKey(walk, tab);
+    await adopt(walk, tab, '8');
+    const prior = plain(stored(walk, 'book'));
+    const removed = walk.site.messages.splice(0, 2).map((source) => source.id);
+    const retained = walk.site.messages.map((message) => message.id);
+    const zeta = walk.site.rooms.get(ROOM).zeta;
+    zeta.perPage = 2;
+    const respond = zeta.respond.bind(zeta);
+    let interrupted = 0;
+    zeta.respond = (receiver, url, options) => {
+        if (new URL(url).searchParams.has('cursor')) {
+            interrupted++;
+            return Promise.resolve({ status: 400, ok: false, text: async () => 'The next page is unavailable.' });
+        }
+        return respond(receiver, url, options);
+    };
+    tab.panel.tab('Progress');
+    tab.panel.click('scribe-pull');
+    await until(walk, 'the partial pull to fail on its second page', () => interrupted > 0, TICK_MS);
+    await pass(walk, 1000);
+    assert.deepEqual(plain(stored(walk, 'book')), prior);
+    zeta.respond = respond;
+    walk.model.answers.Story = (input) => CitedStory.answer(input, '');
+    tab.panel.click('scribe-pull');
+    await until(walk, 'a complete pull to remove only the deleted messages and reread the shifted history',
+        () => tab.panel.headline() === 'Up to date: 5 of 5 read.', 5 * TICK_MS);
+    const saved = stored(walk, 'book');
+    assert.deepEqual(Object.keys(saved.log.read), retained);
+    assert.deepEqual(Object.keys(saved.fingerprints), retained);
+    for (const id of removed) {
+        assert.ok(saved.log.entries.some((entry) => entry.withdrawn && entry.messageIds.includes(id)));
+    }
+});
+
 for (const change of ['quiet room', 'new reply', 'edit ahead of the current batch', 'edit between scheduled polls']) {
     test(`the installed reader drains 400 of 441 on its own with ${change}`, async () => {
         const walk = world();
@@ -933,7 +1260,7 @@ for (const { name, size, original, edit, extra, notes, story } of [
         const total = walk.site.messages.length;
         const complete = `Up to date: ${total} of ${total} read.`;
         await pass(walk, 4 * TICK_MS);
-        assert.equal(tab.panel.headline(), complete);
+        await until(walk, 'written progress to return after the background comparison', () => tab.panel.headline() === complete, TICK_MS);
         const saved = plain(stored(walk, 'book'));
         assert.deepEqual(saved.log.notes, notes);
         assert.equal(Object.keys(saved.log.read).length, total);
@@ -942,8 +1269,13 @@ for (const { name, size, original, edit, extra, notes, story } of [
         }
         tab = await reload(walk, tab);
         await pass(walk, 2 * TICK_MS);
-        assert.equal(tab.panel.headline(), complete);
-        assert.deepEqual(plain(stored(walk, 'book')), saved);
+        await until(walk, 'restored written progress', () => tab.panel.headline() === complete, TICK_MS);
+        const restored = stored(walk, 'book');
+        assert.deepEqual(plain(restored.log.entries.filter((entry) => entry.origin !== 'Checker')),
+            saved.log.entries.filter((entry) => entry.origin !== 'Checker'));
+        assert.deepEqual(plain(restored.log.read), saved.log.read);
+        assert.deepEqual(plain(restored.log.notes), saved.log.notes);
+        assert.deepEqual(plain(restored.fingerprints), saved.fingerprints);
         const calls = walk.model.calls.slice(firstCall);
         const storyCalls = calls.filter((call) => call.role === 'Story');
         const noteCalls = calls.filter((call) => call.role === 'Notes');
@@ -1017,7 +1349,7 @@ test('4. while the book is first read, only the Analyzer is asked; then the newe
     assert.equal(after.filter((role) => role === 'Scene').length, 1);
     assert.equal(after.filter((role) => role === 'Pedant').length, 1);
     assert.deepEqual(
-        after.filter((role) => !['Scene', 'Pedant'].includes(role)),
+        after.filter((role) => !['Scene', 'Pedant', 'HistoryCheck'].includes(role)),
         [],
     );
     assert.equal(seen[last + 1].ready, null);
@@ -1029,7 +1361,7 @@ test('4. while the book is first read, only the Analyzer is asked; then the newe
     await forceReminder(walk, tab);
     const ready = stored(walk, 'live').ready;
     assert.equal(ready, FIRST_READY);
-    assert.deepEqual(rolesSince(walk, asked), ['Told']);
+    assert.deepEqual(rolesSince(walk, asked).filter((role) => role !== 'HistoryCheck'), ['Told']);
     assert.deepEqual(queued(tab), [`Reminder: ${ready}`]);
     assert.equal(tab.panel.byId('scribe-reminder').value, ready);
     assert.deepEqual(tab.panel.rowTexts('queued'), []);
@@ -1070,6 +1402,85 @@ test('a slow writer leaves the default sixth send bare and delivers on the first
 });
 
 for (const layout of ['top', 'frame']) {
+    test(`a paid writer refusal keeps the ${layout} send bare until a new recap is confirmed`, async () => {
+        const walk = world({ layout });
+        let tab = await opened(walk);
+        await saveKey(walk, tab);
+        await saveInterval(walk, tab, 2);
+        walk.model.costs.Told = 0.12;
+        walk.model.answers.Told = () => "I can't write this story.\n\n[Story template]";
+        await adopt(walk, tab, '8');
+        const before = walk.model.calls.length;
+        const spent = spentToday(walk);
+        assert.equal(await send(walk, tab, 'I listen.'), 'I listen.');
+        await until(walk, 'the paid refusal', () => stored(walk, 'live').untold !== null, 2 * TICK_MS);
+        assert.equal(asked(walk, 'Told', before), 1);
+        const readingCost = asked(walk, 'Story', before) * COSTS.Story;
+        assert.ok(Math.abs(spentToday(walk) - spent - readingCost - 0.12) < 0.000001);
+        const warning = 'The writer declined to produce a recap. Your reminder is still due.';
+        for (const screen of ['Findings', 'Progress']) {
+            tab.panel.tab(screen);
+            assert.equal(tab.panel.byId('scribe-problems').children.length, 1);
+            assert.equal(tab.panel.text('scribe-problems'), warning);
+            assert.doesNotMatch(tab.panel.text('scribe-problem-details'), /writer declined/);
+        }
+        assert.equal(await send(walk, tab, 'I wait.'), 'I wait.');
+        const request = walk.site.requests.filter((entry) => entry.method === 'POST').at(-1);
+        assert.equal(request.origin, layout === 'frame' ? FRAME_ORIGIN : TOP_ORIGIN);
+        assert.equal(JSON.parse(request.body).text, 'I wait.');
+        assert.equal(stored(walk, 'live').sends, 2);
+        tab = await reload(walk, tab);
+        await pass(walk, 6 * TICK_MS);
+        assert.equal(tab.panel.text('scribe-problems'), warning);
+        assert.equal(asked(walk, 'Told', before), 1);
+        const dialogue = '“I can’t write this story,” Mirra said.';
+        walk.model.answers.Scene = () => OFFICE;
+        walk.model.answers.Told = () => dialogue;
+        walk.site.reply(CALM_REPLY);
+        await until(walk, 'the dialogue recap', () => stored(walk, 'live').ready?.includes(dialogue), 4 * TICK_MS);
+        const ready = stored(walk, 'live').ready;
+        assert.equal(tab.panel.byId('scribe-problems').hidden, true);
+        assert.equal(await send(walk, tab, 'I nod.'), 'I nod.\n@: ' + ready);
+        assert.equal(stored(walk, 'live').sends, 0);
+        assert.equal(await send(walk, tab, 'I stay.'), 'I stay.');
+        assert.equal(asked(walk, 'Told', before), 2);
+        const selected = '[Scribe] The story so far: I can’t write this story.\n  My wording.';
+        await queueSelection(tab, selected);
+        tab = await reload(walk, tab);
+        assert.equal(await send(walk, tab, 'Mine.'), 'Mine.\n@: ' + selected);
+        assert.equal(await send(walk, tab, 'After.'), 'After.');
+    });
+
+    test(`a pre-fix Worker recap stays out of the first ${layout} request after cold hydration`, async () => {
+        const { walk, tab } = await adopted('8', { layout });
+        const saved = stored(walk, 'live');
+        tab.unload();
+        saved.story.text = 'I can offer a summary instead.';
+        saved.ready = '[Scribe] The story so far: ' + saved.story.text;
+        for (const kind of SYNCED) {
+            walk.worker.seed(CLOUD_ROOM, kind, 1, [kind === 'live' ? JSON.stringify(saved) : localText(walk.storage, kind)]);
+        }
+        const storage = new FakeStorage();
+        REFERENCE.ScribeStore.setKey(storage, KEY);
+        const restored = otherPc(walk, storage);
+        await restored.openPage();
+        restored.ready();
+        const warning = 'The writer declined to produce a recap. Your reminder is still due.';
+        await until(walk, 'the refused recap restored from the Worker', () => restored.panel.text('scribe-problems') === warning, 4 * TICK_MS);
+        assert.equal(restored.panel.byId('scribe-problems').children.length, 1);
+        assert.equal(await send(walk, restored, 'Mine alone.'), 'Mine alone.');
+        const request = walk.site.requests.filter((entry) => entry.method === 'POST').at(-1);
+        assert.equal(JSON.parse(request.body).text, 'Mine alone.');
+        assert.equal(request.origin, layout === 'frame' ? FRAME_ORIGIN : TOP_ORIGIN);
+        const after = REFERENCE.ScribeStore.read(storage, ROOM, 'live');
+        assert.equal(after.sends, 1);
+        assert.equal(after.forced, true);
+        assert.equal(after.ready, null);
+        assert.equal(after.story, null);
+        await pass(walk, 6 * TICK_MS);
+        assert.equal(walk.model.by(restored.name).filter((call) => call.role === 'Told').length, 0);
+    });
+
     test(`a due ${layout} reminder waits for the saved reply and uses its new evidence`, async () => {
         const walk = world({ layout });
         let tab = await opened(walk);
@@ -1081,10 +1492,10 @@ for (const layout of ['top', 'frame']) {
         await send(walk, tab, 'I wait.');
         await pass(walk, 2 * TICK_MS);
         const clue = 'the lantern has gone dark';
-        const reply = 'The lantern keeper needs a new flame.';
+        const reply = 'The lantern beside him has gone dark. Its keeper needs a new flame.';
         const previous = walk.model.answers.Story;
         walk.model.answers.Story = (input) => input.includes(reply)
-            ? '=== THREADS\nOPEN | ' + clue + ' | #95' : previous(input);
+            ? CitedStory.answer(input, '=== THREADS\nOPEN | ' + clue + ' | #95') : previous(input);
         walk.model.answers.Told = (input) => input.includes(clue) ? 'The lantern has gone dark.' : 'The lantern is burning.';
         const held = holdCompletion(walk, (role, input) => role === 'Story' && input.includes(reply));
         const first = walk.model.calls.length;
@@ -1126,8 +1537,8 @@ test('5. a reload keeps everything', async () => {
     const fresh = await reload(walk, tab);
     await pass(walk, TICK_MS * 2);
     fresh.panel.tab('Summary');
-    assert.equal(walk.model.calls.length, calls);
-    assert.equal(fresh.panel.headline(), 'Up to date: 91 of 91 read.');
+    assert.ok(walk.model.calls.slice(calls).every((call) => call.role === 'HistoryCheck'));
+    await until(walk, 'the restored written progress', () => fresh.panel.headline() === 'Up to date: 91 of 91 read.', TICK_MS);
     assert.deepEqual(
         {
             headline: fresh.panel.headline(),
@@ -1338,7 +1749,7 @@ test('8. switching back rereads the changed stretch and checks the restored vers
     assert.equal(asked(walk, 'Scene', back), 1);
     assert.equal(asked(walk, 'Pedant', back), 1);
     assert.equal(findingRows(tab).length, 1);
-    assert.deepEqual(rolesSince(walk, back).sort(), ['Pedant', 'Scene', 'Story']);
+    assert.deepEqual(rolesSince(walk, back).filter((role) => role !== 'HistoryCheck').sort(), ['Pedant', 'Scene', 'Story']);
 });
 
 test('10. a ruling', async () => {
@@ -1353,8 +1764,7 @@ test('10. a ruling', async () => {
     value.click();
     await until(walk, 'step 10: the ruling to be saved', () => tab.panel.rows('made').length === 1, 5000);
     await quiet(walk, 'step 10: after the ruling');
-    const roles = rolesSince(walk, from);
-    assert.deepEqual(roles, []);
+    assert.ok(rolesSince(walk, from).every((role) => role === 'HistoryCheck'));
     tab.panel.tab('Rulings');
     assert.equal(tab.panel.rows('conflicts').length, 0);
     assert.equal(tab.panel.rowTexts('made')[0].includes('Pin'), true);
@@ -1368,13 +1778,12 @@ test('10. a ruling', async () => {
 
 test('9. an edited old message', async () => {
     const { walk, tab } = await adopted('2');
+    const prefix = Object.fromEntries(Object.entries(stored(walk, 'book').log.read).slice(0, 4));
     tab.panel.tab('Rulings');
     tab.panel.buttonStarting(tab.panel.rows('conflicts')[0], 'grey').click();
     await until(walk, 'step 9: the ruling to be saved first', () => tab.panel.rows('made').length === 1, 5000);
     const from = walk.model.calls.length;
     walk.site.edit(5, 'I am Oswin, harbourmaster of this port. Keep the peace, guard.');
-    await pass(walk, TICK_MS * 2);
-    assert.equal(asked(walk, 'Story', from), 0);
     tab.panel.tab('Progress');
     tab.panel.click('scribe-pull');
     await until(walk, 'step 9: the stretch to be read again', () => asked(walk, 'Story', from) >= 1, TICK_MS * 3);
@@ -1382,17 +1791,19 @@ test('9. an edited old message', async () => {
     await pass(walk, TICK_MS * 3);
     assert.deepEqual(
         walk.model.calls.slice(from).filter((call) => call.role === 'Story').map((call) => rangeOf(call.user)),
-        ['1-30'],
+        ['5-34', '35-64', '65-91'],
     );
     const roles = rolesSince(walk, from);
     assert.deepEqual(
-        roles.filter((role) => role !== 'Story' && role !== 'Told'),
+        roles.filter((role) => !['Story', 'Told', 'HistoryCheck'].includes(role)),
         [],
     );
-    assert.equal(tab.panel.headline(), 'Up to date: 91 of 91 read.');
+    await until(walk, 'the edited history to show its saved written count',
+        () => tab.panel.headline() === 'Up to date: 91 of 91 read.', TICK_MS);
     tab.panel.tab('Rulings');
     assert.equal(tab.panel.rows('made').length, 1);
     const book = stored(walk, 'book');
+    assert.deepEqual(Object.fromEntries(Object.keys(prefix).map((id) => [id, book.log.read[id]])), prefix);
     assert.equal(book.log.entries.filter((entry) => entry.kind === 'Operator' && !entry.withdrawn).length, 1);
 });
 
@@ -1473,7 +1884,7 @@ for (const layout of ['top', 'frame']) {
         tab.panel.button(hair(), 'Save').click();
         await until(walk, 'hair edited', () => bookState(walk).facts.some((fact) => fact.text === copper), 5000);
         await quiet(walk, 'after the edit with an automatic paragraph');
-        assert.deepEqual(rolesSince(walk, before), []);
+        assert.ok(rolesSince(walk, before).every((role) => role === 'HistoryCheck'));
         walk.model.answers.Told = (input) => input.includes(copper) ? 'Mirelle wears a silver braid.' : 'The market is quiet.';
         tab.panel.tab('Findings');
         tab.panel.click('scribe-force');
@@ -1556,7 +1967,7 @@ test('a Book draft whose source ID changed on reread remains available to copy w
     const before = bookState(walk).facts.find((row) => row.text === 'black, worn in a braid');
     tab.panel.button(hair(), 'Edit').click();
     tab.panel.walk(hair()).find((node) => node.tagName === 'TEXTAREA').value = 'my outstanding draft';
-    walk.site.edit(5, 'I am Oswin, harbourmaster of this port.');
+    walk.site.messages[0].contents.push({ ...walk.site.messages[0].contents[0], text: 'A market bell rings.' });
     tab.panel.tab('Progress');
     tab.panel.click('scribe-pull');
     await pass(walk, TICK_MS * 4);
@@ -1738,6 +2149,510 @@ async function exhausted() {
     return { walk, tab, from, before };
 }
 
+test('a watcher saves once and two rooms recover their rejected book readings with the shared key', async () => {
+    const walk = world();
+    const first = await opened(walk);
+    await saveKey(walk, first);
+    walk.site.open(QUARRY, campaign(QUARRY_LENGTH));
+    const other = install(walk, '/rooms/' + QUARRY);
+    other.ready();
+    await other.openPage();
+    await until(walk, 'quarry to be ready', () => other.panel.headline().startsWith('No local book'), 15000);
+    const watcher = await secondTab(walk);
+    const nextKey = 'synthetic-replacement';
+    const request = walk.model.request.bind(walk.model);
+    walk.model.request = (tab, details) => {
+        if (details.headers.Authorization !== 'Bearer ' + KEY) {
+            return request(tab, details);
+        }
+        return request(tab, { ...details, onload: () => details.onload({
+            status: 401, responseText: JSON.stringify({ error: { message: 'User not found.' } }),
+        }) });
+    };
+    for (const reader of [first, other]) {
+        reader.panel.click('scribe-next');
+        await until(walk, 'rejection in ' + reader.name, () => reader.panel.text('scribe-problems').includes('OpenRouter rejected the saved API key'), 15000);
+        reader.panel.tab('Settings');
+        reader.panel.type('scribe-key', 'abandoned-private-entry');
+        reader.panel.byId('scribe-key').dispatchEvent({ type: 'input' });
+        reader.panel.type('scribe-setting-scribe', 'keep-this-draft');
+    }
+    watcher.panel.tab('Settings');
+    watcher.panel.type('scribe-key', nextKey);
+    watcher.panel.click('scribe-save-key');
+    for (const tab of [first, other, watcher]) {
+        assert.equal(tab.panel.byId('scribe-key').value, '');
+    }
+    const from = walk.model.calls.length;
+    walk.storage.notify('scribe:key');
+    for (const reader of [first, other]) {
+        assert.equal(reader.panel.byId('scribe-setting-scribe').value, 'keep-this-draft');
+        await until(walk, 'reading to finish in ' + reader.name, () => reader.panel.headline().startsWith('Up to date'), 3 * TICK_MS);
+        const calls = walk.model.by(reader.name);
+        const rejected = calls.find((call) => call.authorization === 'Bearer ' + KEY);
+        assert.ok(rejected);
+        assert.equal(calls.filter((call) => call.authorization === 'Bearer ' + nextKey &&
+            call.role === rejected.role && call.user === rejected.user).length, 1);
+        assert.doesNotMatch(reader.panel.text('scribe-problems'), /key rejected|rejected the saved API key/i);
+    }
+    assert.ok(walk.model.calls.slice(from).every((call) => call.authorization === 'Bearer ' + nextKey));
+    assert.equal(walk.model.by(watcher.name).length, 0);
+});
+
+for (const [heldRole, oldStatus, finalStatus] of [['Story', 401, 401], ['Pedant', 401, 200], ['Story', 503, 200],
+    ['Story', 401, 'provider 401'], ['Pedant', 401, 'provider 401'], ['Pedant', 401, 'unrelated provider error']]) {
+    test(`a held ${heldRole} ${oldStatus} resumes with the other room's save and ends on ${finalStatus}`, async () => {
+        const walk = world();
+        const reader = await opened(walk);
+        await saveKey(walk, reader);
+        if (heldRole === 'Pedant') {
+            await adopt(walk, reader, '8');
+        }
+        walk.site.open(QUARRY, campaign(QUARRY_LENGTH));
+        const saver = install(walk, '/rooms/' + QUARRY);
+        saver.ready();
+        await saver.openPage();
+        await until(walk, 'the other room to open', () => saver.panel.headline().startsWith('No local book'), 15000);
+        saver.panel.tab('Settings');
+        reader.panel.tab('Progress');
+        walk.storage.queued = [];
+        walk.model.holding = heldRole;
+        const before = walk.model.of(heldRole).length;
+        if (heldRole === 'Story') {
+            reader.panel.click('scribe-next');
+        } else {
+            await arrive(walk, reader, ASKED, REPLY);
+        }
+        await until(walk, 'the original request to be held', () => walk.model.held.size === 1, TICK_MS * 2);
+        const first = walk.model.of(heldRole)[before];
+        const previousSpend = spentToday(walk);
+        const secondKey = 'fictional-next-credential';
+        const finalKey = 'fictional-last-credential';
+        const firstError = JSON.stringify({ error: { message: 'Obsolete account ' + KEY }, usage: { cost: 0.125 } });
+        if (oldStatus === 503) {
+            walk.model.held.get(first)(503, firstError);
+            await pass(walk, 1999);
+            assert.equal(walk.model.of(heldRole).length, before + 1);
+        }
+        saver.panel.type('scribe-key', secondKey);
+        saver.panel.click('scribe-save-key');
+        if (oldStatus === 401) {
+            walk.model.held.get(first)(401, firstError);
+        } else {
+            await pass(walk, 1);
+        }
+        await settle();
+        const second = walk.model.of(heldRole)[before + 1];
+        assert.equal(second.authorization, 'Bearer ' + secondKey);
+        assert.equal(second.user, first.user);
+        assert.equal(first.authorization, 'Bearer ' + KEY);
+        assert.doesNotMatch(reader.panel.text('scribe-problems'), /OpenRouter rejected/);
+        saver.panel.type('scribe-key', finalKey);
+        saver.panel.click('scribe-save-key');
+        walk.model.held.get(second)(401, JSON.stringify({ error: { message: 'Obsolete account ' + secondKey } }));
+        await settle();
+        const third = walk.model.of(heldRole)[before + 2];
+        assert.equal(third.authorization, 'Bearer ' + finalKey);
+        assert.equal(third.user, first.user);
+        for (const deliver of walk.storage.queued.reverse()) {
+            deliver();
+            deliver();
+        }
+        assert.ok(reader.panel.everWritten().every((line) => !/OpenRouter rejected|Obsolete account/.test(line)));
+        assert.equal(walk.model.of(heldRole).length, before + 3);
+        const provider = typeof finalStatus === 'string';
+        let responseText = WholeModel.completion(ANSWERS[heldRole](third.user), 0.25);
+        if (finalStatus === 401) {
+            responseText = JSON.stringify({ error: { message: 'Current account ' + finalKey }, usage: { cost: 0.25 } });
+        } else if (provider) {
+            const error = { code: finalStatus === 'provider 401' ? 401 : 400, message: 'Provider reference 401 for ' + finalKey };
+            responseText = JSON.stringify({ ...(heldRole === 'Story' ? { error } : { choices: [{ error, finish_reason: 'error' }] }), usage: { cost: 0.25 } });
+        }
+        walk.model.holding = null;
+        walk.model.held.get(third)(provider ? 200 : finalStatus, responseText);
+        await settle();
+        const sameWork = walk.model.of(heldRole).filter((call) => call.user === first.user);
+        assert.deepEqual(sameWork.map((call) => call.authorization), [KEY, secondKey, finalKey].map((key) => 'Bearer ' + key));
+        if (finalStatus === 401) {
+            assert.match(reader.panel.text('scribe-problems'), /OpenRouter rejected/);
+            assert.match(reader.panel.text('scribe-problem-details'), /Current account \[key\]/);
+        } else if (provider) {
+            const notice = (tab) => [tab.panel.text('scribe-problems'), tab.panel.text('scribe-problem-details')];
+            const notices = [notice(reader), notice(await reload(walk, reader))];
+            for (const [reason, detail] of notices) {
+                assert.match(reason, finalStatus === 'provider 401' ? /model provider reported an authentication error.*Check your provider settings/i : /model supplied no usable result/i);
+                assert.doesNotMatch(reason, /OpenRouter rejected/);
+                assert.match(detail, /status 200; finish (?:none|error); reason: Provider reference 401 for \[key\]/);
+                assert.equal(detail.includes('code 401'), finalStatus === 'provider 401');
+            }
+        } else {
+            assert.doesNotMatch(reader.panel.text('scribe-problems'), /OpenRouter rejected/);
+            assert.ok(!reader.panel.everWritten().some((line) => line.includes('OpenRouter rejected')));
+        }
+        const otherCharges = walk.model.calls.slice(walk.model.calls.indexOf(first) + 1)
+            .filter((call) => !sameWork.includes(call)).reduce((sum, call) => sum + walk.model.costs[call.role], 0);
+        assert.ok(Math.abs(spentToday(walk) - previousSpend - 0.375 - otherCharges) < 1e-9);
+        assert.equal(walk.model.by(saver.name).length, 0);
+        assert.ok(reader.panel.everWritten().every((line) => !carries(line, [KEY, secondKey, finalKey])));
+    });
+}
+
+for (const role of ['Suggest', 'Notes']) {
+    test('a save while a ' + role + ' refusal reaches the panel completes the original action once', async () => {
+        const { walk, tab } = await replied('8');
+        walk.model.holding = role;
+        const from = walk.model.calls.length;
+        if (role === 'Suggest') {
+            tab.panel.tab('Findings');
+            tab.panel.button(tab.panel.byId('scribe-offer-actions'), 'Suggest one').click();
+        } else {
+            tab.panel.tab('Rulings');
+            tab.panel.type('scribe-tell', 'Mirelle keeps a brass compass from her father.');
+            tab.panel.click('scribe-tell-work');
+        }
+        await settle();
+        const first = walk.model.of(role).at(-1);
+        walk.model.held.get(first)(401, '{"error":"obsolete acceptance failure"}');
+        for (let tick = 0; tick < 12; tick++) {
+            await Promise.resolve();
+        }
+        walk.model.holding = null;
+        tab.panel.tab('Settings');
+        tab.panel.type('scribe-key', 'synthetic-before-action-result');
+        tab.panel.click('scribe-save-key');
+        await settle();
+        const calls = walk.model.calls.slice(from);
+        assert.deepEqual(calls.map((call) => call.role), [role, role]);
+        assert.equal(calls[1].authorization, 'Bearer synthetic-before-action-result');
+        assert.equal(calls[1].user, calls[0].user);
+        tab.panel.tab(role === 'Suggest' ? 'Findings' : 'Rulings');
+        assert.match(tab.panel.text(role === 'Suggest' ? 'scribe-offer-text' : 'scribe-understood'), role === 'Suggest' ? /rider arrives/ : /File it/);
+        assert.doesNotMatch(tab.panel.text('scribe-problems'), /obsolete acceptance failure/);
+    });
+}
+
+test('a save during recap failure publication completes the pending reminder once', async () => {
+    const walk = world();
+    const tab = await opened(walk);
+    await saveKey(walk, tab);
+    await adopt(walk, tab, '8');
+    const beforeSpend = spentToday(walk);
+    walk.model.holding = 'Told';
+    walk.model.costs.Told = 0.25;
+    tab.panel.tab('Findings');
+    tab.panel.click('scribe-force');
+    await settle();
+    const first = walk.model.of('Told')[0];
+    walk.model.held.get(first)(401, '{"error":"obsolete recap rejection","usage":{"cost":0.125}}');
+    for (let tick = 0; tick < 12; tick++) {
+        await Promise.resolve();
+    }
+    walk.model.holding = null;
+    tab.panel.tab('Settings');
+    tab.panel.type('scribe-key', 'synthetic-recap-replacement');
+    tab.panel.click('scribe-save-key');
+    await pass(walk, 3 * TICK_MS);
+    assert.deepEqual(walk.model.of('Told').map((call) => call.authorization), ['Bearer ' + KEY, 'Bearer synthetic-recap-replacement']);
+    assert.equal(stored(walk, 'live').ready, FIRST_READY);
+    assert.equal(stored(walk, 'live').untold, null);
+    assert.ok(Math.abs(spentToday(walk) - beforeSpend - 0.375) < 1e-9);
+    assert.doesNotMatch(tab.panel.text('scribe-problems'), /OpenRouter rejected/);
+});
+
+test('a scene rejection awaiting a paid check at save time replaces just the scene', async () => {
+    const { walk, tab } = await adopted('8');
+    const from = walk.model.calls.length;
+    const beforeSpend = spentToday(walk);
+    walk.model.holding = 'Scene';
+    await arrive(walk, tab, ASKED, REPLY);
+    await until(walk, 'the scene request', () => walk.model.held.size === 1, TICK_MS * 2);
+    const scene = walk.model.of('Scene').at(-1);
+    walk.model.holding = 'Pedant';
+    walk.model.held.get(scene)(401, '{"error":"obsolete scene refusal","usage":{"cost":0.125}}');
+    await until(walk, 'the check request', () => walk.model.held.size === 1, TICK_MS);
+    const check = walk.model.of('Pedant').at(-1);
+    tab.panel.tab('Settings');
+    tab.panel.type('scribe-key', 'synthetic-after-scene');
+    tab.panel.click('scribe-save-key');
+    walk.model.holding = null;
+    walk.model.held.get(check)(200, WholeModel.completion(ANSWERS.Pedant(check.user), 0.25));
+    await pass(walk, 3 * TICK_MS);
+    const calls = walk.model.calls.slice(from);
+    assert.deepEqual(calls.filter((call) => call.role === 'Scene').map((call) => call.authorization),
+        ['Bearer ' + KEY, 'Bearer synthetic-after-scene']);
+    assert.deepEqual(calls.filter((call) => call.role === 'Pedant'), [check]);
+    assert.equal(stored(walk, 'live').retries.length, 0);
+    assert.ok(!tab.panel.everWritten().some((line) => line.includes('OpenRouter rejected the saved API key')));
+    const otherCharges = calls.filter((call) => call !== scene && call !== check)
+        .reduce((sum, call) => sum + walk.model.costs[call.role], 0);
+    assert.ok(Math.abs(spentToday(walk) - beforeSpend - 0.375 - otherCharges) < 1e-9);
+});
+
+for (const barrier of ['paused', 'handed off']) {
+    test('a held book read that is ' + barrier + ' before replacement sends nothing further', async () => {
+        const walk = world({ locks: false });
+        const tab = await opened(walk);
+        await saveKey(walk, tab);
+        walk.model.holding = 'Story';
+        tab.panel.click('scribe-next');
+        await until(walk, 'the book request', () => walk.model.held.size === 1, TICK_MS);
+        const story = walk.model.of('Story')[0];
+        walk.storage.queued = [];
+        REFERENCE.ScribeStore.setKey(walk.storage, 'synthetic-replacement-key');
+        if (barrier === 'paused') {
+            tab.panel.click('scribe-pause');
+        } else {
+            walk.storage.set('scribe:claim:harbour', JSON.stringify({ tabId: 'current-reader', at: walk.clock.now() }));
+        }
+        walk.model.held.get(story)(401, '{"error":"obsolete rejection"}');
+        await pass(walk, 1000);
+        assert.equal(walk.model.calls.length, 1);
+        assert.doesNotMatch(tab.panel.text('scribe-problems'), /OpenRouter rejected/);
+        assert.equal(spentToday(walk), 0);
+    });
+}
+
+for (const ticks of [8, 12, 16, 20]) {
+    test('a save ' + ticks + ' microtasks after a book 401 starts one replacement', async () => {
+        const walk = world();
+        const tab = await opened(walk);
+        await saveKey(walk, tab);
+        walk.model.holding = 'Story';
+        tab.panel.click('scribe-next');
+        await until(walk, 'the first book request', () => walk.model.held.size === 1, TICK_MS);
+        const first = walk.model.of('Story')[0];
+        walk.model.held.get(first)(401, '{"error":"obsolete book refusal","usage":{"cost":0.125}}');
+        for (let tick = 0; tick < ticks; tick++) {
+            await Promise.resolve();
+        }
+        tab.panel.tab('Settings');
+        tab.panel.type('scribe-key', 'synthetic-after-book-401');
+        tab.panel.click('scribe-save-key');
+        await pass(walk, 3 * TICK_MS);
+        assert.deepEqual(walk.model.of('Story').map((call) => call.authorization), ['Bearer ' + KEY, 'Bearer synthetic-after-book-401']);
+        assert.equal(walk.model.of('Story')[1].user, first.user);
+        assert.doesNotMatch(tab.panel.text('scribe-problems'), /OpenRouter rejected/);
+        walk.model.held.get(walk.model.of('Story')[1])(401, '{"error":"current book refusal"}');
+        await pass(walk, TICK_MS);
+        assert.equal(walk.model.of('Story').length, 2);
+        assert.match(tab.panel.text('scribe-problem-details'), /current book refusal/);
+        assert.equal(spentToday(walk), 0.125);
+    });
+}
+
+test('a saved legacy book rejection describes the previous read until Resume tries the current key', async () => {
+    const { walk, tab } = await adopted('5');
+    const config = stored(walk, 'settings');
+    config.stop = { reason: 'Failed', problem: 'unexpected HTTP status; status 401; finish none; reason: User not found.' };
+    REFERENCE.ScribeStore.write(walk.storage, ROOM, 'settings', config);
+    const before = walk.model.calls.length;
+    const reopened = await reload(walk, tab);
+    assert.equal(walk.model.calls.length, before);
+    assert.match(reopened.panel.text('scribe-problems'), /previous book reading.*OpenRouter rejected the key used then.*Press Resume/);
+    assert.match(reopened.panel.text('scribe-problem-details'), /OpenRouter · book reading · unexpected HTTP status; status 401/);
+    reopened.panel.click('scribe-next');
+    await until(walk, 'the retained rejection to clear', () => reopened.panel.headline().startsWith('Up to date'), TICK_MS);
+    assert.doesNotMatch(reopened.panel.text('scribe-problems'), /rejected/);
+});
+
+for (const stopped of ['book', 'live']) {
+    test('navigation before a key notice leaves the departed ' + stopped + ' failure parked', async () => {
+        const { walk, tab } = await adopted('10');
+        walk.site.open(QUARRY, campaign(QUARRY_LENGTH));
+        let reader = tab;
+        if (stopped === 'book') {
+            const config = stored(walk, 'settings');
+            config.stop = { reason: 'Failed', problem: 'unexpected HTTP status; status 401; finish none' };
+            REFERENCE.ScribeStore.write(walk.storage, ROOM, 'settings', config);
+            reader = await reload(walk, tab);
+        } else {
+            const request = walk.model.request.bind(walk.model);
+            walk.model.request = (owner, details) => {
+                const role = walk.model.roleOf(JSON.parse(details.data).messages[0].content);
+                if (!['Scene', 'Pedant'].includes(role)) {
+                    return request(owner, details);
+                }
+                return request(owner, { ...details, onload: () => details.onload({
+                    status: 401, responseText: '{"error":{"message":"User not found."}}',
+                }) });
+            };
+            await arrive(walk, reader, ASKED, REPLY);
+            await pass(walk, 400000);
+            assert.deepEqual(Array.from(stored(walk, 'live').retries, (retry) => retry.tries), [3, 3]);
+            walk.model.request = request;
+        }
+        const before = walk.model.calls.length;
+        const stop = stored(walk, 'settings').stop;
+        const retries = stored(walk, 'live').retries;
+        reader.go('/rooms/' + QUARRY);
+        REFERENCE.ScribeStore.setKey(walk.storage, 'different-local-test-value');
+        reader.show('visible');
+        await settle();
+        assert.deepEqual(stored(walk, 'settings').stop, stop);
+        assert.deepEqual(stored(walk, 'live').retries, retries);
+        assert.equal(walk.model.calls.length, before);
+    });
+}
+
+/**
+ * @param {boolean} handoff
+ * @param {boolean} newFailure
+ * @return {Promise<void>}
+ */
+async function recoverAfterSuggestion(handoff, newFailure) {
+    const { walk, tab } = await adopted('10', { locks: !handoff });
+    const request = walk.model.request.bind(walk.model);
+    walk.model.request = (owner, details) => {
+        const role = walk.model.roleOf(JSON.parse(details.data).messages[0].content);
+        if (!['Scene', 'Pedant'].includes(role)) {
+            return request(owner, details);
+        }
+        return request(owner, { ...details, onload: () => details.onload({
+            status: 401, responseText: '{"error":{"message":"User not found."}}',
+        }) });
+    };
+    await arrive(walk, tab, ASKED, REPLY);
+    await pass(walk, 400000);
+    assert.deepEqual(Array.from(stored(walk, 'live').retries, (retry) => retry.tries), [3, 3]);
+    walk.model.request = request;
+    const held = holdCompletion(walk, (role) => role === 'Story');
+    await tab.pagePost('Extra user note.');
+    await pass(walk, TICK_MS);
+    assert.equal(typeof held.release, 'function');
+    const before = walk.model.calls.length;
+    REFERENCE.ScribeStore.setKey(walk.storage, 'replacement-local-test');
+    tab.panel.tab('Findings');
+    tab.panel.button(tab.panel.byId('scribe-offer-actions'), 'Suggest one').click();
+    await settle();
+    assert.deepEqual(walk.model.calls.slice(before).map((call) => call.role), ['Suggest']);
+    const claimName = 'scribe:claim:harbour';
+    const owner = JSON.parse(walk.storage.get(claimName, 'null'))?.tabId;
+    if (handoff) {
+        walk.storage.set(claimName, JSON.stringify({ tabId: 'other-test-reader', at: walk.clock.now() }));
+    }
+    held.release();
+    if (handoff) {
+        await pass(walk, TICK_MS);
+        assert.equal(tab.panel.headline(), 'Another tab is reading this chat.');
+        if (newFailure) {
+            const changed = stored(walk, 'live');
+            changed.retries.find((entry) => entry.role === 'check').at = walk.clock.now();
+            REFERENCE.ScribeStore.write(walk.storage, ROOM, 'live', changed);
+        }
+        walk.storage.set(claimName, JSON.stringify({ tabId: owner, at: walk.clock.now() }));
+    }
+    await pass(walk, 4 * TICK_MS);
+    const after = walk.model.calls.slice(before);
+    assert.equal(after.filter((call) => call.role === 'Scene').length, 1);
+    assert.equal(after.filter((call) => call.role === 'Pedant').length, newFailure ? 0 : 1);
+    assert.ok(after.every((call) => call.authorization === 'Bearer replacement-local-test'));
+    assert.deepEqual(Array.from(stored(walk, 'live').retries, (retry) => retry.role), newFailure ? ['check'] : []);
+}
+
+test('a new-key suggestion during a book read keeps the two older live failures eligible for recovery',
+    () => recoverAfterSuggestion(false, false));
+test('a reader handoff restores both earlier parked live jobs after an unrelated new-key suggestion',
+    () => recoverAfterSuggestion(true, false));
+test('a new failure for the same role and message during handoff stays parked while the other recovers',
+    () => recoverAfterSuggestion(true, true));
+
+test('an unreadable private key produces one local book warning before and after reload', async () => {
+    const walk = world();
+    const reader = await opened(walk);
+    await saveKey(walk, reader);
+    walk.storage.refuseGetsMatching(/^scribe:key$/);
+    reader.panel.click('scribe-next');
+    await settle();
+    assert.equal(walk.model.calls.length, 0);
+    assert.equal(stored(walk, 'settings').stop.source, REFERENCE.ScribeStore.KeyStorageSource);
+    for (const tab of [reader, await reload(walk, reader)]) {
+        assert.equal(tab.panel.byId('scribe-problems').children.length, 1);
+        assert.match(tab.panel.text('scribe-problems'), /local storage.*then retry/);
+        assert.doesNotMatch(tab.panel.text('scribe-problems'), /OpenRouter rejected/);
+    }
+    assert.equal(walk.model.calls.length, 0);
+});
+
+test('a fresh 401 after first observing a new key remains stopped until an explicit retry', async () => {
+    const walk = world();
+    const reader = await opened(walk);
+    const request = walk.model.request.bind(walk.model);
+    walk.model.request = (owner, details) => request(owner, { ...details, onload: () => details.onload({
+        status: 401, responseText: '{"error":{"message":"User not found."}}',
+    }) });
+    walk.storage.queued = [];
+    REFERENCE.ScribeStore.setKey(walk.storage, 'new-rejected-test-value');
+    reader.panel.click('scribe-next');
+    await pass(walk, 3 * TICK_MS);
+    assert.equal(walk.model.calls.length, 1);
+    assert.equal(walk.model.calls[0].authorization, 'Bearer new-rejected-test-value');
+    assert.equal(stored(walk, 'settings').stop.reason, 'Failed');
+    assert.match(reader.panel.text('scribe-problems'), /OpenRouter rejected the saved API key/);
+    for (const deliver of walk.storage.queued) {
+        deliver();
+    }
+    await pass(walk, TICK_MS);
+    assert.equal(walk.model.calls.length, 1);
+    reader.panel.click('scribe-next');
+    await settle();
+    assert.equal(walk.model.calls.length, 2);
+    assert.match(reader.panel.text('scribe-problems'), /OpenRouter rejected the saved API key/);
+});
+
+test('a sleeping Settings draft cannot replace a newer save, and idle key changes send no requests', async () => {
+    const walk = world();
+    const reader = await opened(walk);
+    const watcher = await secondTab(walk);
+    const counts = () => [walk.site.requests.length, walk.model.calls.length, walk.worker.log.length];
+    const before = counts();
+    const enter = (tab, value) => {
+        tab.panel.tab('Settings');
+        tab.panel.type('scribe-key', value);
+        tab.panel.byId('scribe-key').dispatchEvent({ type: 'input' });
+    };
+    walk.storage.queued = [];
+    enter(watcher, 'before-sleep-test');
+    enter(reader, 'first-test-save');
+    reader.panel.click('scribe-save-key');
+    enter(reader, 'second-test-save');
+    reader.panel.click('scribe-save-key');
+    watcher.panel.click('scribe-save-key');
+    assert.equal(REFERENCE.ScribeStore.key(walk.storage), 'second-test-save');
+    assert.equal(watcher.panel.byId('scribe-key').value, '');
+    assert.match(watcher.panel.text('scribe-key-outcome'), /saved key changed/);
+    enter(watcher, 'intentional-test-save');
+    watcher.panel.click('scribe-save-key');
+    for (const deliver of walk.storage.queued.reverse()) {
+        deliver();
+        deliver();
+    }
+    assert.equal(REFERENCE.ScribeStore.key(walk.storage), 'intentional-test-save');
+    assert.deepEqual(counts(), before);
+    assert.equal(watcher.panel.byId('scribe-key').getAttribute('aria-invalid'), null);
+    assert.equal(reader.panel.text('scribe-key-state'), 'An OpenRouter key is saved');
+});
+
+test('a refused room claim read leaves the key saved, the new pane state visible and recovery pending', async () => {
+    const walk = world({ locks: false });
+    const reader = await opened(walk);
+    await saveKey(walk, reader);
+    const watcher = await secondTab(walk);
+    watcher.panel.tab('Settings');
+    watcher.panel.type('scribe-key', 'old-draft');
+    walk.storage.refuseGetsMatching(/:claim:/);
+    reader.panel.type('scribe-key', 'new-local-test-value');
+    reader.panel.click('scribe-save-key');
+    await settle();
+    assert.equal(REFERENCE.ScribeStore.key(walk.storage), 'new-local-test-value');
+    assert.equal(reader.panel.text('scribe-key-outcome'), '');
+    assert.match(reader.panel.text('scribe-problems'), /key is saved.*could not resume work in this room/);
+    assert.equal(watcher.panel.byId('scribe-key').value, '');
+    assert.equal(walk.model.calls.length, 0);
+    walk.storage.allow();
+    await until(walk, 'recovery to finish after local claims are readable', () =>
+        !reader.panel.text('scribe-problems').includes('could not resume work in this room'), 2 * TICK_MS);
+});
+
 test('saved scene and check auth failures reopen as one warning with private detail masked in Progress', async () => {
     const { walk, tab } = await adopted('5');
     const live = stored(walk, 'live');
@@ -1753,6 +2668,171 @@ test('saved scene and check auth failures reopen as one warning with private det
     assert.doesNotMatch(openedAgain.panel.headline(), /status 401/);
     assert.doesNotMatch(openedAgain.panel.text('scribe-list-liveCalls'), /user not found/);
 });
+
+/**
+ * @param {WholeTab} reader
+ * @return {Promise<string>}
+ */
+async function exportFromProgress(reader) {
+    const previous = reader.document.downloads.length;
+    reader.panel.click('scribe-export');
+    await settle();
+    const downloads = reader.document.downloads.slice(previous);
+    assert.equal(downloads.length, 1, 'Progress activated exactly one download');
+    assert.equal(downloads[0].name, `scribe-${reader.room()}.json`);
+    const text = await resolveObjectURL(downloads[0].href).text();
+    assert.equal(JSON.parse(text).roomId, reader.room());
+    return text;
+}
+
+test('the privacy harness captures subsequent and nested console arguments in both script contexts', () => {
+    const tab = install(world(), CHAT);
+    tab.ready();
+    for (const [context, logs] of [[tab.context, tab.logs], [tab.frame.context, tab.frame.logs]]) {
+        const detail = { nested: { detail: 'synthetic-log-marker' } };
+        detail.self = detail;
+        context.console.warn('sample warning', detail, 'last argument');
+        const entry = logs.at(-1);
+        assert.match(entry, /sample warning/);
+        assert.match(entry, /synthetic-log-marker/);
+        assert.match(entry, /last argument/);
+    }
+});
+
+for (const layout of ['frame', 'top']) {
+    test(`packed Settings save clears the other reader's echoed 401s privately in the ${layout} layout`, async () => {
+        const walk = world({ layout });
+        const replacement = 'synthetic-second-openrouter-value';
+        const credentials = [KEY, replacement];
+        const clean = (value, destination) => assert.ok(!carries(JSON.stringify(value), credentials), destination);
+        const unexpectedWrites = [];
+        const store = walk.storage.set.bind(walk.storage);
+        walk.storage.set = (name, value) => {
+            if (carries(name, credentials) || (name !== 'scribe:key' && carries(JSON.stringify(value), credentials))) {
+                unexpectedWrites.push(name);
+            }
+            store(name, value);
+        };
+        walk.site.open(QUARRY, campaign(QUARRY_LENGTH));
+        const saver = install(walk, '/rooms/' + QUARRY);
+        saver.ready();
+        await saver.openPage();
+        await until(walk, 'the saving tab to open', () => saver.panel.headline().startsWith('No local book'), TICK_MS);
+        saver.setDmKey(DM_KEY);
+        await saveKey(walk, saver);
+        assert.equal(walk.storage.get('scribe:key'), KEY);
+        const reader = install(walk, CHAT, 320);
+        reader.ready();
+        await reader.openPage();
+        await until(walk, 'the new reader to be ready', () => reader.panel.headline().startsWith('No book on this PC or in the Worker'), TICK_MS);
+        reader.panel.click('scribe-toggle');
+        reader.panel.click('scribe-next');
+        await until(walk, 'the initial reply to be checked', () => stored(walk, 'live')?.seen?.id === walk.site.messages.at(-1).id, 3 * TICK_MS);
+        await quiet(walk, 'the initial reading');
+        reader.panel.click('scribe-toggle');
+        const from = walk.model.calls.length;
+        walk.model.holding = 'Scene';
+        await arrive(walk, reader, ASKED, REPLY);
+        const echo = JSON.stringify({ error: { message: 'Rejected credential ' + KEY } });
+        for (const [role, next] of [['Scene', 'Pedant'], ['Pedant', null]]) {
+            await until(walk, 'a held ' + role, () => walk.model.held.has(walk.model.of(role).at(-1)), TICK_MS * 2);
+            walk.model.holding = next;
+            walk.model.held.get(walk.model.of(role).at(-1))(401, echo);
+        }
+        const compact = reader.panel.byId('scribe-problems-compact');
+        const full = reader.panel.byId('scribe-problems');
+        const details = reader.panel.byId('scribe-problem-details');
+        await until(walk, 'both rejected jobs to appear', () => full.textContent.includes('Scene updates and story checks'), TICK_MS);
+        assert.deepEqual(folded(reader), FOLDED);
+        assert.equal(compact.textContent, 'OpenRouter key rejected');
+        assert.equal(compact.getAttribute('role'), 'status');
+        assert.equal(compact.hidden, false);
+        assert.equal(full.hidden, true);
+        const toggle = reader.panel.byId('scribe-toggle');
+        assert.equal(toggle.tagName, 'BUTTON');
+        assert.equal(toggle.getAttribute('tabindex'), null);
+        assert.equal(toggle.getAttribute('aria-controls'), 'scribe-body');
+        toggle.focus();
+        assert.equal(reader.document.focused, toggle);
+        let cancelled = false;
+        toggle.dispatchEvent({ type: 'keydown', key: 'Enter', bubbles: true, preventDefault: () => { cancelled = true; } });
+        if (!cancelled) {
+            toggle.click();
+        }
+        assert.deepEqual(folded(reader), UNFOLDED);
+        assert.equal(compact.hidden, true);
+        assert.equal(full.hidden, false);
+        assert.equal(full.children.length, 1);
+        assert.equal(full.textContent, 'OpenRouter rejected the saved API key. Scene updates and story checks could not run. Open Settings, enter your current OpenRouter key, and press Save key.');
+        reader.panel.tab('Progress');
+        assert.match(details.textContent, /Rejected credential \[key\]/);
+        const blockedExport = await exportFromProgress(reader);
+        assert.match(blockedExport, /Rejected credential \[key\]/);
+        clean(blockedExport, 'room export while rejected');
+        await until(walk, 'the masked failure to reach the Worker', () =>
+            walk.worker.textOf(CLOUD_ROOM, 'live')?.includes('Rejected credential [key]'), 3 * TICK_MS);
+
+        saver.panel.tab('Settings');
+        saver.panel.type('scribe-key', replacement);
+        saver.panel.byId('scribe-key').dispatchEvent({ type: 'input' });
+        const savedAt = walk.model.calls.length;
+        saver.panel.click('scribe-save-key');
+        assert.equal(walk.storage.get('scribe:key'), replacement);
+        await until(walk, 'the latest reply to recover', () => stored(walk, 'live')?.seen?.id === walk.site.messages.at(-1).id &&
+            full.hidden && details.hidden, 3 * TICK_MS);
+        await quiet(walk, 'after key recovery');
+        assert.equal(full.textContent, '');
+        assert.equal(compact.textContent, '');
+        assert.equal(details.textContent, '');
+        reader.panel.click('scribe-toggle');
+        assert.equal(compact.hidden, true);
+        reader.panel.click('scribe-toggle');
+        clean(await exportFromProgress(reader), 'room export after recovery');
+        for (const role of ['Scene', 'Pedant']) {
+            const calls = walk.model.calls.slice(from).filter((call) => call.role === role);
+            assert.deepEqual(calls.map((call) => call.authorization), credentials.map((key) => 'Bearer ' + key));
+        }
+        assert.deepEqual(walk.model.by(saver.name), []);
+        assert.deepEqual(walk.model.strays, []);
+        assert.deepEqual(unexpectedWrites, []);
+        for (const [index, call] of walk.model.calls.entries()) {
+            assert.equal(call.url, WholeModel.Endpoint);
+            const { Authorization, ...otherHeaders } = JSON.parse(call.headers);
+            assert.equal(Authorization, 'Bearer ' + (index < savedAt ? KEY : replacement));
+            clean([call.url, otherHeaders, call.data], 'OpenRouter URL, other headers and body');
+        }
+        assert.ok(walk.worker.calls('/v1/scribe/part', 'PUT').length > 0);
+        clean(walk.worker.log, 'Worker URLs, headers and uploaded parts');
+        assert.ok(walk.site.requests.some((request) => !request.own));
+        clean(walk.site.requests, 'Zeta requests');
+        assert.equal(walk.posts.length > 0, layout === 'frame');
+        clean(walk.posts, 'frame and page messages');
+        for (const tab of walk.tabs) {
+            assert.equal(tab.panel.byId('scribe-key').value, '');
+            clean(tab.panel.shownTexts(), tab.name + ' panel after save');
+            clean(tab.logs, tab.name + ' console');
+            const entries = [];
+            for (const element of tab.document.elements) {
+                for (const write of element.written) {
+                    if (element.id === 'scribe-key' && write.kind === 'value' && write.text !== '') {
+                        entries.push(write.text);
+                    } else {
+                        clean(write.text, tab.name + ' rendered text, attributes and field writes');
+                    }
+                }
+            }
+            assert.deepEqual(entries, tab === saver ? credentials : []);
+            if (tab.frame) {
+                clean(tab.frame.logs, 'frame console');
+                assert.ok(tab.frame.gm.every((entry) => entry === BRIDGE_READ));
+                clean(tab.frame.document.elements.map((node) => node.written), 'frame DOM');
+            }
+            for (const field of [tab.box, ...tab.inputs]) {
+                clean([field.value, field.writes], 'page or frame field');
+            }
+        }
+    });
+}
 
 test('13. every billed attempt of a failed answer is counted', async () => {
     const { walk, from, before } = await exhausted();
@@ -1840,7 +2920,8 @@ test('14. when the first tab is hidden while the second waits, the second become
     const since = walk.model.calls.slice(from);
     assert.equal(since.filter((call) => call.tab === second.name && call.role === 'Scene').length, 1);
     assert.equal(since.filter((call) => call.tab === second.name && call.role === 'Pedant').length, 1);
-    assert.equal(second.panel.headline(), 'Up to date: 93 of 93 read.');
+    await until(walk, 'the new reader to show the saved count between background checks',
+        () => second.panel.headline() === 'Up to date: 93 of 93 read.', TICK_MS);
 });
 
 test('14. with a lock manager that has no query, the hidden first tab keeps the chat', async () => {
@@ -1975,7 +3056,8 @@ test('16. starting the book over', async () => {
     const oldFindings = findingRows(tab).map((row) => row.textContent);
     assert.equal(oldFindings.length, 1);
     assert.equal(oldFindings[0].includes(OLD_HAIR), true);
-    walk.model.answers.Story = storyFrom(FACTS.map(([position, line]) => [position, line.replace(OLD_HAIR, NEW_HAIR)]));
+    walk.model.answers.Story = storyFrom(FACTS.map(([position, line]) =>
+        line.includes(OLD_HAIR) ? [15, line.replace(OLD_HAIR, NEW_HAIR)] : [position, line]));
     const from = walk.model.calls.length;
     tab.panel.tab('Progress');
     assert.equal(tab.panel.text('scribe-adopt'), 'Start the book over');
@@ -2127,7 +3209,7 @@ async function openedAgain(walk, tab, ready) {
     assert.equal(texts.includes(GOES_FIRST), true);
     assert.deepEqual(tab.panel.buttonTexts(findings[0]), ['Dismiss', 'Rule it...']);
     await pass(walk, TICK_MS);
-    assert.deepEqual(rolesSince(walk, before), []);
+    assert.ok(rolesSince(walk, before).every((role) => role === 'HistoryCheck'));
     assert.equal(stored(walk, 'live').ready, ready);
 }
 
@@ -2248,7 +3330,7 @@ async function wholeWalk() {
     first.panel.type('scribe-setting-budget', '0');
     first.panel.click('scribe-next');
     await pass(walk, 1000);
-    await adopt(walk, first, '3');
+    await adopt(walk, first, '5');
     const tab = await reload(walk, first);
     tab.panel.tab('Rulings');
     tab.panel.buttonStarting(tab.panel.rows('conflicts')[0], 'grey').click();
@@ -2331,6 +3413,8 @@ async function wholeWalk() {
     const handed = walk.model.calls.length;
     third.show('hidden');
     await pass(walk, TICK_MS * 2);
+    await until(walk, 'the new reader to finish its active comparison',
+        () => fourth.panel.headline().startsWith('Up to date'), TICK_MS);
     const handover = fourth.panel.headline();
     await arrive(walk, fourth, ASKED, REPLY);
     await pass(walk, TICK_MS * 2);
@@ -2728,8 +3812,9 @@ test('F5. a script-made message event on the top page tells nothing and causes n
     const ready = stored(walk, 'live').ready;
     const sends = stored(walk, 'live').sends;
     const last = armsTo(walk, tab).at(-1).seq;
-    const reads = await afterTick(walk, TICK_MS + 1000);
-    await pass(walk, 300);
+    await afterTick(walk, TICK_MS + 1000);
+    await pass(walk, 3000);
+    const reads = walk.site.pageRequests().length;
     tab.window.receive({
         type: 'message',
         isTrusted: false,
@@ -2843,7 +3928,9 @@ test('F9. a send reported while the chat frame is hidden still clears the remind
 
 test("F10. leaving one chat for another: the second chat's messages never carry the first chat's reminder", async () => {
     const walk = world();
-    walk.site.open(QUARRY, campaign(QUARRY_LENGTH));
+    const quarry = campaign(QUARRY_LENGTH);
+    quarry.messages[0].contents[0].text = NARRATION[1][0][1].replace(OLD_HAIR, NEW_HAIR);
+    walk.site.open(QUARRY, quarry);
     walk.model.answers.Story = storyFrom(FACTS.map(([position, line]) => [position, line.replace(OLD_HAIR, NEW_HAIR)]));
     const tab = install(walk, '/');
     tab.ready();
@@ -3053,6 +4140,47 @@ function otherPc(walk, storage) {
     return install(walk, CHAT, WIDE, { storage, locks: new FakeLocks() });
 }
 
+test('a fresh PC restores the last live claim and ruling together from the Worker', async () => {
+    const walk = world();
+    const first = await adoptedInWorker(walk);
+    walk.model.answers.Story = (input) => CitedStory.answer(input, '=== FACTS\nMirelle | belonging | silver lantern | #92');
+    const quote = 'Mirelle owns a silver lantern.';
+    walk.site.reply([['Narrator', quote]]);
+    await first.pageGet();
+    await until(walk, 'the live claim to be saved', () => bookState(walk).facts.some((fact) => fact.text === 'silver lantern'), 2 * TICK_MS);
+    first.panel.tab('Rulings');
+    first.panel.buttonStarting(first.panel.rows('conflicts')[0], 'grey').click();
+    await until(walk, 'the ruling to be saved', () => first.panel.rows('made').length === 1, TICK_MS);
+    const roomBook = localText(walk.storage, 'book');
+    const source = REFERENCE.ScribeIntake.read(walk.site.messages).messages.at(-1);
+    await until(walk, 'the complete Book revision to upload', () => walk.worker.textOf(CLOUD_ROOM, 'book') === roomBook, 4 * TICK_MS);
+    first.unload();
+    await pass(walk, 100000);
+    const storage = new FakeStorage();
+    const second = otherPc(walk, storage);
+    await second.openPage();
+    second.ready();
+    await until(walk, 'the new PC to show the saved live book',
+        () => second.panel.headline() === 'Up to date: 92 of 92 read.', 5 * TICK_MS);
+    assert.equal(localText(storage, 'book'), roomBook);
+    const restored = JSON.parse(localText(storage, 'book'));
+    const messages = REFERENCE.ScribeIntake.read(walk.site.messages).messages;
+    const state = REFERENCE.ScribeReplay.run(restored.log, messages.map((message) => message.id));
+    assert.deepEqual(plain(REFERENCE.ScribeLog.coverage(restored, messages)), {
+        writtenThrough: 92, verificationPending: [], legacyClaims: [],
+    });
+    const fact = state.facts.find((candidate) => candidate.text === 'silver lantern');
+    assert.equal(fact.evidence.quote, quote);
+    assert.equal(fact.evidence.messageId, source.id);
+    assert.equal(fact.evidence.fingerprint, source.fingerprint);
+    assert.equal(restored.fingerprints[source.id], source.fingerprint);
+    assert.ok(restored.log.read[source.id]);
+    second.panel.tab('Rulings');
+    assert.equal(second.panel.rows('made').length, 1);
+    assert.equal(second.panel.rows('conflicts').length, 0);
+    assert.equal(walk.model.by(second.name).filter((call) => call.role === 'Story').length, 0);
+});
+
 for (const connection of ['saved DM key', 'enter DM key']) {
     test(`a second PC restores 533 saved passages with ${connection} and a surviving sync record`, async () => {
         const walk = world();
@@ -3135,7 +4263,9 @@ test('a watching PC discovers a newly uploaded book after an empty or failed Wor
     second.cut = false;
     await until(walk, 'the watcher to restore the newly published book', () => localText(storage, 'book') === localText(walk.storage, 'book'), 5 * TICK_MS);
     assert.equal(second.panel.headline(), 'Another PC is reading this chat.');
-    assert.match(second.panel.text('scribe-cloud-state'), new RegExp('Worker book revision ' + revision + '\\.'));
+    const restoredRevision = REFERENCE.ScribeStore.synced(storage, ROOM).book.revision;
+    assert.ok(restoredRevision >= revision);
+    assert.match(second.panel.text('scribe-cloud-state'), new RegExp('Worker book revision ' + restoredRevision + '\\.'));
     walk.site.reply(CALM_REPLY);
     await until(walk, 'the reader to publish a newer Worker book', () =>
         first.panel.headline() === 'Up to date: 534 of 534 read.' && walk.worker.revisionOf(CLOUD_ROOM, 'book') > revision &&
@@ -3143,9 +4273,11 @@ test('a watching PC discovers a newly uploaded book after an empty or failed Wor
     await until(walk, 'the watcher to fetch that revision while the reader keeps its lease', () =>
         localText(storage, 'book') === localText(walk.storage, 'book'), 3 * TICK_MS);
     assert.equal(second.panel.headline(), 'Another PC is reading this chat.');
-    const parts = walk.worker.calls('/v1/scribe/part', 'GET').length;
+    const downloaded = () => walk.worker.calls('/v1/scribe/part', 'GET').map(({ query }) =>
+        JSON.stringify([query.kind, query.revision, query.part]));
+    const parts = downloaded();
     await pass(walk, 2 * TICK_MS);
-    assert.equal(walk.worker.calls('/v1/scribe/part', 'GET').length, parts);
+    assert.ok(downloaded().slice(parts.length).every((part) => !parts.includes(part)));
     assert.equal(walk.model.by(second.name).length, 0);
 });
 
@@ -4167,7 +5299,8 @@ for (const layout of ['top', 'frame']) {
         for (const message of disputed) {
             assert.ok(!Object.hasOwn(book.log.read, message.id));
         }
-        assert.equal(fresh.panel.headline(), 'Unresolved authorship: 188 of 190 read.');
+        await until(walk, 'the unresolved authorship status between comparisons',
+            () => fresh.panel.headline() === 'Unresolved authorship: 188 of 190 read.', TICK_MS);
         assert.match(fresh.panel.text('scribe-counts'), /2 unread messages have unresolved authorship/);
         assert.deepEqual(fresh.panel.rowTexts('disputed'), ['Player message #92', 'Player message #125']);
         const counted = walk.model.calls.length;
@@ -4175,7 +5308,7 @@ for (const layout of ['top', 'frame']) {
         const reopened = await reload(walk, fresh);
         reopened.panel.tab('Progress');
         await pass(walk, 4 * TICK_MS);
-        assert.deepEqual(rolesSince(walk, counted), []);
+        assert.ok(rolesSince(walk, counted).every((role) => role === 'HistoryCheck'));
         assert.equal(spentToday(walk), charged);
         assert.deepEqual(plain(stored(walk, 'book').log.read), plain(book.log.read));
         assert.deepEqual(reopened.panel.rowTexts('disputed'), ['Player message #92', 'Player message #125']);

@@ -122,10 +122,12 @@ export default class FakeChat {
         for (let index = 0; index < count; index++) {
             this.serial++;
             const number = this.serial;
+            const duties = ` Halvard keeps watch from line ${number}. Mirelle counts coins to line ${number}.`;
             if (number % 2 === 0) {
-                this.builder.player(`I answer the ferryman, line ${number}.`);
+                this.builder.player(`I answer the ferryman, line ${number}.` + duties);
             } else {
-                this.builder.narrator(`The tale goes on, line ${number}.`);
+                const age = { 3: ' Halvard is twenty-five.', 5: ' Halvard is thirty.' };
+                this.builder.narrator(`The tale goes on, line ${number}.` + duties + (age[number] ?? ''));
             }
             this.builder.timed(FakeChat.time(number));
             this.raw[this.raw.length - 1].id = FakeChat.id(number);
@@ -324,7 +326,8 @@ export default class FakeChat {
                     onPage(count);
                 }
                 onPage(copy.length);
-                return { messages: copy, end, problem, skipped };
+                return { messages: copy, end, problem, skipped, completeHistory: chosen === this.raw && !skipped,
+                    emptyRoom: chosen === this.raw && this.raw.length === 0 };
             },
             /**
              * @return {Promise<{ messages: object[], end: string, problem: null, skipped: number }>}
@@ -341,7 +344,9 @@ export default class FakeChat {
                     this.hidden = null;
                 }
                 const copy = this.copy(chosen);
-                return { messages: copy, end: copy.length === 0 ? 'EmptyPage' : 'NoCursor', problem: null, skipped };
+                return { messages: copy, end: copy.length === 0 ? 'EmptyPage' : 'NoCursor', problem: null, skipped,
+                    completeHistory: through !== null && copy.length === this.raw.length && !skipped,
+                    emptyRoom: this.raw.length === 0 };
             },
         };
     }

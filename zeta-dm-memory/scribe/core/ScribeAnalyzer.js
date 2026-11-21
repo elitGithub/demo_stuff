@@ -109,7 +109,7 @@ const ScribeAnalyzer = Object.freeze({
             "PLAYER CHARACTER PROFILE is the player's own description of their character; trust it for that character.",
             'In the LEDGER each fact ends with (#n), the message that established it, or (owner) when the player added it by hand. After that it may be marked pinned, hidden, or (check: the other side has changed).',
             '',
-            'Answer with these blocks, in this order, each starting with its === line. Leave a block out if it has nothing. Write nothing else: no headings, no remarks, no notes inside or between blocks.',
+            'These blocks help organize the book. Include any other part of your reading in your own words.',
             '',
             '=== SUBJECTS',
             'Label | kind',
@@ -134,7 +134,7 @@ const ScribeAnalyzer = Object.freeze({
             '=== QUESTIONS',
             'A question for the player | #n',
             '',
-            'Categories. Use exactly these words.',
+            'Use a precise category for each statement. The following categories are examples.',
             'One value at a time:',
             '  kind (character, group, place, item or world), age (a plain number whenever the story gives one), eyes, hair (colour and usual style), build (height and body shape), skin, status (alive, dead or missing), location (where they live or are staying), role (what they are or do for a living), relation to <Label> (where they stand with that person: lovers, rivals, friends, enemies, family; one short sentence, not what they last did to each other)',
             'Any number of values:',
@@ -169,7 +169,7 @@ const ScribeAnalyzer = Object.freeze({
             '3. Read the LEDGER before adding. Never repeat what it holds, even in other words.',
             "4. Subjects. Use a label from SUBJECTS exactly. For someone or something new, add a SUBJECTS line first; its kind is exactly one of character, group, place, item, world. If a new person has the same name as an existing subject, give them a label with a short distinguishing note in brackets, such as Oswin (Tamsin's uncle). A label never contains # or a comma. Give an entry to every named character who speaks or acts and to named places that are used. Unnamed passers-by get none.",
             "5. NAMES. When the story writes a known subject's name another way (a misspelling, a nickname, a first name alone, a full name used for the first time), do not make a new subject: write a NAMES line the first time, then use the known label.",
-            '6. Fixed attributes (kind, age, eyes, hair, build, skin). When the new messages state one that the LEDGER already holds for that subject: if it means the same (another spelling, a synonym, the same age said another way) write nothing; if it adds detail to the same thing write a FULLER line in CHANGES; if it contradicts the LEDGER and the story gives no reason, write it as a plain FACTS line and the player will be asked to rule. Never decide who is right.',
+            '6. Fixed attributes (kind, age, eyes, hair, build, skin). If a new statement repeats an existing fact, write nothing. For additional detail on the same fact, write a FULLER line in CHANGES. File a different account as a FACTS line with its source. The Checker compares the accounts and the player rules on discrepancies.',
             "7. CHANGES is for what the story itself changes or ends: someone is promoted, scarred for good, loses a belonging, breaks a habit. Give the id from the LEDGER, then the subject's label and the category exactly as the LEDGER shows them. For status, location, role and relation you need no id: add the new fact in FACTS and it replaces the old one; write hidden on it when it is still a secret.",
             "8. hidden. Mark a fact hidden when it is the subject's own thought, or something the subject conceals from everyone present. What a character learns, is told or is shown in a scene is not hidden: the scene's list of who was present decides who knows it. Something the narrator states that even its subject does not know is filed, hidden, under the one who does know it, or under the world when nobody does. Write a TOLD line when the new messages show a character being told or shown a fact the LEDGER marks hidden. One TOLD line per person. A FULLER line keeps the hidden mark of the fact it extends; when the added detail is more secret than the fact, write it as a separate hidden fact instead.",
             '9. A relation marked (check: the other side has changed) must be restated in FACTS as it stands now, hidden if it is marked hidden.',
@@ -185,10 +185,11 @@ const ScribeAnalyzer = Object.freeze({
             'Every row in every block above, including SUBJECTS and SCENES, needs exactly one supporting source block. Split assertions from different messages or speakers into separate rows. Separate an observation from an inference, an account from a witnessed event, and an offer or promise from actual possession.',
             '=== EVIDENCE',
             'Write one JSON object per line with section (uppercase heading), row (one-based within that section), messageNumber, blockNumber, quote, attribution, form and dimension. Use the original block number printed in the transcript, or 1 when none is printed. Copy an exact contiguous quote from that block without its speaker label.',
-            'For FACTS and CHANGES copy the statement intact from this quote. Keep words of suspicion, attribution, uncertainty, and future intent. Never file a promise or a suspicion as possession. Include event, day and time when given, subject, attribute (or action), value and related (an array of people/items). Use null for unknown values. Attribution is witnessed, claimed, inferred, promised or ruled.',
+            'Write book entries in your own words when that expresses the story clearly. Only the evidence quote must be verbatim. Interpret the passage in context, including pronouns, attribution, uncertainty and future intent. Never file a promise or a suspicion as possession. Include event, day and time when given, subject, attribute (or action), value and related (an array of people/items). Use null for unknown values. Attribution is witnessed, claimed, inferred, promised or ruled. Use ruled only for a ruling by the player.',
             'For measurements identify an explicit form and dimension, for example human / height and full dragon / length. Preserve original units and words. Otherwise use null for form and dimension. A change to one form does not end a measurement for another.',
+            'Preserve authored chat as story, including italics and parenthetical actions. Interpret genuine operator instructions and notes in context; operator rulings are final.',
             '=== READ',
-            'One line per input message: #n | read if supported rows cite it, or #n | no change if it adds nothing. A bare heading or an omitted message is incomplete.',
+            'Acknowledge every input message you read. Write #n | read, including messages that contribute to a scene without a separate book entry, or #n | no change if you found nothing to file from that message. Only an explicit READ receipt acknowledges a message.',
         ]),
 
         NotesPromptLines: Object.freeze([
@@ -199,7 +200,7 @@ const ScribeAnalyzer = Object.freeze({
             'File what they say in the book. You receive PLAYER CHARACTER, SUBJECTS (everyone and everything that has an entry), LEDGER (the facts now in force for the subjects the notes name) and the PLAYER NOTES.',
             'In the LEDGER each fact ends with (#n) or (owner), and may then be marked pinned or hidden.',
             '',
-            'Answer with these blocks, in this order, each starting with its === line. Leave a block out if it has nothing. Write nothing else.',
+            'These blocks help organize the book. Include any other part of your reading in your own words.',
             '',
             '=== SUBJECTS',
             'Label | kind',
@@ -215,7 +216,7 @@ const ScribeAnalyzer = Object.freeze({
             '=== THREADS',
             'OPEN | something left hanging | #n',
             '',
-            'Categories. Use exactly these words.',
+            'Use a precise category for each statement. The following categories are examples.',
             'One value at a time:',
             '  kind (character, group, place, item or world), age (a plain number whenever the notes give one), eyes, hair (colour and usual style), build (height and body shape), skin, status (alive, dead or missing), location (where they live or are staying), role (what they are or do for a living), relation to <Label> (where they stand with that person; one short sentence)',
             'Any number of values:',
@@ -236,7 +237,7 @@ const ScribeAnalyzer = Object.freeze({
             '4. Use a label from SUBJECTS exactly. For someone or something new, add a SUBJECTS line first; its kind is exactly one of character, group, place, item, world. A label never contains # or a comma.',
             "5. When a note writes a known subject's name another way, write a NAMES line, then use the known label.",
             '6. Mark a fact hidden when the note says it is a secret or known only to the subject.',
-            '7. A note that cannot be read as a fact about a subject is left out. Never guess.',
+            '7. Keep the operator’s wording when a note falls outside these blocks.',
         ]),
 
         AnswersPromptLines: Object.freeze([
@@ -247,7 +248,7 @@ const ScribeAnalyzer = Object.freeze({
             'File each answer in the book, exactly as the player answered. You receive PLAYER CHARACTER, SUBJECTS (everyone and everything that has an entry), LEDGER (the facts now in force for the subjects named) and the ANSWERED QUESTIONS.',
             'In the LEDGER each fact ends with (#n) or (owner), and may then be marked pinned or hidden.',
             '',
-            'Answer with these blocks, in this order, each starting with its === line. Leave a block out if it has nothing. Write nothing else.',
+            'These blocks help organize the book. Include any other part of your reading in your own words.',
             '',
             '=== SUBJECTS',
             'Label | kind',
@@ -261,7 +262,7 @@ const ScribeAnalyzer = Object.freeze({
             'F12 | Label | category | FULLER: the same fact with more detail | #n',
             'F45 | Label | category | ENDED: why it is no longer true | #n',
             '',
-            'Categories. Use exactly these words.',
+            'Use a precise category for each statement. The following categories are examples.',
             'One value at a time:',
             '  kind (character, group, place, item or world), age, eyes, hair, build, skin, status, location, role, relation to <Label>',
             'Any number of values:',
@@ -273,7 +274,6 @@ const ScribeAnalyzer = Object.freeze({
             "3. When an answer contradicts a fact in the LEDGER, or says it is no longer true, do not add a second fact: write a CHANGES line for that fact, with its id, the subject's label and the category exactly as the LEDGER shows them. When an answer adds detail to a fact, write a FULLER line. A fact marked pinned is never changed.",
             '4. Use a label from SUBJECTS exactly. For someone or something new, add a SUBJECTS line first; its kind is exactly one of character, group, place, item, world. A label never contains # or a comma.',
             '5. Mark a fact hidden when the answer says it is a secret, a thought, or known only to the subject.',
-            '6. An answer that settles nothing ("leave it open", "not decided") produces no line. Never guess.',
         ]),
     }),
 
@@ -543,9 +543,10 @@ const ScribeAnalyzer = Object.freeze({
      * @param {string} player
      * @param {readonly string[]} chosen
      * @param {number} through
+     * @param {readonly object[]} questions
      * @return {readonly string[]}
      */
-    opening(state, player, chosen, through) {
+    opening(state, player, chosen, through, questions = state.questions ?? []) {
         const settings = ScribeAnalyzer.Settings;
         const headings = settings.Headings;
         const labels = ScribeAnalyzer.labels(state);
@@ -569,10 +570,13 @@ const ScribeAnalyzer = Object.freeze({
         }
         for (const fact of state.facts) {
             const lines = ledgers.get(fact.subject);
-            if (lines === undefined || fact.status !== ScribeReplay.Status.InForce || fact.position > through) {
+            if (lines === undefined || ![ScribeReplay.Status.InForce, ScribeReplay.Status.Reported].includes(fact.status) || fact.position > through) {
                 continue;
             }
             let line = fact.id + settings.Space + ScribeAnalyzer.statement(fact, labels);
+            if (fact.status === ScribeReplay.Status.Reported) {
+                line += ' [reported account: ' + (fact.evidence?.attribution ?? 'attribution unavailable') + ']';
+            }
             if (fact.pinned) {
                 line += settings.Pinned;
             }
@@ -591,13 +595,18 @@ const ScribeAnalyzer = Object.freeze({
         const decisions = (state.checkerRulings ?? []).filter((decision) => decision.status !== 'superseded' &&
             decision.support.every((source) => source.position <= through)).map((decision) => JSON.stringify({
             disputed: decision.question, status: decision.status, accepted: decision.status === 'settled' ? decision.canonical : null,
-            sources: decision.support.map((source) => ({ message: source.position, speaker: source.speaker, quote: source.quote })),
+            ...(decision.sourceStale ? { sourceStale: true } : {
+                sources: decision.support.map((source) => ({ message: source.position, speaker: source.speaker, quote: source.quote })) }),
         }));
+        const answered = questions.filter((question) => question.answer != null && question.position <= through)
+            .map((question) => JSON.stringify({ question: question.text, answer: question.answer, position: question.position }));
         return Object.freeze([
             ScribeAnalyzer.section(headings.Player, [player]),
             ScribeAnalyzer.section(headings.Subjects, subjects),
             ScribeAnalyzer.section(headings.Ledger, ledger),
             ...(decisions.length ? [ScribeAnalyzer.section('Operator rulings on cited evidence', decisions)] : []),
+            ...(state.operatorStatements?.length ? [ScribeAnalyzer.section('Operator rulings (final)', state.operatorStatements)] : []),
+            ...(answered.length ? [ScribeAnalyzer.section('Operator answers (final)', answered)] : []),
         ]);
     },
 
@@ -734,7 +743,9 @@ const ScribeAnalyzer = Object.freeze({
                     settings.Closing,
             );
         }
-        const messages = settings.MessagesOpen + first + settings.MessagesTo + last + settings.MessagesClose;
+        const messages = last - first + 1 === stretch.length
+            ? settings.MessagesOpen + first + settings.MessagesTo + last + settings.MessagesClose
+            : 'NEW MESSAGES (' + stretch.map((message) => '#' + message.position).join(', ') + '):';
         const [named, ...known] = ScribeAnalyzer.opening(state, player, chosen, last);
         const profiled = profile === null ? [] : [ScribeAnalyzer.section(headings.Profile, [profile])];
         return [
@@ -814,13 +825,13 @@ const ScribeAnalyzer = Object.freeze({
                 settings.NumberOpen +
                 question.position +
                 settings.NumberClose +
-                question.text +
+                (question.id ? '[' + question.id + '] ' : '') + question.text +
                 settings.AnswerMarker +
                 question.answer,
         );
         const chosen = ScribeAnalyzer.select(state, text, player, settings.NoSceneBefore);
         return [
-            ...ScribeAnalyzer.opening(state, player, chosen, settings.NoLimit),
+            ...ScribeAnalyzer.opening(state, player, chosen, settings.NoLimit, []),
             ScribeAnalyzer.section(settings.Headings.Answers, lines),
         ].join(settings.BlankLine);
     },

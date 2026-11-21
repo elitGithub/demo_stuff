@@ -35,13 +35,13 @@ const BRIDGE = 'scribe-bridge';
 const BRIDGE_READ = 'GM_getValue("scribe-bridge", null)';
 const OFFICE = 'Day 1 | The ledger office | private | present: Halvard, Mirelle | They settle the debt\nCHANGED: yes';
 const LOOKS =
-    'Mirelle: brown eyes, black hair, worn in a braid, short and broad-shouldered, a scar across her left palm.';
+    'Mirelle: eyes: brown, hair: black, worn in a braid, build: short and broad-shouldered, appearance: a scar across her left palm.';
 const PARTY = 'The party: a stranger asks after Oswin.';
 const TOLD = 'Halvard came to the harbour to keep the peace, and Mirelle owes Brandt.';
 const LEAD = `[Scribe] The story so far: ${TOLD}`;
 const FIRST_READY = `${LEAD} ${LOOKS} ${PARTY}`;
-const HAIR = `${LEAD} Mirelle has black hair, worn in a braid.`;
-const LOOKS_LEFT = 'Mirelle: brown eyes, short and broad-shouldered, a scar across her left palm.';
+const HAIR = `${LEAD} Mirelle: hair: black, worn in a braid.`;
+const LOOKS_LEFT = 'Mirelle: eyes: brown, build: short and broad-shouldered, appearance: a scar across her left palm.';
 const OLD_HAIR = 'black, worn in a braid';
 const APRON = 'an ink-stained apron';
 const NEW_HAIR = 'black, cut short';
@@ -243,6 +243,7 @@ function storyAnswer(user, known) {
         ['FACTS', facts],
         ['SCENES', scenes],
         ['THREADS', threads],
+        ['QUESTIONS', scriptedSource(41) ? ['Are Tamsin’s eyes grey or blue? | #41'] : []],
     ]) {
         if (lines.length > 0) {
             blocks.push([`=== ${name}`, ...lines].join('\n'));
@@ -276,8 +277,8 @@ function pedantAnswer(user) {
  * @return {string}
  */
 function notesAnswer(user) {
-    const cited = /^\[#(\d+)\] /m.exec(user);
-    return cited === null ? '=== FACTS' : `=== FACTS\nMirelle | belonging | ${COMPASS} | #${cited[1]}`;
+    const cited = [...user.matchAll(/^\[#(\d+)\] /gm)];
+    return ['=== FACTS', ...cited.map((match) => `Mirelle | belonging | ${COMPASS} | #${match[1]}`)].join('\n');
 }
 
 const ANSWERS = Object.freeze({
@@ -288,7 +289,7 @@ const ANSWERS = Object.freeze({
     Pedant: pedantAnswer,
     HistoryCheck: (input) => JSON.stringify({ page: JSON.parse(input).page, complete: true, claims: [], findings: [] }),
     Suggest: () => `LINE: ${RIDER}`,
-    Told: () => TOLD,
+    Told: () => JSON.stringify({ status: 'recap', text: TOLD }),
 });
 
 /**
@@ -400,7 +401,8 @@ async function until(walk, label, condition, most) {
         }
         await pass(walk, STEP_MS);
     }
-    assert.fail(`${label}: it did not happen within ${most} ms of scripted time`);
+    const tab = walk.tabs.at(-1);
+    assert.fail(`${label}: it did not happen within ${most} ms of scripted time. Headline: ${tab.panel.headline()}; ${tab.panel.text('scribe-problems')}; last calls: ${walk.model.calls.slice(-4).map((call) => call.role).join(', ')}`);
 }
 
 /**
@@ -662,7 +664,7 @@ async function reload(walk, tab, width = WIDE) {
     await until(
         walk,
         'the reloaded tab to settle',
-        () => /^(?:Up to date|Waiting to read|Unresolved authorship|Stopped)/.test(fresh.panel.headline()),
+        () => /^(?:Up to date|Waiting to read|Unresolved authorship|Stopped|[\d,]+ of [\d,]+ processed)/.test(fresh.panel.headline()),
         15000,
     );
     return fresh;
@@ -896,7 +898,7 @@ test('the installed Checker resumes its own cited history in order after its bud
     assert.equal(spentToday(walk), 0.375);
     tab = await reload(walk, tab);
     tab.panel.tab('Progress');
-    assert.equal(tab.panel.text('scribe-checked'), 'Checker: 1 of 3 messages checked.');
+    assert.equal(tab.panel.text('scribe-checked'), 'Checker: 1 of 3 messages checked. 0 book entries with linked quotes, 0 without. 2 processed messages await the Checker.');
     tab.panel.tab('Settings');
     tab.panel.type('scribe-setting-budget', '2');
     tab.panel.click('scribe-save-settings');
@@ -1258,7 +1260,7 @@ test('installed reader bounds history requests while writing, checking and reche
     walk.site.reply(CALM_REPLY);
     await until(walk, 'the fourth historical check to start', () => held.release !== null, 8 * TICK_MS);
     const fourth = JSON.parse(walk.model.of('HistoryCheck').at(-1).user);
-    assert.ok(fourth.evidence.some((row) => row.position === 1));
+    assert.ok(fourth.evidence.some((row) => row.ref === 'm1b1'));
     const checking = cursorReads() - written;
     assert.ok(checking <= 8, 'historical cursor requests during checking and append: ' + checking);
     const edited = 'The tide has covered the harbour steps.';
@@ -1274,17 +1276,16 @@ test('installed reader bounds history requests while writing, checking and reche
 });
 
 /**
- * @return {Promise<object>}
+ * @param {object} walk
+ * @return {object}
  */
-async function roomWithExpiringLinks() {
-    const walk = world();
-    walk.site.open(ROOM, campaign(186));
-    walk.model.answers.Story = (input) => CitedStory.answer(input, '');
+function expiringHistory(walk) {
     const zeta = walk.site.rooms.get(ROOM).zeta;
     const respond = zeta.respond.bind(zeta);
     let generation = 0;
     let rotate = false;
     let expired = 0;
+    const walks = [];
     zeta.respond = async (receiver, url, options) => {
         if (!WholeSite.paged(url)) {
             return respond(receiver, url, options);
@@ -1292,6 +1293,7 @@ async function roomWithExpiringLinks() {
         const address = new URL(url);
         const cursor = address.searchParams.get('cursor');
         if (cursor === null) {
+            walks.push({ pages: 0, finished: false });
             if (rotate) {
                 generation++;
             }
@@ -1305,11 +1307,26 @@ async function roomWithExpiringLinks() {
         }
         const response = await respond(receiver, address.href, options);
         const body = JSON.parse(await response.text());
+        const current = walks.at(-1);
+        current.pages++;
+        current.finished ||= body.nextCursor === null;
+        current.oldest = Math.min(current.oldest ?? Infinity, ...body.messages.map((row) => Number(row.id.split('-').at(-1))));
         if (body.nextCursor) {
             body.nextCursor = generation + ':' + body.nextCursor;
         }
         return zetaResponse(url, response.status, JSON.stringify(body));
     };
+    return { walks, rotate: () => { rotate = true; }, expired: () => expired };
+}
+
+/**
+ * @return {Promise<object>}
+ */
+async function roomWithExpiringLinks() {
+    const walk = world();
+    walk.site.open(ROOM, campaign(186));
+    walk.model.answers.Story = (input) => CitedStory.answer(input, '');
+    const links = expiringHistory(walk);
     const tab = await opened(walk);
     await saveKey(walk, tab);
     tab.panel.tab('Settings');
@@ -1321,9 +1338,386 @@ async function roomWithExpiringLinks() {
     assert.doesNotMatch(tab.panel.text('scribe-checked'), /next background history check/);
     const cursorReads = () => walk.site.pageRequests().filter((row) => new URL(row.url).searchParams.has('cursor')).length;
     const scheduleKey = REFERENCE.ScribeStore.name('checkafter', REFERENCE.ScribeStore.room(ROOM));
-    rotate = true;
-    return { walk, tab, cursorReads, scheduleKey, expired: () => expired };
+    links.rotate();
+    return { walk, tab, cursorReads, scheduleKey, expired: links.expired };
 }
+
+/**
+ * @param {number} count
+ * @param {(input: string) => string} story
+ * @return {Promise<object>}
+ */
+async function savedReader(count, story = (input) => CitedStory.answer(input, ''), initial = campaign(count)) {
+    const walk = world();
+    walk.site.open(ROOM, initial);
+    walk.model.answers.Story = story;
+    const first = install(walk, CHAT);
+    await first.openPage();
+    first.ready();
+    await until(walk, 'the initial history to finish', () => first.panel.headline().startsWith('No local book'), 3 * TICK_MS);
+    assert.equal(walk.site.pageRequests().length, Math.ceil(count / 31));
+    await saveKey(walk, first);
+    first.panel.tab('Settings');
+    first.panel.type('scribe-setting-size', '40');
+    first.panel.type('scribe-setting-budget', '8');
+    first.panel.click('scribe-next');
+    const total = count.toLocaleString('en-US');
+    await until(walk, 'the initial book to finish', () => first.panel.headline() === `Up to date: ${total} of ${total} read.`, 20 * TICK_MS);
+    await quiet(walk, 'the initial scene');
+    return { walk, first };
+}
+
+test('refreshing an unchanged saved 1,022-message room fetches one history page', async () => {
+    const { walk, first } = await savedReader(1022);
+    const saved = plain(stored(walk, 'book').log);
+    first.unload();
+    const before = walk.site.pageRequests().length;
+    const paid = walk.model.calls.length;
+    const fresh = install(walk, CHAT);
+    await fresh.openPage();
+    fresh.ready();
+    await until(walk, 'the saved 1,022-message room to reopen',
+        () => fresh.panel.headline() === 'Up to date: 1,022 of 1,022 read.', 3 * TICK_MS);
+    const reads = walk.site.pageRequests().slice(before);
+    assert.equal(reads.length, 1);
+    assert.equal(new URL(reads[0].url).searchParams.has('cursor'), false);
+    assert.deepEqual(plain(stored(walk, 'book').log), saved);
+    assert.equal(walk.model.calls.length, paid);
+    await pass(walk, 2 * TICK_MS);
+    const polls = walk.site.pageRequests().length - before - 1;
+    assert.ok(polls > 0 && polls <= 10, 'history GETs over two reader ticks: ' + polls);
+    assert.ok(walk.model.calls.slice(paid).every((call) => call.role === 'HistoryCheck'));
+    assert.deepEqual(plain(stored(walk, 'book').log.read), saved.read);
+});
+
+test('four old gaps reuse archived page links and include edited evidence in a single reading', async () => {
+    const { walk, first } = await savedReader(1068);
+    first.unload();
+    const gaps = [187, 575, 603, 615];
+    const book = stored(walk, 'book');
+    for (const position of gaps) {
+        delete book.log.read[walk.site.messages[position - 1].id];
+    }
+    REFERENCE.ScribeStore.write(walk.storage, ROOM, 'book', book);
+    const firstEdit = 'The lighthouse burned a red lantern.';
+    const edited = 'The ferryman carried a blue bell.';
+    walk.site.edit(187, firstEdit);
+    walk.site.edit(603, edited);
+    const requests = walk.site.pageRequests().length;
+    const initial = walk.model.of('Story').length;
+    const tab = install(walk, CHAT);
+    await tab.openPage();
+    tab.ready();
+    await until(walk, 'all four old gaps to be saved', () => Object.keys(stored(walk, 'book').log.read).length === 1068, 25 * TICK_MS);
+    const readings = walk.model.of('Story').slice(initial);
+    assert.deepEqual(readings.map((call) => [...CitedStory.messages(call.user).keys()]), [gaps]);
+    assert.equal(stored(walk, 'campaign').messages[186].contents[0].text, firstEdit);
+    assert.ok(readings[0].user.includes(firstEdit));
+    assert.equal(stored(walk, 'campaign').messages[602].contents[0].text, edited);
+    assert.ok(readings[0].user.includes(edited));
+    assert.ok(walk.site.pageRequests().length - requests <= 8);
+    tab.unload();
+});
+
+test('fifty scattered gaps in a saved 1,074-message room cost two Story calls even when archived page links expire', async () => {
+    const { walk, first } = await savedReader(1074);
+    first.unload();
+    const book = stored(walk, 'book');
+    const gaps = Array.from({ length: 50 }, (_, index) => 741 + 6 * index);
+    for (const position of gaps) {
+        delete book.log.read[walk.site.messages[position - 1].id];
+    }
+    REFERENCE.ScribeStore.write(walk.storage, ROOM, 'book', book);
+    const links = expiringHistory(walk);
+    links.rotate();
+    const before = walk.site.pageRequests().length;
+    const paid = walk.model.of('Story').length;
+    const tab = install(walk, CHAT);
+    await tab.openPage();
+    tab.ready();
+    await until(walk, 'the 50 saved gaps to be processed in two readings', () =>
+        Object.keys(stored(walk, 'book').log.read).length === 1074, 8 * TICK_MS);
+    const calls = walk.model.of('Story').slice(paid);
+    assert.deepEqual(calls.map((call) => [...CitedStory.messages(call.user).keys()]), [gaps.slice(0, 40), gaps.slice(40)]);
+    assert.ok(links.expired() > 0);
+    assert.ok(links.walks.every((group) => !group.finished && group.pages <= 2 && group.oldest >= 1013));
+    assert.ok(walk.site.pageRequests().length - before <= 18);
+    tab.unload();
+    const after = walk.site.pageRequests().length;
+    const reopened = install(walk, CHAT);
+    await reopened.openPage();
+    reopened.ready();
+    await until(walk, 'the unchanged room to reopen without another Story call', () =>
+        reopened.panel.headline() === 'Up to date: 1,074 of 1,074 read.', TICK_MS);
+    assert.equal(walk.site.pageRequests().length - after, 1);
+    assert.equal(walk.model.of('Story').length - paid, 2);
+    reopened.unload();
+});
+
+test('an archived page containing a deleted message is reconciled once and the remaining gap gets read', async () => {
+    const { walk, first } = await savedReader(300);
+    first.unload();
+    const book = stored(walk, 'book');
+    const target = walk.site.messages[149].id;
+    delete book.log.read[target];
+    REFERENCE.ScribeStore.write(walk.storage, ROOM, 'book', book);
+    const [removed] = walk.site.messages.splice(145, 1);
+    const reads = walk.site.pageRequests().length;
+    const tab = install(walk, CHAT);
+    await tab.openPage();
+    tab.ready();
+    await until(walk, 'the remaining source and the revised history to be saved', () =>
+        stored(walk, 'book').log.read[target] && stored(walk, 'campaign').messages.length === 299, 8 * TICK_MS);
+    assert.ok(!stored(walk, 'campaign').messages.some((message) => message.id === removed.id));
+    assert.ok(walk.site.pageRequests().length - reads < 15);
+    tab.unload();
+});
+
+test('a legacy paid reading of three italic lines survives refreshing an unchanged saved room', async () => {
+    const { walk, first } = await savedReader(40, undefined, campaign(39).player('*She calls.*\n*She waits.*\n*She leaves.*'));
+    first.unload();
+    const book = stored(walk, 'book');
+    for (const entry of book.log.entries) {
+        delete entry.sourceAuthority;
+    }
+    REFERENCE.ScribeStore.write(walk.storage, ROOM, 'book', book);
+    const paid = walk.model.of('Story').length;
+    const tab = install(walk, CHAT);
+    await tab.openPage();
+    tab.ready();
+    await until(walk, 'the unchanged legacy read receipts to reopen', () =>
+        tab.panel.headline() === 'Up to date: 40 of 40 read.', TICK_MS);
+    await pass(walk, TICK_MS);
+    assert.equal(walk.model.of('Story').length, paid);
+    assert.deepEqual(stored(walk, 'book').log.read, book.log.read);
+    tab.unload();
+});
+
+for (const duplicate of [32, 289]) {
+    test('a saved room with duplicate transport row #' + duplicate + ' fetches one page on each new tip', async () => {
+        const initial = campaign(300);
+        initial.messages.splice(duplicate, 0, initial.messages[duplicate - 1]);
+        const { walk, first } = await savedReader(300, undefined, initial);
+        let tab = first;
+        for (const total of [301, 302]) {
+            tab.unload();
+            walk.site.reply(CALM_REPLY);
+            const before = walk.site.pageRequests().length;
+            const paid = walk.model.of('Story').length;
+            tab = install(walk, CHAT);
+            await tab.openPage();
+            tab.ready();
+            await until(walk, 'only the newly appended reply to be filed', () =>
+                Object.keys(stored(walk, 'book').log.read).length === total, 3 * TICK_MS);
+            const requests = walk.site.pageRequests().slice(before);
+            assert.ok(requests.length <= 2);
+            assert.ok(requests.every((request) => !new URL(request.url).searchParams.has('cursor')));
+            assert.deepEqual(walk.model.of('Story').slice(paid).map((call) => [...CitedStory.messages(call.user).keys()]), [[total]]);
+        }
+        tab.unload();
+    });
+}
+
+test('the installed reader files a paraphrased book entry with its original source passage', async () => {
+    const { walk, first } = await savedReader(40);
+    const quote = 'She drew the iron bolt and let nobody through.';
+    const statement = 'Mirelle controls access to the gatehouse';
+    const initial = walk.model.of('Story').length;
+    walk.model.answers.Story = (input) => CitedStory.answer(input, '=== FACTS\nMirelle | role | ' + statement + ' | #41');
+    walk.site.open(ROOM, campaign(40).narrator(quote));
+    await until(walk, 'the paraphrased fact to be filed', () =>
+        first.panel.headline() === 'Up to date: 41 of 41 read.', 4 * TICK_MS);
+    assert.equal(walk.model.of('Story').length, initial + 1);
+    const book = stored(walk, 'book');
+    const entry = book.log.entries.find((record) => record.sequence === book.log.read['MESSAGE-41']);
+    const fact = entry.operations.find((operation) => operation.type === 'Fact');
+    assert.equal(fact.text, statement);
+    assert.equal(fact.evidence.quote, quote);
+    assert.equal(fact.evidence.messageId, 'MESSAGE-41');
+    assert.equal(fact.evidence.blockNumber, 1);
+});
+
+test('a row labelled #1036 keeps the distinct #1035 source declared by the model and survives refresh', async () => {
+    const { walk, first } = await savedReader(1025);
+    const extended = campaign(1034).reply([['Narrator', 'The council adjourns.'], ['Oswin', 'Who has the keys?'],
+        ['Mirelle', 'Mirelle keeps the seals for the council.']]).narrator('The porters leave.')
+        .narrator('The hall closes.').narrator('Night falls.');
+    const before = walk.model.of('Story').length;
+    walk.model.answers.Story = (input) => CitedStory.answer(input, '=== FACTS\nMirelle | role | keeps the seals | #1035')
+        .replace('keeps the seals | #1035', 'keeps the seals | #1036').replaceAll(' | no change', ' | read');
+    walk.site.open(ROOM, extended);
+    const filed = '1,038 of 1,038 processed · 1,038 acknowledged · 1 filing issues';
+    await until(walk, 'the whole room to be filed', () => first.panel.headline() === filed, 4 * TICK_MS);
+    const fresh = await reload(walk, first);
+    assert.equal(fresh.panel.headline(), filed);
+    assert.deepEqual(walk.model.of('Story').slice(before).map((call) => rangeOf(call.user)), ['1026-1038']);
+    const log = stored(walk, 'book').log;
+    const entry = log.entries.find((row) => row.sequence === log.read['MESSAGE-1035']);
+    const fact = entry.operations.find((row) => row.type === 'Fact');
+    assert.deepEqual([fact.position, fact.cite, fact.evidence.verified, fact.evidence.issue, fact.evidence.citedMessage,
+        fact.evidence.citedBlock, fact.evidence.modelQuote, fact.evidence.quote],
+    [1036, 'MESSAGE-1036', false, 'Citation', 1035, 3, 'Mirelle keeps the seals for the council.', null]);
+});
+
+test('the installed reader finishes #1026–#1036 with read receipts for context and a cited final message', async () => {
+    const start = [
+        '=== SCENES',
+        'Day 4 | #973-#980 | The quay | public | present: Halvard | Halvard keeps watch',
+        '=== THREADS',
+        'OPEN | When will the watch end? | #973',
+    ].join('\n');
+    const { walk, first } = await savedReader(1025, (input) =>
+        CitedStory.answer(input, CitedStory.messages(input).has(973) ? start : ''));
+    const earlier = plain(stored(walk, 'book').log.read);
+    first.unload();
+    const extended = campaign(1025);
+    for (const line of ['The watch continues.', 'The dock is quiet.', 'The bell rings.',
+        'The watch ends.', 'The guards turn in.', 'Dawn breaks.', 'They cross the bridge.',
+        'The market opens.', 'The stalls fill up.', 'A week passes.', 'Halvard carries the new lantern.']) {
+        extended.narrator(line);
+    }
+    walk.site.open(ROOM, extended);
+    const additions = [
+        '=== FACTS',
+        'Halvard | belonging | a new lantern | #1036',
+        '=== SCENES',
+        'Day 4 | #973-#1035 | The quay | public | present: Halvard | The watch ends and a week passes',
+        'Day 11 | #1035-#1036 | The market | public | present: Halvard | Halvard collects the lantern',
+        '=== NIGHTS',
+        '#1035 | A week passes',
+        '=== THREADS',
+        'CLOSE T1 | The watch ends | #1029',
+    ].join('\n');
+    walk.model.answers.Story = (input) => {
+        const [rows] = CitedStory.answer(input, additions).split('=== READ');
+        const receipts = Array.from({ length: 10 }, (_, index) => '#' + (1026 + index) + ' | read');
+        return rows + ['=== READ', ...receipts].join('\n');
+    };
+    const reads = walk.site.pageRequests().length;
+    const calls = walk.model.of('Story').length;
+    const tab = install(walk, CHAT);
+    await tab.openPage();
+    tab.ready();
+    await until(walk, 'the reopened room to join its saved history',
+        () => stored(walk, 'campaign').messages.length === 1036, 3 * TICK_MS);
+    assert.equal(walk.site.pageRequests().length - reads, 1);
+    await until(walk, 'all eleven messages to be filed', () => Object.hasOwn(stored(walk, 'book').log.read, 'MESSAGE-1036'), 4 * TICK_MS);
+    const log = stored(walk, 'book').log;
+    for (const [id, sequence] of Object.entries(earlier)) {
+        assert.equal(log.read[id], sequence);
+    }
+    const entry = log.entries.find((row) => row.sequence === log.read['MESSAGE-1036']);
+    assert.deepEqual(plain(entry.sources.map((source) => source.position)),
+        Array.from({ length: 11 }, (_, index) => 1026 + index));
+    assert.deepEqual(plain(entry.operations.filter((row) => row.type === 'Scene').map((scene) =>
+        [scene.firstPosition, scene.lastPosition, scene.evidence.messageNumber])), [[973, 1035, 1035], [1035, 1036, 1036]]);
+    assert.equal(entry.operations.find((row) => row.type === 'ThreadClose').evidence.quote, 'The watch ends.');
+    assert.equal(entry.operations.find((row) => row.type === 'Fact').evidence.quote, 'Halvard carries the new lantern.');
+    await quiet(walk, 'the final scene to settle');
+    const reopen = walk.site.pageRequests().length;
+    const fresh = await reload(walk, tab);
+    assert.match(fresh.panel.headline(), /1,036 of 1,036 processed · 1,035 acknowledged/u);
+    assert.equal(walk.site.pageRequests().length - reopen, 1);
+    assert.deepEqual(walk.model.of('Story').slice(calls).map((call) => rangeOf(call.user)), ['1026-1036']);
+});
+
+test('reopening a saved 1,034-message room after Zeta replaces its newest ID reads one page', async () => {
+    const { walk, first } = await savedReader(1034);
+    first.unload();
+    const old = walk.site.messages.at(-1);
+    const replacement = { ...old, id: 'MESSAGE-replaced-1034' };
+    walk.site.messages.splice(-1, 1, replacement);
+    const before = walk.site.pageRequests().length;
+    const paid = walk.model.calls.length;
+    const tab = install(walk, CHAT);
+    await tab.openPage();
+    tab.ready();
+    await until(walk, 'the replacement to enter the saved campaign',
+        () => stored(walk, 'campaign').messages.at(-1).id === replacement.id, 3 * TICK_MS);
+    const requests = walk.site.pageRequests().slice(before);
+    assert.equal(requests.length, 1);
+    assert.equal(new URL(requests[0].url).searchParams.has('cursor'), false);
+    assert.deepEqual(plain(stored(walk, 'campaign').messages.map((row) => row.id)), walk.site.messages.map((row) => row.id));
+    const book = stored(walk, 'book');
+    assert.equal(Object.hasOwn(book.log.read, old.id), false);
+    assert.equal(Object.hasOwn(book.log.read, replacement.id), false);
+    assert.equal(Object.keys(book.log.read).length, 1033);
+    assert.equal(walk.model.calls.length, paid);
+    const liveReplacement = { ...replacement, id: 'MESSAGE-live-1034' };
+    walk.site.messages.splice(-1, 1, liveReplacement);
+    const liveStart = walk.site.pageRequests().length;
+    await until(walk, 'the next poll to reconcile a changed live tip',
+        () => stored(walk, 'campaign').messages.at(-1).id === liveReplacement.id, 3 * TICK_MS);
+    const polls = walk.site.pageRequests().slice(liveStart);
+    assert.equal(polls.length, 1);
+    assert.equal(new URL(polls[0].url).searchParams.has('cursor'), false);
+    assert.equal(Object.hasOwn(stored(walk, 'book').log.read, replacement.id), false);
+});
+
+test('the installed reader displays a plain model reading before and after reload without inventing acknowledgments', async () => {
+    const { walk, first } = await savedReader(527);
+    const before = walk.model.of('Story').length;
+    const statement = 'The archivist still holds the bronze key.';
+    walk.model.answers.Story = () => statement;
+    walk.site.open(ROOM, campaign(533));
+    first.panel.tab('Progress');
+    const written = () => Object.keys(stored(walk, 'book').log.read).length;
+    const batches = () => walk.model.of('Story').slice(before).map((call) => rangeOf(call.user));
+    await until(walk, 'all six messages to be processed', () => written() === 533, 4 * TICK_MS);
+    await pass(walk, 3 * TICK_MS);
+    assert.deepEqual(batches(), ['528-533']);
+    const published = 'Scribe · #528–#533 · ' + statement;
+    assert.ok(first.panel.text('scribe-list-lines').includes(published));
+    assert.equal(first.panel.byId('scribe-story-retry').hidden, true);
+    assert.equal(first.panel.text('scribe-list-filing').includes(statement), false);
+    const restored = await reload(walk, first);
+    restored.panel.tab('Progress');
+    await until(walk, 'the saved model answer to return', () => restored.panel.text('scribe-list-lines').includes(published), 2 * TICK_MS);
+    assert.match(restored.panel.text('scribe-counts'), /533 of 533 messages processed\. The model acknowledged 527\./);
+    assert.deepEqual(batches(), ['528-533']);
+    assert.equal(written(), 533);
+});
+
+test('a pre-upgrade content stop is cleared on reload and the first unread message is processed', async () => {
+    const { walk, first } = await savedReader(40);
+    first.unload();
+    const settings = stored(walk, 'settings');
+    settings.stop = { reason: 'Failed', problem: 'The answer for #41 to #41 held no line that could be read.' };
+    REFERENCE.ScribeStore.write(walk.storage, ROOM, 'settings', settings);
+    walk.site.open(ROOM, campaign(41));
+    const before = walk.model.of('Story').length;
+    const tab = install(walk, CHAT);
+    await tab.openPage();
+    tab.ready();
+    await until(walk, 'the saved legacy stop to release', () => Object.keys(stored(walk, 'book').log.read).length === 41, 4 * TICK_MS);
+    assert.equal(stored(walk, 'settings').stop, null);
+    assert.deepEqual(walk.model.of('Story').slice(before).map((call) => rangeOf(call.user)), ['41-41']);
+});
+
+test('a legacy saved room refreshes through the first known page and preserves the older book', async () => {
+    const { walk, first } = await savedReader(124);
+    first.unload();
+    const saved = plain(stored(walk, 'book').log.read);
+    walk.storage.remove(REFERENCE.ScribeStore.name('historypages', REFERENCE.ScribeStore.room(ROOM)));
+    const requests = walk.site.pageRequests().length;
+    const unchanged = install(walk, CHAT);
+    await unchanged.openPage();
+    unchanged.ready();
+    await until(walk, 'the legacy book to reopen', () => unchanged.panel.headline() === 'Up to date: 124 of 124 read.', TICK_MS);
+    assert.equal(walk.site.pageRequests().length - requests, 1);
+    unchanged.unload();
+    walk.site.open(ROOM, campaign(189));
+    const before = walk.site.pageRequests().length;
+    const changed = install(walk, CHAT);
+    await changed.openPage();
+    changed.ready();
+    await until(walk, 'the 65 offline messages to join the saved history',
+        () => stored(walk, 'campaign').messages.length === 189, TICK_MS);
+    const pages = walk.site.pageRequests().slice(before);
+    assert.deepEqual(pages.map((row) => new URL(row.url).searchParams.has('cursor')), [false, true, true]);
+    assert.deepEqual(Array.from(stored(walk, 'campaign').messages, (row) => row.id), walk.site.messages.map((row) => row.id));
+    assert.deepEqual(plain(stored(walk, 'book').log.read), saved);
+});
 
 test('expired Zeta page links space out background history checks while new messages still reach the book', async () => {
     const { walk, tab, cursorReads, expired } = await roomWithExpiringLinks();
@@ -1336,7 +1730,10 @@ test('expired Zeta page links space out background history checks while new mess
     walk.site.reply(CALM_REPLY);
     await until(walk, 'the new reply to reach the book during the wait', () => tab.panel.headline() === 'Up to date: 187 of 187 read.', 2 * TICK_MS);
     await pass(walk, 8 * 60000);
-    assert.equal(tab.panel.text('scribe-checked'), scheduled.replace('of 186', 'of 187'));
+    const updated = tab.panel.text('scribe-checked');
+    assert.equal(updated.split('The next background history check')[1], scheduled.split('The next background history check')[1]);
+    assert.match(updated, /of 187 messages checked/);
+    assert.match(updated, /185 processed messages await the Checker/);
     assert.equal(cursorReads(), earlierReads);
     assert.equal(walk.model.of('HistoryCheck').length, earlierChecks);
     await until(walk, 'the next expensive check to resume', () => cursorReads() > earlierReads &&
@@ -1483,7 +1880,7 @@ const OLD_LEDGER = 'Mirelle keeps the harbour ledger.';
 const NEW_LEDGER = 'Mirelle keeps the clocktower logs.';
 const KEY_NOTE = 'Oswin holds the spare key.';
 const NARRATIVE = 'I shut the cover.';
-const noteBlock = (text) => `*(\n${text}\n)*`;
+const noteBlock = (text) => text ? `[Operator note] ${text}` : '';
 
 for (const { name, size, original, edit, extra, notes, story } of [
     { name: 'an edited note-only #441', size: 40, original: noteBlock(OLD_LEDGER), edit: noteBlock(NEW_LEDGER), notes: [NEW_LEDGER] },
@@ -1515,10 +1912,18 @@ for (const { name, size, original, edit, extra, notes, story } of [
         }
         walk.site.open(ROOM, room);
         const firstRange = `${prefix + 1}-${boundary}`;
-        const savedAtNotes = [];
+        const savedAtTail = [];
+        const normalStory = walk.model.answers.Story;
+        walk.model.answers.Story = (input) => {
+            if (!notes.length || !input.includes('[#' + (boundary + 1) + ']')) {
+                return normalStory(input);
+            }
+            const rows = notes.map((text, index) => 'Ledger | detail | ' + text + ' | #' + (boundary + index + 1));
+            return CitedStory.answer(input, '=== FACTS\n' + rows.join('\n'));
+        };
         walk.model.watch = (call) => {
-            if (call.role === 'Notes') {
-                savedAtNotes.push(Object.keys(stored(walk, 'book').log.read).length);
+            if (call.role === 'Story' && call.user.includes('[#' + (boundary + 1) + ']')) {
+                savedAtTail.push(Object.keys(stored(walk, 'book').log.read).length);
             }
         };
         const held = holdCompletion(walk, (role, input) => role === 'Story' && rangeOf(input) === firstRange);
@@ -1538,7 +1943,10 @@ for (const { name, size, original, edit, extra, notes, story } of [
         await pass(walk, 4 * TICK_MS);
         await until(walk, 'written progress to return after the background comparison', () => tab.panel.headline() === complete, TICK_MS);
         const saved = plain(stored(walk, 'book'));
-        assert.deepEqual(saved.log.notes, notes);
+        for (const note of notes) {
+            assert.ok(saved.log.entries.some((entry) => entry.operations.some((operation) => operation.text === note)));
+        }
+        assert.ok(!JSON.stringify(saved.log).includes(OLD_LEDGER));
         assert.equal(Object.keys(saved.log.read).length, total);
         for (const row of REFERENCE.ScribeIntake.read(walk.site.messages).messages) {
             assert.equal(saved.fingerprints[row.id], row.fingerprint);
@@ -1555,19 +1963,18 @@ for (const { name, size, original, edit, extra, notes, story } of [
         const calls = walk.model.calls.slice(firstCall);
         const storyCalls = calls.filter((call) => call.role === 'Story');
         const noteCalls = calls.filter((call) => call.role === 'Notes');
-        assert.deepEqual(storyCalls.map((call) => rangeOf(call.user)), story ? [firstRange, `${boundary + 1}-${total}`] : [firstRange]);
+        assert.deepEqual(storyCalls.map((call) => rangeOf(call.user)), edit !== null ? [firstRange, `${boundary + 1}-${total}`] : [firstRange]);
         if (story) {
             assert.ok(storyCalls.at(-1).user.includes(NARRATIVE));
         }
-        assert.equal(noteCalls.length, notes.length ? 1 : 0);
-        assert.deepEqual(savedAtNotes, notes.length ? [boundary] : []);
+        assert.equal(noteCalls.length, 0);
+        assert.deepEqual(savedAtTail, edit !== null ? [boundary] : []);
         for (const [index, note] of notes.entries()) {
-            assert.ok(noteCalls[0].user.includes(`[#${boundary + index + 1}] ${note}`));
+            assert.ok(storyCalls.at(-1).user.includes('[Operator note] ' + note));
         }
         assert.ok([...storyCalls, ...noteCalls].every((call) => !call.user.includes(OLD_LEDGER)));
-        const otherCharges = calls.filter((call) => call.role !== 'Notes').reduce((sum, call) => sum + (walk.model.costs[call.role] ?? 0), 0);
-        const noteSpend = spentToday(walk) - initialSpend - otherCharges;
-        assert.ok(Math.abs(noteSpend - (notes.length ? COSTS.Notes : 0)) < 1e-9);
+        const otherCharges = calls.filter((call) => call !== storyCalls[1]).reduce((sum, call) => sum + (walk.model.costs[call.role] ?? 0), 0);
+        assert.ok(Math.abs(spentToday(walk) - initialSpend - otherCharges - (edit !== null ? COSTS.Story : 0)) < 1e-9);
     });
 }
 
@@ -1651,6 +2058,85 @@ test('4. the first message after adopting carries a reminder built from the book
     assert.equal(went, `I look around.\n@: ${FIRST_READY}`);
 });
 
+for (const format of ['plain text', 'JSON', 'Markdown-fenced JSON']) {
+    test(`the installed userscript sends the Writer's ${format} recap with the next message`, async () => {
+        const narrative = '“I cannot open the gate,” said Mirelle. Halvard waited.';
+        const json = JSON.stringify({ status: 'recap', text: narrative });
+        const responses = { 'plain text': narrative, JSON: json, 'Markdown-fenced JSON': '```json\r\n' + json + '\r\n```' };
+        const walk = world();
+        walk.model.answers.Told = () => responses[format];
+        const tab = await opened(walk);
+        await saveKey(walk, tab);
+        await adopt(walk, tab, '2');
+        await forceReminder(walk, tab);
+        const reminder = FIRST_READY.replace(TOLD, narrative);
+        assert.equal(stored(walk, 'live').story.text, narrative);
+        assert.equal(tab.panel.byId('scribe-reminder').value, reminder);
+        assert.equal(await send(walk, tab, 'I wait.'), 'I wait.\n@: ' + reminder);
+        assert.equal(asked(walk, 'Told', 0), 1);
+    });
+}
+
+for (const edited of [false, true]) {
+    test(`the installed writer recovers a saved format rejection with a ${edited ? 'queued edit' : 'due recap'}`, async () => {
+        const walk = world();
+        let tab = await opened(walk);
+        await saveKey(walk, tab);
+        await saveInterval(walk, tab, 2);
+        walk.model.answers.Told = () => '{"status":"declined"}';
+        await adopt(walk, tab, '8');
+        await send(walk, tab, 'I listen.');
+        await until(walk, 'the writer outcome to be saved', () => stored(walk, 'live').untold !== null, 2 * TICK_MS);
+        const parked = stored(walk, 'live').untold;
+        const mine = '[Scribe] Keep my own paragraph.';
+        if (edited) {
+            await queueSelection(tab, mine);
+        }
+        const saved = stored(walk, 'live');
+        tab.unload();
+        saved.untold = { ...parked, reason: 'the writer returned no usable recap in the requested format' };
+        REFERENCE.ScribeStore.write(walk.storage, ROOM, 'live', saved);
+        const before = walk.model.calls.length;
+        const narrative = 'Halvard has the map.';
+        walk.model.answers.Told = () => narrative;
+        tab = await reload(walk, tab);
+        tab.panel.tab('Findings');
+        const expected = edited ? mine : narrative;
+        await until(walk, 'the previous rejection to be gone and a usable paragraph to be available',
+            () => tab.panel.byId('scribe-reminder').value.includes(expected), 4 * TICK_MS);
+        await pass(walk, 3 * TICK_MS);
+        assert.equal(asked(walk, 'Told', before), edited ? 0 : 1);
+        assert.doesNotMatch(tab.panel.text('scribe-problems'), /usable result|requested format/);
+        tab = await reload(walk, tab);
+        await pass(walk, 3 * TICK_MS);
+        const sent = await send(walk, tab, 'I nod.');
+        if (edited) {
+            assert.equal(sent, 'I nod.\n@: ' + mine);
+        } else {
+            assert.ok(sent.includes(narrative), sent);
+        }
+        assert.equal(asked(walk, 'Told', before), edited ? 0 : 1);
+    });
+}
+
+test('the installed writer reports empty text and polls and reloads do not repeat the same paid call', async () => {
+    const walk = world();
+    let tab = await opened(walk);
+    await saveKey(walk, tab);
+    await saveInterval(walk, tab, 2);
+    walk.model.answers.Told = () => '   ';
+    await adopt(walk, tab, '8');
+    const before = walk.model.calls.length;
+    await send(walk, tab, 'I listen.');
+    const warning = 'The writer returned no recap text. Your reminder is still due.';
+    await until(walk, 'the actual empty response to be reported', () => tab.panel.text('scribe-problems') === warning, 3 * TICK_MS);
+    tab = await reload(walk, tab);
+    await pass(walk, 4 * TICK_MS);
+    assert.equal(tab.panel.text('scribe-problems'), warning);
+    assert.equal(asked(walk, 'Told', before), 1);
+    assert.equal(stored(walk, 'live').ready, null);
+});
+
 test('a slow writer leaves the default sixth send bare and delivers on the first eligible send without another reply', async () => {
     const walk = world();
     const tab = await opened(walk);
@@ -1684,7 +2170,7 @@ for (const layout of ['top', 'frame']) {
         await saveKey(walk, tab);
         await saveInterval(walk, tab, 2);
         walk.model.costs.Told = 0.12;
-        walk.model.answers.Told = () => "I can't write this story.\n\n[Story template]";
+        walk.model.answers.Told = () => '{"status":"declined"}';
         await adopt(walk, tab, '8');
         const before = walk.model.calls.length;
         const spent = spentToday(walk);
@@ -1711,7 +2197,7 @@ for (const layout of ['top', 'frame']) {
         assert.equal(asked(walk, 'Told', before), 1);
         const dialogue = '“I can’t write this story,” Mirra said.';
         walk.model.answers.Scene = () => OFFICE;
-        walk.model.answers.Told = () => dialogue;
+        walk.model.answers.Told = () => JSON.stringify({ status: 'recap', text: dialogue });
         walk.site.reply(CALM_REPLY);
         await until(walk, 'the dialogue recap', () => stored(walk, 'live').ready?.includes(dialogue), 4 * TICK_MS);
         const ready = stored(walk, 'live').ready;
@@ -1731,7 +2217,9 @@ for (const layout of ['top', 'frame']) {
         const { walk, tab } = await adopted('8', { layout });
         const saved = stored(walk, 'live');
         tab.unload();
-        saved.story.text = 'I can offer a summary instead.';
+        saved.basis.story = saved.story.key = 'pre-structured-recap';
+        saved.story.text = 'Unable to assist with that request.';
+        walk.model.answers.Told = () => '{"status":"declined"}';
         saved.ready = '[Scribe] The story so far: ' + saved.story.text;
         for (const kind of SYNCED) {
             walk.worker.seed(CLOUD_ROOM, kind, 1, [kind === 'live' ? JSON.stringify(saved) : localText(walk.storage, kind)]);
@@ -1754,7 +2242,7 @@ for (const layout of ['top', 'frame']) {
         assert.equal(after.ready, null);
         assert.equal(after.story, null);
         await pass(walk, 6 * TICK_MS);
-        assert.equal(walk.model.by(restored.name).filter((call) => call.role === 'Told').length, 0);
+        assert.equal(walk.model.by(restored.name).filter((call) => call.role === 'Told').length, 1);
     });
 
     test(`a due ${layout} reminder waits for the saved reply and uses its new evidence`, async () => {
@@ -1772,7 +2260,7 @@ for (const layout of ['top', 'frame']) {
         const previous = walk.model.answers.Story;
         walk.model.answers.Story = (input) => input.includes(reply)
             ? CitedStory.answer(input, '=== THREADS\nOPEN | ' + clue + ' | #95') : previous(input);
-        walk.model.answers.Told = (input) => input.includes(clue) ? 'The lantern has gone dark.' : 'The lantern is burning.';
+        walk.model.answers.Told = (input) => JSON.stringify({ status: 'recap', text: input.includes(clue) ? 'The lantern has gone dark.' : 'The lantern is burning.' });
         const held = holdCompletion(walk, (role, input) => role === 'Story' && input.includes(reply));
         const first = walk.model.calls.length;
         await arrive(walk, tab, ASKED, [['Narrator', reply]]);
@@ -1877,7 +2365,7 @@ test('6. a new reply arrives', async () => {
     assert.deepEqual(tab.panel.buttonTexts(findings[0]), ['Dismiss', 'Rule it...']);
 });
 
-test('6. a story character is told only what the chat added, and an unreadable story says so once', async () => {
+test('6. a character profile preserves the model’s appearance claims, and an unreadable story says so once', async () => {
     const told = world();
     told.site.rooms.get(ROOM).zeta.characters = [
         { name: 'Mirelle', description: 'A money-changer with brown eyes and black hair worn in a braid.' },
@@ -1888,7 +2376,7 @@ test('6. a story character is told only what the chat added, and an unreadable s
     await forceReminder(told, tab);
     assert.equal(
         stored(told, 'live').ready,
-        `${LEAD} Mirelle: short and broad-shouldered, a scar across her left palm. ${PARTY}`,
+        FIRST_READY,
     );
     tab.panel.tab('Progress');
     assert.equal(tab.panel.byId('scribe-story').hidden, true);
@@ -1923,6 +2411,29 @@ test('6. a story character is told only what the chat added, and an unreadable s
         ['/v1/rooms/harbour'],
     );
     assert.equal(unread.model.calls.some((call) => call.user.includes('PLAYER CHARACTER PROFILE:')), false);
+});
+
+test('installed scene, recap, note and suggestion use delivered model text when the provider reports length', async () => {
+    const walk = world();
+    for (const role of ['Scene', 'Told', 'Notes', 'Suggest']) {
+        walk.model.answers[role] = (input) => ({ text: ANSWERS[role](input), finish: 'length' });
+    }
+    const tab = await opened(walk);
+    await saveKey(walk, tab);
+    await adopt(walk, tab, '8');
+    await forceReminder(walk, tab);
+    assert.equal(stored(walk, 'live').ready, FIRST_READY);
+    assert.ok(stored(walk, 'live').now.present.length);
+    tab.panel.tab('Rulings');
+    tab.panel.type('scribe-tell', 'Mirelle has auburn hair.');
+    tab.panel.click('scribe-tell-work');
+    await until(walk, 'delivered note preview', () => tab.panel.text('scribe-understood').includes('File it'), 5000);
+    tab.panel.button(tab.panel.byId('scribe-understood'), 'File it').click();
+    await until(walk, 'delivered note saved', () => stored(walk, 'book').log.entries.some((item) => item.origin === 'Notes'), 5000);
+    tab.panel.tab('Findings');
+    tab.panel.button(tab.panel.byId('scribe-offer-actions'), 'Suggest one').click();
+    await until(walk, 'delivered offer', () => tab.panel.text('scribe-offer-text') === RIDER, 5000);
+    assert.equal(walk.model.of('Suggest').length, 1);
 });
 
 test('7. sending', async () => {
@@ -2031,32 +2542,59 @@ test('8. switching back rereads the changed stretch and checks the restored vers
 test('10. a ruling', async () => {
     const { walk, tab } = await adopted('2');
     tab.panel.tab('Summary');
-    assert.equal(tab.panel.text('scribe-needs'), '1 conflict');
+    assert.equal(tab.panel.text('scribe-needs'), '1 question');
     tab.panel.tab('Rulings');
-    const rows = tab.panel.rows('conflicts');
+    const rows = tab.panel.rows('questions');
     assert.equal(rows.length, 1);
-    const value = tab.panel.buttonStarting(rows[0], 'grey');
+    assert.match(rows[0].textContent, /Are Tamsin’s eyes grey or blue/);
+    const value = tab.panel.button(rows[0], 'Dismiss');
     const from = walk.model.calls.length;
     value.click();
     await until(walk, 'step 10: the ruling to be saved', () => tab.panel.rows('made').length === 1, 5000);
     await quiet(walk, 'step 10: after the ruling');
     assert.ok(rolesSince(walk, from).every((role) => role === 'HistoryCheck'));
     tab.panel.tab('Rulings');
-    assert.equal(tab.panel.rows('conflicts').length, 0);
-    assert.equal(tab.panel.rowTexts('made')[0].includes('Pin'), true);
+    assert.equal(tab.panel.rows('questions').length, 0);
+    assert.equal(bookState(walk).questions.find((question) => question.position === 41).dismissed, true);
     tab.panel.tab('Summary');
     assert.equal(tab.panel.text('scribe-needs'), 'Nothing needs a ruling.');
     const fresh = await reload(walk, tab);
     fresh.panel.tab('Rulings');
     assert.equal(fresh.panel.rows('made').length, 1);
+    assert.equal(fresh.panel.rows('questions').length, 0);
+});
+
+test('a saved operator pin on legacy eye-color rows survives reload and can be revoked in Rulings', async () => {
+    const { walk, tab } = await adopted('2');
+    const book = stored(walk, 'book');
+    const legacyEyes = book.log.entries.flatMap((entry) => entry.operations)
+        .filter((row) => row.category === 'eyes' && ['grey', 'blue'].includes(row.text));
+    assert.equal(legacyEyes.length, 2);
+    for (const row of legacyEyes) {
+        delete row.evidence.valueSupplied;
+    }
+    const state = bookState(walk);
+    const grey = state.facts.find((fact) => fact.id === legacyEyes.find((row) => row.text === 'grey').fact);
+    REFERENCE.ScribeLog.rule(book.log, state, { type: 'Pin', subject: grey.subject, category: grey.category,
+        target: null, text: grey.text, hidden: grey.hidden });
+    REFERENCE.ScribeStore.write(walk.storage, ROOM, 'book', book);
+    const old = await reload(walk, tab);
+    old.panel.tab('Rulings');
+    assert.equal(bookState(walk).facts.find((fact) => fact.id === grey.id).pinned, true);
+    const fresh = await reload(walk, old);
+    fresh.panel.tab('Rulings');
     assert.equal(fresh.panel.rows('conflicts').length, 0);
+    assert.match(fresh.panel.rowTexts('made')[0], /Pin/);
+    assert.equal(fresh.panel.rows('questions').length, 1);
+    fresh.panel.button(fresh.panel.rows('made')[0], 'Revoke').click();
+    await until(walk, 'the legacy pin to be revoked', () => !bookState(walk).facts.find((fact) => fact.id === grey.id).pinned, 5000);
 });
 
 test('9. an edited old message', async () => {
     const { walk, tab } = await adopted('2');
     const prefix = Object.fromEntries(Object.entries(stored(walk, 'book').log.read).slice(0, 4));
     tab.panel.tab('Rulings');
-    tab.panel.buttonStarting(tab.panel.rows('conflicts')[0], 'grey').click();
+    tab.panel.button(tab.panel.rows('questions')[0], 'Dismiss').click();
     await until(walk, 'step 9: the ruling to be saved first', () => tab.panel.rows('made').length === 1, 5000);
     const from = walk.model.calls.length;
     walk.site.edit(5, 'I am Oswin, harbourmaster of this port. Keep the peace, guard.');
@@ -2161,7 +2699,7 @@ for (const layout of ['top', 'frame']) {
         await until(walk, 'hair edited', () => bookState(walk).facts.some((fact) => fact.text === copper), 5000);
         await quiet(walk, 'after the edit with an automatic paragraph');
         assert.ok(rolesSince(walk, before).every((role) => role === 'HistoryCheck'));
-        walk.model.answers.Told = (input) => input.includes(copper) ? 'Mirelle wears a silver braid.' : 'The market is quiet.';
+        walk.model.answers.Told = (input) => JSON.stringify({ status: 'recap', text: input.includes(copper) ? 'Mirelle wears a silver braid.' : 'The market is quiet.' });
         tab.panel.tab('Findings');
         tab.panel.click('scribe-force');
         await until(walk, 'fresh corrected recap', () => stored(walk, 'live').ready?.includes('Mirelle wears a silver braid.'), 3 * TICK_MS);
@@ -2216,7 +2754,7 @@ for (const layout of ['top', 'frame']) {
         assert.equal(await send(walk, tab, 'I listen.'), 'I listen.\n@: [Scribe] ' + chosen);
         walk.model.answers.Scene = () => 'Day 2 | The quay | public | present: Halvard, Oswin, Mirra | Oswin meets Mirra\nCHANGED: yes';
         const told = 'Oswin offers a bounty of 50,000 gold toward Mirra.';
-        walk.model.answers.Told = (input) => input.includes(corrected) ? told : 'The quay is quiet.';
+        walk.model.answers.Told = (input) => JSON.stringify({ status: 'recap', text: input.includes(corrected) ? told : 'The quay is quiet.' });
         await arrive(walk, tab, 'I watch.', [['Narrator', 'Oswin meets Mirra at the quay.']]);
         await until(walk, 'Mirra present', () => stored(walk, 'live').now?.present?.some((person) => person.name === 'Mirra' || person.label === 'Mirra' || person === 'Mirra'), 4 * TICK_MS);
         await forceReminder(walk, tab);
@@ -2356,14 +2894,19 @@ for (const origin of ['Findings', 'Rulings']) {
             await pass(walk, 1000);
             fresh.panel.button(fresh.panel.byId('scribe-understood'), 'File it').click();
             await pass(walk, 1000);
-            assert.equal(fresh.panel.text('scribe-badge'), '2 to rule, 2 findings');
-            fresh.panel.click('scribe-keep-first');
-            await pass(walk, 1000);
-            assert.equal(fresh.panel.text('scribe-badge'), '1 finding');
+            assert.equal(fresh.panel.text('scribe-badge'), '1 to rule, 2 findings');
+            assert.ok(bookState(walk).facts.some((fact) => fact.text === 'pink'));
+            fresh.panel.tab('Findings');
+            const hair = findingRows(fresh).find((row) => row.textContent.includes('auburn'));
+            fresh.panel.button(hair, 'Rule it...').click();
+            walk.model.answers.Notes = () => '=== FACTS\nMirelle | hair | auburn | #93';
+            fresh.panel.click('scribe-tell-work');
+            await until(walk, 'explicit hair ruling preview', () => fresh.panel.text('scribe-understood').includes('auburn'), 5000);
+            fresh.panel.button(fresh.panel.byId('scribe-understood'), 'File it').click();
+            await until(walk, 'hair settled independently', () => fresh.panel.text('scribe-badge') === '1 to rule, 1 finding', 5000);
             assert.match(findingRows(fresh)[0].textContent, /green/);
-            const pinned = stored(walk, 'book').log.entries.flatMap((entry) => entry.operations)
-                .find((operation) => operation.type === 'Pin' && operation.category === 'hair');
-            assert.equal(pinned.resolutions.length, 1);
+            const latest = stored(walk, 'book').log.entries.findLast((entry) => entry.origin === 'Notes');
+            assert.equal(latest.operations.find((operation) => operation.text === 'auburn').resolutions.length, 1);
         }
     });
 }
@@ -2396,18 +2939,51 @@ test('12. a chosen suggestion goes out once, after the reminder', async () => {
     assert.equal(second.includes(RIDER), false);
 });
 
-test('12. an answer without the mark offers nothing', async () => {
+test('installed suggestion keeps the complete unmarked provider text and the operator controls delivery', async () => {
     const { walk, tab } = await replied('2');
-    walk.model.answers.Suggest = () => RIDER;
-    const from = walk.model.calls.length;
+    const answer = '"@Rider [Scribe] calls."\n' + 'A long reply. '.repeat(28);
+    walk.model.answers.Suggest = () => ({ text: [{ type: 'text', text: answer.slice(0, 20) }, { type: 'text', text: answer.slice(20) }] });
     tab.panel.tab('Findings');
     tab.panel.button(tab.panel.byId('scribe-offer-actions'), 'Suggest one').click();
-    await until(walk, 'step 12: the answer to be weighed', () => asked(walk, 'Suggest', from) === 1, 5000);
-    await pass(walk, 500);
-    assert.equal(tab.panel.text('scribe-offer-text'), '');
-    assert.equal(tab.panel.byId('scribe-offer-text').hidden, true);
-    assert.equal(tab.panel.text('scribe-offer-outcome'), 'Nothing fits this scene right now.');
-    assert.deepEqual(tab.panel.buttonTexts(tab.panel.byId('scribe-offer-actions')), ['Suggest one']);
+    await until(walk, 'offer shown', () => tab.panel.text('scribe-offer-text') === answer, 5000);
+    assert.equal(stored(walk, 'live').offer.text, answer);
+    assert.equal(stored(walk, 'live').suggestion, null);
+    tab.panel.button(tab.panel.byId('scribe-offer-actions'), 'Use').click();
+    await settle();
+    assert.equal(stored(walk, 'live').suggestion, answer);
+});
+
+test('installed manual ruling preserves long operator words and any writer response on confirmation', async () => {
+    const { walk, tab } = await adopted('8');
+    const words = '[#10] The operator rules.\n' + 'word '.repeat(410);
+    const answer = '“An unstructured reading.”\nAnd a second line.';
+    walk.model.answers.Notes = () => answer;
+    tab.panel.tab('Rulings');
+    tab.panel.type('scribe-tell', words);
+    tab.panel.click('scribe-tell-work');
+    await until(walk, 'unstructured note preview', () => tab.panel.text('scribe-understood').includes(answer), 5000);
+    assert.equal(stored(walk, 'book').log.entries.some((entry) => entry.operatorText === words), false);
+    tab.panel.button(tab.panel.byId('scribe-understood'), 'File it').click();
+    await until(walk, 'operator wording filed', () => stored(walk, 'book').log.entries.some((entry) => entry.operatorText === words), 5000);
+    const entry = stored(walk, 'book').log.entries.find((item) => item.operatorText === words);
+    assert.equal(entry.modelResponse, answer);
+    assert.deepEqual(Array.from(bookState(walk).operatorStatements), [words]);
+});
+
+test('installed scene keeps prose without assigning unknown cast or location', async () => {
+    const walk = world();
+    const answer = '“Look.”\nThey wait for a response.';
+    walk.model.answers.Scene = () => answer;
+    const tab = await opened(walk);
+    await saveKey(walk, tab);
+    await adopt(walk, tab, '8');
+    await forceReminder(walk, tab);
+    const now = stored(walk, 'live').now;
+    assert.equal(now.modelResponse, answer);
+    assert.equal(now.summary, answer);
+    assert.equal(now.day, null);
+    assert.equal(now.place, '');
+    assert.equal(now.present.length, 0);
 });
 
 /**
@@ -2416,7 +2992,7 @@ test('12. an answer without the mark offers nothing', async () => {
 async function exhausted() {
     const { walk, tab } = await replied('1.95');
     const before = spentToday(walk);
-    walk.model.answers.Pedant = () => '';
+    walk.model.answers.Pedant = () => ({ text: '', finish: 'error' });
     walk.model.costs.Pedant = 0.15;
     const from = walk.model.calls.length;
     await arrive(walk, tab, 'I ask Mirelle about the red ledger.', [['Narrator', 'Mirelle taps the red ledger and smiles.']]);
@@ -3162,7 +3738,7 @@ test('14. a second tab watches', async () => {
         tab.panel.rows('cast').map((row) => row.children[0].textContent),
     );
     second.panel.tab('Rulings');
-    const value = second.panel.buttonStarting(second.panel.rows('conflicts')[0], 'grey');
+    const value = second.panel.button(second.panel.rows('questions')[0], 'Dismiss');
     const before = storageText(walk);
     const sets = walk.storage.count('set');
     const removes = walk.storage.count('remove');
@@ -3174,7 +3750,7 @@ test('14. a second tab watches', async () => {
     assert.equal(storageText(walk), before);
     await pass(walk, TICK_MS * 2);
     second.panel.tab('Rulings');
-    assert.equal(second.panel.rows('conflicts').length, 1);
+    assert.equal(second.panel.rows('questions').length, 1);
     assert.equal(second.panel.rows('made').length, 0);
     assert.equal(walk.model.by(second.name).length, 0);
     assert.equal(second.panel.headline(), 'Another tab is reading this chat.');
@@ -3359,7 +3935,7 @@ test('16. starting the book over', async () => {
     const newReady = live.ready;
     assert.equal(typeof newReady, 'string');
     assert.equal(newReady === oldReady, false);
-    assert.equal(newReady, `${LEAD} Mirelle has black hair, cut short. ${LOOKS_LEFT} ${PARTY}`);
+    assert.equal(newReady, `${LEAD} Mirelle: hair: black, cut short. ${LOOKS_LEFT} ${PARTY}`);
     assert.equal(newReady.includes('worn in a braid'), false);
     assert.deepEqual(queued(tab), [`Reminder: ${newReady}`]);
     const newFindings = findingRows(tab).map((row) => row.textContent);
@@ -3609,7 +4185,7 @@ async function wholeWalk() {
     await adopt(walk, first, '5');
     const tab = await reload(walk, first);
     tab.panel.tab('Rulings');
-    tab.panel.buttonStarting(tab.panel.rows('conflicts')[0], 'grey').click();
+    tab.panel.button(tab.panel.rows('questions')[0], 'Dismiss').click();
     await pass(walk, 1000);
     walk.site.edit(5, 'I am Oswin, harbourmaster of this port. Keep the peace, guard.');
     tab.panel.tab('Progress');
@@ -3659,7 +4235,7 @@ async function wholeWalk() {
     tab.panel.type('scribe-setting-budget', budget);
     tab.panel.click('scribe-save-settings');
     await pass(walk, 1000);
-    walk.model.answers.Pedant = () => '';
+    walk.model.answers.Pedant = () => ({ text: '', finish: 'error' });
     walk.model.costs.Pedant = 0.15;
     const failing = walk.model.calls.length;
     await arrive(walk, tab, 'I ask Mirelle about the red ledger.', [['Narrator', 'Mirelle taps the red ledger and smiles.']]);
@@ -4161,13 +4737,27 @@ async function moved(walk, tab) {
     return stored(walk, 'live').ready;
 }
 
+test('installed live Checker keeps its whole mixed reply on the source and shows it in Readings with the credential masked', async () => {
+    const { walk, tab } = await replied('2');
+    const text = '=== NOW\nMirelle | bearing | cautious\n=== MORE\nAn open question. ' + KEY;
+    walk.model.answers.Pedant = () => text;
+    await arrive(walk, tab, 'I listen.', [['Narrator', 'Mirelle waits for the bell.']]);
+    const last = walk.site.messages.at(-1).id;
+    await until(walk, 'the new Checker wording to be saved', () => stored(walk, 'live').seen?.id === last, TICK_MS * 2);
+    const matching = stored(walk, 'live').checkerRows.filter((item) => item.id === last && item.modelReading);
+    assert.equal(matching.length, 1);
+    assert.equal(matching[0].statement, text.replace(KEY, '[key]'));
+    tab.panel.tab('Progress');
+    assert.ok(tab.panel.rows('lines').some((row) => row.textContent.includes(matching[0].statement)));
+});
+
 test('F9. a chat frame hidden while the reminder changes appends the present reminder, never the old one', async () => {
     const { walk, tab } = await replied('2');
     const old = stored(walk, 'live').ready;
     tab.frameShown(false);
     const present = await moved(walk, tab);
     assert.equal(typeof present, 'string');
-    assert.equal(present.includes(`Mirelle wears ${APRON}; brown eyes`), true, present);
+    assert.equal(present.includes(`Mirelle wears ${APRON}; eyes: brown`), true, present);
     assert.equal(present === old, false);
     assert.equal(armsTo(walk, tab).at(-1).ready, present);
     tab.frameShown(true);
@@ -4233,7 +4823,7 @@ test("F10. leaving one chat for another: the second chat's messages never carry 
     await forceReminder(walk, tab);
     const first = stored(walk, 'live').ready;
     assert.equal(typeof first, 'string');
-    assert.equal(first.includes('black hair, worn in a braid'), true, first);
+    assert.equal(first.includes('hair: black, worn in a braid'), true, first);
     const harbourArm = armsTo(walk, tab).at(-1);
     assert.equal(harbourArm.ready, first);
     const mark = walk.posts.length;
@@ -4247,7 +4837,8 @@ test("F10. leaving one chat for another: the second chat's messages never carry 
     const late = walk.posts.slice(reported).filter((post) => post.fromLabel === `${tab.name}/frame`);
     assert.equal(late.length, 1);
     assert.equal(late[0].delivered, true);
-    assert.equal(walk.site.pageRequests().length > reads, true);
+    assert.ok(walk.site.pageRequests().slice(reads).every((request) =>
+        new URL(request.url).pathname.includes('/rooms/' + QUARRY + '/messages')));
     assert.deepEqual(tab.logs, []);
     assert.deepEqual(tab.frame.logs, []);
     const after = plain(stored(walk, 'live', QUARRY));
@@ -4425,7 +5016,7 @@ test('a fresh PC restores the last live claim and ruling together from the Worke
     await first.pageGet();
     await until(walk, 'the live claim to be saved', () => bookState(walk).facts.some((fact) => fact.text === 'silver lantern'), 2 * TICK_MS);
     first.panel.tab('Rulings');
-    first.panel.buttonStarting(first.panel.rows('conflicts')[0], 'grey').click();
+    first.panel.button(first.panel.rows('questions')[0], 'Dismiss').click();
     await until(walk, 'the ruling to be saved', () => first.panel.rows('made').length === 1, TICK_MS);
     const roomBook = localText(walk.storage, 'book');
     const source = REFERENCE.ScribeIntake.read(walk.site.messages).messages.at(-1);
@@ -4453,7 +5044,8 @@ test('a fresh PC restores the last live claim and ruling together from the Worke
     assert.ok(restored.log.read[source.id]);
     second.panel.tab('Rulings');
     assert.equal(second.panel.rows('made').length, 1);
-    assert.equal(second.panel.rows('conflicts').length, 0);
+    assert.equal(second.panel.rows('questions').length, 0);
+    assert.equal(state.questions.find((question) => question.position === 41).dismissed, true);
     assert.equal(walk.model.by(second.name).filter((call) => call.role === 'Story').length, 0);
 });
 
@@ -5596,7 +6188,8 @@ for (const layout of ['top', 'frame']) {
         assert.deepEqual(repaired.map((call) => rangeOf(call.user)), ['92-92']);
         assert.ok(repaired[0].user.includes(corrected));
         assert.deepEqual(reopened.panel.rowTexts('disputed'), ['Player message #125']);
-        assert.equal(reopened.panel.headline(), 'Unresolved authorship: 189 of 190 read.');
+        await until(walk, 'the corrected authorship status between comparisons',
+            () => reopened.panel.headline() === 'Unresolved authorship: 189 of 190 read.', TICK_MS);
         assert.match(reopened.panel.text('scribe-counts'), /1 unread message has unresolved authorship/);
         const saved = stored(walk, 'book').log.read;
         assert.ok(Object.hasOwn(saved, row.id));
@@ -5639,8 +6232,12 @@ for (const layout of ['top', 'frame']) {
             ScribeLog.rule(book.log, replay(), { type: 'Answer', question: id, text: answers[index] });
         }
         ScribeStore.write(walk.storage, ROOM, 'book', book);
-        walk.model.answers.Answers = () =>
-            '=== FACTS\nHalvard | trait | observes the harbour forecast | #93\nHalvard | trait | knows the sailing schedule | #125';
+        walk.model.answers.Answers = (input) => {
+            const index = input.includes('[#93] [' + ids[0] + ']') ? 0 : 1;
+            const position = questions[index].position;
+            const detail = ['observes the harbour forecast', 'knows the sailing schedule'][index];
+            return '=== FACTS\nHalvard | trait | ' + detail + ' | #' + position + '\n=== FILED\n' + ids[index] + ' | #' + position;
+        };
         const before = walk.model.of('Answers').length;
         const requests = () => walk.model.of('Answers').slice(before).map((call) => call.user);
         const dismissed = () => ids.map((id) => bookState(walk).questions.find((question) => question.id === id).dismissed);
@@ -5651,7 +6248,7 @@ for (const layout of ['top', 'frame']) {
         const fresh = await reload(walk, tab);
         await pass(walk, 2 * TICK_MS);
         assert.equal(requests().length, 1);
-        assert.ok(requests()[0].includes('[#93] ' + questions[0].text));
+        assert.ok(requests()[0].includes('[#93] [' + ids[0] + '] ' + questions[0].text));
         assert.ok(requests()[0].includes(answers[0]));
         assert.ok(!requests()[0].includes(disputedFact));
         assert.ok(!requests()[0].includes('[#125]') && !requests()[0].includes(answers[1]));
@@ -5670,7 +6267,7 @@ for (const layout of ['top', 'frame']) {
         reopened.panel.click('scribe-pull');
         await pass(walk, 3 * TICK_MS);
         assert.equal(requests().length, 2);
-        assert.ok(requests()[1].includes('[#125] ' + questions[1].text));
+        assert.ok(requests()[1].includes('[#125] [' + ids[1] + '] ' + questions[1].text));
         assert.ok(requests()[1].includes(answers[1]));
         assert.ok(requests()[1].includes(disputedFact));
         assert.ok(!requests()[1].includes('[#93]') && !requests()[1].includes(answers[0]));
@@ -6717,3 +7314,36 @@ for (const layout of ['top', 'frame']) {
         });
     }
 }
+
+test('refresh after Zeta deletes #1034 confirms the live head once and preserves all 1,033 earlier receipts', async () => {
+    const { walk, first } = await savedReader(1034);
+    first.unload();
+    const before = plain(stored(walk, 'book').log.read);
+    const deleted = walk.site.messages.pop();
+    delete before[deleted.id];
+    const history = walk.site.pageRequests().length;
+    const start = walk.site.requests.length;
+    const paid = walk.model.calls.filter((call) => call.role === 'Story').length;
+    const fresh = install(walk, CHAT);
+    await fresh.openPage();
+    fresh.ready();
+    await until(walk, 'the deleted tip to leave the saved campaign',
+        () => fresh.panel.headline() === 'Up to date: 1,033 of 1,033 read.', 3 * TICK_MS);
+    const requests = walk.site.pageRequests().slice(history);
+    assert.equal(requests.length, 1);
+    assert.equal(new URL(requests[0].url).searchParams.has('cursor'), false);
+    const checked = walk.site.requests.slice(start).filter((item) => item.method === 'GET' &&
+        new URL(item.url).pathname === '/v1/rooms/' + ROOM);
+    assert.ok(checked.some((item) => item.authorization === WholeSite.Token));
+    assert.deepEqual(plain(stored(walk, 'book').log.read), before);
+    assert.deepEqual(plain(stored(walk, 'campaign').messages.map((item) => item.id)), walk.site.messages.map((item) => item.id));
+    assert.equal(walk.model.calls.filter((call) => call.role === 'Story').length, paid);
+    fresh.unload();
+    const next = install(walk, CHAT);
+    await next.openPage();
+    next.ready();
+    await until(walk, 'the shortened room to reopen',
+        () => next.panel.headline() === 'Up to date: 1,033 of 1,033 read.', 3 * TICK_MS);
+    assert.equal(walk.site.pageRequests().length, history + 2);
+    assert.deepEqual(plain(stored(walk, 'book').log.read), before);
+});

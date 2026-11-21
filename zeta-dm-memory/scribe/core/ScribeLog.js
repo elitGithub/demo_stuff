@@ -1,4 +1,6 @@
 const ScribeLog = Object.freeze({
+    CheckerPlanVersion: 4,
+
     Reason: Object.freeze({
         Citation: 'Citation',
         Reference: 'Reference',
@@ -116,10 +118,9 @@ const ScribeLog = Object.freeze({
      * @return {void}
      */
     index(context, written, subject) {
-        const key = ScribeText.normaliseName(written);
-        const holders = context.names.get(key) ?? [];
-        if (key !== ScribeLog.Settings.Nothing && !holders.includes(subject)) {
-            context.names.set(key, [...holders, subject]);
+        const holders = context.names.get(written) ?? [];
+        if (written && !holders.includes(subject)) {
+            context.names.set(written, [...holders, subject]);
         }
     },
 
@@ -131,9 +132,9 @@ const ScribeLog = Object.freeze({
      * @return {void}
      */
     enrol(context, subject, label, name) {
-        const key = ScribeText.normaliseName(label);
-        if (key !== ScribeLog.Settings.Nothing && !context.labels.has(key)) {
-            context.labels.set(key, subject);
+        const holders = context.labels.get(label) ?? [];
+        if (label && !holders.includes(subject)) {
+            context.labels.set(label, [...holders, subject]);
         }
         ScribeLog.index(context, name, subject);
     },
@@ -144,12 +145,7 @@ const ScribeLog = Object.freeze({
      * @return {Readonly<{ subject: string|null, ambiguous: boolean }>}
      */
     find(context, written) {
-        const key = ScribeText.normaliseName(written);
-        const labelled = context.labels.get(key);
-        if (labelled !== undefined) {
-            return Object.freeze({ subject: labelled, ambiguous: false });
-        }
-        const holders = context.names.get(key) ?? [];
+        const holders = context.labels.get(written) ?? context.names.get(written) ?? [];
         return Object.freeze({
             subject: holders.length === 1 ? holders[0] : null,
             ambiguous: holders.length > 1,
@@ -159,24 +155,11 @@ const ScribeLog = Object.freeze({
     /**
      * @param {object} context
      * @param {string} written
-     * @return {boolean}
-     */
-    clashes(context, written) {
-        return context.mismatched.has(ScribeText.normaliseName(written));
-    },
-
-    /**
-     * @param {object} context
-     * @param {string} written
      * @param {string} subject
      * @return {boolean}
      */
     owns(context, written, subject) {
-        const key = ScribeText.normaliseName(written);
-        const labelled = context.labels.get(key);
-        const reached =
-            labelled === undefined ? (context.names.get(key) ?? []).includes(subject) : labelled === subject;
-        return !ScribeLog.clashes(context, written) && reached;
+        return (context.labels.get(written) ?? context.names.get(written) ?? []).includes(subject);
     },
 
     /**
@@ -202,7 +185,6 @@ const ScribeLog = Object.freeze({
             written !== ScribeLog.Settings.Nothing && written === ScribeText.normaliseName(named.targetText);
         const sameSubject =
             named.target !== null &&
-            !ScribeLog.clashes(context, operation.target) &&
             ScribeLog.find(context, operation.target).subject === named.target;
         return sameText || sameSubject;
     },
@@ -341,7 +323,7 @@ const ScribeLog = Object.freeze({
      * @return {string}
      */
     aliasKey(subject, name) {
-        return JSON.stringify([subject, ScribeText.normaliseName(name)]);
+        return JSON.stringify([subject, name.toLowerCase()]);
     },
 
     /**
@@ -423,39 +405,29 @@ const ScribeLog = Object.freeze({
          * @return {string|null}
          */
         Subject(operation, context, outcome) {
-            const reasons = ScribeLog.Reason;
-            if (ScribeLog.clashes(context, operation.label)) {
-                return reasons.Mismatch;
-            }
-            const match = ScribeLog.find(context, operation.label);
-            if (match.ambiguous) {
-                return reasons.Ambiguous;
-            }
-            if (match.subject === null) {
+            const ids = context.labels.get(operation.label) ?? [];
+            const subject = ids.find((id) => context.subjects.get(id)?.kind === operation.kind) ??
+                ids.find((id) => context.subjects.get(id)?.assumed);
+            if (subject === undefined) {
                 outcome.draft = ScribeLog.make(context, operation.label, operation.kind);
                 return null;
             }
-            const known = context.subjects.get(match.subject);
+            const known = context.subjects.get(subject);
             if (known.assumed) {
                 known.kind = operation.kind;
                 known.assumed = false;
-                outcome.checks.push({ written: operation.label, subject: match.subject });
                 outcome.draft = {
                     type: ScribeAnswer.Type.Subject,
-                    subject: match.subject,
+                    subject,
                     label: known.label,
                     kind: operation.kind,
                 };
                 return null;
             }
-            if (known.kind === operation.kind) {
-                if (operation.evidence) {
-                    outcome.draft = { type: operation.type, subject: match.subject, label: known.label, kind: known.kind };
-                }
-                return null;
+            if (operation.evidence) {
+                outcome.draft = { type: operation.type, subject, label: known.label, kind: known.kind };
             }
-            context.mismatched.add(ScribeText.normaliseName(operation.label));
-            return reasons.Mismatch;
+            return null;
         },
 
         /**
@@ -469,9 +441,6 @@ const ScribeLog = Object.freeze({
             const cite = context.cites.get(operation.position);
             if (cite === undefined) {
                 return reasons.Citation;
-            }
-            if (ScribeLog.clashes(context, operation.label) || ScribeLog.clashes(context, operation.name)) {
-                return reasons.Mismatch;
             }
             const known = ScribeLog.find(context, operation.label);
             if (known.ambiguous) {
@@ -521,9 +490,6 @@ const ScribeLog = Object.freeze({
             if (cite === undefined) {
                 return reasons.Citation;
             }
-            if (ScribeLog.clashes(context, operation.label)) {
-                return reasons.Mismatch;
-            }
             const subject = ScribeLog.reach(context, operation.label, outcome.subjects);
             if (subject === null) {
                 return reasons.Ambiguous;
@@ -569,28 +535,30 @@ const ScribeLog = Object.freeze({
             if (named === undefined || ScribeLog.unnamed(named)) {
                 return reasons.Reference;
             }
-            if (operation.position < named.position) {
-                return reasons.Citation;
-            }
-            if (!ScribeLog.fits(context, operation, named)) {
-                return reasons.Mismatch;
-            }
+
+            const declared = ScribeLog.fits(context, operation, named) ? null : {
+                label: operation.label, category: operation.category, target: operation.target, ...ScribeCategory.scope(operation),
+            };
             let other = null;
             if (named.category === ScribeLog.Settings.AkaCategory) {
                 const found = ScribeLog.find(context, operation.text).subject;
                 other = found === named.subject ? null : found;
                 ScribeLog.index(context, operation.text, named.subject);
             }
+            const selectedSubject = ScribeLog.reach(context, operation.label, outcome.subjects) ?? named.subject;
             outcome.draft = {
                 type: operation.type,
+                ...(declared ? { declared } : {}),
+                ...(selectedSubject !== named.subject ? { changedSubject: true } : {}),
                 fact: operation.fact,
                 becomes: null,
-                subject: named.subject,
+                subject: selectedSubject,
                 label: operation.label,
-                category: named.category,
+                category: operation.category,
                 ...ScribeCategory.scope(named),
-                target: named.target,
-                targetText: named.targetText,
+                ...ScribeCategory.scope(operation),
+                target: operation.target ? ScribeLog.find(context, operation.target).subject : null,
+                targetText: operation.target,
                 other,
                 hidden: named.hidden,
                 text: operation.text,
@@ -626,14 +594,13 @@ const ScribeLog = Object.freeze({
             if (named === undefined || ScribeLog.unnamed(named)) {
                 return reasons.Reference;
             }
-            if (operation.position < named.position) {
-                return reasons.Citation;
-            }
-            if (!ScribeLog.fits(context, operation, named)) {
-                return reasons.Mismatch;
-            }
+
+            const declared = ScribeLog.fits(context, operation, named) ? null : {
+                label: operation.label, category: operation.category, target: operation.target, ...ScribeCategory.scope(operation),
+            };
             outcome.draft = {
                 type: ScribeAnswer.Type.End,
+                ...(declared ? { declared } : {}),
                 fact: operation.fact,
                 ...ScribeCategory.scope(named),
                 label: operation.label,
@@ -660,13 +627,8 @@ const ScribeLog = Object.freeze({
             if (named === undefined || ScribeLog.unnamed(named)) {
                 return reasons.Reference;
             }
-            if (operation.position < named.position) {
-                return reasons.Citation;
-            }
+
             const owned = ScribeLog.owns(context, operation.owner, named.subject);
-            if (!owned || ScribeLog.clashes(context, operation.label)) {
-                return reasons.Mismatch;
-            }
             const subject = ScribeLog.reach(context, operation.label, outcome.subjects);
             if (subject === null) {
                 return reasons.Ambiguous;
@@ -674,6 +636,7 @@ const ScribeLog = Object.freeze({
             outcome.checks.push({ written: operation.label, subject });
             outcome.draft = {
                 type: ScribeAnswer.Type.Told,
+                ...(!owned ? { declared: { owner: operation.owner, label: operation.label } } : {}),
                 fact: operation.fact,
                 subject,
                 owner: operation.owner,
@@ -693,9 +656,13 @@ const ScribeLog = Object.freeze({
         Scene(operation, context, outcome) {
             const reasons = ScribeLog.Reason;
             const reachesBack = context.before !== null && operation.first === context.before.firstPosition;
-            const first = reachesBack ? context.before.first : context.cites.get(operation.first);
+            const prior = context.sources.get(operation.first);
+            const recorded = prior && context.story && operation.first < context.earliest && prior.text &&
+                !prior.attributionPending && Object.hasOwn(context.read, prior.id);
+            const first = context.cites.get(operation.first) ?? (recorded ? prior.id :
+                reachesBack && (!context.story || !prior) ? context.before.first : undefined);
             const last = context.cites.get(operation.last);
-            if (first === undefined || last === undefined || context.starts.has(first)) {
+            if (first === undefined || last === undefined) {
                 return reasons.Citation;
             }
             for (const attendee of operation.present) {
@@ -704,9 +671,6 @@ const ScribeLog = Object.freeze({
                     if (source?.attributionPending || (context.story && source?.text === ScribeLog.Settings.Nothing)) {
                         return reasons.Citation;
                     }
-                }
-                if (ScribeLog.clashes(context, attendee.label)) {
-                    return reasons.Mismatch;
                 }
             }
             const trial = {
@@ -727,9 +691,18 @@ const ScribeLog = Object.freeze({
             context.labels = trial.labels;
             context.names = trial.names;
             context.counters = trial.counters;
-            context.starts.add(first);
+            const used = context.starts.get(first) ?? new Set();
+            const existing = context.scenes.filter((scene) => scene.first === first && !used.has(scene.id));
+            const matches = existing.filter((scene) => scene.day === operation.day && scene.place === operation.place);
+            let sceneId = matches.length === 1 ? matches[0].id : used.size === 0 && existing.length === 1 ? existing[0].id : null;
+            if (!sceneId) {
+                sceneId = used.size || existing.length ? JSON.stringify([first, context.sequence, used.size]) : first;
+            }
+            used.add(sceneId);
+            context.starts.set(first, used);
             outcome.draft = {
                 type: ScribeAnswer.Type.Scene,
+                ...(sceneId === first ? {} : { sceneId }),
                 day: operation.day,
                 first,
                 last,
@@ -862,7 +835,7 @@ const ScribeLog = Object.freeze({
          * @return {void}
          */
         Fact(draft, context) {
-            if (draft.targetText !== null && !ScribeLog.clashes(context, draft.targetText)) {
+            if (draft.targetText !== null) {
                 draft.target = ScribeLog.find(context, draft.targetText).subject;
             }
             draft.fact = ScribeLog.Settings.FactPrefix + context.counters.nextFact;
@@ -930,26 +903,13 @@ const ScribeLog = Object.freeze({
             }
             const text = operation.text.trim();
             const scope = ScribeCategory.scope(fact);
-            const corrected = ScribeCategory.scope({ category: fact.category, text });
-            if ((scope.form && corrected.form && scope.form !== corrected.form) ||
-                (scope.dimension && corrected.dimension && scope.dimension !== corrected.dimension)) {
-                return ScribeLog.Reason.Mismatch;
-            }
-            const edited = { ...fact, text, ...corrected, ...Object.fromEntries(Object.entries(scope).filter(([, value]) => value)) };
             if (text === fact.text) {
                 return null;
-            }
-            const kind = ScribeReplay.kindOf(fact.category);
-            if ([ScribeCategory.Kind.Fixed, ScribeCategory.Kind.List].includes(kind) &&
-                view.state.facts.some((other) => other.id !== fact.id && ScribeReplay.live(other) &&
-                    other.subject === fact.subject && other.category === fact.category && ScribeCategory.sameScope(other, edited) &&
-                    ScribeCategory.value(other) === ScribeCategory.value(edited))) {
-                return 'This wording would combine two facts. Choose distinct wording.';
             }
             const source = view.state.editOrigins?.[fact.id] ?? { fact: fact.id, cite: fact.cite,
                 subject: fact.subject, category: fact.category, target: fact.target, targetText: fact.targetText,
                 ...ScribeCategory.scope(fact), book: fact.text, sourcePrint: null };
-            outcome.stored = { type: operation.type, fact: fact.id, before: fact.text, text, ...ScribeCategory.scope(edited), source: { ...source } };
+            outcome.stored = { type: operation.type, fact: fact.id, before: fact.text, text, ...scope, source: { ...source } };
             return null;
         },
 
@@ -1168,10 +1128,9 @@ const ScribeLog = Object.freeze({
         AddFact(operation, view, outcome) {
             const { subject, category, target, text, hidden, cite, position } = operation;
             const relation = category === ScribeCategory.Settings.RelationCategory;
-            const kind = ScribeLog.categoryKind(category);
             const valid =
                 typeof subject === 'string' &&
-                (relation || (kind !== null && kind !== ScribeCategory.Kind.Fixed)) &&
+                typeof category === 'string' && Boolean(ScribeCategory.parse(category)) &&
                 (relation ? typeof target === 'string' : target === null) &&
                 ScribeLog.worded(text) &&
                 typeof hidden === 'boolean' &&
@@ -1181,32 +1140,7 @@ const ScribeLog = Object.freeze({
             if (!valid) {
                 return ScribeLog.Settings.InvalidOperation;
             }
-            const owner = ScribeLog.root(view, subject);
             const aimed = relation ? view.subjects.get(target) : undefined;
-            const aimedName = aimed === undefined ? ScribeLog.Settings.Nothing : ScribeText.normaliseName(aimed.label);
-            const present = view.state.facts.some(
-                /**
-                 * @param {object} fact
-                 * @return {boolean}
-                 */
-                (fact) => {
-                    const written = fact.targetText === null ? null : ScribeText.normaliseName(fact.targetText);
-                    const aimedAlike =
-                        aimed !== undefined &&
-                        (fact.target === ScribeLog.root(view, target) ||
-                            (aimedName !== ScribeLog.Settings.Nothing && written === aimedName));
-                    return (
-                        fact.subject === owner &&
-                        fact.category === category &&
-                        fact.status === ScribeReplay.Status.InForce &&
-                        (!relation || aimedAlike) &&
-                        ScribeCategory.same(fact.text, text)
-                    );
-                },
-            );
-            if (present) {
-                return ScribeLog.Settings.InvalidOperation;
-            }
             if (!view.subjects.has(subject) || (relation && aimed === undefined)) {
                 return ScribeLog.Reason.Reference;
             }
@@ -1256,13 +1190,13 @@ const ScribeLog = Object.freeze({
                 return ScribeLog.Settings.InvalidOperation;
             }
             const owner = ScribeLog.root(view, subject);
-            const key = ScribeText.normaliseName(name);
+            const key = name.toLowerCase();
             const held = view.state.aliases.some(
                 /**
                  * @param {{ subject: string, name: string }} item
                  * @return {boolean}
                  */
-                (item) => item.subject === owner && ScribeText.normaliseName(item.name) === key,
+                (item) => item.subject === owner && item.name.toLowerCase() === key,
             );
             if (!view.subjects.has(subject) || !held) {
                 return ScribeLog.Reason.Reference;
@@ -1391,7 +1325,6 @@ const ScribeLog = Object.freeze({
             distinct.add(ScribeLog.pair(item.first, item.second));
         }
         const settled = new Map();
-        let marked = new Set();
         let context = null;
         let results = [];
         let unsettled = true;
@@ -1401,15 +1334,18 @@ const ScribeLog = Object.freeze({
                 sources,
                 story,
                 before,
+                earliest,
+                read: log.read,
                 unaliased,
                 distinct,
-                starts: new Set(),
+                starts: new Map(),
+                scenes: state.scenes,
+                sequence: log.nextSequence,
                 facts: new Map(),
                 threads: new Set(),
                 labels: new Map(),
                 names: new Map(),
                 subjects: new Map(),
-                mismatched: new Set(marked),
                 counters: {
                     nextSubject: log.nextSubject,
                     nextFact: log.nextFact,
@@ -1454,8 +1390,7 @@ const ScribeLog = Object.freeze({
                     refusedAtEnd = true;
                 }
             }
-            unsettled = refusedAtEnd || context.mismatched.size > marked.size;
-            marked = context.mismatched;
+            unsettled = refusedAtEnd;
         }
         const resolved = [];
         const refused = [];
@@ -1474,7 +1409,7 @@ const ScribeLog = Object.freeze({
                 continue;
             }
             if (operation.evidence) {
-                outcome.draft.evidence = operation.evidence;
+                outcome.draft.evidence = outcome.draft.declared ? { ...operation.evidence, declared: outcome.draft.declared } : operation.evidence;
                 outcome.draft.cite ??= operation.evidence.messageId;
             }
             if (Object.hasOwn(ScribeLog.Finishers, outcome.draft.type)) {
@@ -1835,6 +1770,28 @@ const ScribeLog = Object.freeze({
     },
 
     /**
+     * @param {object} entry
+     * @return {string|null}
+     */
+    modelReading(entry) {
+        if (!entry || entry.withdrawn || ![ScribeLog.Origin.Story, ScribeLog.Origin.Notes, ScribeLog.Origin.Answers].includes(entry.origin)) {
+            return null;
+        }
+        if (typeof entry.modelReading === 'string') {
+            return entry.modelReading;
+        }
+        if (entry.modelResponse && (entry.unfiledRows?.length || entry.proposals?.length)) {
+            return entry.modelResponse;
+        }
+        const rows = entry.unfiledRows;
+        if (entry.operations.length || entry.proposals?.length || !rows?.length ||
+            !rows.every((row) => !row.resolvedBy && row.block === ScribeAnswer.Settings.Preamble && typeof row.line === 'string')) {
+            return null;
+        }
+        return rows.map((row) => row.line).join('\n');
+    },
+
+    /**
      * @param {object} book
      * @param {readonly object[]} messages
      * @return {object}
@@ -1844,21 +1801,32 @@ const ScribeLog = Object.freeze({
         const rows = messages.map(() => ({ written: [], rulings: [], decisions: [] }));
         const checks = new Map();
         const legacy = new Map();
+        const legacyRecords = ScribeLog.legacyRecords(book.log);
         for (const entry of book.log.entries) {
             for (const binding of entry.withdrawn ? [] : entry.check?.legacyRulings ?? []) {
-                legacy.set(JSON.stringify([binding.legacyQuestion, binding.legacy]), binding);
+                if (ScribeLog.validLegacy(binding, legacyRecords)) {
+                    legacy.set(JSON.stringify([binding.legacyQuestion, binding.legacy]), binding);
+                }
             }
         }
         let lastFiled = 0;
         for (const entry of book.log.entries) {
+            if (!entry.withdrawn && entry.operatorText) {
+                const position = byId.get(entry.after)?.position ?? 0;
+                const bucket = rows[position];
+                if (bucket) {
+                    bucket.rulings.push({ origin: ScribeLog.Origin.Operator, position, text: entry.operatorText });
+                }
+            }
             if (entry.checkerRuling) {
                 const decision = entry.checkerRuling;
                 const next = byId.get(decision.after)?.position;
                 if (!entry.withdrawn && next && rows[next]) {
-                    const current = decision.support.every((source) => ScribeLog.supportedPassage(source, byId.get(source.messageId)));
-                    const row = current ? { origin: ScribeLog.Origin.Operator, position: next,
+                    const current = decision.support.every((source) => ScribeLog.supportedPassage(source, byId.get(source.messageId))) &&
+                        ScribeLog.currentReportedSources(decision, (source) => byId.get(source.messageId)?.fingerprint === source.fingerprint);
+                    const row = { origin: ScribeLog.Origin.Operator, position: next,
                         text: JSON.stringify({ finding: decision.finding, sequence: entry.sequence, question: decision.question, decision: decision.canonical,
-                            accounts: decision.claims, action: decision.action }) } : null;
+                            accounts: current ? decision.claims : [], action: decision.action, ...(current ? {} : { sourceStale: true }) }) };
                     if (row) {
                         rows[next].rulings.push(row);
                     }
@@ -1882,6 +1850,30 @@ const ScribeLog = Object.freeze({
             if (entry.withdrawn) {
                 continue;
             }
+            const response = story ? ScribeLog.modelReading(entry) : entry.modelResponse ?? ScribeLog.modelReading(entry);
+            const responseAt = story ? end : Math.max(0, ...(entry.responseSources ?? []).map((source) => {
+                const message = byId.get(source.id);
+                return message?.fingerprint === source.fingerprint ? message.position : 0;
+            }));
+            if (response && responseAt && (!story || entry.messageIds.every((id) => book.log.read[id] === entry.sequence))) {
+                rows[responseAt - 1].written.push({ position: responseAt, origin: entry.origin, filing: 'model reading', text: response });
+            }
+            for (const item of story ? entry.unfiledRows ?? [] : []) {
+                const id = item.reviewAt ?? entry.messageIds.at(-1);
+                const position = byId.get(id)?.position;
+                if (!item.resolvedBy && position && book.log.read[id] === entry.sequence) {
+                    rows[position - 1].written.push({ position, origin: entry.origin, filing: 'unfiled model answer',
+                        section: item.block, reason: item.reason, text: item.line });
+                }
+            }
+            for (const proposal of entry.proposals ?? []) {
+                const id = proposal.operation.evidence?.messageId ?? proposal.sourceId;
+                const position = byId.get(id)?.position;
+                if (!proposal.resolvedBy && position && book.log.read[id] === entry.sequence) {
+                    rows[position - 1].written.push({ position, origin: entry.origin, filing: 'unfiled proposal',
+                        reason: proposal.reason, text: JSON.stringify(proposal.operation) });
+                }
+            }
             for (const operation of entry.operations) {
                 if (operation.revoked || operation.type === ScribeAnswer.Type.Contradiction) {
                     continue;
@@ -1901,7 +1893,7 @@ const ScribeLog = Object.freeze({
                     continue;
                 }
                 const block = evidence && cited?.blocks.find((part) => part.blockNumber === evidence.blockNumber);
-                const source = block && cited.fingerprint === evidence.fingerprint && block.speaker === evidence.speaker &&
+                const source = block && evidence.verified !== false && cited.fingerprint === evidence.fingerprint && block.speaker === evidence.speaker &&
                     block.text.includes(evidence.quote) && (ScribeIntake.Originals.get(block) ?? block.text).includes(evidence.quote)
                     ? { messageId: cited.id, fingerprint: cited.fingerprint, position: cited.position,
                         blockNumber: block.blockNumber, speaker: block.speaker, quote: evidence.quote } : null;
@@ -1914,6 +1906,13 @@ const ScribeLog = Object.freeze({
                 if (source) {
                     row.source = source;
                     row.attribution = provenance.attribution;
+                } else if (evidence?.verified === false) {
+                    row.modelCitation = { issue: evidence.issue, attribution: evidence.attribution, quote: evidence.modelQuote,
+                        message: evidence.citedMessage, block: evidence.citedBlock, original: block ?
+                            { speaker: block.speaker, pieces: ScribeIntake.sourcePieces(block) } : null };
+                } else if (story && evidence) {
+                    row.proposedCitation = { messageId: citedId, blockNumber: evidence.blockNumber, quote: evidence.quote, verified: false };
+                    row.attribution = evidence.attribution;
                 } else if (story && cited && !evidence) {
                     const candidates = ScribeLog.sourceClaims(cited, [operation])[0]?.candidates ?? [];
                     if (candidates.length === 1) {
@@ -1943,7 +1942,7 @@ const ScribeLog = Object.freeze({
             return null;
         }
         const block = message.blocks.find((part) => part.blockNumber === source.blockNumber && part.speaker === source.speaker);
-        if (!block || typeof source.quote !== 'string' || !source.quote.trim() ||
+        if (!block || source.verified === false || typeof source.quote !== 'string' || !source.quote.trim() ||
             !(ScribeIntake.Originals.get(block) ?? block.text).includes(source.quote)) {
             return null;
         }
@@ -1965,6 +1964,15 @@ const ScribeLog = Object.freeze({
     supportedPassage(source, message) {
         const current = ScribeLog.passage(source, message);
         return Boolean(current && source.context === current.context && source.role === current.role);
+    },
+
+    /**
+     * @param {object} decision
+     * @param {Function} matches
+     * @return {boolean}
+     */
+    currentReportedSources(decision, matches) {
+        return [decision.source, decision.earlier].every((source) => source?.verified !== false || matches(source));
     },
 
     /**
@@ -1999,29 +2007,12 @@ const ScribeLog = Object.freeze({
     findingHistory(log, positions, fingerprints, messages) {
         const history = [];
         const latest = new Map();
-        const operators = new Map();
+        const legacyRecords = ScribeLog.legacyRecords(log);
         for (const entry of log.entries) {
-            if (entry.kind === ScribeLog.Kind.Operator && !entry.withdrawn) {
-                for (const operation of entry.operations) {
-                    if (!operation.revoked && [ScribeLog.Ruling.Answer, ScribeLog.Ruling.Dismiss].includes(operation.type)) {
-                        operators.set(operation.question, entry.sequence);
-                    }
-                }
-            }
-        }
-        for (const entry of log.entries) {
-            for (const alert of entry.withdrawn ? [] : entry.check?.challenges ?? []) {
-                const previous = latest.get(alert.finding);
-                if (previous?.sequence === alert.sequence && ScribeLog.challengesFinding(entry.check, alert, previous) && alert.support.every((source) =>
-                    positions.has(source.messageId) && (messages ? ScribeLog.supportedPassage(source, messages.get(source.messageId))
-                        : fingerprints?.get(source.messageId) === source.fingerprint))) {
-                    previous.status = 'reopened';
-                }
-            }
             const decisions = entry.kind === ScribeLog.Kind.Operator && entry.checkerRuling ? [entry.checkerRuling] :
                 entry.origin === ScribeLog.Origin.Checker ? entry.check?.legacyRulings ?? [] : [];
             for (const decision of entry.withdrawn ? [] : decisions) {
-                if (!Array.isArray(decision.support) || (decision.legacy && operators.get(decision.legacyQuestion) !== decision.legacy)) {
+                if (!Array.isArray(decision.support) || (decision.legacy && !ScribeLog.validLegacy(decision, legacyRecords))) {
                     continue;
                 }
                 const prior = latest.get(decision.finding);
@@ -2033,9 +2024,15 @@ const ScribeLog = Object.freeze({
                 }
                 const current = decision.support.every((source) => positions.has(source.messageId) && (messages
                     ? ScribeLog.supportedPassage(source, messages.get(source.messageId))
-                    : fingerprints?.get(source.messageId) === source.fingerprint));
-                const row = { ...decision, sequence: decision.legacy ?? entry.sequence, status: current
-                    ? (decision.action === 'open' ? 'deferred' : 'settled') : 'reopened' };
+                    : fingerprints?.get(source.messageId) === source.fingerprint)) &&
+                    ScribeLog.currentReportedSources(decision, (source) => positions.has(source.messageId) &&
+                        ((!messages && !fingerprints) || (messages ? messages.get(source.messageId)?.fingerprint :
+                            fingerprints.get(source.messageId)) === source.fingerprint));
+                const row = { ...decision, ...(decision.legacy ? { action: 'explain', account: null,
+                    explanation: decision.canonical ?? 'Dismissed by the operator.', claims: [], factIds: [], patches: [], additions: [] } : {}),
+                    sequence: decision.legacy ?? entry.sequence,
+                    status: decision.action === 'open' ? 'deferred' : 'settled',
+                    ...(!current ? { sourceStale: true, shareInReminder: false } : {}) };
                 latest.set(decision.finding, row);
                 history.push(row);
             }
@@ -2044,30 +2041,43 @@ const ScribeLog = Object.freeze({
     },
 
     /**
-     * @param {object} receipt
-     * @param {object} alert
-     * @param {object} decision
-     * @return {boolean}
+     * @param {object} log
+     * @return {object}
      */
-    challengesFinding(receipt, alert, decision) {
-        const pages = receipt.pages;
-        for (const page of pages) {
-            for (const finding of page.findings) {
-                const source = finding.source;
-                if (source.messageId !== alert.support[0]?.messageId || source.blockNumber !== alert.support[0].blockNumber ||
-                    source.quote !== alert.support[0].quote || (finding.earlier && (finding.earlier.messageId !== alert.support[1]?.messageId ||
-                        finding.earlier.blockNumber !== alert.support[1].blockNumber || finding.earlier.quote !== alert.support[1].quote))) {
+    legacyRecords(log) {
+        const originals = new Map();
+        const operators = new Map();
+        for (const entry of log.entries) {
+            if (entry.withdrawn) {
+                continue;
+            }
+            for (const operation of entry.operations) {
+                if (operation.revoked || entry.retired?.includes(operation.cite)) {
                     continue;
                 }
-                const claims = pages.flatMap((checked) => checked.claims).filter((claim) =>
-                    claim.source.messageId === source.messageId && claim.source.blockNumber === source.blockNumber &&
-                    claim.source.speaker === source.speaker && claim.source.quote === source.quote);
-                if (ScribeLog.relatedFinding(decision, { ...finding, support: alert.support, accounts: { source: claims } })) {
-                    return true;
+                if (operation.type === ScribeAnswer.Type.Question) {
+                    originals.set(operation.question, operation);
+                } else if (entry.kind === ScribeLog.Kind.Operator && [ScribeLog.Ruling.Answer, ScribeLog.Ruling.Dismiss].includes(operation.type)) {
+                    operators.set(operation.question, { operation, sequence: entry.sequence });
                 }
             }
         }
-        return false;
+        return { originals, operators };
+    },
+
+    /**
+     * @param {object} decision
+     * @param {object} records
+     * @return {boolean}
+     */
+    validLegacy(decision, { originals, operators }) {
+        const question = originals.get(decision.legacyQuestion);
+        const chosen = operators.get(decision.legacyQuestion);
+        return !!question && Array.isArray(decision.support) && chosen?.sequence === decision.legacy && decision.question === question.text &&
+            decision.source?.messageId === question.cite &&
+            (chosen.operation.passages ?? []).every((passage) => decision.support.some((source) =>
+                source.messageId === passage.id && source.fingerprint === passage.fingerprint)) &&
+            (chosen.operation.text ?? null) === decision.canonical;
     },
 
     /**
@@ -2079,29 +2089,19 @@ const ScribeLog = Object.freeze({
         if (!['Question', 'Contradiction'].includes(row.kind)) {
             return null;
         }
-        const wording = (value) => ' ' + ScribeReplay.wording(value) + ' ';
         const candidates = [];
         for (const { question, operation, sequence } of prior) {
-            if (!row.support.some((source) => source.messageId === question.cite) ||
+            if (row.source.messageId !== question.cite ||
                 operation.passages?.some((passage) => !row.support.some((source) =>
                     source.messageId === passage.id && source.fingerprint === passage.fingerprint))) {
                 continue;
             }
-            const exact = wording(question.text) === wording(row.question);
-            const selected = Object.entries(row.accounts).filter(([, claims]) => claims.some((claim) => claim.value &&
-                operation.text && wording(operation.text).includes(wording(claim.value)) &&
-                (exact || claim.subject && claim.attribute && wording(question.text).includes(wording(claim.subject)) &&
-                    wording(row.question).includes(wording(claim.subject)) &&
-                    wording(question.text).includes(wording(claim.attribute)) && wording(row.question).includes(wording(claim.attribute)))));
-            if (exact || selected.length === 1) {
-                const account = selected.length === 1 ? selected[0][0] : null;
+            if (question.text === row.question) {
                 candidates.push({ finding: row.id, version: row.version, kind: row.kind, question: row.question,
                     source: row.source, earlier: row.earlier, record: row.record, support: row.support,
-                    legacy: sequence, legacyQuestion: question.id, sequence, action: account ? 'choose' : 'explain', account,
-                    explanation: account ? null : operation.text ?? 'Dismissed by the operator.',
-                    canonical: operation.text ?? null, claims: account ? row.accounts[account] : [],
-                    pointClaims: row.accounts.source.map(({ subject, attribute }) => ({ subject, attribute })),
-                    factIds: [], patches: [], additions: [], status: 'settled' });
+                    legacy: sequence, legacyQuestion: question.id, sequence, action: 'explain', account: null,
+                    explanation: operation.text ?? 'Dismissed by the operator.', canonical: operation.text ?? null, claims: [],
+                    pointClaims: [], factIds: [], patches: [], additions: [], status: 'settled' });
             }
         }
         return candidates.length === 1 ? candidates[0] : null;
@@ -2122,14 +2122,14 @@ const ScribeLog = Object.freeze({
             if (!source) {
                 continue;
             }
+            accounts[side] = claims.filter((claim) => claim.source.messageId === source.messageId &&
+                claim.source.blockNumber === source.blockNumber && claim.source.speaker === source.speaker &&
+                claim.source.quote === source.quote);
             const passage = ScribeLog.passage(source, messages.get(source.messageId));
             if (!passage) {
                 continue;
             }
             support.push(passage);
-            accounts[side] = claims.filter((claim) => claim.source.messageId === source.messageId &&
-                claim.source.blockNumber === source.blockNumber && claim.source.speaker === source.speaker &&
-                claim.source.quote === source.quote);
         }
         const record = ScribeLog.checkRecord(finding.record);
         if (record?.cite && !support.some((source) => source.messageId === record.cite)) {
@@ -2162,13 +2162,13 @@ const ScribeLog = Object.freeze({
             }
         }
         const point = record?.fact ? ['fact', record.fact] : ['source', ...keyOf(finding.source)];
-        const dispute = ScribeText.words(finding.question).join(' ');
-        const identities = [finding.kind, dispute, point, ...support.map(keyOf), record?.fact ?? finding.record?.text ?? null];
+        const identities = [finding.kind, finding.question, point, ...support.map(keyOf), record?.fact ?? finding.record?.text ?? null];
         const id = ScribeText.fingerprint(JSON.stringify(identities));
+        const priorId = ScribeText.fingerprint(JSON.stringify([finding.kind, ScribeText.words(finding.question).join(' '), ...identities.slice(2)]));
         const version = ScribeText.fingerprint(JSON.stringify([id, support.map((source) => [source.role, source.context]),
             record ?? finding.record?.text ?? null, Object.values(accounts).map((group) => group.map((claim) =>
-                [claim.attribution, claim.subject, claim.attribute, claim.value]))]));
-        return { ...finding, id, version, accounts, support, status: 'open', actionable: true };
+                [claim.attribution, claim.subject, claim.attribute, claim.value, ...(claim.target ? [claim.target] : [])]))]));
+        return { ...finding, id, priorId, version, accounts, support, status: 'open', actionable: true };
     },
 
     /**
@@ -2196,13 +2196,34 @@ const ScribeLog = Object.freeze({
         }
         const record = ScribeLog.checkRecord(row.record);
         let claims = action === 'choose' ? (row.accounts[account] ?? []) : Object.values(row.accounts).flat();
-        let canonical = action === 'choose' ? (account === 'record' ? record?.text ?? row.record.text : row[account].quote) : explanation;
+        let canonical = action === 'choose' ? (account === 'record' ? record?.text ?? row.record.text : row[account].quote ?? row.question) : explanation;
         const patches = [];
         const factIds = [];
         const additions = [];
-        const counters = { nextFact: log.nextFact };
-        const named = (name) => state.subjects.filter((subject) => !subject.mergedInto && [subject.name, subject.label, ...subject.aka]
-            .some((label) => ScribeCategory.same(label, name)));
+        const counters = { nextFact: log.nextFact, nextSubject: log.nextSubject };
+        const declarations = [];
+        const named = (name) => {
+            const active = state.subjects.filter((subject) => !subject.mergedInto);
+            const exact = active.filter((subject) => subject.label === name);
+            if (exact.length) {
+                return exact;
+            }
+            const aliases = active.filter((subject) => subject.aka.includes(name));
+            return aliases.length ? aliases : active.filter((subject) => subject.name === name);
+        };
+        const ownerFor = (name) => {
+            const owners = named(name);
+            if (owners.length > 0) {
+                return owners.length === 1 ? owners[0].id : null;
+            }
+            const pending = declarations.find((item) => item.label === name);
+            if (pending) {
+                return pending.subject;
+            }
+            const subject = ScribeLog.Settings.SubjectPrefix + counters.nextSubject++;
+            declarations.push({ type: ScribeAnswer.Type.Subject, subject, label: name, kind: null });
+            return subject;
+        };
         const matchesSource = (fact, claim) => claim.subject && claim.value && named(claim.subject).some((owner) => owner.id === fact.subject) &&
             (fact.cite === claim.source.messageId || fact.evidence?.messageId === claim.source.messageId) &&
             (ScribeCategory.same(fact.text, claim.value) || ScribeCategory.same(fact.text, claim.text) ||
@@ -2212,6 +2233,8 @@ const ScribeLog = Object.freeze({
             cite: fact.cite, target: fact.target, targetText: fact.targetText, ...ScribeCategory.scope(fact) });
         const evidenceFor = (claim) => ({ ...claim.source, messageNumber: claim.source.position, subject: claim.subject,
             attribute: claim.attribute, value: claim.value, attribution: claim.attribution });
+        const selectedClaims = claims;
+        const filedClaims = new Set();
         if (action === 'choose' && record?.fact) {
             const fact = state.facts.find((item) => item.id === record.fact);
             if (!fact || (record.text && fact.text !== record.text) || (record.subject && fact.subject !== record.subject) ||
@@ -2220,159 +2243,106 @@ const ScribeLog = Object.freeze({
                 (Object.hasOwn(record, 'targetText') && record.targetText !== fact.targetText)) {
                 throw new Error('The cited book entry has changed. Check its current wording and references.');
             }
+            const owned = claims.filter((item) => item.subject && named(item.subject).length === 1 && named(item.subject)[0].id === fact.subject);
+            const candidates = owned.length <= 1 ? owned : owned.filter((item) =>
+                item.attribute === fact.category || item.attribute === fact.evidence?.attribute);
+            const claim = claims.length === 1 ? claims[0] : candidates.length === 1 ? candidates[0] : null;
+            const subject = account !== 'record' && claim?.subject && claim.value ? ownerFor(claim.subject) : null;
             if (account === 'record') {
                 factIds.push(fact.id);
-            } else {
-                const substantive = claims.filter((claim) => claim.subject && claim.value);
-                const sameAttribute = substantive.filter((claim) => claim.attribute && (claim.attribute === fact.category ||
-                    claim.attribute === fact.evidence?.attribute));
-                const candidates = sameAttribute.length ? sameAttribute : substantive;
-                const matched = candidates.filter((claim) => named(claim.subject).length === 1);
-                if (matched.length !== 1 || candidates.some((claim) => claim.subject !== matched[0]?.subject)) {
-                    throw new Error('The cited account must identify one book subject and its value before changing this entry.');
-                }
-                const claim = matched[0];
-                const subject = named(claim.subject)[0].id;
+            } else if (subject) {
                 const fixed = ScribeLog.categoryKind(fact.category) === ScribeCategory.Kind.Fixed;
-                const scope = ScribeCategory.scope({ category: fact.category, text: claim.source.quote });
-                if (fixed && (claim.attribute !== fact.category || !ScribeCategory.sameScope(fact, { category: fact.category, ...scope }))) {
-                    throw new Error('The cited account does not support this category, scope or relationship.');
+                const category = ScribeCategory.parse(claim.attribute ?? '');
+                const relation = claim.target || category?.target || fact.category === ScribeCategory.Settings.RelationCategory;
+                const selectedCategory = relation ? ScribeCategory.Settings.RelationCategory :
+                    claim.attribute === fact.evidence?.attribute ? fact.category : category?.category ?? fact.category;
+                const scope = selectedCategory === fact.category ? ScribeCategory.scope(fact) : ScribeCategory.scope({ category: selectedCategory, text: claim.value });
+                let target = relation ? fact.target : null;
+                let targetText = relation ? fact.targetText : null;
+                if (relation) {
+                    const selectedTarget = claim.target ?? category?.target;
+                    const related = named(selectedTarget ?? claim.value);
+                    if (related.length === 1) {
+                        target = related[0].id;
+                        targetText = related[0].label;
+                    } else if (selectedTarget) {
+                        target = null;
+                        targetText = selectedTarget;
+                    }
                 }
-                let target = fact.target;
-                let targetText = fact.targetText;
-                if (fact.category === ScribeCategory.Settings.RelationCategory) {
-                    const fold = (value) => value.normalize('NFC').trim().replace(/\s+/gu, ' ').toLowerCase();
-                    const quote = fold(claim.source.quote).replace(/[.!]$/u, '');
-                    const owner = state.subjects.find((item) => item.id === subject);
-                    const subjects = [owner.name, owner.label, ...owner.aka];
-                    if (named(claim.source.speaker).some((speaker) => speaker.id === subject)) {
-                        subjects.push('I');
-                    }
-                    const objects = state.subjects.filter((item) => !item.mergedInto && item.id !== subject)
-                        .map((item) => ({ id: item.id, label: item.label, names: [item.name, item.label, ...item.aka] }));
-                    if (target === null && targetText && !named(targetText).length) {
-                        objects.push({ id: null, label: targetText, names: [targetText] });
-                    }
-                    const related = objects.filter((item) => claim.attribute && subjects.some((actor) => item.names.some((name) => {
-                        const prefix = fold(actor + ' ' + claim.attribute) + ' ';
-                        const object = fold(name);
-                        const value = fold(claim.value);
-                        return quote === prefix + object + ' ' + value || (object === value && quote === prefix + object) ||
-                            ['to', 'from', 'with', 'for', 'toward', 'towards'].some((join) =>
-                                quote === prefix + value + ' ' + join + ' ' + object || quote === prefix + join + ' ' + object + ' ' + value);
-                    })));
-                    if (related.length !== 1) {
-                        throw new Error('The selected words must identify who acted and the single target of this relationship.');
-                    }
-                    target = related[0].id;
-                    targetText = related[0].label;
+                if (claims.length === 1) {
+                    canonical = claim.value;
                 }
-                canonical = claim.value;
-                claims = [claim];
-                const after = { subject, target, targetText, ...scope, text: claim.value, cite: claim.source.messageId, position: claim.source.position,
+                filedClaims.add(claim);
+                const after = { subject, category: selectedCategory, target, targetText, ...scope, text: claim.value, cite: claim.source.messageId, position: claim.source.position,
                     ruledAttribute: claim.attribute, evidence: evidenceFor(claim) };
                 const other = account === 'source' ? 'earlier' : 'source';
                 const movedCitation = row.kind === 'Citation' && fact.cite !== claim.source.messageId;
-                const companion = movedCitation ? (row.accounts[other] ?? [])
-                    .filter((item) => item.subject === claim.subject && item.value && item.source.messageId === fact.cite &&
-                        fact.text.toLowerCase().includes(item.value.toLowerCase()) && !claim.text.includes(item.value)) : [];
-                const clauses = movedCitation ? fact.text.trim().split(/\s+(?:and(?:\s+then)?|but|while|as well as|although)\s+|[;—]|\.(?=\s)|,\s+(?=\p{L})/iu)
-                    .map((part) => part.trim()).filter(Boolean) : [];
-                const fold = (value) => ScribeText.words(value).join(' ');
-                const mentions = (text, words) => (' ' + fold(text) + ' ').includes(' ' + fold(words) + ' ');
-                const oneValue = (part, item) => {
-                    const values = [item.value];
-                    if (item.attribute) {
-                        values.push(item.value + ' ' + item.attribute);
-                        for (const join of [' ', ' of ', ' is ', ' as ', ' as a ', ' as an ', ' as the ']) {
-                            values.push(item.attribute + join + item.value);
-                        }
-                    }
-                    return values.some((value) => fold(part) === fold(value));
-                };
-                if (movedCitation && clauses.length === 1) {
-                    if (companion.length || !oneValue(fact.text, claim)) {
-                        throw new Error('The whole book entry must match the selected claim before its citation can move. Review each part separately.');
-                    }
-                }
-                if (clauses.length > 1) {
-                    const unchanged = clauses.filter((part) => !mentions(part, claim.value));
-                    if (clauses.length !== 2 || unchanged.length !== 1 ||
-                        (companion.length && !companion.every((item) => oneValue(unchanged[0], item)))) {
-                        throw new Error('This combined entry needs separate source support for each part before it can be split.');
-                    }
-                    const changed = clauses.find((part) => part !== unchanged[0]);
-                    const transfer = /^(?:given|received) (?:an? |the )?(\p{L}[\p{L}\p{M}'’-]*) as (?:an? |the )?(.+)$/iu.exec(changed);
-                    const completeTransfer = transfer && fold(transfer[2]) === fold(claim.value) &&
-                        claim.source.quote.split(/[.!?\n]/u).some((sentence) => {
-                            const plain = fold(sentence).split(' ').filter((word) => !['a', 'an', 'the'].includes(word)).join(' ');
-                            const item = fold(transfer[1]);
-                            const value = fold(claim.value);
-                            const actor = claim.source.speaker === claim.subject && plain.startsWith('i ') ? 'i' : fold(claim.subject);
-                            if (['received', 'was given'].some((verb) => plain === [actor, verb, item, 'as', value].join(' '))) {
-                                return true;
-                            }
-                            return claim.attribute && fold(claim.attribute) === item &&
-                                ['is', 'was'].some((verb) => (' ' + plain + ' ').includes(' ' + item + ' ' + verb + ' ' + value + ' '));
-                        });
-                    if (!oneValue(changed, claim) && !completeTransfer) {
-                        throw new Error('The new source must support the entire part whose citation is being moved.');
-                    }
-                    if (companion.length === 0) {
-                        const retained = unchanged[0];
-                        const original = row.support.filter((source) => source.messageId === fact.cite && mentions(source.quote, retained));
-                        const source = original.length === 1 ? original[0] : null;
-                        const actor = source?.role === ScribeIntake.Role.Character && source.speaker === claim.subject ? 'I' : claim.subject;
-                        const literal = source && ['', ' was', ' is', ' had', ' has'].some((verb) =>
-                            fold(source.quote) === fold(actor + verb + ' ' + retained));
-                        if (!literal || ![ScribeIntake.Role.Character, ScribeIntake.Role.Narrator].includes(source.role)) {
-                            throw new Error('The earlier source must verify the retained part of this combined entry before changing its citation.');
-                        }
-                        companion.push({ source, text: source.quote, subject: claim.subject, attribute: null, value: retained,
-                            attribution: source.role === ScribeIntake.Role.Character ? 'claimed' : 'witnessed' });
-                    }
-                }
-                if (companion.length > 0) {
-                    if (companion.length !== 1 || fact.category === ScribeCategory.Settings.RelationCategory || fixed ||
-                        fact.subject !== subject) {
-                        throw new Error('This combined entry needs separately cited accounts before it can be split.');
-                    }
+                const companion = movedCitation ? (row.accounts[other] ?? []).filter((item) => item.subject === claim.subject &&
+                    item.value && item.source.messageId === fact.cite && item.attribute !== claim.attribute) : [];
+                if (companion.length === 1 && fact.category !== ScribeCategory.Settings.RelationCategory && !fixed && fact.subject === subject) {
                     const kept = companion[0];
-                    claims = [kept, claim];
-                    patches.push({ id: fact.id, before: mark(fact), after: { subject, target: null, targetText: null, text: kept.value,
+                    claims = [kept, ...selectedClaims];
+                    patches.push({ id: fact.id, before: mark(fact), after: { subject, category: ScribeCategory.parse(kept.attribute)?.category ?? fact.category,
+                        target: null, targetText: null, text: kept.value,
                         cite: kept.source.messageId, position: kept.source.position, ruledAttribute: kept.attribute, evidence: evidenceFor(kept) } });
                     const id = ScribeLog.nextFactId(counters);
-                    additions.push({ ...after, type: ScribeLog.Ruling.AddFact, fact: id, category: fact.category,
-                        target: null, targetText: null, hidden: fact.hidden });
+                    additions.push({ ...after, type: ScribeLog.Ruling.AddFact, fact: id, hidden: fact.hidden });
+                    factIds.push(id);
+                } else if (movedCitation && fact.text !== claim.value) {
+                    patches.push({ id: fact.id, before: mark(fact), after: null });
+                    const id = ScribeLog.nextFactId(counters);
+                    additions.push({ ...after, type: ScribeLog.Ruling.AddFact, fact: id, hidden: fact.hidden });
                     factIds.push(id);
                 } else {
                     patches.push({ id: fact.id, before: mark(fact), after });
                 }
                 factIds.push(fact.id);
             }
-        } else if (action === 'choose' && account !== 'record') {
-            const accepted = state.facts.filter((fact) => claims.some((claim) => matchesSource(fact, claim)));
-            factIds.push(...accepted.map((fact) => fact.id));
-            const other = account === 'source' ? 'earlier' : 'source';
-            for (const fact of state.facts) {
-                if (!factIds.includes(fact.id) && (row.accounts[other] ?? []).some((claim) => matchesSource(fact, claim)) &&
-                    accepted.some((winner) => winner.subject === fact.subject && winner.category === fact.category &&
-                        winner.target === fact.target && winner.targetText === fact.targetText && ScribeCategory.sameScope(winner, fact))) {
-                    patches.push({ id: fact.id, before: mark(fact), after: null });
+        }
+        if (action === 'choose' && account !== 'record') {
+            for (const claim of selectedClaims) {
+                if (filedClaims.has(claim)) {
+                    continue;
                 }
-            }
-            if (row.kind === 'Omission' && !accepted.length && claims.length === 1) {
-                const claim = claims[0];
+                const matched = state.facts.filter((fact) => matchesSource(fact, claim));
+                if (matched.length) {
+                    for (const fact of matched) {
+                        if (!factIds.includes(fact.id)) {
+                            factIds.push(fact.id);
+                        }
+                    }
+                    continue;
+                }
                 const category = claim.attribute && ScribeCategory.parse(claim.attribute);
-                const owners = claim.subject && named(claim.subject);
-                if (owners?.length === 1 && category && !category.target && claim.value && claim.attribution === 'witnessed') {
+                const owner = claim.subject && category && claim.value ? ownerFor(claim.subject) : null;
+                if (owner) {
+                    const targetText = claim.target ?? category.target;
+                    const related = targetText ? named(targetText) : [];
                     const id = ScribeLog.nextFactId(counters);
-                    additions.push({ type: ScribeLog.Ruling.AddFact, fact: id, subject: owners[0].id,
-                        category: category.category, target: null, targetText: null, ...ScribeCategory.scope({ category: category.category, text: claim.text }),
+                    additions.push({ type: ScribeLog.Ruling.AddFact, fact: id, subject: owner,
+                        category: targetText ? ScribeCategory.Settings.RelationCategory : category.category, target: related.length === 1 ? related[0].id : null, targetText,
+                        ...ScribeCategory.scope({ category: category.category, text: claim.text }),
                         text: claim.value, hidden: true,
                         cite: claim.source.messageId, position: claim.source.position, ruledAttribute: claim.attribute, evidence: evidenceFor(claim) });
                     factIds.push(id);
-                    canonical = claim.value;
+                    if (selectedClaims.length === 1 && row.kind === 'Omission') {
+                        canonical = claim.value;
+                    }
+                }
+            }
+        }
+        if (action === 'choose' && account !== 'record' && !record?.fact) {
+            const accepted = [...state.facts.filter((fact) => factIds.includes(fact.id)), ...additions];
+            const other = account === 'source' ? 'earlier' : 'source';
+            const opposing = row.accounts[other] ?? [];
+            for (const fact of state.facts) {
+                const accountClaims = opposing.filter((claim) => named(claim.subject).some((owner) => owner.id === fact.subject));
+                const winners = accepted.filter((winner) => winner.subject === fact.subject && winner.target === fact.target &&
+                    winner.targetText === fact.targetText && ScribeCategory.sameScope(winner, fact));
+                if (!factIds.includes(fact.id) && accountClaims.some((claim) => matchesSource(fact, claim)) &&
+                    (winners.some((winner) => winner.category === fact.category) || winners.length === 1 && accountClaims.length === 1)) {
+                    patches.push({ id: fact.id, before: mark(fact), after: null });
                 }
             }
         }
@@ -2385,9 +2355,9 @@ const ScribeLog = Object.freeze({
             ...(change.shareInReminder ? { shareInReminder: true } : {}),
             support, action, account, explanation, claims, canonical, factIds, patches, additions,
             pointClaims: row.accounts.source.map(({ subject, attribute }) => ({ subject, attribute })),
-            after: messages[progress.checkedThrough - 1].id };
+            after: messages[(progress.processedThrough ?? progress.checkedThrough) - 1].id };
         const entry = { sequence: log.nextSequence, kind: ScribeLog.Kind.Operator, origin: ScribeLog.Origin.Operator,
-            messageIds: [], operations: [], checkerRuling: JSON.parse(JSON.stringify(decision)), withdrawn: false };
+            messageIds: [], operations: declarations, checkerRuling: JSON.parse(JSON.stringify(decision)), withdrawn: false };
         if (factIds.length) {
             const preview = { ...log, entries: [...log.entries, entry] };
             const applied = ScribeReplay.run(preview, messages.map((message) => message.id), null,
@@ -2403,6 +2373,7 @@ const ScribeLog = Object.freeze({
         }
         log.nextSequence++;
         log.nextFact = counters.nextFact;
+        log.nextSubject = counters.nextSubject;
         log.revision++;
         log.entries.push(entry);
         return entry;
@@ -2415,7 +2386,8 @@ const ScribeLog = Object.freeze({
      * @return {boolean}
      */
     validCheckPage(page, target, messages) {
-        if (page?.complete !== true || typeof page.id !== 'string' || !page.id || !Number.isSafeInteger(page.total) ||
+        if (page?.complete !== true || (page.judged !== undefined && typeof page.judged !== 'boolean') ||
+            typeof page.id !== 'string' || !page.id || !Number.isSafeInteger(page.total) ||
             !Number.isSafeInteger(page.index) || page.index < 0 || page.index >= page.total ||
             !Array.isArray(page.claims) || !Array.isArray(page.findings) ||
             typeof page.answer !== 'string' || !page.answer.trim()) {
@@ -2430,8 +2402,16 @@ const ScribeLog = Object.freeze({
         if (answer?.complete !== true || answer.page !== page.id || !Array.isArray(answer.claims) || !Array.isArray(answer.findings)) {
             return false;
         }
-        if (Object.keys(answer).some((key) => !['page', 'complete', 'claims', 'findings'].includes(key)) ||
-            answer.claims.length !== page.claims.length) {
+        if (page.reviewRows !== undefined && (!Array.isArray(page.reviewRows) || !page.reviewRows.every((row) =>
+            row && ['answer', 'claims', 'findings'].includes(row.section) && typeof row.reason === 'string' &&
+            typeof row.statement === 'string'))) {
+            return false;
+        }
+        if (page.modelResponses !== undefined && (!Array.isArray(page.modelResponses) ||
+            !page.modelResponses.every((text) => typeof text === 'string'))) {
+            return false;
+        }
+        if (answer.claims.length !== page.claims.length) {
             return false;
         }
         const supported = (source, currentOnly) => {
@@ -2440,20 +2420,73 @@ const ScribeLog = Object.freeze({
             return Boolean(block && original.position === source.position &&
                 (currentOnly ? original.id === target.id : original.position <= target.position) &&
                 original.id === source.messageId && original.fingerprint === source.fingerprint && block.speaker === source.speaker &&
-                typeof source.quote === 'string' && source.quote.trim() && block.text.includes(source.quote) &&
-                (ScribeIntake.Originals.get(block) ?? block.text).includes(source.quote));
+                typeof source.quote === 'string' && source.quote.trim() && (source.verified === false ||
+                    block.text.includes(source.quote) && (ScribeIntake.Originals.get(block) ?? block.text).includes(source.quote)));
         };
         return page.claims.every((claim, index) => {
             const raw = answer.claims[index];
             return claim && raw && supported(claim.source, true) && claim.text === claim.source.quote &&
-                ['witnessed', 'claimed', 'inferred', 'promised'].includes(claim.attribution) && raw.attribution === claim.attribution &&
+                JSON.stringify(raw.attribution) === JSON.stringify(claim.attribution) &&
                 raw.source?.quote === claim.source.quote && raw.source.ref === 'm' + claim.source.position + 'b' + claim.source.blockNumber &&
-                ['subject', 'attribute', 'value'].every((key) => (raw[key] ?? null) === (claim[key] ?? null));
+                ['subject', 'attribute', 'value', 'target'].every((key) => (raw[key] ?? null) === (claim[key] ?? null));
         }) &&
-            page.findings.every((finding) => finding && supported(finding.source, true) &&
-                ['Omission', 'Citation', 'Contradiction', 'Question'].includes(finding.kind) &&
+            page.findings.every((finding) => finding && (finding.source?.unlinked === true
+                ? finding.source.verified === false && finding.source.messageId === target.id && finding.source.fingerprint === target.fingerprint &&
+                    finding.source.position === target.position && finding.source.blockNumber === null && finding.source.speaker === null
+                : supported(finding.source, true)) &&
                 typeof finding.question === 'string' && finding.question.trim() &&
                 (!finding.earlier || supported(finding.earlier, false)));
+    },
+
+    /**
+     * @param {object} page
+     * @param {object} message
+     * @return {object}
+     */
+    recoveredCheckPage(page, message) {
+        if (!page.reviewRows?.length) {
+            return page;
+        }
+        const claims = [...page.claims];
+        const findings = [...page.findings];
+        const reviewRows = [];
+        let judged = page.judged;
+        for (const row of page.reviewRows) {
+            let item;
+            try {
+                item = JSON.parse(row.statement);
+            } catch {
+                reviewRows.push(row);
+                continue;
+            }
+            const source = item?.source;
+            const block = message.blocks.find((part) => source?.ref === 'm' + message.position + 'b' + part.blockNumber);
+            if (row.section === 'answer' && row.reason === 'The Checker returned an incomplete or unrecognized response envelope.' &&
+                item?.page === page.id && item.complete === true && Array.isArray(item.claims) && Array.isArray(item.findings)) {
+                judged = true;
+                continue;
+            }
+            if (!block || typeof source.quote !== 'string' || !source.quote.trim()) {
+                reviewRows.push(row);
+                continue;
+            }
+            const citation = { messageId: message.id, position: message.position, fingerprint: message.fingerprint,
+                blockNumber: block.blockNumber, speaker: block.speaker, quote: source.quote };
+            if (!block.text.includes(source.quote) || !(ScribeIntake.Originals.get(block) ?? block.text).includes(source.quote)) {
+                citation.verified = false;
+            }
+            if (row.section === 'claims' &&
+                ['subject', 'attribute', 'value', 'target'].every((field) => item[field] == null || typeof item[field] === 'string')) {
+                claims.push({ source: citation, text: citation.quote, attribution: item.attribution, subject: item.subject ?? null,
+                    attribute: item.attribute ?? null, value: item.value ?? null, ...(item.target ? { target: item.target } : {}) });
+            } else if (row.section === 'findings' &&
+                !item.earlier && !item.record && typeof item.question === 'string' && item.question.trim()) {
+                findings.push({ kind: item.kind, source: citation, earlier: null, record: null, question: item.question });
+            } else {
+                reviewRows.push(row);
+            }
+        }
+        return { ...page, claims, findings, reviewRows, judged };
     },
 
     /**
@@ -2467,19 +2500,22 @@ const ScribeLog = Object.freeze({
         let version = 'checker-v1';
         let writtenThrough = 0;
         let checkedThrough = 0;
+        let processedThrough = 0;
+        let checkedCount = 0;
         let message = null;
         let completed = [];
         let segments = [];
+        let priorPages = [];
         const earlierClaims = [];
         const rulings = new Set();
         const decisions = new Map();
-        const challenged = new Map();
-        let expired = [];
         const findings = new Map();
         const byId = new Map(messages.map((source) => [source.id, source]));
         const history = ScribeLog.findingHistory(book.log, byId, null, byId);
         const active = history.filter((row) => row.status !== 'superseded');
         const citedClaims = new Map();
+        const reviewRows = new Map();
+        const modelReadings = [];
         let legacy = null;
         for (const source of messages) {
             if (!Object.hasOwn(book.log.read, source.id) || source.attributionPending ||
@@ -2498,17 +2534,9 @@ const ScribeLog = Object.freeze({
                 rulings.add(row);
             }
             const removed = [];
-            for (const alert of expired) {
-                challenged.set(alert.finding, alert.sequence);
-                const old = decisions.get(alert.finding);
-                if (old?.sequence === alert.sequence && rulings.delete(old.row)) {
-                    removed.push(alert.sequence);
-                }
-            }
-            expired = [];
             for (const choice of bucket.decisions) {
                 const previous = decisions.get(choice.decision.finding);
-                if (challenged.get(choice.decision.finding) === choice.sequence || previous && previous.sequence > choice.sequence) {
+                if (previous && previous.sequence > choice.sequence) {
                     if (choice.row && rulings.delete(choice.row)) {
                         removed.push(choice.sequence);
                     }
@@ -2526,6 +2554,7 @@ const ScribeLog = Object.freeze({
             const receipt = checks.get(JSON.stringify([source.id, version]));
             completed = [];
             segments = [];
+            priorPages = [];
             const pageIds = new Set();
             if (receipt?.fingerprint === source.fingerprint && Array.isArray(receipt.pages)) {
                 for (const page of receipt.pages) {
@@ -2551,16 +2580,57 @@ const ScribeLog = Object.freeze({
                     }
                 }
                 message = source;
-                continue;
             }
-            for (const alert of receipt.challenges ?? []) {
-                const previous = history.find((decision) => decision.finding === alert.finding && decision.sequence === alert.sequence);
-                if (previous && ScribeLog.challengesFinding(receipt, alert, previous) &&
-                    alert.support.every((reference) => ScribeLog.supportedPassage(reference, byId.get(reference.messageId)))) {
-                    expired.push(alert);
+            if (receipt?.fingerprint === source.fingerprint) {
+                priorPages = (receipt.priorPages ?? []).filter((page) => page.seal === ScribeLog.checkSeal(page) &&
+                    ScribeLog.validCheckPage(page, source, messages));
+                if (message && receipt.planVersion !== ScribeLog.CheckerPlanVersion) {
+                    priorPages = [...priorPages, ...completed, ...segments];
+                    completed = [];
+                    segments = [];
                 }
             }
-            for (const page of completed) {
+            const currentIds = new Set([...completed, ...segments].map((page) => page.id));
+            const previous = priorPages.filter((page) => !currentIds.has(page.id));
+            const observations = new Map();
+            for (const page of [...previous, ...completed, ...segments]) {
+                observations.set(page.id, page.modelResponses ?? []);
+            }
+            const represented = new Map();
+            for (const id of [...observations.keys()].sort((left, right) => left.length - right.length)) {
+                let ancestor = id;
+                while (ancestor.includes('/')) {
+                    ancestor = ancestor.slice(0, ancestor.lastIndexOf('/'));
+                    if (represented.has(ancestor)) {
+                        break;
+                    }
+                }
+                const parent = represented.get(ancestor);
+                const own = new Map();
+                for (const statement of observations.get(id)) {
+                    own.set(statement, (own.get(statement) ?? 0) + 1);
+                    const available = parent?.get(statement) ?? 0;
+                    if (available) {
+                        parent.set(statement, available - 1);
+                    } else {
+                        modelReadings.push({ role: 'Checker', first: source.position, last: source.position, statement });
+                    }
+                }
+                represented.set(id, own);
+            }
+            for (const page of message ? [...previous, ...completed, ...segments] : []) {
+                for (const row of page.reviewRows ?? []) {
+                    reviewRows.set(JSON.stringify([source.position, row]), { position: source.position, ...row });
+                }
+            }
+            if (message) {
+                continue;
+            }
+            const recovered = [...previous, ...completed].map((page) => ScribeLog.recoveredCheckPage(page, source));
+            for (const page of recovered) {
+                for (const row of page.reviewRows ?? []) {
+                    reviewRows.set(JSON.stringify([source.position, row]), { position: source.position, ...row });
+                }
                 for (const claim of page.claims) {
                     const id = claim.source.messageId;
                     if (!citedClaims.has(id)) {
@@ -2569,22 +2639,35 @@ const ScribeLog = Object.freeze({
                     citedClaims.get(id).set(JSON.stringify(claim), claim);
                 }
             }
-            for (const page of completed) {
-                for (const finding of page.findings) {
+            for (const page of recovered) {
+                const retained = [...page.findings];
+                if (page.judged === undefined) {
+                    const raw = JSON.parse(page.answer);
+                    for (const item of raw.findings) {
+                        if (item?.kind !== 'Omission' || typeof item.question !== 'string' || !item.question.trim() ||
+                            item.record != null || item.earlier != null || retained.some((row) => row.kind === item.kind &&
+                                row.question === item.question && row.source.quote === item.source?.quote &&
+                                'm' + row.source.position + 'b' + row.source.blockNumber === item.source?.ref)) {
+                            continue;
+                        }
+                        const claim = page.claims.find((row) => row.source.quote === item.source?.quote &&
+                            'm' + row.source.position + 'b' + row.source.blockNumber === item.source?.ref);
+                        if (claim) {
+                            retained.push({ kind: item.kind, question: item.question, source: claim.source, earlier: null, record: null });
+                        }
+                    }
+                }
+                for (const finding of retained) {
                     const claims = [...(citedClaims.get(finding.source.messageId)?.values() ?? []),
                         ...(finding.earlier && finding.earlier.messageId !== finding.source.messageId
                             ? citedClaims.get(finding.earlier.messageId)?.values() ?? [] : [])];
                     const row = ScribeLog.findingPoint(finding, claims, byId);
-                    const related = active.filter((prior) => ScribeLog.relatedFinding(prior, row));
-                    const linked = active.find((prior) => prior.finding === row.id) ?? (related.length === 1 ? related[0] : null);
+                    const linked = active.find((prior) => (prior.finding === row.id || prior.finding === row.priorId) &&
+                        prior.kind === row.kind && prior.question === row.question);
                     if (linked) {
-                        const same = linked.version === row.version;
                         row.id = linked.finding;
                         row.ruling = linked;
-                        row.status = same ? linked.status : 'reopened';
-                        if (same && linked.status === 'reopened') {
-                            row.actionable = false;
-                        }
+                        row.status = linked.status;
                     } else {
                         if (legacy === null) {
                             const operations = new Map();
@@ -2618,23 +2701,39 @@ const ScribeLog = Object.freeze({
                     findings.set(row.id, row);
                 }
             }
-            checkedThrough++;
-            if (includeContext) {
-                for (const block of source.blocks) {
-                    for (const piece of ScribeIntake.sourcePieces(block)) {
-                        earlierClaims.push({ messageId: source.id, fingerprint: source.fingerprint, position: source.position,
-                            blockNumber: block.blockNumber, speaker: block.speaker, role: block.role,
-                            offset: piece.offset, quote: piece.quote });
-                    }
+            processedThrough++;
+            if (recovered.slice(previous.length).every((page) => page.judged ?? !page.reviewRows?.some((row) => row.section === 'answer'))) {
+                checkedCount++;
+                if (checkedThrough === processedThrough - 1) {
+                    checkedThrough++;
                 }
-                earlierClaims.push(...bucket.written);
+            }
+            if (includeContext) {
                 const independent = new Map();
-                for (const page of completed) {
+                for (const page of recovered) {
                     for (const claim of page.claims) {
                         independent.set(JSON.stringify(claim), claim);
                     }
                 }
-                earlierClaims.push(...independent.values());
+                const originals = new Map();
+                for (const record of [...bucket.written, ...independent.values(), ...bucket.rulings]) {
+                    const cite = record.source;
+                    const message = cite && byId.get(cite.messageId);
+                    const block = message?.blocks.find((part) => part.blockNumber === cite.blockNumber);
+                    if (block && cite.verified !== false && cite.fingerprint === message.fingerprint &&
+                        typeof cite.quote === 'string' && cite.quote && block.text.includes(cite.quote)) {
+                        const linked = { messageId: message.id, position: message.position, fingerprint: message.fingerprint,
+                            blockNumber: block.blockNumber, speaker: block.speaker, role: block.role, quote: cite.quote };
+                        originals.set(JSON.stringify(linked), linked);
+                    }
+                }
+                earlierClaims.push(...originals.values(), ...bucket.written.map((row) => {
+                    if (!row.modelCitation?.original) {
+                        return row;
+                    }
+                    const { original, ...modelCitation } = row.modelCitation;
+                    return { ...row, modelCitation };
+                }), ...independent.values());
             }
         }
         for (const prior of active) {
@@ -2644,49 +2743,10 @@ const ScribeLog = Object.freeze({
                     status: prior.status, ruling: prior, actionable: false });
             }
         }
-        return { checkedThrough, writtenThrough, message, version, written: message ? rows[message.position - 1].written : [],
-            earlierClaims, rulings: includeContext ? [...rulings] : [], completed: message ? completed : [], segments, findings: [...findings.values()] };
-    },
-
-    /**
-     * @param {object} prior
-     * @param {object} row
-     * @return {boolean}
-     */
-    relatedFinding(prior, row) {
-        if (prior.kind !== row.kind) {
-            return false;
-        }
-        const sameEvidence = prior.support.length === row.support.length && row.support.every((now, index) =>
-            now.messageId === prior.support[index].messageId && now.blockNumber === prior.support[index].blockNumber &&
-            now.quote === prior.support[index].quote);
-        const sameQuestion = ScribeText.words(prior.question).join(' ') === ScribeText.words(row.question).join(' ');
-        if (sameEvidence && !sameQuestion) {
-            return false;
-        }
-        const oldRecord = ScribeLog.checkRecord(prior.record)?.fact;
-        const newRecord = ScribeLog.checkRecord(row.record)?.fact;
-        if (oldRecord && newRecord && oldRecord !== newRecord) {
-            return false;
-        }
-        const known = (prior.pointClaims ?? prior.claims).filter((claim) => claim.subject && claim.attribute);
-        const fresh = (row.accounts.source ?? []).filter((claim) => claim.subject && claim.attribute);
-        const sameSubject = (old, next) => ScribeText.normaliseName(old.subject) === ScribeText.normaliseName(next.subject);
-        if (known.length && fresh.length && !known.some((old) => fresh.some((next) => sameSubject(old, next)))) {
-            return false;
-        }
-        if (sameQuestion && oldRecord && oldRecord === newRecord) {
-            return true;
-        }
-        const shared = prior.support.some((before) => row.support.some((now) => before.messageId === now.messageId &&
-            before.blockNumber === now.blockNumber && before.speaker === now.speaker && before.quote === now.quote));
-        const sameSlot = row.support.length === prior.support.length && row.support.every((now, index) =>
-            now.messageId === prior.support[index].messageId && now.blockNumber === prior.support[index].blockNumber);
-        const mentions = (question, attribute) => (' ' + ScribeText.words(question).join(' ') + ' ')
-            .includes(' ' + ScribeText.words(attribute).join(' ') + ' ');
-        const matched = known.some((old) => fresh.some((claim) => claim.attribute === old.attribute && sameSubject(old, claim) &&
-            (sameQuestion || mentions(prior.question, old.attribute) && mentions(row.question, old.attribute))));
-        return (shared || sameSlot) && (matched || sameQuestion && (sameEvidence || !known.length || !fresh.length));
+        return { checkedThrough, processedThrough, checkedCount, writtenThrough, message, version,
+            reviewRows: [...reviewRows.values()], modelReadings, written: message ? rows[message.position - 1].written : [],
+            earlierClaims, rulings: includeContext ? [...rulings] : [], completed: message ? completed : [], segments,
+            priorPages: message ? priorPages : [], findings: [...findings.values()] };
     },
 
     /**
@@ -2695,8 +2755,9 @@ const ScribeLog = Object.freeze({
      * @return {object}
      */
     checkProgress(book, messages) {
-        const { checkedThrough, writtenThrough, findings } = ScribeLog.checkWork(book, messages, false);
-        return { checkedThrough, writtenThrough, findings };
+        const { checkedThrough, processedThrough, checkedCount, writtenThrough, findings, reviewRows, modelReadings } = ScribeLog.checkWork(book, messages, false);
+        return { checkedThrough, writtenThrough, findings, ...(processedThrough !== checkedThrough ? { processedThrough, checkedCount } : {}),
+            ...(reviewRows.length ? { reviewRows } : {}), ...(modelReadings.length ? { modelReadings } : {}) };
     },
 
     /**
@@ -2705,11 +2766,20 @@ const ScribeLog = Object.freeze({
      */
     checkSeal(page) {
         const fields = [page.id, page.index, page.total, page.answer, page.claims, page.findings];
+        if (page.judged !== undefined) {
+            fields.push(page.judged);
+        }
         if (page.planBytes !== undefined) {
             fields.push(page.planBytes, page.parentId ?? null, page.parentIndex ?? null);
         }
         if (page.verifyFrom !== undefined) {
             fields.push(page.verifyFrom);
+        }
+        if (page.reviewRows !== undefined) {
+            fields.push(page.reviewRows);
+        }
+        if (page.modelResponses !== undefined) {
+            fields.push(page.modelResponses);
         }
         return ScribeText.fingerprint(JSON.stringify(fields));
     },
@@ -2745,6 +2815,22 @@ const ScribeLog = Object.freeze({
                     fingerprint: target.fingerprint, version: current.version, pages: [] } };
             log.entries.push(existing);
         }
+        if (existing.check.planVersion !== ScribeLog.CheckerPlanVersion) {
+            if (current.priorPages.length) {
+                existing.check.priorPages = current.priorPages;
+            }
+            existing.check.planVersion = ScribeLog.CheckerPlanVersion;
+            existing.check.pages = [];
+            delete existing.check.segments;
+        }
+        if (existing.check.priorPages?.length) {
+            existing.check.priorPages = existing.check.priorPages.filter((prior) => prior.id !== stored.id ||
+                prior.answer !== stored.answer || JSON.stringify(prior.modelResponses) !== JSON.stringify(stored.modelResponses) ||
+                JSON.stringify(prior.reviewRows) !== JSON.stringify(stored.reviewRows));
+            if (!existing.check.priorPages.length) {
+                delete existing.check.priorPages;
+            }
+        }
         if (segment) {
             existing.check.segments = [...current.segments, stored];
         } else {
@@ -2754,10 +2840,6 @@ const ScribeLog = Object.freeze({
                 const progress = ScribeLog.checkProgress(book, messages);
                 existing.check.legacyRulings = progress.findings.filter((finding) => finding.ruling?.legacy &&
                     finding.status === 'settled' && finding.source.messageId === target.id).map((finding) => finding.ruling);
-                existing.check.challenges = progress.findings.filter((finding) => finding.status === 'reopened' &&
-                    finding.actionable && finding.ruling && finding.source.messageId === target.id &&
-                    finding.version !== finding.ruling.version).map((finding) => ({ finding: finding.id,
-                        sequence: finding.ruling.sequence, support: finding.support }));
             }
         }
         return true;
@@ -2778,7 +2860,7 @@ const ScribeLog = Object.freeze({
                 continue;
             }
             const quote = evidence?.quote ?? text;
-            const blocks = message.blocks.filter((block) => (!evidence || (evidence.messageId === message.id &&
+            const blocks = message.blocks.filter((block) => evidence?.verified !== false && (!evidence || (evidence.messageId === message.id &&
                 evidence.fingerprint === message.fingerprint && evidence.blockNumber === block.blockNumber && evidence.speaker === block.speaker)) &&
                 block.text.includes(quote) && (ScribeIntake.Originals.get(block) ?? block.text).includes(quote));
             const candidates = blocks.map((block) => ({ blockNumber: block.blockNumber, speaker: block.speaker,
@@ -2816,6 +2898,7 @@ const ScribeLog = Object.freeze({
             const start = anchor ? anchor.position - ids.indexOf(anchor.cite) : null;
             let lastIndex = -1;
             let lastEntryIndex = -1;
+            let lastPosition = null;
             let deleted = false;
             for (const [index, id] of ids.entries()) {
                 if (read[id] !== entry.sequence) {
@@ -2829,11 +2912,13 @@ const ScribeLog = Object.freeze({
                 if (now !== undefined) {
                     if (deleted || now < lastIndex) {
                         first = Math.min(first, now);
-                    } else if (lastIndex >= 0 && now - lastIndex > index - lastEntryIndex) {
+                    } else if (lastIndex >= 0 && now - lastIndex > (position !== null && lastPosition !== null
+                        ? position - lastPosition : index - lastEntryIndex)) {
                         first = Math.min(first, lastIndex + 1);
                     }
                     lastIndex = now;
                     lastEntryIndex = index;
+                    lastPosition = position;
                 } else if (removed.has(id)) {
                     deleted = true;
                     if (lastIndex >= 0 && index === lastEntryIndex + 1) {

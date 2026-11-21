@@ -9,17 +9,6 @@ const ScribeReminder = Object.freeze({
         Place: 'Place',
     }),
 
-    Shape: Object.freeze({
-        Look: 'Look',
-        State: 'State',
-        Where: 'Where',
-        Named: 'Named',
-        Thing: 'Thing',
-        Passing: 'Passing',
-        Owned: 'Owned',
-        Habit: 'Habit',
-        Past: 'Past',
-    }),
 
     Settings: Object.freeze({
         MaxCharacters: 3000,
@@ -48,9 +37,7 @@ const ScribeReminder = Object.freeze({
             'Rules.',
             '1. Only what those lines say. No name, place, object or event that they do not hold.',
             '2. Past tense for what happened; present tense for where things stand now.',
-            '3. Write the prose and nothing else: no heading, no label, no list, no remarks.',
         ]),
-        LongestText: 200,
         MostPlaces: 2,
         LongestLabel: 60,
         MostLabelWords: 4,
@@ -58,231 +45,17 @@ const ScribeReminder = Object.freeze({
         FewestLetters: 3,
         NotFound: -1,
         NormalForm: 'NFKC',
-        WrittenForm: 'NFC',
         ListWord: 'and',
         Article: 'the',
-        Slash: '/',
         Nothing: '',
         Space: ' ',
         LooksCategories: Object.freeze(['age', 'eyes', 'hair', 'build', 'skin', 'appearance', 'feature']),
         PlaceCategories: Object.freeze(['location', 'appearance', 'feature']),
         FiledOrigins: Object.freeze(['Operator', 'Notes']),
-        LightWords: Object.freeze([
-            'a',
-            'an',
-            'the',
-            'and',
-            'or',
-            'with',
-            'of',
-            'in',
-            'on',
-            'at',
-            'to',
-            'for',
-            'from',
-            'by',
-            'her',
-            'his',
-            'their',
-            'its',
-            'is',
-            'are',
-            'has',
-            'have',
-            'very',
-        ]),
-        LookClauses: Object.freeze({
-            age: Object.freeze({
-                prefix: 'aged ',
-                suffix: '',
-                nouns: Object.freeze(['age', 'old', 'year', 'years']),
-                adjectives: Object.freeze(['aged']),
-                counted: true,
-            }),
-            eyes: Object.freeze({
-                prefix: '',
-                suffix: ' eyes',
-                nouns: Object.freeze(['eye', 'eyes']),
-                adjectives: Object.freeze(['eyed']),
-                counted: false,
-            }),
-            hair: Object.freeze({
-                prefix: '',
-                suffix: ' hair',
-                nouns: Object.freeze(['hair']),
-                adjectives: Object.freeze(['haired', 'bald', 'balding']),
-                counted: false,
-            }),
-            skin: Object.freeze({
-                prefix: '',
-                suffix: ' skin',
-                nouns: Object.freeze(['skin']),
-                adjectives: Object.freeze(['skinned']),
-                counted: false,
-            }),
-        }),
-        Shapes: Object.freeze({
-            age: 'Look',
-            eyes: 'Look',
-            hair: 'Look',
-            skin: 'Look',
-            kind: 'State',
-            status: 'State',
-            role: 'State',
-            build: 'State',
-            location: 'Where',
-            aka: 'Named',
-            title: 'Named',
-            appearance: 'Thing',
-            feature: 'Thing',
-            condition: 'Passing',
-            belonging: 'Owned',
-            trait: 'Habit',
-            ability: 'Habit',
-            rule: 'Habit',
-            background: 'Past',
-        }),
-        Called: Object.freeze({ aka: 'is also called ', title: 'is titled ' }),
-        Is: 'is ',
-        Has: 'has ',
-        Was: 'was ',
-        IsAt: 'is at ',
-        IsIn: 'is in ',
-        Leads: Object.freeze([
-            'is',
-            'are',
-            'was',
-            'were',
-            'has',
-            'had',
-            'have',
-            'can',
-            'cannot',
-            'could',
-            'will',
-            'would',
-            'may',
-            'might',
-            'must',
-            'should',
-            'does',
-            'did',
-            'doesn',
-            'didn',
-            'isn',
-            'wasn',
-            'hasn',
-            'won',
-            'always',
-            'never',
-            'often',
-            'usually',
-            'sometimes',
-            'rarely',
-            'seldom',
-            'wears',
-            'wore',
-        ]),
-        Determiners: Object.freeze([
-            'a',
-            'an',
-            'the',
-            'his',
-            'her',
-            'their',
-            'its',
-            'my',
-            'our',
-            'your',
-            'some',
-            'several',
-            'many',
-            'few',
-            'no',
-            'every',
-            'each',
-            'both',
-            'this',
-            'that',
-            'these',
-            'those',
-        ]),
-        Prepositions: Object.freeze([
-            'in',
-            'at',
-            'on',
-            'under',
-            'inside',
-            'outside',
-            'behind',
-            'beside',
-            'near',
-            'by',
-            'with',
-            'without',
-            'among',
-            'between',
-            'across',
-            'around',
-            'above',
-            'below',
-            'over',
-            'into',
-            'onto',
-            'from',
-            'toward',
-            'towards',
-            'within',
-            'beyond',
-            'through',
-            'of',
-            'to',
-            'for',
-            'about',
-            'against',
-            'along',
-            'after',
-            'before',
-            'during',
-            'until',
-            'upon',
-        ]),
-        Joiners: Object.freeze(['and', 'or', 'but']),
-        NumberWords: Object.freeze([
-            'one',
-            'two',
-            'three',
-            'four',
-            'five',
-            'six',
-            'seven',
-            'eight',
-            'nine',
-            'ten',
-            'eleven',
-            'twelve',
-            'thirteen',
-            'fourteen',
-            'fifteen',
-            'sixteen',
-            'seventeen',
-            'eighteen',
-            'nineteen',
-            'twenty',
-            'thirty',
-            'forty',
-            'fifty',
-            'sixty',
-            'seventy',
-            'eighty',
-            'ninety',
-            'hundred',
-        ]),
         Toward: 'toward ',
         Last: -1,
         Wears: ' wears ',
-        Secretly: ' secretly ',
+        PrivateBookValue: ' (private): ',
         OnlyOpen: '; only ',
         KnowsOne: ' knows.',
         KnowMany: ' know.',
@@ -294,12 +67,6 @@ const ScribeReminder = Object.freeze({
         And: ' and ',
         FullStop: '.',
 
-        /**
-         * @return {RegExp}
-         */
-        get TrailingMarks() {
-            return /[\s.!?;,]+$/u;
-        },
 
         /**
          * @return {RegExp}
@@ -315,19 +82,6 @@ const ScribeReminder = Object.freeze({
             return /[\p{Cf}\p{Default_Ignorable_Code_Point}]/gu;
         },
 
-        /**
-         * @return {RegExp}
-         */
-        get Frame() {
-            return /[\[\]@]/u;
-        },
-
-        /**
-         * @return {RegExp}
-         */
-        get Frames() {
-            return /[\[\]@]/gu;
-        },
 
         /**
          * @return {RegExp}
@@ -343,26 +97,6 @@ const ScribeReminder = Object.freeze({
             return /\S(?=\s)/gu;
         },
 
-        /**
-         * @return {RegExp}
-         */
-        get EchoedLabel() {
-            return /^[\s>*_"'“”‘’`]*(?:the\s+)?(?:story\s+)?so\s+far[*_"'“”‘’`]*\s*(?::|[—–]|-\s)(?:["'”’](?=\s))?[\s>*_`]*/iu;
-        },
-
-        /**
-         * @return {RegExp}
-         */
-        get HeadedLabel() {
-            return /^\s*(?:#+|\*\*|__|>)\s*(?:the\s+)?(?:story\s+)?so\s+far\s*(?:\*\*|__)?\s*\r?\n[\s>]*/iu;
-        },
-
-        /**
-         * @return {RegExp}
-         */
-        get Backslashes() {
-            return /\\/g;
-        },
 
         /**
          * @return {RegExp}
@@ -406,40 +140,6 @@ const ScribeReminder = Object.freeze({
             return /^(?:(?:is|are)\s+)?(?:wears|wearing)\s+/iu;
         },
 
-        /**
-         * @return {RegExp}
-         */
-        get ClauseBreak() {
-            return /[,;(]/u;
-        },
-
-        /**
-         * @return {RegExp}
-         */
-        get Numeral() {
-            return /^\p{N}/u;
-        },
-
-        /**
-         * @return {RegExp}
-         */
-        get Plural() {
-            return /\p{L}[^isu]s$/u;
-        },
-
-        /**
-         * @return {RegExp}
-         */
-        get PresentVerb() {
-            return /\p{L}[^aiosu]s$/u;
-        },
-
-        /**
-         * @return {RegExp}
-         */
-        get Progressive() {
-            return /\p{L}{2}ing$/u;
-        },
     }),
 
     /**
@@ -567,45 +267,36 @@ const ScribeReminder = Object.freeze({
             .join(settings.BlankLine);
     },
 
-    /**
-     * @param {string} text
-     * @return {string|null}
-     */
-    told(text) {
-        const settings = ScribeReminder.Settings;
-        const said = ScribeIntake.collapse(
-            ScribeReminder.clean(
-                text.replace(settings.HeadedLabel, settings.Nothing).replace(settings.EchoedLabel, settings.Nothing),
-                settings.NormalForm,
-            )
-                .replace(settings.Frames, settings.Nothing)
-                .replace(settings.Backslashes, settings.Slash),
-        );
-        return said === settings.Nothing ? null : said;
-    },
 
     /**
-     * @param {string} text
-     * @return {boolean}
+     * @param {string} answer
+     * @return {{status: string, text: string|null}|null}
      */
-    declined(text) {
-        const said = ScribeReminder.told(text);
-        if (said === null) {
-            return false;
+    recap(answer) {
+        const original = answer.trim();
+        const fence = /^(`{3,}|~{3,})[^\r\n]*\r?\n([\s\S]*)^[ \t]*(`{3,}|~{3,})$/mu.exec(original);
+        const enclosed = fence && fence.index === 0 && fence[0].length === original.length && fence[3].startsWith(fence[1]);
+        const body = enclosed ? fence[2].trim() : original;
+        if (!original) {
+            return null;
         }
-        const opening = said.replace(/^(?:(?:i(?:['’]m| am) )?sorry|i apologize)[,.!:\s—–-]+(?:but\s+)?/iu, '')
-            .replace(/^instead[,\s]+/iu, '');
-        if (/^[^.!?,"“”]*[,!?.]["'”’]\s+\p{L}/u.test(opening)) {
-            return false;
+        if (body.startsWith('{')) {
+            let result;
+            try {
+                result = JSON.parse(body);
+            } catch (error) {
+                if (!(error instanceof SyntaxError)) {
+                    throw error;
+                }
+            }
+            if (typeof result?.text === 'string' && result.text.trim()) {
+                return { status: 'recap', text: result.text };
+            }
+            if (result?.status === 'declined' && Object.keys(result).every((name) => ['status', 'text'].includes(name)) && !result.text) {
+                return { status: 'declined', text: null };
+            }
         }
-        const refusal = /^i(?: (?:can(?:not|['’]t| not)|won['’]t)|(?:['’]m| am) unable to) /iu.exec(opening);
-        if (refusal) {
-            const task = opening.slice(refusal[0].length);
-            return /^(?:help (?:to )?)?(?:write|continue(?: with| writing)?|generate|provide|produce|summari[sz]e|recap) (?:this|that|the|your) (?:story|role[\s-]?play|recap|summary|narrative|scene|content|request)\b/iu.test(task) ||
-                /^(?:assist|help|comply) with (?:this|that|your|the) request\b/iu.test(task);
-        }
-        return /^i (?:can|could) (?:offer|provide|give|write) (?:you )?a (?:brief |short )?(?:summary|recap)\b/iu.test(opening) ||
-            /^i (?:can|could) (?:summari[sz]e|recap) (?:this|that|the|your) (?:story|role[\s-]?play|events|scene|narrative) instead\b/iu.test(opening);
+        return { status: 'recap', text: answer };
     },
 
     /**
@@ -669,15 +360,7 @@ const ScribeReminder = Object.freeze({
      * @return {string|null}
      */
     guarded(text) {
-        const settings = ScribeReminder.Settings;
-        const said = ScribeReminder.clean(text, settings.WrittenForm)
-            .replace(settings.TrailingMarks, settings.Nothing)
-            .replace(settings.Backslashes, settings.Slash);
-        const fits =
-            said !== settings.Nothing &&
-            !settings.Frame.test(said.normalize(settings.NormalForm)) &&
-            Array.from(said).length <= settings.LongestText;
-        return fits ? said : null;
+        return typeof text === 'string' && text.trim() ? text : null;
     },
 
     /**
@@ -1048,20 +731,6 @@ const ScribeReminder = Object.freeze({
         return found;
     },
 
-    /**
-     * @param {string} text
-     * @return {string[]}
-     */
-    content(text) {
-        const light = ScribeReminder.Settings.LightWords;
-        return ScribeText.words(text).filter(
-            /**
-             * @param {string} word
-             * @return {boolean}
-             */
-            (word) => !light.includes(word),
-        );
-    },
 
     /**
      * @param {readonly string[]} sought
@@ -1092,8 +761,7 @@ const ScribeReminder = Object.freeze({
      * @return {boolean}
      */
     added(text, description) {
-        const sought = ScribeReminder.content(text);
-        return sought.length > 0 && ScribeReminder.within(sought, ScribeReminder.content(description)).length === 0;
+        return text.trim() !== description.trim();
     },
 
     /**
@@ -1102,163 +770,9 @@ const ScribeReminder = Object.freeze({
      * @return {boolean}
      */
     restates(text, phrases) {
-        const words = ScribeReminder.content(text);
-        const covered = new Set();
-        for (const phrase of phrases) {
-            const sought = ScribeReminder.content(phrase);
-            for (const start of ScribeReminder.within(sought, words)) {
-                for (let offset = 0; offset < sought.length; offset++) {
-                    covered.add(start + offset);
-                }
-            }
-        }
-        return covered.size === words.length;
+        return phrases.some((phrase) => phrase.trim() === text.trim());
     },
 
-    /**
-     * @param {string} text
-     * @return {string[]}
-     */
-    tokens(text) {
-        const settings = ScribeReminder.Settings;
-        return text.split(settings.Space).map(
-            /**
-             * @param {string} token
-             * @return {string}
-             */
-            (token) => {
-                const [word = settings.Nothing] = ScribeText.words(token);
-                return word;
-            },
-        );
-    },
-
-    /**
-     * @param {string} text
-     * @return {string}
-     */
-    head(text) {
-        const settings = ScribeReminder.Settings;
-        const cut = text.search(settings.ClauseBreak);
-        return (cut === settings.NotFound ? text : text.slice(0, cut)).trimEnd();
-    },
-
-    /**
-     * @param {string} text
-     * @return {boolean}
-     */
-    linked(text) {
-        return ScribeReminder.tokens(text).some(
-            /**
-             * @param {string} token
-             * @return {boolean}
-             */
-            (token) => ScribeReminder.Settings.Prepositions.includes(token),
-        );
-    },
-
-    /**
-     * @param {string} word
-     * @return {boolean}
-     */
-    counted(word) {
-        const settings = ScribeReminder.Settings;
-        return settings.Numeral.test(word) || settings.NumberWords.includes(word);
-    },
-
-    /**
-     * @param {string} category
-     * @param {string} text
-     * @return {string}
-     */
-    looked(category, text) {
-        const settings = ScribeReminder.Settings;
-        if (!Object.hasOwn(settings.LookClauses, category)) {
-            return text;
-        }
-        const clause = settings.LookClauses[category];
-        const marked = ScribeText.words(text).some(
-            /**
-             * @param {string} word
-             * @return {boolean}
-             */
-            (word) => clause.nouns.includes(word) || clause.adjectives.includes(word),
-        );
-        const head = ScribeReminder.head(text);
-        const [first] = ScribeReminder.tokens(head);
-        const counted = ScribeReminder.counted(first);
-        const bare = clause.counted
-            ? counted
-            : !counted && !settings.Determiners.includes(first) && !ScribeReminder.linked(head);
-        if (marked || !bare || head === settings.Nothing) {
-            return text;
-        }
-        return clause.prefix + head + clause.suffix + text.slice(head.length);
-    },
-
-    /**
-     * @param {string} category
-     * @param {string} text
-     * @return {string}
-     */
-    stated(category, text) {
-        const settings = ScribeReminder.Settings;
-        const shapes = ScribeReminder.Shape;
-        const shape = Object.hasOwn(settings.Shapes, category) ? settings.Shapes[category] : shapes.Habit;
-        const tokens = ScribeReminder.tokens(text);
-        const [first] = tokens;
-        const single = tokens.length === 1;
-        const second = single ? settings.Nothing : tokens[1];
-        const named = settings.Determiners.includes(first) || ScribeReminder.counted(first);
-        const opening = settings.Prepositions.includes(first) || settings.Progressive.test(first);
-        const loose = single || settings.Prepositions.includes(second) || settings.Joiners.includes(second);
-        const acting = settings.PresentVerb.test(first);
-        if (shape === shapes.Named) {
-            return settings.Called[category] + text;
-        }
-        if (shape === shapes.Look) {
-            const look = ScribeReminder.looked(category, text);
-            const clause = settings.LookClauses[category];
-            const adjective = ScribeText.words(text).some(
-                /**
-                 * @param {string} word
-                 * @return {boolean}
-                 */
-                (word) => clause.adjectives.includes(word),
-            );
-            const noun = look !== text || named || clause.nouns.includes(first);
-            const being = clause.counted || (!noun && (adjective || ScribeReminder.linked(ScribeReminder.head(text))));
-            return (being ? settings.Is : settings.Has) + look;
-        }
-        if (settings.Leads.includes(first)) {
-            return text;
-        }
-        if (shape === shapes.Past) {
-            return named || opening ? settings.Was + text : text;
-        }
-        if (opening) {
-            return settings.Is + text;
-        }
-        if (shape === shapes.Owned) {
-            return settings.Has + text;
-        }
-        if (shape === shapes.Where) {
-            return acting ? text : settings.IsAt + text;
-        }
-        if (shape === shapes.State) {
-            return acting ? text : settings.Is + text;
-        }
-        if (named) {
-            return settings.Has + text;
-        }
-        if (shape === shapes.Habit) {
-            return acting ? text : settings.Is + text;
-        }
-        if (settings.Plural.test(first)) {
-            return single && shape === shapes.Passing ? settings.IsIn + text : settings.Has + text;
-        }
-        return loose ? settings.Is + text : settings.Has + text;
-    },
 
     /**
      * @param {{ state: object, now: ?object, player: string, unread: *, notes: *, characters: *, first: *, story?: string|null }} request
@@ -1403,13 +917,13 @@ const ScribeReminder = Object.freeze({
                 const target = names.get(ScribeKnowledge.survivor(state, fact.target));
                 return target === null ? null : settings.Toward + target + settings.Colon + text;
             }
-            return ScribeReminder.stated(fact.category, text);
+            return fact.category + settings.Colon + text;
         };
         /**
          * @param {object} fact
          * @return {string}
          */
-        const joint = (fact) => (veiled(fact) && fact.category !== relation ? settings.Secretly : settings.Space);
+        const joint = (fact) => fact.category === relation ? settings.Space : veiled(fact) ? settings.PrivateBookValue : settings.Colon;
         /**
          * @param {{ subject: string|null }} person
          * @param {object} fact
@@ -1536,7 +1050,7 @@ const ScribeReminder = Object.freeze({
                 const words = clause(fact);
                 if (words !== null) {
                     said.add(fact.id);
-                    const text = person.label + settings.Space + words + settings.FullStop;
+                    const text = person.label + joint(fact) + words + settings.FullStop;
                     pieces.push({ part: parts.Filed, person, fact: null, text });
                 }
             }
@@ -1595,12 +1109,11 @@ const ScribeReminder = Object.freeze({
                     if (text === null) {
                         continue;
                     }
-                    const look = ScribeReminder.looked(category, text);
                     if (said.has(fact.id)) {
-                        spoken.push(look);
-                    } else if (!newest && (description === null || ScribeReminder.added(look, description))) {
-                        items.push(look);
-                        spoken.push(look);
+                        spoken.push(text);
+                    } else if (!newest && (description === null || ScribeReminder.added(text, description))) {
+                        items.push(fact.category + settings.Colon + text);
+                        spoken.push(text);
                     }
                 }
             }

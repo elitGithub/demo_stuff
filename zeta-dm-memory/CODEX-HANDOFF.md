@@ -81,7 +81,8 @@ node --input-type=module -e "
   import { readFileSync } from 'node:fs'
   import { ScribePack } from './scribe/pack.mjs'
   const read = path => readFileSync(path, 'utf8')
-  if (ScribePack.build(read) !== read('scribe/scribe.user.js')) process.exit(1)
+  const released = read('scribe/scribe.user.js').replaceAll('\r\n', '\n')
+  if (ScribePack.build(read, ScribePack.version(released)) !== released) process.exit(1)
   console.log('Bundle matches source')
 "
 ```

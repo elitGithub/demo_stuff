@@ -38,6 +38,7 @@ const ScribeStore = Object.freeze({
             Synced: 'synced',
             Others: 'others',
             CheckAfter: 'checkafter',
+            HistoryPages: 'historypages',
         }),
         Segments: Object.freeze({
             Head: Object.freeze([4]),
@@ -47,6 +48,7 @@ const ScribeStore = Object.freeze({
             Synced: Object.freeze([3]),
             Others: Object.freeze([3]),
             CheckAfter: Object.freeze([3]),
+            HistoryPages: Object.freeze([3]),
         }),
         Position: Object.freeze({
             Prefix: 0,

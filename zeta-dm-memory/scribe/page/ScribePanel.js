@@ -6,7 +6,6 @@ const ScribePanel = Object.freeze({
             Collapsed: 'collapsed',
         }),
         NarrowWindow: 1100,
-        TellLimit: 2000,
         RepeatMs: 1000,
         ClockMs: 1000,
         Hollow: Object.freeze(['Summary', 'Book', 'Timeline', 'Rulings']),
@@ -59,6 +58,7 @@ const ScribePanel = Object.freeze({
             Queued: 'queued',
             Findings: 'findings',
             Disputed: 'disputed',
+            Filing: 'filing',
             Lines: 'lines',
             Calls: 'calls',
             Contradictions: 'contradictions',
@@ -72,6 +72,7 @@ const ScribePanel = Object.freeze({
             ProblemsCompact: 'scribe-problems-compact',
             ProblemDetails: 'scribe-problem-details',
             DisputedGroup: 'scribe-disputed-group',
+            FilingGroup: 'scribe-filing-group',
             Choice: 'scribe-choice',
             ChoiceCounts: 'scribe-choice-counts',
             UseCloud: 'scribe-use-cloud',
@@ -142,6 +143,8 @@ const ScribePanel = Object.freeze({
             Pull: 'scribe-pull',
             Pause: 'scribe-pause',
             Resume: 'scribe-resume',
+            StoryRetry: 'scribe-story-retry',
+            InputRetry: 'scribe-input-retry',
             ControlsOutcome: 'scribe-controls-outcome',
             Pulled: 'scribe-pulled',
             Checked: 'scribe-checked',
@@ -481,8 +484,6 @@ const ScribePanel = Object.freeze({
             TellNote: 'This stays with the scribe. It is never sent to the chat.',
             Work: 'Work it out',
             TellMissing: 'Write what the book should know.',
-            TellLong: 'Write at most 2,000 characters.',
-            FieldFull: 'The field is full: clear it or file it first.',
             ReadingWords: 'Reading your words...',
             Understood: 'The scribe understood:',
             RefusedOne: ' line of the answer could not be used.',
@@ -692,6 +693,7 @@ const ScribePanel = Object.freeze({
             marked: new Set(),
             last: new Map(),
             busy: 0,
+            storyRetry: null,
             step: null,
             timer: null,
             began: null,
@@ -1865,7 +1867,6 @@ const ScribePanel = Object.freeze({
                 false,
             );
             ScribePanel.own(panel, 'Tell', field.input);
-            field.input.setAttribute(settings.Attributes.MaxLength, String(settings.TellLimit));
             const working = ScribePanel.make(panel, tags.Block, settings.Nothing, classes.Actions);
             working.append(
                 ScribePanel.own(
@@ -2226,7 +2227,23 @@ const ScribePanel = Object.freeze({
             const checked = ScribePanel.own(panel, 'Checked', ScribePanel.make(panel, tags.Paragraph, settings.Nothing, classes.Meta));
             checked.hidden = true;
             const details = ScribePanel.own(panel, 'ProblemDetails', ScribePanel.make(panel, tags.Block, settings.Nothing, classes.Meta));
-            section.append(controls, ScribePanel.outlet(panel, 'ControlsOutcome', outlets.Controls), details, checked, story, pulled);
+            const retry = ScribePanel.own(panel, 'StoryRetry', ScribePanel.button(panel, 'Retry', async () => {
+                const displayed = panel.storyRetry;
+                if (displayed) {
+                    return command(() => keeper.retryStory(displayed), true)();
+                }
+            }, guards.Book, ids.StoryRetry));
+            retry.hidden = true;
+            const inputRetry = ScribePanel.own(panel, 'InputRetry', ScribePanel.button(panel, 'Retry input', async () => {
+                if (panel.inputRetry) {
+                    return command(() => keeper.retryStory(panel.inputRetry), true)();
+                }
+            }, guards.Book, ids.InputRetry));
+            inputRetry.hidden = true;
+            section.append(controls, ScribePanel.outlet(panel, 'ControlsOutcome', outlets.Controls), details, retry, inputRetry, checked, story, pulled);
+            const filing = ScribePanel.own(panel, 'FilingGroup', ScribePanel.group(panel, section, 'Pending book entries, checker rows and operator input'));
+            filing.hidden = true;
+            ScribePanel.pager(panel, settings.Lists.Filing, filing);
             const disputed = ScribePanel.own(panel, 'DisputedGroup', ScribePanel.group(panel, section, words.DisputedHeading));
             disputed.hidden = true;
             ScribePanel.pager(panel, settings.Lists.Disputed, disputed);
@@ -2352,6 +2369,10 @@ const ScribePanel = Object.freeze({
      * @return {void}
      */
     lockAll(panel) {
+        panel.storyRetry = null;
+        panel.parts.StoryRetry.hidden = true;
+        panel.inputRetry = null;
+        panel.parts.InputRetry.hidden = true;
         for (const lists of [panel.held, panel.guarded]) {
             for (const controls of Object.values(lists)) {
                 for (const control of controls) {
@@ -2536,6 +2557,17 @@ const ScribePanel = Object.freeze({
         ));
         parts.ProblemDetails.replaceChildren(...details);
         parts.ProblemDetails.hidden = details.length === 0;
+        panel.storyRetry = view.reader && view.hasKey && !view.keyProblem ? view.storyRetry ?? null : null;
+        panel.inputRetry = view.reader && view.hasKey && !view.keyProblem ? view.inputRetry ?? null : null;
+        parts.InputRetry.hidden = panel.inputRetry === null;
+        if (panel.inputRetry) {
+            ScribePanel.write(parts.InputRetry, 'Retry operator input at #' + panel.inputRetry.first);
+        }
+        parts.StoryRetry.hidden = panel.storyRetry === null;
+        if (panel.storyRetry) {
+            const { first, through } = panel.storyRetry;
+            ScribePanel.write(parts.StoryRetry, first === through ? 'Retry #' + first : 'Retry #' + first + '–#' + through);
+        }
         const choiceOutlet = settings.Outlets.Choice;
         const conflict = cloud.phase === ScribeCloud.Phase.Conflict ? cloud.conflict : null;
         parts.Choice.hidden = conflict === null;
@@ -3111,10 +3143,6 @@ const ScribePanel = Object.freeze({
         const text = panel.parts.Tell.value;
         if (text.trim() === settings.Nothing) {
             ScribePanel.refuse(panel, outlet, settings.Ids.Tell, words.TellMissing);
-            return;
-        }
-        if (text.length > settings.TellLimit) {
-            ScribePanel.refuse(panel, outlet, settings.Ids.Tell, words.TellLong);
             return;
         }
         ScribePanel.mark(panel, settings.Ids.Tell, false);
@@ -3757,9 +3785,9 @@ const ScribePanel = Object.freeze({
                 );
                 const lines = PanelView.lines(understood.lines);
                 const unchanged = lines.length === settings.Single && lines[0] === words.NothingChanges;
-                if (unchanged) {
+                if (unchanged && !understood.operatorText) {
                     shown.push(ScribePanel.make(panel, tags.Paragraph, words.NothingChanges, classes.Meta));
-                } else if (understood.count > 0) {
+                } else if (understood.operatorText || understood.count > 0) {
                     const list = ScribePanel.make(panel, tags.List, settings.Nothing, classes.Lines);
                     list.append(
                         ...ScribePanel.items(
@@ -3773,6 +3801,12 @@ const ScribePanel = Object.freeze({
                         ),
                     );
                     shown.push(ScribePanel.make(panel, tags.Form, words.Understood), list);
+                    if (understood.operatorText) {
+                        shown.push(ScribePanel.make(panel, tags.Paragraph, understood.operatorText));
+                    }
+                    if (understood.modelResponse) {
+                        shown.push(ScribePanel.make(panel, tags.Paragraph, understood.modelResponse));
+                    }
                     const refused = PanelView.listed(understood.refused).length;
                     if (refused > 0) {
                         const counted = refused === settings.Single ? words.RefusedOne : words.RefusedMany;
@@ -4178,8 +4212,61 @@ const ScribePanel = Object.freeze({
                 const time = new Date(view.expensiveCheckAt).toLocaleTimeString();
                 schedule = ' Zeta expired the links to older messages. The next background history check is due at ' + time + ' (local time).';
             }
+            const pending = [...PanelView.listed(view.pendingFiling)];
+            const readings = [...PanelView.listed(view.modelReadings)];
+            const displayed = new Set(readings.filter((item) => item.role === 'Checker')
+                .map((item) => JSON.stringify([item.first, item.statement])));
+            for (const item of PanelView.listed(view.checkerReview)) {
+                if (item.section === 'answer' && (item.reason === 'Checker response' ||
+                    item.reason === 'The Checker returned text outside its JSON format.')) {
+                    if (!displayed.has(JSON.stringify([item.position, item.statement]))) {
+                        readings.push({ role: 'Checker', first: item.position, last: item.position, statement: item.statement });
+                    }
+                } else {
+                    pending.push({ ...item, kind: 'checker' });
+                }
+            }
+            for (const item of PanelView.listed(live.checkerRows)) {
+                if (item.modelReading) {
+                    readings.push({ role: 'Checker', first: item.position, last: item.position, statement: item.statement });
+                } else {
+                    pending.push({ ...item, kind: 'checker', section: 'live answer',
+                        reason: 'The model returned this statement without a matching link.' });
+                }
+            }
+            parts.FilingGroup.hidden = pending.length === 0;
+            const reasons = ScribeAdoption.Settings.StoryReasons;
+            const retriable = new Set();
+            ScribePanel.paged(panel, settings.Lists.Filing, pending, (item) => {
+                const reason = item.kind === 'checker' ? 'Checker · ' + item.section + ' · ' + item.reason :
+                    item.reason === 'answerPending' ? 'The model has not filed this answer.' :
+                    item.reason === 'notePending' ? 'The model has not filed this operator note.' :
+                    reasons[item.reason] ?? 'The model returned a row that still needs filing.';
+                const statements = item.statement ? [item.statement] : item.statements ?? [];
+                const detail = [reason, ...statements.map((text) => ScribeStore.diagnostic(panel.storage, text))].join(' · ');
+                const row = ScribePanel.make(panel, settings.Tags.Item, '#' + item.position + (item.row ? ' · ' + item.row : '') + ' · ' + detail, settings.Classes.Row);
+                const first = item.kind === 'story' ? panel.storyRetry : panel.inputRetry;
+                const key = item.kind + ':' + item.id;
+                if (first && first.first !== item.position && item.kind !== 'checker' && !retriable.has(key)) {
+                    retriable.add(key);
+                    const scope = panel.keeper.filingRetry(item.kind, item.id);
+                    if (scope) {
+                        row.append(ScribePanel.button(panel, 'Retry #' + item.position, () => ScribePanel.perform(panel, {
+                            outlet: settings.Outlets.Controls, call: () => panel.keeper.retryStory(scope), question: null,
+                            done: settings.Nothing, pending: words.Working, book: true,
+                        }), settings.Guard.Book));
+                    }
+                }
+                return row;
+            }, null);
+            const coverage = Number.isSafeInteger(view.linkedEntries) ?
+                ' ' + view.linkedEntries + ' book entries with linked quotes, ' + view.unlinkedEntries + ' without. ' +
+                Math.max(0, view.read - (view.processedChecks ?? view.checkedThrough)) + ' processed messages await the Checker.' : '';
+            const checked = view.checkedCount ?? view.checkedThrough;
+            const unjudged = (view.processedChecks ?? view.checkedThrough) - checked;
             ScribePanel.write(parts.Checked, parts.Checked.hidden ? settings.Nothing :
-                'Checker: ' + view.checkedThrough + ' of ' + view.total + ' messages checked.' + schedule);
+                'Checker: ' + checked + ' of ' + view.total + ' messages checked.' +
+                (unjudged ? ' ' + unjudged + ' processed without a completed judgment.' : '') + coverage + schedule);
             ScribePanel.write(parts.Story, live.notice ?? settings.Nothing);
             const pulled = view.pulled;
             let line = pulled === null && !view.reader ? words.NoPullHere : settings.Nothing;
@@ -4211,12 +4298,14 @@ const ScribePanel = Object.freeze({
             ScribePanel.paged(
                 panel,
                 settings.Lists.Lines,
-                PanelView.each(view.lines, whole),
+                [...readings.reverse(), ...PanelView.each(view.lines, whole)],
                 /**
                  * @param {object} report
                  * @return {object}
                  */
-                (report) => ScribePanel.Rows.line(panel, report, mask),
+                (report) => report.statement === undefined ? ScribePanel.Rows.line(panel, report, mask) :
+                    ScribePanel.make(panel, settings.Tags.Item, report.role + (report.first == null ? '' : ' · #' + report.first +
+                        (report.first === report.last ? '' : '–#' + report.last)) + ' · ' + mask(report.statement), settings.Classes.Row),
                 null,
             );
             ScribePanel.paged(
@@ -5226,16 +5315,10 @@ const ScribePanel = Object.freeze({
                                     );
                                     const empty = field.value.trim() === settings.Nothing;
                                     const value = empty ? line : field.value + words.LineBreak + line;
-                                    const full = !there && value.length > settings.TellLimit;
-                                    if (full) {
-                                        ScribePanel.say(panel, telling, words.FieldFull);
-                                    } else if (!there) {
+                                    if (!there) {
                                         field.value = value;
-                                        if (panel.outcomes.get(telling) === words.FieldFull) {
-                                            ScribePanel.say(panel, telling, settings.Nothing);
-                                        }
                                     }
-                                    if (!full && finding.fingerprint) {
+                                    if (finding.fingerprint) {
                                         panel.rulingOrigins.set(finding.key, { key: finding.key, fingerprint: finding.fingerprint, line });
                                     }
                                     panel.tab = settings.RulingsTab;

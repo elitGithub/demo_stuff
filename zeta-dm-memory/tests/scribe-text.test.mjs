@@ -388,15 +388,19 @@ test('exact category words only', () => {
         }
     }
     assert.equal(count, 19);
-    for (const refused of ['abilities', 'age:', 'knows', 'secret', '', '   ', 'eye', 'hairs', 'eyes hair']) {
-        assert.equal(ScribeCategory.parse(refused), null, refused);
+    for (const category of ['abilities', 'age:', 'knows', 'secret', 'eye', 'hairs', 'eyes hair']) {
+        assert.deepEqual(plain(ScribeCategory.parse(category)), { category, kind: 'List', target: null });
+    }
+    for (const empty of ['', '   ']) {
+        assert.equal(ScribeCategory.parse(empty), null);
     }
     assert.deepEqual(plain(ScribeCategory.parse('  EYES \n')), { category: 'eyes', kind: 'Fixed', target: null });
 });
 
-test('name and knows are not categories', () => {
-    assert.equal(ScribeCategory.parse('name'), null);
-    assert.equal(ScribeCategory.parse('knows'), null);
+test('the model can name categories beyond the suggested vocabulary', () => {
+    for (const category of ['name', 'knows']) {
+        assert.deepEqual(plain(ScribeCategory.parse(category)), { category, kind: 'List', target: null });
+    }
 });
 
 test('every relation form', () => {
@@ -422,9 +426,9 @@ test('a joint target is kept as written', () => {
     }
 });
 
-test('only a missing target is refused', () => {
+test('a category with no explicit target is filed as written', () => {
     for (const raw of ['relation', 'relation to', 'relation with', 'toward', 'towards', 'relation to   ', 'relation of Orla', 'relationto Orla']) {
-        assert.equal(ScribeCategory.parse(raw), null, raw);
+        assert.deepEqual(plain(ScribeCategory.parse(raw)), { category: raw.trim(), kind: 'List', target: null }, raw);
     }
     assert.equal(ScribeCategory.parse('relation to Island').target, 'Island');
     assert.equal(ScribeCategory.parse('relation to Candor').target, 'Candor');

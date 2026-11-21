@@ -185,10 +185,35 @@ const ScribeKeeper = Object.freeze({
         if (!ScribeKeeper.isObject(value) || !settings.Lasting.includes(value.reason)) {
             return null;
         }
-        if (value.problem !== null && typeof value.problem !== settings.StringType) {
+        const structured = value.reason === ScribeAdoption.Stop.Failed && Object.hasOwn(value, 'storyFailure');
+        if (!structured && value.problem !== null && typeof value.problem !== settings.StringType) {
             return null;
         }
         const source = value.source === 'OpenRouter' || ScribeStore.localSource(value.source) ? { source: value.source } : {};
+        if (value.reason === ScribeAdoption.Stop.Failed && (structured || !value.source)) {
+            let failure = value.storyFailure;
+            if (!structured && typeof value.problem === 'string') {
+                const legacy = /^The answer for #(\d+) to #(\d+) held no line that could be read\.$/.exec(value.problem);
+                const pending = /^Missing supported Story evidence at #(\d+)\.$/.exec(value.problem);
+                if (legacy) {
+                    failure = { first: Number(legacy[1]), last: Number(legacy[2]), reason: 'legacy' };
+                } else if (pending) {
+                    failure = { first: Number(pending[1]), last: Number(pending[1]), reason: 'legacy' };
+                }
+            }
+            if (!value.source && failure && Number.isSafeInteger(failure.first) && Number.isSafeInteger(failure.last) &&
+                failure.first > 0 && failure.last >= failure.first && typeof failure.reason === 'string' &&
+                Object.hasOwn(ScribeAdoption.Settings.StoryReasons, failure.reason) &&
+                ((failure.reason === 'legacy' && failure.stamp === undefined) ||
+                    (typeof failure.stamp === 'string' && /^[0-9a-f]{8}$/.test(failure.stamp)))) {
+                const { first, last, reason, stamp } = failure;
+                const storyFailure = Object.freeze({ first, last, reason, ...(stamp ? { stamp } : {}) });
+                return Object.freeze({ reason: value.reason, problem: ScribeAdoption.storyProblem(storyFailure), storyFailure });
+            }
+            if (structured) {
+                return Object.freeze({ reason: value.reason, problem: null, storyFailure: null });
+            }
+        }
         return Object.freeze({ reason: value.reason, problem: value.problem, ...source });
     },
 
@@ -308,6 +333,54 @@ const ScribeKeeper = Object.freeze({
         keeper.writtenThrough = coverage.writtenThrough;
         keeper.verificationPending = Object.freeze(coverage.verificationPending);
         keeper.legacyClaims = Object.freeze(coverage.legacyClaims);
+        const pendingSources = ScribeAdoption.pendingSources(log, messages);
+        const entries = new Map(log.entries.map((entry) => [entry.sequence, entry]));
+        keeper.pendingFiling = [];
+        keeper.modelReadings = [...(keeper.checkProgress?.modelReadings ?? [])];
+        const positions = new Map(messages.map((row) => [row.id, row.position]));
+        keeper.linkedEntries = 0;
+        keeper.unlinkedEntries = 0;
+        for (const entry of log.entries) {
+            if (entry.withdrawn) {
+                continue;
+            }
+            const text = entry.modelResponse ?? ScribeLog.modelReading(entry);
+            if (text) {
+                const ids = entry.responseSources?.map((source) => source.id) ?? entry.messageIds;
+                const places = ids.map((id) => positions.get(id)).filter((position) => position !== undefined);
+                keeper.modelReadings.push({ role: entry.origin === ScribeLog.Origin.Story ? 'Scribe' : entry.origin,
+                    first: places[0] ?? null, last: places.at(-1) ?? null, statement: text });
+            }
+            if (entry.origin !== ScribeLog.Origin.Story) {
+                continue;
+            }
+            for (const operation of entry.operations) {
+                if (operation.revoked) {
+                    continue;
+                }
+                if (operation.evidence?.quote && operation.evidence.verified !== false) {
+                    keeper.linkedEntries++;
+                } else {
+                    keeper.unlinkedEntries++;
+                }
+            }
+        }
+        for (const message of pendingSources) {
+            const entry = entries.get(log.read[message.id]);
+            const source = entry.sources.find((item) => item.id === message.id);
+            const issues = source.filingPending?.length ? source.filingPending : [{ reason: 'missingRead' }];
+            for (const issue of issues) {
+                const proposal = entry.proposals?.find((item) => !item.resolvedBy && item.sourceId === message.id &&
+                    item.reason === issue.reason && (!issue.row || item.operation.evidence?.section + ':' + item.operation.evidence?.row === issue.row))?.operation;
+                const raw = entry.unfiledRows?.filter((row) => !row.resolvedBy && row.reviewAt === message.id);
+                const evidence = entry.operations.find((operation) => operation.evidence?.messageId === message.id &&
+                    operation.evidence.issue === issue.reason && operation.evidence.section + ':' + operation.evidence.row === issue.row)?.evidence;
+                const statements = proposal ? [proposal.text ?? proposal.said ?? proposal.name ?? proposal.type] :
+                    evidence?.modelQuote ? ['Model quote: ' + evidence.modelQuote] :
+                    issue.reason === 'format' ? raw?.map((row) => row.line) ?? [] : [];
+                keeper.pendingFiling.push({ kind: 'story', id: message.id, position: message.position, ...issue, statements });
+            }
+        }
         keeper.made = Object.freeze([]);
         if (typeof BenchView !== ScribeKeeper.Settings.UndefinedType) {
             const filed = log.entries.filter((entry) => entry.origin === ScribeLog.Origin.Notes && !entry.withdrawn)
@@ -397,11 +470,12 @@ const ScribeKeeper = Object.freeze({
             keeper.damaged ??
             keeper.cut ?? (pending ? ScribeKeeper.Settings.Messages.Attribution + pending.position : null);
         const history = local === null && problem !== null && problem === keeper.cut;
-        const nextCheck = keeper.checkProgress && messages[keeper.checkProgress.checkedThrough];
+        const processedChecks = keeper.checkProgress?.processedThrough ?? keeper.checkProgress?.checkedThrough ?? 0;
+        const nextCheck = keeper.checkProgress && messages[processedChecks];
         const waiting = keeper.reader && !keeper.closed && keeper.phase === ScribeKeeper.Phase.Idle &&
             keeper.book?.adopted && keeper.compared && keeper.historyChecked && !keeper.pausing &&
             keeper.unloaded === null && !keeper.owed.size && ScribeKeeper.held(keeper) === null &&
-            keeper.writtenThrough > keeper.checkProgress?.checkedThrough && nextCheck &&
+            keeper.writtenThrough > processedChecks && nextCheck &&
             (keeper.checkPage || keeper.spentToday < keeper.settings.budget) &&
             keeper.expensiveAfter > keeper.clock.now() &&
             (keeper.deferredCheck?.id === nextCheck.id && !keeper.zeta.onHead?.(keeper.deferredCheck.sources) ||
@@ -420,10 +494,14 @@ const ScribeKeeper = Object.freeze({
             writtenThrough: keeper.writtenThrough,
             checksEnabled: keeper.checkPassage !== null,
             checkedThrough: keeper.checkProgress?.checkedThrough ?? 0,
+            checkedCount: keeper.checkProgress?.checkedCount ?? keeper.checkProgress?.checkedThrough ?? 0,
+            processedChecks,
             checkerFindings: keeper.checkProgress?.findings ?? [],
+            checkerReview: keeper.checkProgress?.reviewRows ?? [],
             checkerProblem: keeper.checkProblem,
             expensiveCheckAt: waiting ? keeper.expensiveAfter : null,
             verificationPending: keeper.verificationPending,
+            acknowledged: keeper.read - (keeper.verificationPending?.length ?? 0),
             legacyClaims: keeper.legacyClaims,
             made: keeper.made,
             state: keeper.state,
@@ -435,6 +513,12 @@ const ScribeKeeper = Object.freeze({
             flight: keeper.flight,
             began: keeper.flight === null ? null : keeper.began,
             stop: keeper.stop,
+            storyRetry: ScribeKeeper.storyRetry(keeper),
+            inputRetry: ScribeKeeper.storyRetry(keeper, false, 'input'),
+            pendingFiling: keeper.pendingFiling,
+            modelReadings: keeper.modelReadings,
+            linkedEntries: keeper.linkedEntries,
+            unlinkedEntries: keeper.unlinkedEntries,
             restoredStop: keeper.restoredStop === keeper.stop && keeper.stop !== null,
             pulled: keeper.lastPull,
             historyChecked: keeper.historyChecked,
@@ -471,6 +555,9 @@ const ScribeKeeper = Object.freeze({
             view.settings,
             view.lastRead,
             view.unread.length,
+            view.pendingFiling.length,
+            view.linkedEntries,
+            view.unlinkedEntries,
             view.made.length,
             view.state.revision,
             view.state.facts.length,
@@ -611,6 +698,7 @@ const ScribeKeeper = Object.freeze({
         keeper.historyComplete = !keeper.blank && value.completeHistory === true;
         const recheck = !keeper.blank && Array.isArray(value.recheck) ? value.recheck.filter((id) => typeof id === 'string') : [];
         keeper.campaign = { messages, gone, ...(keeper.historyComplete ? { completeHistory: true } : {}),
+            ...(!keeper.blank && value.needsHistory === true ? { needsHistory: true } : {}),
             ...(recheck.length ? { recheck } : {}) };
         keeper.compared = false;
         const taken = ScribeKeeper.take(messages, keeper);
@@ -668,7 +756,7 @@ const ScribeKeeper = Object.freeze({
             }
             keeper.savedStop = ScribeKeeper.stopOf(record.stop);
         }
-        keeper.stop = keeper.savedStop;
+        keeper.stop = keeper.savedStop?.storyFailure ? null : keeper.savedStop;
         keeper.restoredStop = keeper.stop;
         keeper.retryAt = null;
         keeper.intake = null;
@@ -945,6 +1033,7 @@ const ScribeKeeper = Object.freeze({
                 return;
             }
             const cleared = { messages: keeper.campaign.messages, gone: [],
+                ...(keeper.campaign.needsHistory ? { needsHistory: true } : {}),
                 ...(keeper.campaign.completeHistory ? { completeHistory: true } : {}) };
             try {
                 ScribeKeeper.store(keeper, ScribeStore.Kind.Campaign, cleared);
@@ -992,6 +1081,7 @@ const ScribeKeeper = Object.freeze({
             recheck.add(id);
         }
         const campaign = { messages: rawMessages, gone, ...(complete || keeper.historyComplete ? { completeHistory: true } : {}),
+            ...(!complete && keeper.campaign.needsHistory ? { needsHistory: true } : {}),
             ...(recheck.size ? { recheck: [...recheck] } : {}) };
         try {
             ScribeKeeper.store(keeper, ScribeStore.Kind.Campaign, campaign);
@@ -1101,7 +1191,7 @@ const ScribeKeeper = Object.freeze({
             });
         }
         const confirmed = whole && (emptyRoom || pulled.length > 0) && !keepAll;
-        if (!merged.changed && !(confirmed && !keeper.campaign.completeHistory)) {
+        if (!merged.changed && !(confirmed && (!keeper.campaign.completeHistory || keeper.campaign.needsHistory))) {
             if (!keeper.compared && !keeper.blank) {
                 ScribeKeeper.compare(keeper);
             }
@@ -1175,7 +1265,7 @@ const ScribeKeeper = Object.freeze({
      * @return {boolean}
      */
     whole(pulled) {
-        return ScribeKeeper.Settings.WholeEnds.includes(pulled.end);
+        return !pulled.problem && ScribeKeeper.Settings.WholeEnds.includes(pulled.end);
     },
 
     /**
@@ -1214,9 +1304,12 @@ const ScribeKeeper = Object.freeze({
      * @param {object} keeper
      * @param {Function|null} onComplete
      * @param {Function|null} allowExpensive
+     * @param {object[]|null} saved
+     * @param {object|null} firstPage
+     * @param {boolean} incremental
      * @return {Promise<boolean>}
      */
-    async history(keeper, onComplete = null, allowExpensive = null) {
+    async history(keeper, onComplete = null, allowExpensive = null, saved = null, firstPage = null, incremental = false) {
         const settings = ScribeKeeper.Settings;
         const flight = settings.Flight;
         const epoch = keeper.epoch;
@@ -1239,6 +1332,8 @@ const ScribeKeeper = Object.freeze({
                     }
                 },
                 allowExpensive,
+                saved,
+                firstPage,
             );
         } catch (error) {
             if (keeper.epoch === epoch) {
@@ -1254,29 +1349,47 @@ const ScribeKeeper = Object.freeze({
             return false;
         }
         const pulled = ScribeKeeper.single(result.messages);
+        const joined = Array.isArray(result.observed);
+        const observed = joined ? ScribeKeeper.single(result.observed) : pulled;
         const whole = ScribeKeeper.whole(result);
         const natural = result.end !== settings.Ends.Failed && result.end !== settings.Ends.Limit;
         const now = keeper.clock.now();
         keeper.pullDone = true;
         keeper.problem = null;
-        keeper.cutShort = !whole;
-        keeper.lastPull = Object.freeze({ end: result.end, count: pulled.length, skipped: result.skipped, at: now });
+        keeper.cutShort = !whole && !joined;
+        keeper.lastPull = Object.freeze({ end: result.end, count: observed.length, skipped: result.skipped, at: now });
+        if (!joined && (!whole || result.skipped || result.problem) && (saved && !incremental || keeper.campaign.needsHistory)) {
+            keeper.cutShort = true;
+            keeper.partial = true;
+            keeper.cut = ScribeKeeper.shortfall(result, false) ?? settings.Messages.Unsettled;
+            if (!keeper.campaign.needsHistory && ScribeKeeper.writable(keeper)) {
+                const campaign = { ...keeper.campaign, needsHistory: true };
+                try {
+                    ScribeKeeper.store(keeper, ScribeStore.Kind.Campaign, campaign);
+                    keeper.campaign = campaign;
+                } catch (error) {
+                    keeper.problem = ScribeKeeper.words(error);
+                }
+            }
+            ScribeKeeper.tell(keeper, { kind: ScribeKeeper.Event.Changed });
+            return false;
+        }
         const taken = ScribeKeeper.takeIn(keeper, pulled, result.skipped > settings.NoCount,
             whole && result.problem === null && result.emptyRoom === true, whole && !result.problem && result.completeHistory === true);
         if (keeper.epoch !== epoch) {
             return false;
         }
-        if (taken.fresh && whole && !result.skipped && !result.problem && pulled.at(settings.Last)?.id === keeper.campaign.messages.at(settings.Last)?.id) {
-            ScribeKeeper.observed(keeper, pulled, result.completeHistory === true);
-            if (result.completeHistory === true && onComplete) {
-                onComplete(pulled);
+        if (taken.fresh && (whole || joined) && !result.skipped && !result.problem && pulled.at(settings.Last)?.id === keeper.campaign.messages.at(settings.Last)?.id) {
+            ScribeKeeper.observed(keeper, observed, result.completeHistory === true);
+            if ((result.completeHistory === true || joined) && onComplete) {
+                onComplete(observed);
             }
         }
         if (taken.fresh) {
-            ScribeKeeper.confirmStretch(keeper, pulled, result);
+            ScribeKeeper.confirmStretch(keeper, observed, result);
         }
-        keeper.cut = ScribeKeeper.shortfall(result, !taken.joined);
-        keeper.partial = !whole && !taken.shared && !(keeper.book === null && natural && taken.joined);
+        keeper.cut = joined ? null : ScribeKeeper.shortfall(result, !taken.joined);
+        keeper.partial = !joined && !whole && !taken.shared && !(keeper.book === null && natural && taken.joined);
         if (taken.shared || (taken.joined && whole)) {
             keeper.unjoined = false;
             keeper.suspectAt = null;
@@ -1308,6 +1421,8 @@ const ScribeKeeper = Object.freeze({
         let page = null;
         let through = null;
         const required = new Set(evidence);
+        const savedRoom = keeper.historyComplete && keeper.compared && !keeper.campaign.needsHistory &&
+            keeper.intake?.messages.length === keeper.campaign.messages.length;
         try {
             const stretch = keeper.checkStretch && !keeper.pausing && ScribeKeeper.due(keeper) ? ScribeKeeper.nextStretch(keeper) : [];
             through = anchor ?? (stretch.length ? keeper.intake.messages[Math.max(0, stretch[0].position - 2)].id : null);
@@ -1320,7 +1435,7 @@ const ScribeKeeper = Object.freeze({
             if (expected) {
                 required.add(expected.id);
             }
-            page = await keeper.zeta.newest(through, [...required], keeper.campaign.messages, check);
+            page = await keeper.zeta.newest(through, [...required], keeper.campaign.messages, check, savedRoom);
         } catch (error) {
             if (keeper.epoch === epoch) {
                 keeper.problem = { source: 'Zeta', reason: ScribeKeeper.words(error) };
@@ -1344,6 +1459,7 @@ const ScribeKeeper = Object.freeze({
                 return false;
             }
             const originals = keeper.intake?.messages.filter((row) => required.has(row.id)) ?? [];
+            const saved = savedRoom ? keeper.campaign.messages : null;
             let confirmed = false;
             const fresh = await ScribeKeeper.history(keeper, (pulled) => {
                 const received = new Set(pulled.map((row) => row.id));
@@ -1352,12 +1468,12 @@ const ScribeKeeper = Object.freeze({
                     return received.has(row.id) && current?.id === row.id && current.fingerprint === row.fingerprint &&
                         current.projection === row.projection && current.attributionPending === row.attributionPending;
                 });
-            }, page.expiredCheck ? check.reserve : null);
+            }, page.expiredCheck ? check.reserve : null, saved, page.changedHead);
             if (!fresh || keeper.cutShort || keeper.unjoined || keeper.epoch !== epoch) {
                 return false;
             }
             if (expected === null) {
-                return true;
+                return !saved || confirmed;
             }
             const current = keeper.intake?.messages[expected.position - 1];
             return confirmed && current?.id === expected.id && current.fingerprint === expected.fingerprint &&
@@ -1367,21 +1483,22 @@ const ScribeKeeper = Object.freeze({
         const head = ScribeKeeper.single(page.messages);
         const verified = page.verified ?? [];
         const pulled = [...verified, ...head];
+        const available = new Set([...pulled.map((row) => row.id), ...(page.cached ?? [])]);
         const complete = ScribeKeeper.whole(page) && !page.skipped && !page.problem && page.completeHistory === true;
-        if (anchor && !complete && !pulled.some((message) => message.id === anchor)) {
+        if (anchor && !complete && !page.reconciled && !available.has(anchor)) {
             keeper.problem = page.problem ? { source: 'Zeta', reason: page.problem } : ScribeKeeper.Settings.Messages.Unsettled;
             ScribeKeeper.tell(keeper, { kind: ScribeKeeper.Event.Changed });
             return false;
         }
-        const taken = ScribeKeeper.takeIn(keeper, head, page.skipped > ScribeKeeper.Settings.NoCount,
-            ScribeKeeper.whole(page) && page.problem === null && page.emptyRoom === true, complete, verified);
+        const taken = ScribeKeeper.takeIn(keeper, page.reconciled ?? head, page.skipped > ScribeKeeper.Settings.NoCount,
+            ScribeKeeper.whole(page) && page.problem === null && page.emptyRoom === true, complete || !!page.reconciled, verified);
         if (keeper.epoch !== epoch) {
             return false;
         }
         if (!taken.joined) {
             keeper.unjoined = true;
             if (ScribeKeeper.mayRepull(keeper)) {
-                const fresh = await ScribeKeeper.history(keeper);
+                const fresh = await ScribeKeeper.history(keeper, null, null, savedRoom ? keeper.campaign.messages : null, null, true);
                 return fresh && expected === null;
             }
             ScribeKeeper.tell(keeper, { kind: ScribeKeeper.Event.Changed });
@@ -1409,8 +1526,7 @@ const ScribeKeeper = Object.freeze({
         }
         if (expected !== null) {
             const current = keeper.intake?.messages[expected.position - 1];
-            const received = new Set(pulled.map((message) => message.id));
-            return observed && received.has(expected.id) && evidence.every((id) => received.has(id)) && current?.id === expected.id &&
+            return observed && available.has(expected.id) && evidence.every((id) => available.has(id)) && current?.id === expected.id &&
                 current.fingerprint === expected.fingerprint && !current.attributionPending && current.projection === expected.projection;
         }
         return taken.fresh;
@@ -1438,6 +1554,9 @@ const ScribeKeeper = Object.freeze({
             return;
         }
         const ids = new Set(pulled.map((message) => message.id));
+        for (const id of response.cached ?? []) {
+            ids.add(id);
+        }
         const stretch = ScribeKeeper.nextStretch(keeper);
         if (!stretch.length || (!keeper.pausing && ScribeKeeper.due(keeper))) {
             keeper.checkStretch = !stretch.every((message) => ids.has(message.id));
@@ -1510,6 +1629,10 @@ const ScribeKeeper = Object.freeze({
         const stretch = ScribeAdoption.next(keeper.book.log, chosen, keeper.settings.size);
         if (stretch.length === ScribeKeeper.Settings.NoCount) {
             return flight.Finishing;
+        }
+        if (stretch.at(-1).position - stretch[0].position + 1 !== stretch.length) {
+            return 'Reading ' + stretch.length + ' unread messages between #' + stretch[0].position +
+                ' and #' + stretch.at(-1).position;
         }
         return flight.ReadOpen + stretch[0].position + flight.ReadMiddle + stretch.at(ScribeKeeper.Settings.Last).position;
     },
@@ -1589,9 +1712,10 @@ const ScribeKeeper = Object.freeze({
     /**
      * @param {object} keeper
      * @param {{id: string, fingerprint: string}|null} target
+     * @param {object|null} retry
      * @return {Promise<void>}
      */
-    async read(keeper, target = null) {
+    async read(keeper, target = null, retry = null) {
         const settings = ScribeKeeper.Settings;
         const stops = ScribeAdoption.Stop;
         const epoch = keeper.epoch;
@@ -1603,7 +1727,8 @@ const ScribeKeeper = Object.freeze({
         }
         const book = keeper.book;
         const size = keeper.settings.size;
-        const { settled, end } = ScribeKeeper.plan(keeper, target);
+        const { settled, end: planned } = ScribeKeeper.plan(keeper, target);
+        const end = retry ? retry.through : planned;
         const chosen = settled.slice(0, end);
         const room = target === null ? keeper.intake.messages : chosen;
         const notes = keeper.intake.notes.filter(
@@ -1668,6 +1793,9 @@ const ScribeKeeper = Object.freeze({
             result = await ScribeAdoption.run({
                 messages: room,
                 readThrough: end,
+                ...(retry?.kind === 'story' ? { retrySources: retry.ids } : {}),
+                ...(retry?.kind === 'input' ? { retryInputs: retry.keys } : {}),
+                diagnostic,
                 notes,
                 player: keeper.intake.player,
                 profile,
@@ -1710,7 +1838,7 @@ const ScribeKeeper = Object.freeze({
                         for (const credential of found.credentials) {
                             credentials.add(credential);
                         }
-                        return { text: found.text, cost: settings.NoSpending };
+                        return { text: found.text, ...(Object.hasOwn(found, 'finish') ? { finish: found.finish } : {}), cost: settings.NoSpending };
                     }
                     ScribeStore.diagnosticKeys(keeper.storage, credentials);
                     let answer;
@@ -1728,7 +1856,7 @@ const ScribeKeeper = Object.freeze({
                         ScribeStore.diagnosticKeys(keeper.storage, credentials);
                     }
                     if (!keeper.closed) {
-                        keeper.kept.push({ key, text: answer.text, credentials });
+                        keeper.kept.push({ key, text: answer.text, ...(Object.hasOwn(answer, 'finish') ? { finish: answer.finish } : {}), credentials });
                         keeper.kept.splice(settings.NoCount, Math.max(keeper.kept.length - settings.KeptAnswers, settings.NoCount));
                     }
                     return answer;
@@ -1743,7 +1871,7 @@ const ScribeKeeper = Object.freeze({
                     if (keeper.epoch !== epoch || !ScribeKeeper.writable(keeper)) {
                         throw new Error(settings.Messages.ThrownAway);
                     }
-                    if (keeper.pollPending && !keeper.pausing) {
+                    if (retry || (keeper.pollPending && !keeper.pausing)) {
                         keeper.pollPending = false;
                         const observed = keeper.observed;
                         const entry = log.entries.at(-1);
@@ -1761,7 +1889,7 @@ const ScribeKeeper = Object.freeze({
                             job.superseded = true;
                             throw new Error(settings.Messages.ThrownAway);
                         }
-                        keeper.pollPending = true;
+                        keeper.pollPending = !retry;
                         confirmAttribution(questions, true);
                     } else {
                         confirmAttribution(questions);
@@ -1913,7 +2041,12 @@ const ScribeKeeper = Object.freeze({
         }
         const source = modelError ? { source: modelError.source } : {};
         const masked = diagnostic(problem);
-        ScribeKeeper.keepStop(keeper, Object.freeze({ reason: stop, problem: masked, ...source }), job.storage);
+
+        const failure = stop === stops.Failed && !job.storage && result.storyFailure;
+        const storyFailure = failure ? Object.freeze({ ...failure, stamp: ScribeKeeper.storyStamp(
+            room.slice(failure.first - 1, failure.last)) }) : null;
+        ScribeKeeper.keepStop(keeper, Object.freeze({ reason: stop, problem: masked, ...source,
+            ...(storyFailure ? { storyFailure } : {}) }), job.storage);
         if (keeper.epoch !== epoch) {
             return;
         }
@@ -1952,6 +2085,9 @@ const ScribeKeeper = Object.freeze({
         } catch (error) {
             keeper.problem = ScribeKeeper.words(error);
         }
+        if (keeper.savedStop?.storyFailure && ScribeKeeper.writable(keeper)) {
+            ScribeKeeper.keepStop(keeper, null, false);
+        }
         if (!keeper.blank) {
             ScribeKeeper.compare(keeper);
         }
@@ -1960,7 +2096,13 @@ const ScribeKeeper = Object.freeze({
         }
         let fresh = false;
         try {
-            fresh = await ScribeKeeper.history(keeper);
+            const saved = keeper.compared && keeper.historyComplete && !keeper.campaign.needsHistory &&
+                keeper.intake?.messages.length === keeper.campaign.messages.length
+                ? keeper.campaign.messages : null;
+            if (saved && keeper.book?.adopted && ScribeKeeper.nextStretch(keeper).length) {
+                keeper.checkStretch = true;
+            }
+            fresh = await ScribeKeeper.history(keeper, null, null, saved);
         } finally {
             if (keeper.epoch === epoch) {
                 keeper.phase = ScribeKeeper.resting(keeper);
@@ -2038,7 +2180,7 @@ const ScribeKeeper = Object.freeze({
         if (!keeper.checkPassage || keeper.phase !== ScribeKeeper.Phase.Idle ||
             !keeper.book?.adopted || !keeper.compared || !keeper.historyChecked || keeper.pausing ||
             keeper.unloaded !== null || keeper.owed.size || ScribeKeeper.held(keeper) !== null ||
-            keeper.writtenThrough <= keeper.checkProgress.checkedThrough ||
+            keeper.writtenThrough <= (keeper.checkProgress.processedThrough ?? keeper.checkProgress.checkedThrough) ||
             keeper.clock.now() < keeper.checkRetryAt) {
             return;
         }
@@ -2156,7 +2298,9 @@ const ScribeKeeper = Object.freeze({
             keeper.checkPage = null;
             await keeper.checkPassage({
                 message: target, written: work.written, earlierClaims: work.earlierClaims, rulings: work.rulings,
-                completedPages: work.completed, completedSegments: work.segments, savePage: save, saveSegment: save, learnLimit,
+                diagnostic: (value) => ScribeStore.diagnosticCopy(value, ScribeStore.redactor(keeper.storage, credentials)),
+                completedPages: work.completed, completedSegments: work.segments, priorPages: work.priorPages,
+                savePage: save, saveSegment: save, learnLimit,
                 ...(Number.isSafeInteger(limit?.bytes) && limit.bytes > 0 ? { pageBytes: limit.bytes } : {}),
                 ask: async (system, input, sources = []) => {
                     if (!current()) {
@@ -2306,7 +2450,9 @@ const ScribeKeeper = Object.freeze({
                 ScribeKeeper.counted(keeper);
                 const holding = ScribeKeeper.holding(keeper);
                 if (!keeper.pullDone || ((holding || keeper.cutShort) && ScribeKeeper.mayRepull(keeper))) {
-                    fresh = await ScribeKeeper.history(keeper);
+                    const saved = keeper.compared && keeper.historyComplete && !keeper.campaign.needsHistory
+                        ? keeper.campaign.messages : null;
+                    fresh = await ScribeKeeper.history(keeper, null, null, saved, null, true);
                 } else if (!holding) {
                     const requested = target && keeper.intake?.messages.find((message) => message.id === target.id);
                     const first = requested ? Math.min(requested.position, keeper.writtenThrough + 1) : null;
@@ -2608,6 +2754,76 @@ const ScribeKeeper = Object.freeze({
     },
 
     /**
+     * @param {readonly object[]} rows
+     * @return {string}
+     */
+    storyStamp(rows) {
+        return ScribeText.fingerprint(JSON.stringify(rows.map((row) => [row.id, row.fingerprint, row.projection])));
+    },
+
+    /**
+     * @param {object} keeper
+     * @param {boolean} confirming
+     * @return {Readonly<object>|null}
+     */
+    storyRetry(keeper, confirming = false, kind = 'story', id = null) {
+        if (!keeper.reader || keeper.closed || keeper.phase !== ScribeKeeper.Phase.Idle ||
+            (!confirming && keeper.busy !== null) || keeper.pausing || !keeper.compared || !keeper.historyChecked ||
+            !keeper.book || keeper.damaged || keeper.unloaded || keeper.owed.size || ScribeKeeper.held(keeper) !== null ||
+            keeper.spentToday >= keeper.settings.budget) {
+            return null;
+        }
+        const work = keeper.pendingFiling.filter((item) => item.kind === kind && (id === null || item.id === id));
+        if (!work.length) {
+            return null;
+        }
+        const first = work[0].position;
+        const selected = work.filter((item) => item.position === first);
+        const ids = [selected[0].id];
+        const keys = selected.filter((item) => item.key).map((item) => item.key);
+        const stamp = ScribeKeeper.storyStamp([keeper.intake.messages[first - 1]]);
+        const token = JSON.stringify([keeper.roomId, keeper.tabId, keeper.epoch, keeper.edition, keeper.retrySerial, stamp, kind, keys]);
+        return Object.freeze({ kind, first, last: first, through: first, ids, keys, token });
+    },
+
+    /**
+     * @param {object} keeper
+     * @param {object} displayed
+     * @return {Promise<void>}
+     * @throws {Error}
+     */
+    async retryStory(keeper, displayed) {
+        const stale = 'This reading has changed. Check the current pending messages before retrying.';
+        ScribeKeeper.guard(keeper);
+        ScribeKeeper.readable(keeper);
+        ScribeKeeper.solvent(keeper);
+        ScribeKeeper.recount(keeper);
+        const scope = ScribeKeeper.storyRetry(keeper, false, displayed?.kind, displayed?.ids?.[0]);
+        if (!scope || scope.token !== displayed?.token || scope.first !== displayed.first ||
+            scope.last !== displayed.last || scope.through !== displayed.through || !ScribeKeeper.writable(keeper)) {
+            throw new Error(stale);
+        }
+        const epoch = keeper.epoch;
+        const rows = keeper.intake.messages.slice(scope.first - 1, scope.through);
+        ScribeKeeper.occupy(keeper, ScribeKeeper.Busy.Looking);
+        try {
+            const fresh = await ScribeKeeper.newest(keeper, rows[0].id, rows[0], rows.map((row) => row.id));
+            ScribeKeeper.recount(keeper);
+            if (!fresh || keeper.epoch !== epoch || !ScribeKeeper.writable(keeper) ||
+                ScribeKeeper.storyRetry(keeper, true, scope.kind, scope.ids[0])?.token !== scope.token) {
+                throw new Error(stale);
+            }
+            keeper.retrySerial++;
+            keeper.pollPending = false;
+            await ScribeKeeper.read(keeper, null, scope);
+        } finally {
+            if (keeper.epoch === epoch) {
+                ScribeKeeper.occupy(keeper, null);
+            }
+        }
+    },
+
+    /**
      * @param {object} keeper
      * @return {void}
      */
@@ -2616,7 +2832,7 @@ const ScribeKeeper = Object.freeze({
         keeper.checkProblem = null;
         const stop = keeper.stop;
         const failed = stop !== null && stop.reason === ScribeAdoption.Stop.Failed;
-        if (keeper.closed || !keeper.reader || !failed || keeper.busy === ScribeKeeper.Busy.Reading) {
+        if (keeper.closed || !keeper.reader || !failed || Object.hasOwn(stop, 'storyFailure') || keeper.busy === ScribeKeeper.Busy.Reading) {
             return;
         }
         if (!ScribeKeeper.writable(keeper)) {
@@ -2770,7 +2986,7 @@ const ScribeKeeper = Object.freeze({
      * @return {{ log: object, result: Readonly<{ entry: object, refused: ReadonlyArray<Readonly<{ operation: object, reason: string }>> }> }|null}
      * @throws {Error}
      */
-    draft(keeper, operations, anchor) {
+    draft(keeper, operations, anchor, operatorText = null) {
         const settings = ScribeKeeper.Settings;
         ScribeKeeper.guard(keeper, true);
         ScribeKeeper.needBook(keeper);
@@ -2788,7 +3004,7 @@ const ScribeKeeper = Object.freeze({
         if (cited === null) {
             throw new Error(settings.Messages.BadAnchor);
         }
-        if (operations.length === settings.NoCount) {
+        if (operations.length === settings.NoCount && !operatorText) {
             return null;
         }
         const log = ScribeKeeper.copy(keeper.book.log);
@@ -2813,13 +3029,17 @@ const ScribeKeeper = Object.freeze({
      * @return {Promise<ReadonlyArray<Readonly<{ operation: object, reason: string }>>>}
      * @throws {Error}
      */
-    async file(keeper, operations, anchor, resolution = null) {
+    async file(keeper, operations, anchor, resolution = null, note = null) {
         const settings = ScribeKeeper.Settings;
-        const drafted = ScribeKeeper.draft(keeper, operations, anchor);
+        const drafted = ScribeKeeper.draft(keeper, operations, anchor, note?.operatorText);
         if (drafted === null) {
             return Object.freeze([]);
         }
-        if (drafted.result.entry.operations.length === settings.NoCount) {
+        if (note?.operatorText) {
+            drafted.result.entry.operatorText = ScribeStore.diagnostic(keeper.storage, note.operatorText);
+            drafted.result.entry.modelResponse = ScribeStore.diagnostic(keeper.storage, note.modelResponse);
+            drafted.result.entry.after = anchor.id;
+        } else if (drafted.result.entry.operations.length === settings.NoCount) {
             return drafted.result.refused;
         }
         ScribeLog.link(drafted.result.entry, keeper.state, resolution ?? [], keeper.intake.messages);
@@ -2919,6 +3139,13 @@ const ScribeKeeper = Object.freeze({
             resume: () => ScribeKeeper.track(keeper, () => ScribeKeeper.resume(keeper)),
 
             /**
+             * @param {object} displayed
+             * @return {Promise<void>}
+             */
+            retryStory: (displayed) => ScribeKeeper.track(keeper, () => ScribeKeeper.retryStory(keeper, displayed)),
+            filingRetry: (kind, id) => ScribeKeeper.storyRetry(keeper, false, kind, id),
+
+            /**
              * @param {{id: string, fingerprint: string}} target
              * @return {Promise<boolean>}
              */
@@ -2948,18 +3175,29 @@ const ScribeKeeper = Object.freeze({
             /**
              * @return {Promise<void>}
              */
-            pull: () => ScribeKeeper.track(keeper, async () => {
-                ScribeKeeper.guard(keeper);
+            pull: async () => {
                 const epoch = keeper.epoch;
-                ScribeKeeper.occupy(keeper, ScribeKeeper.Busy.Pulling);
-                try {
-                    await ScribeKeeper.history(keeper);
-                } finally {
-                    if (keeper.epoch === epoch) {
-                        ScribeKeeper.occupy(keeper, null);
+                if (keeper.busy === ScribeKeeper.Busy.Checking && keeper.activity) {
+                    await keeper.activity;
+                    if (keeper.closed) {
+                        throw new Error(ScribeKeeper.Settings.Messages.Closed);
+                    }
+                    if (keeper.epoch !== epoch || !keeper.reader || !ScribeKeeper.still(keeper)) {
+                        throw new Error(ScribeKeeper.Settings.Messages.Watching);
                     }
                 }
-            }),
+                ScribeKeeper.guard(keeper);
+                return ScribeKeeper.track(keeper, async () => {
+                    ScribeKeeper.occupy(keeper, ScribeKeeper.Busy.Pulling);
+                    try {
+                        await ScribeKeeper.history(keeper);
+                    } finally {
+                        if (keeper.epoch === epoch) {
+                            ScribeKeeper.occupy(keeper, null);
+                        }
+                    }
+                });
+            },
 
             /**
              * @param {object} operation
@@ -3030,7 +3268,7 @@ const ScribeKeeper = Object.freeze({
              * @param {readonly object[]|null} resolution
              * @return {Promise<ReadonlyArray<Readonly<{ operation: object, reason: string }>>>}
              */
-            file: (operations, anchor, resolution = null) => ScribeKeeper.file(keeper, operations, anchor, resolution),
+            file: (operations, anchor, resolution = null, note = null) => ScribeKeeper.file(keeper, operations, anchor, resolution, note),
 
             /**
              * @param {object[]} operations
@@ -3089,6 +3327,8 @@ const ScribeKeeper = Object.freeze({
             checkAfterKey: ScribeStore.name(ScribeStore.Settings.Types.CheckAfter, ScribeStore.room(roomId)),
             expensiveAfter: 0,
             scheduleReadAt: 0,
+            pendingFiling: [],
+            modelReadings: [],
             deferredCheck: null,
             clock,
             notify,
@@ -3123,6 +3363,7 @@ const ScribeKeeper = Object.freeze({
             suspectAt: null,
             mismatch: null,
             kept: [],
+            retrySerial: 0,
             owed: new Map(),
             owing: null,
             pulledAt: null,

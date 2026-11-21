@@ -568,7 +568,10 @@ const BenchView = Object.freeze({
         const accounts = [];
         for (const key of ['source', 'earlier']) {
             const citation = finding[key];
-            if (citation) {
+            if (citation?.unlinked) {
+                const label = 'Checker wording for #' + citation.position + ' (no linked passage)';
+                accounts.push({ key, label, text: label + ' · ' + (citation.quote ?? finding.question) });
+            } else if (citation) {
                 const label = '#' + citation.position + ' · ' + citation.speaker;
                 accounts.push({ key, label, text: label + ' “' + citation.quote + '”' });
             }
@@ -611,7 +614,8 @@ const BenchView = Object.freeze({
         if (ruling.action === 'choose') {
             const citation = ruling[ruling.account];
             return ruling.account === 'record' ? 'Kept the book entry' + (ruling.canonical ? ' · ' + ruling.canonical : '.') :
-                'Chose #' + citation.position + ' · ' + citation.speaker + ' “' + citation.quote + '”';
+                citation.unlinked ? 'Kept the Checker wording · ' + ruling.canonical :
+                    'Chose #' + citation.position + ' · ' + citation.speaker + ' “' + citation.quote + '”';
         }
         return ruling.action === 'explain' ? ruling.explanation : 'Left open.';
     },
@@ -887,11 +891,12 @@ const BenchView = Object.freeze({
      * @param {{ pass: string, first: number|null, last: number|null, read: number, total: number, spent: number, unpriced: number, stored: number, refusedLines: readonly object[], refusedOperations: readonly object[] }} report
      * @return {string}
      */
-    progress(report) {
+    progress(report, daily = false) {
         const settings = BenchView.Settings;
         const where =
             report.pass === ScribeAdoption.Pass.Story
-                ? settings.Hash + report.first + settings.RangeTo + report.last
+                ? (report.selected ? report.selected + ' messages between #' + report.first + ' and #' + report.last :
+                    settings.Hash + report.first + settings.RangeTo + report.last)
                 : report.pass;
         const refused = report.refusedLines.length + report.refusedOperations.length;
         const unpriced =
@@ -906,7 +911,7 @@ const BenchView = Object.freeze({
             refused +
             settings.Refused +
             BenchView.money(report.spent) +
-            settings.Spent +
+            (daily ? ' spent today, ' : settings.Spent) +
             unpriced +
             BenchView.count(report.read) +
             settings.Of +

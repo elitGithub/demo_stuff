@@ -356,7 +356,16 @@ const ScribeGateway = Object.freeze({
         const finish = ScribeGateway.finishOf(key, choice?.finish_reason);
         const counts = ScribeGateway.counted(parsed.usage);
         const content = choice?.message?.content;
-        const written = typeof content === settings.StringType ? content : settings.Nothing;
+        const parts = Array.isArray(content) ? content.map((part) => {
+            if (typeof part === 'string') {
+                return part;
+            }
+            if (part?.type === 'refusal' && typeof part.refusal === 'string') {
+                return part.refusal;
+            }
+            return typeof part?.text === 'string' && (!part.type || ['text', 'output_text'].includes(part.type)) ? part.text : '';
+        }).join('') : content;
+        const written = typeof parts === 'string' && parts.trim() ? parts : (typeof choice?.message?.refusal === 'string' ? choice.message.refusal : '');
         let failed = null;
         for (const candidate of [parsed.error, choice?.error]) {
             const provider = ScribeGateway.reported(candidate);
@@ -373,14 +382,16 @@ const ScribeGateway = Object.freeze({
         }
         const fatal = { retryable: false, status, finish, reason: null };
         const passing = { retryable: true, status, finish, reason: null };
-        if (failed === null && finish === settings.Finish.Length) {
+        const partialReading = request.reading === true && failed === null && ScribeGateway.isObject(choice?.message) &&
+            (written.trim() !== settings.Nothing || finish !== settings.Finish.Error);
+        if (failed === null && !partialReading && finish === settings.Finish.Length) {
             failed = ScribeGateway.failure(key, settings.Messages.Cut, fatal);
             failed.answer = ScribeGateway.mask(key, written).slice(0, settings.MaxKeptAnswer);
-        } else if (failed === null && finish === settings.Finish.Error) {
+        } else if (failed === null && !partialReading && finish === settings.Finish.Error) {
             failed = ScribeGateway.failure(key, settings.Messages.Errored, passing);
-        } else if (failed === null && finish !== settings.Finish.Stop) {
+        } else if (failed === null && !partialReading && finish !== settings.Finish.Stop) {
             failed = ScribeGateway.failure(key, settings.Messages.WrongFinish, fatal);
-        } else if (failed === null && written.trim() === settings.Nothing) {
+        } else if (failed === null && !partialReading && written.trim() === settings.Nothing) {
             failed = ScribeGateway.failure(key, settings.Messages.Empty, passing);
         }
         if (failed !== null) {
@@ -388,7 +399,7 @@ const ScribeGateway = Object.freeze({
         }
         const usage = ScribeGateway.isObject(parsed.usage) ? parsed.usage : {};
         return {
-            text: content,
+            text: written,
             ...counts,
             finish,
             cost: Number.isFinite(usage.cost) && usage.cost >= 0 ? usage.cost : null,

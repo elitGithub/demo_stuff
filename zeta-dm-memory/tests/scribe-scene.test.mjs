@@ -243,7 +243,7 @@ test('the status the book holds goes with each subject, so the dead are not repo
     const dead = ScribeReplay.run(log, storyOrder);
     const text = ScribeScene.input(dead, 'Orla', story.slice(0, 20), null);
     assert.deepEqual(sectionOf(text, 'SUBJECTS:'), [
-        '- Halvard (character) STATUS: missing since the flood',
+        '- Halvard (character) STATUS: alive; missing since the flood',
         '- Mirelle (character) STATUS: dead, slain by Halvard at the ford',
         '- Tamsin (character)',
         '- Corvane (place)',
@@ -419,7 +419,7 @@ test('the same scene is recognised', () => {
     assert.equal(ScribeScene.same(null, now()), false);
 });
 
-test('code decides whether the scene changed', async () => {
+test('scene changes follow the model even if its place, day or attendance fields differ', async () => {
     const asked = [];
     const request = (text, previous) => ({
         state,
@@ -432,7 +432,7 @@ test('code decides whether the scene changed', async () => {
         },
     });
     const first = await ScribeScene.now(request(`${SCENE_LINE}\nCHANGED: no`, null));
-    assert.equal(first.changed, true);
+    assert.equal(first.changed, false);
     assert.equal(asked.length, 1);
     assert.equal(asked[0][0], ScribeScene.Prompt);
     assert.ok(asked[0][1].includes('RECENT MESSAGES (#11 to #30):'));
@@ -451,20 +451,20 @@ test('code decides whether the scene changed', async () => {
     const insisted = await ScribeScene.now(request(`${SCENE_LINE}\nCHANGED: yes`, first));
     assert.equal(insisted.changed, true);
     const silent = await ScribeScene.now(request(SCENE_LINE, first));
-    assert.equal(silent.changed, false);
+    assert.equal(silent.changed, null);
     const moved = await ScribeScene.now(
         request('Day 3 | The yard | private | present: Halvard, Mirelle | They argue over the ledger\nCHANGED: no', first),
     );
-    assert.equal(moved.changed, true);
+    assert.equal(moved.changed, false);
     assert.equal(moved.place, 'The yard');
     const left = await ScribeScene.now(
         request('Day 3 | The mill | private | present: Halvard | They argue over the ledger\nCHANGED: no', first),
     );
-    assert.equal(left.changed, true);
+    assert.equal(left.changed, false);
     const later = await ScribeScene.now(
         request('Day 4 | The mill | private | present: Mira, Halvard | They argue over the ledger\nCHANGED: no', first),
     );
-    assert.equal(later.changed, true);
+    assert.equal(later.changed, false);
     const reordered = await ScribeScene.now(
         request('Day 3 | the mill | PRIVATE | present: Mira, Halvard-san | Other words\nCHANGED: no', first),
     );
@@ -513,9 +513,13 @@ test('an answer that cannot be read changes nothing', async () => {
                 return reply();
             },
         });
-    assert.equal(await attempt(async () => ({ text: 'It is a quiet night at the mill.', cost: 0 })), null);
+    const scene = await attempt(async () => ({ text: 'It is a quiet night at the mill.', cost: 0 }));
+    assert.equal(scene.summary, scene.modelResponse);
+    assert.equal(scene.modelResponse, 'It is a quiet night at the mill.');
+    assert.equal(scene.day, null);
+    assert.deepEqual(Array.from(scene.present), []);
     assert.equal(await attempt(async () => ({ text: '', cost: 0 })), null);
-    assert.equal(await attempt(async () => ({ text: 'Day 3 | The mill | secret | present: Halvard | x', cost: 0 })), null);
+    assert.equal((await attempt(async () => ({ text: 'Day 3 | The mill | secret | present: Halvard | x', cost: 0 }))).summary, 'Day 3 | The mill | secret | present: Halvard | x');
     assert.equal(await attempt(async () => ({ cost: 0 })), null);
     assert.equal(await attempt(async () => null), null);
     assert.equal(

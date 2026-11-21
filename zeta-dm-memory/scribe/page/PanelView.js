@@ -4,7 +4,6 @@ const PanelView = Object.freeze({
         Standing: 3,
         Single: 1,
         FirstPage: 1,
-        DraftLength: 200,
         Leading: Object.freeze(['role', 'status', 'location', 'title']),
         Lookups: Object.freeze(['subjects', 'facts', 'scenes']),
         Rulings: Object.freeze([
@@ -81,6 +80,7 @@ const PanelView = Object.freeze({
             key: ['OpenRouter key rejected', 'OpenRouter rejected the saved API key.', 'Open Settings, enter your current OpenRouter key, and press Save key.'],
             providerAuth: ['Model provider authentication error', 'The model provider reported an authentication error.', 'Check your provider settings in OpenRouter. If your OpenRouter key changed, enter it in Settings and press Save key.'],
             previousKey: ['Previous OpenRouter key rejection', 'The previous book reading stopped because OpenRouter rejected the key used then.', ''],
+            storyFormat: ['Book reading stopped', 'The reason for this reading failure was not recorded.', 'Open Progress for reading controls.'],
             keyStorage: ['Key storage unavailable', 'Scribe could not read the saved OpenRouter key from local storage.', 'Check that Tampermonkey can read its local storage, then retry.'],
             keyRecovery: ['Room recovery pending', 'The key is saved. Scribe could not resume work in this room and will try again.', ''],
             missingKey: ['OpenRouter key needed', 'Scribe needs an OpenRouter API key.', 'Open Settings, enter your OpenRouter key, and press Save key.'],
@@ -90,6 +90,7 @@ const PanelView = Object.freeze({
             connection: ['OpenRouter connection failed', 'The request to OpenRouter did not complete.', 'Check your connection.'],
             length: ['OpenRouter answer cut short', 'The model answer ended early.', 'See Progress for details.'],
             unusable: ['Unusable model answer', 'The model supplied no usable result.', 'See Progress for details.'],
+            emptyRecap: ['Empty writer response', 'The writer returned no recap text. Your reminder is still due.', ''],
             declined: ['Writer declined the recap', 'The writer declined to produce a recap. Your reminder is still due.', ''],
             unknown: ['OpenRouter request failed', '', 'See the OpenRouter detail in Progress.'],
             budget: ['Scribe daily budget spent', "Scribe reached its local daily budget.", ''],
@@ -146,6 +147,14 @@ const PanelView = Object.freeze({
         const settings = PanelView.Settings;
         const words = settings.Words;
         let line = PanelView.number(keeperView.read) + words.Of + PanelView.number(keeperView.total) + words.MessagesRead;
+        const pending = PanelView.listed(keeperView.pendingFiling);
+        if (pending.length || keeperView.acknowledged < keeperView.read) {
+            line = PanelView.number(keeperView.read) + words.Of + PanelView.number(keeperView.total) +
+                ' messages processed. The model acknowledged ' + PanelView.number(keeperView.acknowledged) + '.';
+            if (pending.length) {
+                line += ' ' + pending.length + ' filing ' + (pending.length === 1 ? 'issue remains' : 'issues remain') + ' in Progress.';
+            }
+        }
         const unread = PanelView.listed(keeperView.unread);
         const disputed = unread.filter((message) => message?.attributionPending).length;
         if (disputed > settings.NoCount) {
@@ -255,7 +264,7 @@ const PanelView = Object.freeze({
             ...report,
             refusedLines: PanelView.listed(report.refusedLines),
             refusedOperations: PanelView.listed(report.refusedOperations),
-        });
+        }, true);
     },
 
     Step: Object.freeze({
@@ -331,12 +340,10 @@ const PanelView = Object.freeze({
             if (PanelView.listed(keeperView.unread).some((message) => message?.attributionPending)) {
                 status = words.DisputedOpen;
             }
-            line =
-                status +
-                PanelView.number(keeperView.read) +
-                words.Of +
-                PanelView.number(keeperView.total) +
-                words.ReadClose;
+            const pending = PanelView.listed(keeperView.pendingFiling);
+            line = pending.length || keeperView.acknowledged < keeperView.read ? PanelView.number(keeperView.read) + words.Of + PanelView.number(keeperView.total) +
+                ' processed · ' + PanelView.number(keeperView.acknowledged) + ' acknowledged' + (pending.length ? ' · ' + pending.length + ' filing issues' : '') :
+                status + PanelView.number(keeperView.read) + words.Of + PanelView.number(keeperView.total) + words.ReadClose;
         } else if (keeperView.phase === phases.Stopped && keeperView.stop === null) {
             line = words.Stopped;
         } else if (keeperView.phase === phases.Stopped && keeperView.stop.reason === stops.Paused) {
@@ -375,7 +382,7 @@ const PanelView = Object.freeze({
             cause = 'connection';
         } else if (diagnostic && parsed[3] === ScribeGateway.Settings.Finish.Length) {
             cause = 'length';
-        } else if ((diagnostic && status >= 200 && status < 300) || [ScribeLive.Settings.Messages.SceneUnreadable, ScribeLive.Settings.Messages.StoryEmpty].includes(reason)) {
+        } else if ((diagnostic && status >= 200 && status < 300) || reason === ScribeLive.Settings.Messages.SceneUnreadable) {
             cause = 'unusable';
         } else if (reason === 'No key') {
             cause = 'missingKey';
@@ -421,6 +428,7 @@ const PanelView = Object.freeze({
                 group.details.push(detail);
             }
             group.retrying ||= retrying;
+            return group;
         };
         const model = (operation, detail, retrying = false, source = 'OpenRouter') => {
             const { cause, provider } = PanelView.modelProblem(detail);
@@ -461,7 +469,17 @@ const PanelView = Object.freeze({
         const stop = keeperView.stop;
         if (stop?.reason === ScribeAdoption.Stop.Failed) {
             const detail = stop.problem?.trim() || 'The reason was not recorded.';
-            if (keeperView.previousKey ?? PanelView.previousKey(keeperView)) {
+            if (Object.hasOwn(stop, 'storyFailure')) {
+                const { first, last, reason } = stop.storyFailure ?? {};
+                const numbered = Number.isSafeInteger(first) && first > 0 && Number.isSafeInteger(last) && last >= first;
+                const range = numbered ? (first === last ? '#' + first + ' remains unread.' :
+                    '#' + first + ' to #' + last + ' remain unread.') : null;
+                const group = add('Scribe', 'storyFormat', 'book reading', range);
+                const reasons = ScribeAdoption.Settings.StoryReasons;
+                const cause = typeof reason === 'string' && Object.hasOwn(reasons, reason) ? reasons[reason] : copy.storyFormat[1];
+                const previous = keeperView.restoredStop ? 'Previous reading · ' : '';
+                group.label = previous + (numbered ? '#' + first + ' · ' : '') + cause;
+            } else if (keeperView.previousKey ?? PanelView.previousKey(keeperView)) {
                 add('OpenRouter', 'previousKey', 'book reading', detail);
             } else if (stop.source === 'OpenRouter' || ScribeStore.localSource(stop.source)) {
                 model('book reading', detail, false, stop.source);
@@ -477,6 +495,8 @@ const PanelView = Object.freeze({
             const operation = PanelView.Settings.ModelOperations[failure?.role];
             if (failure?.role === 'recap' && failure.reason === ScribeLive.Settings.Messages.StoryDeclined) {
                 add('Scribe', 'declined', operation, null);
+            } else if (failure?.role === 'recap' && failure.reason === ScribeLive.Settings.Messages.StoryEmpty) {
+                add('Scribe', 'emptyRecap', operation, null);
             } else if (operation && typeof failure.reason === 'string') {
                 model(operation, failure.reason, failure.retrying === true, failure.source);
             }
@@ -498,6 +518,9 @@ const PanelView = Object.freeze({
         for (const group of groups.values()) {
             const [, opening, guidance] = copy[group.cause];
             let action = guidance;
+            if (group.cause === 'storyFormat' && keeperView.reader && keeperView.hasKey && !keeperView.keyProblem && keeperView.storyRetry) {
+                action = 'Use Retry in Progress to continue from this message.';
+            }
             if (group.cause === 'previousKey') {
                 if (keeperView.keyProblem || keeperView.hasKey == null) {
                     action = 'Check that Tampermonkey can read its local storage before retrying.';
@@ -511,9 +534,9 @@ const PanelView = Object.freeze({
             const names = new Intl.ListFormat('en', { style: 'long', type: 'conjunction' }).format(group.operations);
             const affected = names[0].toUpperCase() + names.slice(1) + ' could not run.';
             const retry = group.retrying && group.cause === 'rate' ? ' A retry is scheduled.' : '';
-            const description = ['declined', 'previousKey', 'keyStorage', 'keyRecovery', 'sendForbidden', 'replyRate', 'replyBlocked']
+            const description = ['declined', 'emptyRecap', 'previousKey', 'storyFormat', 'keyStorage', 'keyRecovery', 'sendForbidden', 'replyRate', 'replyBlocked']
                 .includes(group.cause) ? '' : affected;
-            const explanation = [opening, description, action].filter(Boolean).join(' ') + retry;
+            const explanation = [group.cause === 'storyFormat' ? group.label : opening, description, action].filter(Boolean).join(' ') + retry;
             result.push({ ...group, explanation });
         }
         return result;
@@ -1334,14 +1357,7 @@ const PanelView = Object.freeze({
                     }
                     if (contradiction) {
                         possible.push(actions.Rule);
-                        const reply = Array.from(PanelView.named(finding.said));
-                        const cut = reply.length > settings.DraftLength;
-                        const kept = cut ? reply.slice(0, settings.DraftLength - words.Cut.length) : reply;
-                        draft =
-                            PanelView.about(names, facts, finding) +
-                            words.Colon +
-                            kept.join(words.Nothing) +
-                            (cut ? words.Cut : words.Nothing);
+                        draft = PanelView.about(names, facts, finding) + words.Colon + PanelView.said(finding.said);
                     }
                     if (contradiction && open) {
                         notes.push(words.GoesFirst);

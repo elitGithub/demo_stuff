@@ -1,0 +1,7 @@
+{
+  "name": "universe",
+  "private": true,
+  "scripts": {
+    "start": "node server.mjs"
+  }
+}

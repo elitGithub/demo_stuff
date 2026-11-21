@@ -1,6 +1,7 @@
 import { readFileSync } from 'node:fs';
 import vm from 'node:vm';
 import FakeClock from './FakeClock.mjs';
+import declaredJudgments from './DeclaredJudgments.mjs';
 import FakeDocument from './FakeDocument.mjs';
 import FakeServer from './FakeServer.mjs';
 
@@ -117,6 +118,13 @@ export default class FakePage {
             }
             const url = new URL(source, FakePage.Markup);
             const name = url.pathname.split('/').at(-1).replace(/\.js$/, '');
+            if (name === 'BenchPage') {
+                const replay = loaded.ScribeReplay;
+                const view = { ...replay, run: (log, ...args) => declaredJudgments(replay.run(log, ...args), log, replay) };
+                loaded[name] = vm.compileFunction(readFileSync(url, 'utf8') + '\nreturn BenchPage;', ['ScribeReplay'],
+                    { parsingContext: context, filename: url.pathname })(view);
+                continue;
+            }
             vm.runInContext(readFileSync(url, 'utf8'), context, { filename: url.pathname });
             loaded[name] = vm.runInContext(name, context);
         }

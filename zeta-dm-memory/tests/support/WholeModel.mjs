@@ -33,9 +33,9 @@ export default class WholeModel {
      * @param {number} cost
      * @return {string}
      */
-    static completion(content, cost) {
+    static completion(content, cost, finish = 'stop') {
         return JSON.stringify({
-            choices: [{ finish_reason: 'stop', message: { content } }],
+            choices: [{ finish_reason: finish, message: { content } }],
             usage: { prompt_tokens: 120, completion_tokens: 30, cost },
         });
     }
@@ -118,7 +118,9 @@ export default class WholeModel {
                 details.onload({ status: 400, responseText: '{"error":{"code":400,"message":"unknown prompt"}}' });
                 return;
             }
-            details.onload({ status: 200, responseText: WholeModel.completion(answer(call.user), cost) });
+            const result = answer(call.user);
+            details.onload({ status: 200, responseText: typeof result === 'string' ? WholeModel.completion(result, cost) :
+                WholeModel.completion(result.text, cost, result.finish) });
         });
         return handle;
     }

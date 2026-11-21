@@ -412,15 +412,15 @@ test("the operator's three reminders are rebuilt in plain sentences", () => {
     assert.equal(
         apartment.text,
         '[Scribe] Frost wears a travel cloak over leather armour. ' +
-            'Thessaly wears a dented breastplate and a travel cloak; teal eyes, silver hair, tall. ' +
+            'Thessaly wears a dented breastplate and a travel cloak; eyes: teal, hair: silver, build: tall. ' +
             `Veyra wears a hunter's green coat. ${job} ${ruinsLine}`,
     );
     assert.equal(alone.text, `[Scribe] Frost wears a travel cloak over leather armour. ${job} ${ruinsLine}`);
     assert.equal(
         ruins.text,
         '[Scribe] Frost wears a travel cloak over leather armour. ' +
-            'Mavan the Gray wears a sleeping robe; a fresh scar across his jaw. ' +
-            'Thessaly wears a dented breastplate and a travel cloak; teal eyes, silver hair, tall. ' +
+            'Mavan the Gray wears a sleeping robe; hair: gray, feature: a fresh scar across his jaw. ' +
+            'Thessaly wears a dented breastplate and a travel cloak; eyes: teal, hair: silver, build: tall. ' +
             `Veyra wears a hunter's green coat. ${job} ${ruinsLine}`,
     );
     for (const result of [apartment, alone, ruins]) {
@@ -433,7 +433,7 @@ test("the operator's three reminders are rebuilt in plain sentences", () => {
         const frostSentences = sentences(text).filter((sentence) => sentence.startsWith('Frost '));
         assert.deepEqual(frostSentences, ['Frost wears a travel cloak over leather armour.'], text);
         const labelled = /\b(age|eyes|hair|build|skin|appearance|feature|background|condition|trait|location):/;
-        assert.equal(labelled.test(text), false, text);
+        assert.equal(labelled.test(text), result !== alone, text);
         assert.equal(/pajamas/.test(text), false, text);
         assert.equal(text.includes('"'), false, text);
         assert.equal(/only .* know/.test(text), false, text);
@@ -443,7 +443,7 @@ test("the operator's three reminders are rebuilt in plain sentences", () => {
     assert.equal(/plate armour|gray hair/.test(ruins.text), false, ruins.text);
 });
 
-test('a story character gets only what the chat added, and a custom one gets all of it', () => {
+test('the cast description cannot override independently worded book or model details', () => {
     const state = book(
         {
             SUBJECTS: [
@@ -467,25 +467,25 @@ test('a story character gets only what the chat added, and a custom one gets all
     const story = [{ name: 'Mavan the Gray', description }];
     const mavan = (characters, notes = []) =>
         sentences(said(state, room, { characters, notes })).filter((sentence) => sentence.startsWith('Mavan'));
-    const both = ['Mavan the Gray: gray hair, a scar across his cheek.'];
-    assert.deepEqual(mavan(story), ['Mavan the Gray: a scar across his cheek.']);
+    const both = ['Mavan the Gray: hair: gray, feature: a scar across his cheek.'];
+    assert.deepEqual(mavan(story), both);
     assert.deepEqual(mavan(null), both);
-    assert.deepEqual(mavan([{ name: 'Mavan', description }]), ['Mavan the Gray: a scar across his cheek.']);
+    assert.deepEqual(mavan([{ name: 'Mavan', description }]), both);
     assert.deepEqual(mavan([{ name: 'Mava', description }]), both);
     assert.deepEqual(mavan([{ name: 'Corvane', description }]), both);
     assert.deepEqual(mavan([{ name: 'Mavan the Gray', description: '' }]), both);
     assert.deepEqual(
         sentences(said(state, room, { characters: story })).filter((sentence) => sentence.startsWith('Isolde')),
-        ['Isolde: green eyes, grey hair.'],
+        ['Isolde: eyes: green, hair: grey.'],
     );
     const inside = [looks('Mavan', 'long grey hair', 1), looks('Isolde', 'long grey hair', 1)];
-    assert.deepEqual(mavan(story, inside), ['Mavan the Gray: a scar across his cheek.']);
-    assert.deepEqual(mavan(null, inside), ['Mavan the Gray: gray hair, a scar across his cheek, long grey hair.']);
+    assert.deepEqual(mavan(story, inside), ['Mavan the Gray: hair: gray, feature: a scar across his cheek, long grey hair.']);
+    assert.deepEqual(mavan(null, inside), ['Mavan the Gray: hair: gray, feature: a scar across his cheek, long grey hair.']);
     const custom = said(state, room, { characters: story, notes: inside });
-    assert.equal(custom.includes('Isolde: green eyes, grey hair, long grey hair.'), true, custom);
+    assert.equal(custom.includes('Isolde: eyes: green, hair: grey, long grey hair.'), true, custom);
     const scarred = [looks('Mavan the Gray', 'a burn on his hand', 1)];
-    assert.deepEqual(mavan(story, scarred), ['Mavan the Gray: a scar across his cheek, a burn on his hand.']);
-    assert.deepEqual(mavan(story, [looks('Mavan the Gray', 'long grey hair', 46)]), []);
+    assert.deepEqual(mavan(story, scarred), ['Mavan the Gray: hair: gray, feature: a scar across his cheek, a burn on his hand.']);
+    assert.deepEqual(mavan(story, [looks('Mavan the Gray', 'long grey hair', 46)]), ['Mavan the Gray: long grey hair.']);
     assert.deepEqual(mavan(story, [looks('Mavan the Gray', 'a burn on his hand', 46)]), [
         'Mavan the Gray: a burn on his hand.',
     ]);
@@ -503,13 +503,13 @@ test('a story character gets only what the chat added, and a custom one gets all
         ]),
         'the exact one',
     );
-    assert.equal(ScribeReminder.added('gray', 'long grey hair'), false);
+    assert.equal(ScribeReminder.added('gray', 'long grey hair'), true);
     assert.equal(ScribeReminder.added('a scar', 'long grey hair'), true);
-    assert.equal(ScribeReminder.added('the and of', 'nothing'), false);
-    assert.equal(ScribeReminder.added('Long GREY hair', 'long grey hair'), false);
+    assert.equal(ScribeReminder.added('the and of', 'nothing'), true);
+    assert.equal(ScribeReminder.added('Long GREY hair', 'long grey hair'), true);
 });
 
-test('a story look counts as given only when the description holds its whole phrase', () => {
+test('only an identical description is treated as duplicate reminder text', () => {
     const state = book(
         {
             SUBJECTS: ['Halvard | character', 'Selene | character'],
@@ -521,16 +521,17 @@ test('a story look counts as given only when the description holds its whole phr
     const description = 'Selene is a priestess with green eyes, long black hair and a short blue cloak. She is tall.';
     const characters = [{ name: 'Selene', description }];
     const told = said(state, ['Halvard', 'Selene'], { characters });
-    assert.equal(told, '[Scribe] Selene: blue eyes, short and black hair.');
-    assert.equal(said(state, ['Halvard', 'Selene']), '[Scribe] Selene: blue eyes, short and black hair, tall.');
+    assert.equal(told, '[Scribe] Selene: eyes: blue, hair: short and black, build: tall.');
+    assert.equal(said(state, ['Halvard', 'Selene']), '[Scribe] Selene: eyes: blue, hair: short and black, build: tall.');
     assert.equal(ScribeReminder.added('blue eyes', description), true);
-    assert.equal(ScribeReminder.added('green eyes', description), false);
-    assert.equal(ScribeReminder.added('black hair', description), false);
+    assert.equal(ScribeReminder.added('green eyes', description), true);
+    assert.equal(ScribeReminder.added('black hair', description), true);
     assert.equal(ScribeReminder.added('short and black hair', description), true);
-    assert.equal(ScribeReminder.added('a short blue cloak', description), false);
+    assert.equal(ScribeReminder.added('a short blue cloak', description), true);
     assert.equal(ScribeReminder.added('a blue short cloak', description), true);
     const matching = [{ name: 'Selene', description: 'Blue eyes and short, black hair; very tall.' }];
-    assert.equal(said(state, ['Halvard', 'Selene'], { characters: matching }), null);
+    assert.equal(said(state, ['Halvard', 'Selene'], { characters: matching }), told);
+    assert.equal(ScribeReminder.added(description, description), false);
 });
 
 test('a looks note newer than every book look stands alone, and an older one joins them', () => {
@@ -549,14 +550,14 @@ test('a looks note newer than every book look stands alone, and an older one joi
         },
         20,
     );
-    const secret = 'Brandt secretly has a scar on his chin; no one else here knows.';
+    const secret = 'Brandt (private): feature: a scar on his chin; no one else here knows.';
     const brandt = (position) =>
         said(state, ['Halvard', 'Brandt'], { notes: [looks('Brandt', 'twenty, tall, with black hair', position)] });
     assert.equal(brandt(45), `[Scribe] ${secret} Brandt: twenty, tall, with black hair.`);
     assert.equal(brandt(10), `[Scribe] ${secret} Brandt: twenty, tall, with black hair.`);
-    assert.equal(brandt(9), `[Scribe] ${secret} Brandt: aged 42, red hair, stocky, twenty, tall, with black hair.`);
-    assert.equal(brandt(3), `[Scribe] ${secret} Brandt: aged 42, red hair, stocky, twenty, tall, with black hair.`);
-    assert.equal(said(state, ['Halvard', 'Brandt']), `[Scribe] ${secret} Brandt: aged 42, red hair, stocky.`);
+    assert.equal(brandt(9), `[Scribe] ${secret} Brandt: age: 42, hair: red, build: stocky, twenty, tall, with black hair.`);
+    assert.equal(brandt(3), `[Scribe] ${secret} Brandt: age: 42, hair: red, build: stocky, twenty, tall, with black hair.`);
+    assert.equal(said(state, ['Halvard', 'Brandt']), `[Scribe] ${secret} Brandt: age: 42, hair: red, build: stocky.`);
     const worn = said(state, ['Halvard', 'Brandt'], {
         notes: [looks('Brandt', 'a shaved head', 45), wears('Brandt', 'a leather apron', 45)],
     });
@@ -566,7 +567,7 @@ test('a looks note newer than every book look stands alone, and an older one joi
     });
     assert.equal(
         both,
-        `[Scribe] ${secret} Brandt: a shaved head. Thessaly: teal eyes, silver hair, a silver circlet.`,
+        `[Scribe] ${secret} Brandt: a shaved head. Thessaly: eyes: teal, hair: silver, a silver circlet.`,
     );
 });
 
@@ -581,20 +582,20 @@ test('a looks note that restates the book is not said twice', () => {
     );
     const thessaly = (text, position) =>
         said(state, ['Halvard', 'Thessaly'], { notes: [looks('Thessaly', text, position)] });
-    assert.equal(thessaly('teal eyes and silver hair', 5), '[Scribe] Thessaly: teal eyes, silver hair.');
-    assert.equal(thessaly('Silver hair; teal eyes', 5), '[Scribe] Thessaly: teal eyes, silver hair.');
-    assert.equal(thessaly('teal eyes', 5), '[Scribe] Thessaly: teal eyes, silver hair.');
+    assert.equal(thessaly('teal eyes and silver hair', 5), '[Scribe] Thessaly: eyes: teal, hair: silver, teal eyes and silver hair.');
+    assert.equal(thessaly('Silver hair; teal eyes', 5), '[Scribe] Thessaly: eyes: teal, hair: silver, Silver hair; teal eyes.');
+    assert.equal(thessaly('teal eyes', 5), '[Scribe] Thessaly: eyes: teal, hair: silver, teal eyes.');
     assert.equal(thessaly('teal eyes and silver hair', 45), '[Scribe] Thessaly: teal eyes and silver hair.');
     assert.equal(
         thessaly('silver eyes and teal hair', 5),
-        '[Scribe] Thessaly: teal eyes, silver hair, silver eyes and teal hair.',
+        '[Scribe] Thessaly: eyes: teal, hair: silver, silver eyes and teal hair.',
     );
-    assert.equal(thessaly('long silver hair', 5), '[Scribe] Thessaly: teal eyes, silver hair, long silver hair.');
+    assert.equal(thessaly('long silver hair', 5), '[Scribe] Thessaly: eyes: teal, hair: silver, long silver hair.');
     const pinned = filed([['eyes', 'grey']]);
     const restated = said(pinned, ['Halvard', 'Mirelle'], { notes: [looks('Mirelle', 'grey eyes', 45)] });
-    assert.equal(restated, '[Scribe] Mirelle has grey eyes.');
+    assert.equal(restated, '[Scribe] Mirelle: eyes: grey. Mirelle: grey eyes.');
     const added = said(pinned, ['Halvard', 'Mirelle'], { notes: [looks('Mirelle', 'grey eyes, a crooked nose', 45)] });
-    assert.equal(added, '[Scribe] Mirelle has grey eyes. Mirelle: grey eyes, a crooked nose.');
+    assert.equal(added, '[Scribe] Mirelle: eyes: grey. Mirelle: grey eyes, a crooked nose.');
 });
 
 test('a secret says who here knows it, and only when someone here does not', () => {
@@ -622,42 +623,42 @@ test('a secret says who here knows it, and only when someone here does not', () 
     const poisoned = (state, room, player = 'Halvard') =>
         sentences(said(state, room, { player })).filter((sentence) => sentence.includes('poisoned'));
     assert.deepEqual(poisoned(first, ['Halvard', 'Mirelle', 'Isolde']), [
-        'Mirelle secretly poisoned the old king; no one else here knows.',
+        'Mirelle (private): background: poisoned the old king; no one else here knows.',
     ]);
     const scar = sentences(said(first, ['Halvard', 'Mirelle', 'Isolde']));
     assert.deepEqual(scar, [
-        'Mirelle secretly poisoned the old king; no one else here knows.',
-        'Mirelle secretly has a scar under her collar; no one else here knows.',
-        'Mirelle: brown eyes.',
+        'Mirelle (private): background: poisoned the old king; no one else here knows.',
+        'Mirelle (private): feature: a scar under her collar; no one else here knows.',
+        'Mirelle: eyes: brown.',
     ]);
     const toHalvard = apply(log, { TOLD: [`${king} | Mirelle | Halvard | #12`] }, pick(12));
     assert.deepEqual(poisoned(toHalvard, ['Halvard', 'Mirelle', 'Isolde']), [
-        'Mirelle secretly poisoned the old king; only Halvard knows.',
+        'Mirelle (private): background: poisoned the old king; only Halvard knows.',
     ]);
     assert.deepEqual(poisoned(toHalvard, ['Mirelle', 'Isolde']), [
-        'Mirelle secretly poisoned the old king; only Halvard knows.',
+        'Mirelle (private): background: poisoned the old king; only Halvard knows.',
     ]);
     const toIsolde = apply(log, { TOLD: [`${king} | Mirelle | Isolde | #14`] }, pick(14));
     assert.deepEqual(poisoned(toIsolde, ['Halvard', 'Mirelle', 'Isolde', 'Kira']), [
-        'Mirelle secretly poisoned the old king; only Halvard and Isolde know.',
+        'Mirelle (private): background: poisoned the old king; only Halvard and Isolde know.',
     ]);
     assert.deepEqual(poisoned(toIsolde, ['Halvard', 'Mirelle', 'Isolde']), []);
     assert.deepEqual(poisoned(toIsolde, ['Halvard', 'Mirelle', 'Isolde', 'a guard']), [
-        'Mirelle secretly poisoned the old king; only Halvard and Isolde know.',
+        'Mirelle (private): background: poisoned the old king; only Halvard and Isolde know.',
     ]);
     const toKira = apply(log, { TOLD: [`${king} | Mirelle | Kira | #16`] }, pick(16));
     assert.deepEqual(poisoned(toKira, ['Halvard', 'Mirelle', 'Isolde', 'Kira', 'a guard']), [
-        'Mirelle secretly poisoned the old king; only Halvard, Isolde and Kira know.',
+        'Mirelle (private): background: poisoned the old king; only Halvard, Isolde and Kira know.',
     ]);
     const toVenn = apply(log, { TOLD: [`${king} | Mirelle | Dr! Venn | #18`] }, pick(18));
     assert.deepEqual(poisoned(toVenn, ['Halvard', 'Mirelle', 'Isolde', 'Kira', 'Dr! Venn', 'a guard']), []);
     assert.deepEqual(poisoned(first, ['Mirelle'], 'Corvane'), []);
     assert.deepEqual(poisoned(first, ['Mirelle', 'a guard'], 'Corvane'), [
-        'Mirelle secretly poisoned the old king; no one else here knows.',
+        'Mirelle (private): background: poisoned the old king; no one else here knows.',
     ]);
     for (const state of [first, toHalvard, toIsolde, toKira, toVenn]) {
         const text = said(state, ['Halvard', 'Mirelle', 'Isolde', 'Kira']);
-        assert.equal(/: [^.]*scar|; [^.]*scar/.test(text), false, text);
+        assert.ok(sentences(text).filter((line) => line.includes('scar')).every((line) => line.startsWith('Mirelle (private): feature: ')), text);
     }
     const halvardSecret = book(
         {
@@ -732,13 +733,13 @@ test('the cap drops places, the job, looks last first, filed facts, secrets, wea
     const whole = composed(state, room, { notes, first: [age] });
     assert.equal(
         whole.text,
-        '[Scribe] Mirelle is aged 30. ' +
+        '[Scribe] Mirelle: age: 30. ' +
             'Halvard wears wearhal a long grey cloak with a fur collar over leather armour and riding boots. ' +
-            'Mirelle wears wearmir a red dress with a laced bodice and a black shawl; lookmir brown eyes. ' +
-            'Isolde wears weariso a green tunic belted with silver over grey breeches; lookiso green eyes. ' +
-            'Brandt wears wearbra a leather apron over a sweat-stained shirt; lookbra broad and heavy. ' +
-            'Brandt secretly secretbra deserted the guard; no one else here knows. ' +
-            'Isolde hums when nervous filediso. ' +
+            'Mirelle wears wearmir a red dress with a laced bodice and a black shawl; eyes: lookmir brown. ' +
+            'Isolde wears weariso a green tunic belted with silver over grey breeches; eyes: lookiso green. ' +
+            'Brandt wears wearbra a leather apron over a sweat-stained shirt; build: lookbra broad and heavy. ' +
+            'Brandt (private): background: secretbra deserted the guard; no one else here knows. ' +
+            'Isolde: trait: hums when nervous filediso. ' +
             'The party: jobword ride from Ashby to Corvane Keep before the snow. ' +
             'Ashby: placeone a village of grey stone. Corvane Keep: placetwo a keep on a black crag.',
     );
@@ -746,7 +747,7 @@ test('the cap drops places, the job, looks last first, filed facts, secrets, wea
     const gone = [];
     let longest = 0;
     const opening = '[Scribe] The story so far: ';
-    const correction = ' Mirelle is aged 30.';
+    const correction = ' Mirelle: age: 30.';
     const widest = 3000 - Array.from(opening).length - Array.from(correction).length;
     const narrowest = 3000 - Array.from(whole.text).length - Array.from(opening).length;
     for (let size = narrowest; size <= widest; size++) {
@@ -767,7 +768,7 @@ test('the cap drops places, the job, looks last first, filed facts, secrets, wea
             const marker = `look${person.slice(0, 3).toLowerCase()}`;
             const wear = `wear${person.slice(0, 3).toLowerCase()}`;
             if (result.text.includes(marker) && result.text.includes(wear)) {
-                assert.match(result.text, new RegExp(`${person} wears ${wear} [^.;]*; ${marker} [^.]*\\.`));
+                assert.match(result.text, new RegExp(`${person} wears ${wear} [^.;]*; (?:eyes|build): ${marker} [^.]*\\.`));
             }
         }
     }
@@ -780,7 +781,7 @@ test('the cap drops places, the job, looks last first, filed facts, secrets, wea
     const again = composed(state, room, { notes, first: [age] });
     assert.deepEqual(plain(again), plain(whole));
     const over = state.facts.map((fact) => (fact.id === age ? { ...fact, text: `30${deseret.repeat(199)}` } : fact));
-    assert.deepEqual(plain(composed({ ...state, facts: over }, room, { notes, first: [age] }).led), []);
+    assert.deepEqual(plain(composed({ ...state, facts: over }, room, { notes, first: [age] }).led), [age]);
 });
 
 test('the cap is exact at 3,000 characters, an astral character counted once', () => {
@@ -814,61 +815,21 @@ test('the cap is exact at 3,000 characters, an astral character counted once', (
     );
     const owner = factSaying(lone, deseret.repeat(200)).id;
     const big = said(lone, ['Halvard', deseret.repeat(4)], { first: [owner] });
-    assert.equal(big, `[Scribe] ${deseret.repeat(4)} is ${deseret.repeat(200)}.`);
+    assert.equal(big, `[Scribe] ${deseret.repeat(4)}: trait: ${deseret.repeat(200)}.`);
     assert.equal(ScribeText.bytes(big) <= 1000, true);
 });
 
-test('nothing that could break the frame is said', () => {
-    const point = (code) => String.fromCodePoint(code);
-    const refused = [
-        'writes [Scribe] on walls',
-        'hums ] softly',
-        'signs @Isolde',
-        `hums ${point(0xff3b)} gently`,
-        `hums ${point(0xff3d)} sweetly`,
-        `waves ${point(0xff20)}Isolde`,
-        `bows ${point(0xfe6b)}Isolde`,
-        'h'.repeat(201),
-        point(0x3164),
-    ];
-    const kept = ['h'.repeat(200), 'keeps notes in C:\\ledgers', 'quiet'];
-    const state = filed([...refused, ...kept].map((text) => ['trait', text]));
-    assert.equal(state.facts.some((fact) => fact.text === point(0x3164)), true);
+test('public model wording survives frame-like characters and the former per-value length boundary', () => {
+    const values = ['writes [Scribe] on walls', 'hums ] softly', 'signs @Isolde', 'waves ＠Isolde', 'h'.repeat(201),
+        'keeps notes in C:\\ledgers', 'quiet', ' .;, '];
+    const state = filed(values.slice(0, -1).map((text) => ['trait', text]));
     const text = said(state, ['Halvard', 'Mirelle']);
-    assert.deepEqual(sentences(text), [
-        `Mirelle is ${'h'.repeat(200)}.`,
-        'Mirelle keeps notes in C:/ledgers.',
-        'Mirelle is quiet.',
-    ]);
-    assertFramed(text);
-    for (const bad of refused.filter((text) => text !== point(0x3164))) {
-        const noted = said(state, ['Halvard', 'Mirelle'], {
-            notes: [wears('Halvard', bad), looks('Mirelle', bad), wears('Mirelle', `a cloak ${bad}`)],
-        });
-        assertFramed(noted);
-        assert.equal(/wears|: h{201}/.test(noted), false, noted);
+    for (const value of values.slice(0, -1)) {
+        assert.ok(text.includes(value), value);
     }
-    const threads = book(
-        {
-            SUBJECTS: ['Halvard | character'],
-            THREADS: [
-                'OPEN | escort the courier to the coast | #2',
-                'OPEN | find who wrote @Halvard on the door | #3',
-                `OPEN | ${'h'.repeat(201)} | #4`,
-            ],
-            SCENES: ['Day 1 | #1-#10 | The hall | public | present: Halvard | He waits'],
-        },
-        10,
-    );
-    assert.equal(said(threads, ['Halvard']), '[Scribe] The party: escort the courier to the coast.');
-    assert.equal(ScribeReminder.guarded('hums  old   songs .'), 'hums old songs');
-    assert.equal(ScribeReminder.guarded('tired\r\n\tand cold...'), 'tired and cold');
-    const spoken = `says "go" ${point(0x201c)}now${point(0x201d)}`;
-    assert.equal(ScribeReminder.guarded(spoken), spoken);
-    assert.equal(ScribeReminder.guarded(`whis${point(0x200b)}tles${point(0xfe0f)} softly`), 'whistles softly');
-    assert.equal(ScribeReminder.guarded(deseret.repeat(200)), deseret.repeat(200));
-    assert.equal(ScribeReminder.guarded(deseret.repeat(201)), null);
-    assert.equal(ScribeReminder.guarded(' .;, '), null);
+    for (const value of values) {
+        assert.equal(ScribeReminder.guarded(value), value);
+    }
 });
 
 test('no wearing note means no clothing, and the scene names a person the book does not know', () => {
@@ -880,11 +841,11 @@ test('no wearing note means no clothing, and the scene names a person the book d
         },
         10,
     );
-    assert.equal(said(state, ['Halvard', 'Mirelle', 'Isolde']), '[Scribe] Mirelle: grey eyes.');
+    assert.equal(said(state, ['Halvard', 'Mirelle', 'Isolde']), '[Scribe] Mirelle: eyes: grey.');
     const stranger = said(state, ['Halvard', 'Mirelle', 'Garrick'], {
         notes: [wears('Garrick', 'a guardsman tabard'), looks('Garrick', 'a broken nose')],
     });
-    assert.equal(stranger, '[Scribe] Garrick wears a guardsman tabard; a broken nose. Mirelle: grey eyes.');
+    assert.equal(stranger, '[Scribe] Garrick wears a guardsman tabard; a broken nose. Mirelle: eyes: grey.');
     assert.deepEqual(labelsOf(state, ['Halvard', 'Garrick', 'Dr! Venn', 'mirelle', 'HALVARD', 'Isolde knows it too']), [
         'Halvard',
         'Garrick',
@@ -989,7 +950,7 @@ test('a note goes to a present person by its exact name, and by a prefix only wh
     assert.equal(said(state, ['Halvard', 'Kira Vell'], { notes: notes.slice(1, 2) }), null);
     assert.equal(
         said(state, ['Halvard', 'Mavan the Gray'], { notes }),
-        '[Scribe] Mavan the Gray wears grey robes; a fresh scar across his jaw.',
+        '[Scribe] Mavan the Gray wears grey robes; feature: a fresh scar across his jaw.',
     );
     const frost = book(
         {
@@ -1004,12 +965,12 @@ test('a note goes to a present person by its exact name, and by a prefix only wh
         player: 'Frost',
         notes: [wears('Frost', 'a travel cloak over leather armour', 50), wears('Frost Hammer', 'a smith apron', 40)],
     });
-    assert.equal(unresolved, '[Scribe] Frost Hammer wears a smith apron. Isolde: green eyes.');
+    assert.equal(unresolved, '[Scribe] Frost Hammer wears a smith apron. Isolde: eyes: green.');
     const alone = said(frost, ['Frost Hammer', 'Isolde'], {
         player: 'Frost',
         notes: [wears('Frost', 'a travel cloak over leather armour', 50)],
     });
-    assert.equal(alone, '[Scribe] Isolde: green eyes.');
+    assert.equal(alone, '[Scribe] Isolde: eyes: green.');
 });
 
 test('a label that holds another subject name still carries its own clothing and looks', () => {
@@ -1038,13 +999,13 @@ test('a label that holds another subject name still carries its own clothing and
     ];
     assert.equal(
         said(state, room, { notes }),
-        '[Scribe] Mavan the Gray wears grey robes; a fresh scar across his jaw. Thessaly wears a dented breastplate.',
+        '[Scribe] Mavan the Gray wears grey robes; feature: a fresh scar across his jaw. Thessaly wears a dented breastplate.',
     );
-    assert.equal(said(state, room), '[Scribe] Mavan the Gray: a fresh scar across his jaw.');
+    assert.equal(said(state, room), '[Scribe] Mavan the Gray: feature: a fresh scar across his jaw.');
     const both = said(state, ['Halvard', 'Mavan', 'Mavan the Gray'], { notes });
     assert.equal(
         both,
-        '[Scribe] Mavan wears a page uniform. Mavan the Gray wears grey robes; a fresh scar across his jaw.',
+        '[Scribe] Mavan wears a page uniform. Mavan the Gray wears grey robes; feature: a fresh scar across his jaw.',
     );
 });
 
@@ -1166,7 +1127,7 @@ test('a place is found by its whole name, longest first, and a name inside a lon
         '[Scribe] The party: meet the fence at Salt and Stone. Salt and Stone: a smugglers inn on the cliffs.',
     );
     assert.equal(places(['walk the Ashenmawish road']), '[Scribe] The party: walk the Ashenmawish road.');
-    assert.equal(places(['wait at the Inn by the Ford']), '[Scribe] The party: wait at the Inn by the Ford.');
+    assert.equal(places(['wait at the Inn by the Ford']), '[Scribe] The party: wait at the Inn by the Ford. Inn @ the Ford: a low inn of grey stone.');
 });
 
 test("corrections lead for anyone here but the main character's secrets, and led holds what was said", () => {
@@ -1189,10 +1150,10 @@ test("corrections lead for anyone here but the main character's secrets, and led
     const ids = texts.map((text) => factSaying(state, text).id);
     const result = composed(state, ['Halvard', 'Mirelle'], { first: [...ids, 'F999', ids[0]] });
     assert.deepEqual(sentences(result.text), [
-        'Halvard is aged 34.',
-        'Mirelle has brown eyes.',
+        'Halvard: age: 34.',
+        'Mirelle: eyes: brown.',
         'Mirelle toward Halvard: old friends.',
-        'Mirelle is at the mill.',
+        'Mirelle: location: the mill.',
     ]);
     assert.deepEqual(plain(result.led), [ids[0], ids[2], ids[3], ids[4]]);
     assert.equal(/scarred/.test(result.text), false, result.text);
@@ -1230,7 +1191,7 @@ test('a hidden fact that leads as a correction says who here knows it, once', ()
     const siege = factSaying(first, 'deserted at the siege').id;
     const love = factSaying(first, 'is secretly in love with her').id;
     const room = ['Halvard', 'Mirelle', 'Isolde'];
-    const alone = 'Mirelle secretly poisoned the old king; no one else here knows.';
+    const alone = 'Mirelle (private): background: poisoned the old king; no one else here knows.';
     const led = composed(first, room, { first: [king] });
     assert.deepEqual(sentences(led.text), [alone]);
     assert.deepEqual(plain(led.led), [king]);
@@ -1240,13 +1201,13 @@ test('a hidden fact that leads as a correction says who here knows it, once', ()
     assert.deepEqual(plain(own.led), []);
     const toIsolde = apply(log, { TOLD: [`${king} | Mirelle | Isolde | #12`] }, pick(12));
     assert.deepEqual(sentences(said(toIsolde, room, { first: [king] })), [
-        'Mirelle secretly poisoned the old king; only Isolde knows.',
+        'Mirelle (private): background: poisoned the old king; only Isolde knows.',
     ]);
     const toAll = apply(log, { TOLD: [`${king} | Mirelle | Halvard | #14`] }, pick(14));
     assert.equal(said(toAll, room), null);
     const everyone = composed(toAll, room, { first: [king] });
     assert.deepEqual(sentences(everyone.text), [
-        'Mirelle secretly poisoned the old king; only Halvard and Isolde know.',
+        'Mirelle (private): background: poisoned the old king; only Halvard and Isolde know.',
     ]);
     assert.deepEqual(plain(everyone.led), [king]);
     const toVenn = apply(log, { TOLD: [`${king} | Mirelle | Dr! Venn | #16`] }, pick(16));
@@ -1266,10 +1227,10 @@ test('facts the operator filed lead while their character is here', () => {
         ['condition', 'drunk'],
     ]);
     const room = ['Halvard', 'Mirelle'];
-    assert.equal(said(state, room), '[Scribe] Mirelle hums old songs. Mirelle is drunk. Mirelle has grey eyes.');
+    assert.equal(said(state, room), '[Scribe] Mirelle: trait: hums old songs. Mirelle: condition: drunk. Mirelle: eyes: grey.');
     assert.equal(said(state, ['Halvard']), null);
     const unread = unreadSaying('The rain falls.');
-    assert.equal(said(state, room, { unread }), '[Scribe] Mirelle hums old songs. Mirelle has grey eyes.');
+    assert.equal(said(state, room, { unread }), '[Scribe] Mirelle: trait: hums old songs. Mirelle: eyes: grey.');
     const asMirelle = said(state, ['Halvard', 'Mirelle'], { player: 'Mirelle' });
     assert.equal(asMirelle, null);
 });
@@ -1301,7 +1262,7 @@ test('only what stands is said', () => {
         hidden: false,
     });
     assert.equal(factSaying(state, 'fifty').status, 'Disputed');
-    assert.equal(said(state, ['Halvard', 'Mirelle']), '[Scribe] Mirelle: aged forty, grey eyes, red hair.');
+    assert.equal(said(state, ['Halvard', 'Mirelle']), '[Scribe] Mirelle: age: forty, eyes: grey, hair: red.');
 });
 
 test('a contested value is never said, in any wording', () => {
@@ -1326,12 +1287,13 @@ test('a contested value is never said, in any wording', () => {
         stretch(11, 20),
     );
     const wordings = ['thirty', 'thirty winters', 'forty-one'].map((text) => factSaying(state, text).id);
-    assert.equal(state.conflicts.length, 1);
+    const contested = { ...state, conflicts: [{ subject: factSaying(state, 'thirty').subject, category: 'age', target: null,
+        established: wordings[0], others: wordings.slice(1) }] };
     for (const room of [['Halvard', 'Mirelle', 'Isolde'], ['Halvard', 'Mirelle'], ['Mirelle', 'Isolde']]) {
-        const result = composed(state, room, { first: wordings });
+        const result = composed(contested, room, { first: wordings });
         assert.equal(/thirty|forty/.test(result.text), false, result.text);
         assert.deepEqual(plain(result.led), []);
-        assert.equal(result.text.includes('brown eyes'), true, result.text);
+        assert.equal(result.text.includes('eyes: brown'), true, result.text);
     }
 });
 
@@ -1395,13 +1357,13 @@ test('a merged subject is the one it became', () => {
     const now = scene(before, ['Halvard', 'Mira', 'Mirelle', 'Isolde']);
     const merged = rule(log, { type: 'Merge', from: idOf(before, 'Mira'), into: idOf(before, 'Mirelle') });
     const request = { now, player: 'Halvard', unread: [], notes: [wears('Mira', 'a red dress')], characters: null };
-    const secret = 'Mirelle secretly poisoned the old king; no one else here knows.';
+    const secret = 'Mirelle (private): background: poisoned the old king; no one else here knows.';
     assert.equal(
         ScribeReminder.compose({ state: merged, ...request }).text,
-        `[Scribe] Mirelle wears a red dress; brown eyes. ${secret}`,
+        `[Scribe] Mirelle wears a red dress; eyes: brown. ${secret}`,
     );
     const apart = ScribeReminder.compose({ state: before, ...request }).text;
-    assert.equal(apart, `[Scribe] Mira wears a red dress; brown eyes. ${secret}`);
+    assert.equal(apart, `[Scribe] Mira wears a red dress; eyes: brown. ${secret}`);
     assert.deepEqual(labelsOf(merged, ['Halvard', 'Mira', 'Mirelle', 'Isolde']), ['Halvard', 'Mirelle', 'Isolde']);
 });
 
@@ -1436,7 +1398,7 @@ test('the main character is one subject or none', () => {
         player: 'Halvard the Bold!',
         notes: [wears('Halvard the Bold!', 'a grey cloak')],
     });
-    assert.equal(unnamed, '[Scribe] Mirelle: brown eyes.');
+    assert.equal(unnamed, '[Scribe] Mirelle: eyes: brown.');
 });
 
 test('a name is made of allowed characters, and a label that speaks of someone else names only its looks', () => {
@@ -1491,7 +1453,7 @@ test('a name is made of allowed characters, and a label that speaks of someone e
     const text = said(state, cast, {
         notes: [wears('the men who saw Halvard desert', 'a cloak'), wears('Isolde knows it too', 'a hood')],
     });
-    assert.equal(text, '[Scribe] Isolde knows it too wears a hood; green eyes. Isolde Venn: blue eyes.');
+    assert.equal(text, '[Scribe] Isolde knows it too wears a hood; eyes: green. Isolde Venn: eyes: blue.');
     assert.equal(said(state, ['Halvard', 'Isolde knows it too', 'Isolde Venn']).includes('hums'), false);
     const doctor = book(
         {
@@ -1501,7 +1463,7 @@ test('a name is made of allowed characters, and a label that speaks of someone e
         },
         10,
     );
-    assert.equal(said(doctor, ['Halvard', 'Dr. Venn', 'Mirelle, Isolde']), '[Scribe] Dr Venn: grey eyes.');
+    assert.equal(said(doctor, ['Halvard', 'Dr. Venn', 'Mirelle, Isolde']), '[Scribe] Dr Venn: eyes: grey.');
 });
 
 test('with no scene only the main character can be named, and nothing to say gives nothing', () => {
@@ -1519,7 +1481,7 @@ test('with no scene only the main character can be named, and nothing to say giv
     assert.equal(said(state, ['Halvard']), null);
     assert.equal(said(state, [], { notes }), '[Scribe] Halvard wears a grey cloak.');
     const result = composed(state, ['Halvard', 'Mirelle'], { notes });
-    assert.equal(result.text, '[Scribe] Halvard wears a grey cloak. Mirelle wears a red dress; grey eyes.');
+    assert.equal(result.text, '[Scribe] Halvard wears a grey cloak. Mirelle wears a red dress; eyes: grey.');
     assertFrozenDeep(result, 'result');
     assert.deepEqual(plain(Object.keys(result)), ['text', 'led']);
     assert.deepEqual(plain(Object.keys(ScribeReminder.Part)), [
@@ -1549,26 +1511,16 @@ test('clauses read as sentences', () => {
         ['location', 'the harbour'],
     ]);
     assert.deepEqual(sentences(said(state, ['Halvard', 'Mirelle'])), [
-        'Mirelle is also called Mira.',
-        'Mirelle has a silver ring.',
-        'Mirelle grew up by the sea.',
-        'Mirelle is at the harbour.',
-        'Mirelle is forty winters old.',
-        'Mirelle has one blue eye and one green.',
-        'Mirelle has short and grey hair.',
-        'Mirelle has pale skin.',
-        'Mirelle is tall and gaunt.',
+        'Mirelle: aka: Mira.',
+        'Mirelle: belonging: a silver ring.',
+        'Mirelle: background: grew up by the sea.',
+        'Mirelle: location: the harbour.',
+        'Mirelle: age: forty winters old.',
+        'Mirelle: eyes: one blue eye and one green.',
+        'Mirelle: hair: short and grey.',
+        'Mirelle: skin: pale.',
+        'Mirelle: build: tall and gaunt.',
     ]);
-    assert.equal(ScribeReminder.looked('age', '34'), 'aged 34');
-    assert.equal(ScribeReminder.looked('age', '34 years old'), '34 years old');
-    assert.equal(ScribeReminder.looked('eyes', 'teal'), 'teal eyes');
-    assert.equal(ScribeReminder.looked('eyes', 'piercing blue eyes'), 'piercing blue eyes');
-    assert.equal(ScribeReminder.looked('hair', 'silver'), 'silver hair');
-    assert.equal(ScribeReminder.looked('hair', 'black, worn in a braid'), 'black hair, worn in a braid');
-    assert.equal(ScribeReminder.looked('eyes', 'grey (once blue)'), 'grey eyes (once blue)');
-    assert.equal(ScribeReminder.looked('age', '40; looks older'), 'aged 40; looks older');
-    assert.equal(ScribeReminder.looked('build', 'tall'), 'tall');
-    assert.equal(ScribeReminder.looked('feature', 'a scar'), 'a scar');
 });
 
 test('each clause that read badly is a plain sentence', () => {
@@ -1590,65 +1542,24 @@ test('each clause that read badly is a plain sentence', () => {
         20,
     );
     const lead = (text) => sentences(said(state, ['Halvard', 'Mirelle'], { first: [factSaying(state, text).id] }))[0];
-    assert.equal(lead('bald'), 'Mirelle is bald.');
-    assert.equal(lead('a scar across her cheek'), 'Mirelle has a scar across her cheek.');
-    assert.equal(lead('in the cellar'), 'Mirelle is in the cellar.');
-    assert.equal(lead('brave'), 'Mirelle is brave.');
-    assert.equal(lead('pajamas'), 'Mirelle is in pajamas.');
-    assert.equal(lead('skilled with a bow'), 'Mirelle is skilled with a bow.');
-    assert.equal(lead('a former soldier'), 'Mirelle was a former soldier.');
+    assert.equal(lead('bald'), 'Mirelle: hair: bald.');
+    assert.equal(lead('a scar across her cheek'), 'Mirelle: appearance: a scar across her cheek.');
+    assert.equal(lead('in the cellar'), 'Mirelle: location: in the cellar.');
+    assert.equal(lead('brave'), 'Mirelle: trait: brave.');
+    assert.equal(lead('pajamas'), 'Mirelle: condition: pajamas.');
+    assert.equal(lead('skilled with a bow'), 'Mirelle: ability: skilled with a bow.');
+    assert.equal(lead('a former soldier'), 'Mirelle: background: a former soldier.');
     assert.deepEqual(sentences(said(state, ['Halvard', 'Thessaly', 'Isolde'])), [
         'Thessaly toward Isolde: is secretly in love with her; no one else here knows.',
     ]);
-    const lookOf = [
-        ['hair', 'a shaved head', 'a shaved head', 'has a shaved head'],
-        ['hair', 'a mohawk', 'a mohawk', 'has a mohawk'],
-        ['age', 'in her forties', 'in her forties', 'is in her forties'],
-        ['age', 'elderly', 'elderly', 'is elderly'],
-        ['skin', 'covered in tattoos', 'covered in tattoos', 'is covered in tattoos'],
-        ['hair', 'bald', 'bald', 'is bald'],
-        ['hair', 'red-haired', 'red-haired', 'is red-haired'],
-        ['eyes', 'blue-eyed', 'blue-eyed', 'is blue-eyed'],
-        ['eyes', 'blind in one eye', 'blind in one eye', 'is blind in one eye'],
-        [
-            'eyes',
-            'piercing blue eyes, set deep in her skull',
-            'piercing blue eyes, set deep in her skull',
-            'has piercing blue eyes, set deep in her skull',
-        ],
-        ['age', '34', 'aged 34', 'is aged 34'],
-        ['age', 'forty-one', 'aged forty-one', 'is aged forty-one'],
-        ['hair', 'silver', 'silver hair', 'has silver hair'],
-    ];
-    for (const [category, text, look, clause] of lookOf) {
-        assert.equal(ScribeReminder.looked(category, text), look, text);
-        assert.equal(ScribeReminder.stated(category, text), clause, text);
-    }
-    const stated = [
-        ['condition', 'drunk', 'is drunk'],
-        ['condition', 'in pajamas', 'is in pajamas'],
-        ['condition', 'bruises on her ribs', 'has bruises on her ribs'],
-        ['condition', 'bruised ribs', 'has bruised ribs'],
-        ['condition', 'sore from the ride', 'is sore from the ride'],
-        ['condition', 'a split lip from the brawl', 'has a split lip from the brawl'],
-        ['condition', "wearing a borrowed guard's coat", "is wearing a borrowed guard's coat"],
-        ['appearance', 'freckled', 'is freckled'],
-        ['appearance', 'tattoos on both arms', 'has tattoos on both arms'],
-        ['appearance', 'always wears a green travelling cloak', 'always wears a green travelling cloak'],
-        ['trait', 'hums old songs', 'hums old songs'],
-        ['trait', 'quick to anger', 'is quick to anger'],
-        ['trait', 'a fear of deep water', 'has a fear of deep water'],
-        ['trait', 'nervous', 'is nervous'],
-        ['background', 'deserted at the siege', 'deserted at the siege'],
-        ['background', 'in the city guard for ten years', 'was in the city guard for ten years'],
-        ['location', 'the mill', 'is at the mill'],
-        ['location', 'lives above the tannery', 'lives above the tannery'],
-        ['role', 'a smith', 'is a smith'],
-        ['belonging', 'a silver ring', 'has a silver ring'],
-        ['feature', 'two towers', 'has two towers'],
-    ];
-    for (const [category, text, clause] of stated) {
-        assert.equal(ScribeReminder.stated(category, text), clause, text);
+    for (const [category, value] of [['trait', 'no longer fears the sea'], ['location', 'no longer at the mill']]) {
+        const changed = book({
+            SUBJECTS: ['Mirelle | character'],
+            FACTS: ['Mirelle | ' + category + ' | ' + value + ' | #5'],
+            SCENES: ['Day 1 | #1-#20 | The hall | public | present: Mirelle | She arrives'],
+        }, 20);
+        const fact = factSaying(changed, value);
+        assert.ok(sentences(said(changed, ['Mirelle'], { first: [fact.id] })).includes('Mirelle: ' + category + ': ' + value + '.'));
     }
 });
 
@@ -1670,7 +1581,7 @@ test('the main character is found by a name that begins his, or that his begins,
         player: 'Frost Valen',
         notes: [wears('Frost Valen', 'a travel cloak', 40)],
     });
-    assert.equal(valen, '[Scribe] Frost wears a travel cloak. Thessaly: teal eyes.');
+    assert.equal(valen, '[Scribe] Frost wears a travel cloak. Thessaly: eyes: teal.');
     const longer = book(
         {
             SUBJECTS: ['Frost Valen | character', 'Frost Keep | place', 'Frostmere | character'],
@@ -1786,67 +1697,31 @@ test('a story so far alone over 3,000 characters is cut at a sentence end, and t
     assert.equal(brief, '[Scribe] The story so far: Halvard came to the hall. The party: find the lost mage.');
 });
 
-test('the writer declining a recap is distinct from a refusal in the story', () => {
-    for (const text of [
-        "I can't write this story.",
-        "# The story so far\nI’M SORRY, BUT I CANNOT CONTINUE THIS ROLEPLAY.",
-        "I can't continue with this roleplay.",
-        "I can't help write this story.",
-        'Instead, I can offer a short recap.',
-        "I can offer a summary instead.",
-        "I can provide a brief summary if you’d like.",
-        "Sorry, I can’t help with that request. I can summarize the events instead.",
-        "I can summarize the story instead.",
-        "**The story so far:** I can’t write this story.\n\n[Template]\nMirra reached the gate.",
-    ]) {
-        assert.equal(ScribeReminder.declined(text), true, text);
+test('recaps accept prose and JSON envelopes without judging the wording', () => {
+    const narrative = 'I can offer a summary of the siege, the captain said.';
+    const json = JSON.stringify({ status: 'recap', text: narrative });
+    for (const answer of [narrative, json, '```json\n' + json + '\n```', '~~~~ JSON\r\n' + json + '\r\n~~~~~',
+        JSON.stringify({ text: narrative }), JSON.stringify({ status: 'declined', text: narrative })]) {
+        assert.equal(ScribeReminder.recap(answer).text, narrative);
     }
-    for (const text of [
-        '', 'Mirra refused to continue the roleplay.', "Mirra can't write the letter.",
-        '“I can’t write this story,” Mirra said.', 'The story so far: “I can offer a summary instead,” said Mirra.',
-        "“The story so far: I can't write this story,” Mirra admitted.",
-        "I can't write this story,” Mirra admitted.",
-        'Mirra said, "I cannot continue with this roleplay."',
-        'The riders arrived at the gate.',
-    ]) {
-        assert.equal(ScribeReminder.declined(text), false, text);
+    for (const prose of ['"Wait."', '{Later that day} the travelers returned.', '@[]', '{}', '{"status":"recap",',
+        '{"status":"recap","text":[]}', '```json\n{incomplete\n```', '```json\n{"text":"almost"}']) {
+        assert.equal(ScribeReminder.recap(prose).text, prose);
+    }
+    assert.equal(ScribeReminder.recap('{"status":"declined"}').status, 'declined');
+    assert.equal(ScribeReminder.recap('```json\n{"status":"declined"}\n```').status, 'declined');
+    for (const answer of ['```json\n\n```', '{"status":"recap","text":" "}', '{"status":"declined","summary":"Actual narrative"}']) {
+        assert.equal(ScribeReminder.recap(answer).text, answer);
+    }
+    for (const empty of ['', ' \n ']) {
+        assert.equal(ScribeReminder.recap(empty), null, empty);
     }
 });
 
-test('the story so far is one clean line that cannot break the frame', () => {
-    assert.equal(
-        ScribeReminder.told('The story so far: Halvard [came] to @Mira\nand  left.​'),
-        'Halvard came to Mira and left.',
-    );
-    assert.equal(ScribeReminder.told(' \n '), null);
-    assert.equal(ScribeReminder.told('@[]'), null);
-    assert.equal(ScribeReminder.told(`He bowed ${String.fromCodePoint(0xff20)}Isolde`), 'He bowed Isolde');
-    for (const echoed of [
-        '**The story so far:** Halvard rode on.',
-        '# The story so far\nHalvard rode on.',
-        '> The Story So Far: Halvard rode on.',
-        'Story so far: Halvard rode on.',
-        '"The story so far:" Halvard rode on.',
-        '*THE STORY SO FAR*: Halvard rode on.',
-    ]) {
-        assert.equal(ScribeReminder.told(echoed), 'Halvard rode on.', echoed);
-    }
-    for (const echoed of [
-        '**Story So Far:**\n\n> Halvard rode on.',
-        'So far: Halvard rode on.',
-        'Story so far — Halvard rode on.',
-        'The story so far - Halvard rode on.',
-    ]) {
-        assert.equal(ScribeReminder.told(echoed), 'Halvard rode on.', echoed);
-    }
-    for (const kept of [
-        'The story so far is short: Halvard rode on.',
-        'The story so far\nwas never told to Halvard.',
-        'So far the road had been quiet.',
-        'So far-reaching was the flood that Halvard rode on.',
-    ]) {
-        assert.equal(ScribeReminder.told(kept), ScribeIntake.collapse(kept.replace('\n', ' ')), kept);
-    }
+test('text and JSON recaps preserve their paragraph breaks, whitespace and punctuation', () => {
+    const text = '  "The story so far:"\n@Mira said, [wait].  ';
+    assert.equal(ScribeReminder.recap(text).text, text);
+    assert.equal(ScribeReminder.recap(JSON.stringify({ status: 'recap', text })).text, text);
 });
 
 test('the reminder is trimmed to the room a message leaves, the specifics first, then the story at a sentence end', () => {

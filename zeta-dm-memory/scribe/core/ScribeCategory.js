@@ -60,7 +60,7 @@ const ScribeCategory = Object.freeze({
                 return Object.freeze({ category, kind: ScribeCategory.Kind[kindName], target: null });
             }
         }
-        return null;
+        return trimmed && !/[\r\n|]/u.test(trimmed) ? Object.freeze({ category: trimmed, kind: ScribeCategory.Kind.List, target: null }) : null;
     },
 
     /**

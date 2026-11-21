@@ -222,6 +222,149 @@ test('the room is read from the address', () => {
     }
 });
 
+test('saved history rejoins a fresh suffix and verifies distant evidence after a multi-page append', async () => {
+    const api = new FakeZeta(FakeZeta.messages(1022));
+    api.most = 100;
+    const emptyIndex = () => ({ locations: new Map(), boundaries: new Map() });
+    let hints;
+    const { messages: saved } = await walk(api.fetch, { index: emptyIndex(), remember: (value) => { hints = value; } });
+    const before = api.requests.length;
+    const latestIndex = emptyIndex();
+    const warm = await walk(api.fetch, { index: latestIndex, saved, hints });
+    assert.equal(api.requests.length - before, 1);
+    assert.equal(warm.observed.length, 31);
+    assert.deepEqual(ids(warm.messages), ids(saved));
+    assert.equal(hints.pages.length, 33);
+    assert.equal(Object.hasOwn(hints, 'transport'), false);
+    const legacy = await walk(api.fetch, { index: emptyIndex(), saved });
+    assert.equal(api.requests.length - before, 2);
+    assert.equal(legacy.observed.length, 31);
+    api.messages[1018] = { ...api.messages[1018], edited: true };
+    api.messages.push(...Array.from({ length: 70 }, (_, number) => said('append' + number, 1023 + number)));
+    const index = emptyIndex();
+    const extended = await walk(api.fetch, { index, saved, hints });
+    assert.equal(api.requests.length - before, 5);
+    assert.equal(extended.observed.length, 93);
+    assert.equal(extended.messages[1018].edited, true);
+    assert.deepEqual(ids(extended.messages), ids(api.messages));
+    api.messages[0] = { ...api.messages[0], edited: true };
+    const prior = api.requests.length;
+    const verified = await latest(api.fetch, { index, through: saved[0].id, required: [saved[0].id], known: extended.messages });
+    assert.ok(api.requests.length - prior <= 5);
+    assert.equal(verified.verified.find((row) => row.id === saved[0].id).edited, true);
+});
+
+for (const [removed, added, requests] of [[1, 1, 1], [40, 62, 3], [5, 30, 2]]) {
+    test('a changed saved tip rejoins the observed suffix: ' + removed + ' replaced by ' + added, async () => {
+        const api = new FakeZeta(FakeZeta.messages(1034));
+        api.most = 150;
+        const index = () => ({ locations: new Map(), boundaries: new Map() });
+        let hints;
+        const remember = (value) => { hints = value; };
+        const { messages: saved } = await walk(api.fetch, { index: index(), remember });
+        const previous = api.requests.length;
+        const newer = Array.from({ length: added }, (_, number) => said('new-' + number, 1035 + number));
+        api.messages.splice(-removed, removed, ...newer);
+        const edited = api.messages.at(-added - 1);
+        edited.edited = true;
+        const active = index();
+        const current = await walk(api.fetch, { saved, hints, index: active, remember });
+        assert.equal(api.requests.length - previous, requests);
+        assert.deepEqual(ids(current.messages), ids(api.messages));
+        assert.equal(current.observed.length, requests * 31);
+        assert.equal(current.observed[0].id, api.messages.at(-requests * 31).id);
+        assert.ok(current.messages.find((row) => row.id === edited.id).edited);
+        const reopened = index();
+        const reload = await walk(api.fetch, { saved: current.messages, hints, index: reopened });
+        assert.equal(api.requests.length - previous, requests + 1);
+        assert.deepEqual(ids(reload.messages), ids(api.messages));
+        api.messages[0].edited = true;
+        const probe = await latest(api.fetch, { index: reopened, known: reload.messages, through: saved[0].id, required: [saved[0].id] });
+        assert.ok(probe.verified.some((row) => row.id === saved[0].id && row.edited));
+        assert.ok(api.requests.length - previous <= requests + 5);
+    });
+}
+
+test('a deleted tip reuses the saved prefix only after the authenticated room and a full aligned head agree', async () => {
+    const saved = FakeZeta.messages(1034);
+    const api = new FakeZeta(saved.slice(0, -1));
+    const index = () => ({ locations: new Map(), boundaries: new Map() });
+    const result = await walk(api.fetch, { index: index(), saved });
+    assert.deepEqual(ids(result.messages), ids(api.messages));
+    assert.equal(result.observed.length, 31);
+    assert.equal(api.requests.length, 2);
+    assert.match(api.requests[1].url, /\/rooms\/abc$/);
+    const fresh = await walk(api.fetch, { index: index(), saved: result.messages });
+    assert.equal(api.requests.length, 3);
+    assert.deepEqual(ids(fresh.messages), ids(api.messages));
+    assert.equal(api.requests[1].options.headers.Authorization, TOKEN);
+    for (const wrong of [{ id: 'another', lastMessage: { id: api.messages.at(-1).id } }, { id: 'abc', lastMessage: saved.at(-1) },
+        {id: 'abc'}, {id: 'abc', lastMessage: null}, {}, null]) {
+        const stale = FakeZeta.scripted([FakeZeta.page(api.messages.slice(-31).reverse(), 'next'), FakeZeta.reply(200, JSON.stringify(wrong))]);
+        const uncertain = await walk(stale.fetch, { index: index(), saved });
+        assert.equal(uncertain.end, END.Failed);
+        assert.equal(uncertain.observed, undefined);
+        assert.equal(stale.requests.length, 2);
+    }
+});
+
+test('multiple edits and insertions in the newest page rejoin below the changed rows', async () => {
+    for (const mode of ['replacements', 'insertion', 'deletion']) {
+        const api = new FakeZeta(FakeZeta.messages(1034));
+        api.most = 40;
+        const saved = api.messages.slice();
+        if (mode === 'replacements') {
+            for (const offset of [1030, 1033]) {
+                api.messages[offset] = { ...api.messages[offset], id: 'changed-' + offset };
+            }
+        } else if (mode === 'insertion') {
+            api.messages.splice(1031, 0, { ...api.messages[1030], id: 'inserted', messageTime: '2026-01-01T17:11:30.000Z' });
+        } else {
+            api.messages.splice(1030, 1);
+        }
+        const result = await walk(api.fetch, { saved, index: { locations: new Map(), boundaries: new Map() } });
+        assert.equal(api.requests.length, 1, mode);
+        assert.deepEqual(ids(result.messages), ids(api.messages), mode);
+        assert.equal(result.observed.length, 31, mode);
+    }
+});
+
+test('a changed tip waits for corroboration and keeps ambiguous or failed pages out of the fast join', async () => {
+    const saved = FakeZeta.messages(100);
+    const head = said('new', 101);
+    for (const rows of [[head, saved[97]], [head, head, saved[97], saved[96]], [saved[97], saved[96]],
+        [head, saved[97], saved[95]], [head, saved[95], saved[97], saved[94], saved[93]]]) {
+        const api = FakeZeta.scripted([FakeZeta.page(rows, 'next'), FakeZeta.reply(400, 'Expired cursor')]);
+        const result = await walk(api.fetch, { saved, index: { locations: new Map(), boundaries: new Map() } });
+        assert.equal(result.end, END.Failed);
+        assert.equal(result.observed, undefined);
+        assert.equal(result.completeHistory, undefined);
+    }
+});
+
+test('an undersized first page sets a conservative known cheap depth even without saved page hints', async () => {
+    const records = FakeZeta.messages(25);
+    const api = new FakeZeta(records);
+    api.perPage = 5;
+    for (const hints of [null, { pages: [] }]) {
+        const index = { locations: new Map(), boundaries: new Map() };
+        const refreshed = await walk(api.fetch, { index, saved: records, hints });
+        assert.equal(refreshed.observed.length, 5);
+        assert.equal(index.cheapDepth, 5);
+    }
+});
+
+test('an empty page with a continuation never certifies a saved-room repair', async () => {
+    const saved = FakeZeta.messages(100);
+    for (const prefix of [[], [FakeZeta.page(saved.slice(63, 93).reverse(), 'next')]]) {
+        const api = FakeZeta.scripted([...prefix, FakeZeta.page([], 'more')]);
+        const result = await walk(api.fetch, { index: { locations: new Map(), boundaries: new Map() }, saved });
+        assert.match(result.problem, /empty history page/);
+        assert.equal(result.completeHistory, undefined);
+        assert.equal(result.observed, undefined);
+    }
+});
+
 test('observed room cursors re-fetch distant sources, including edits, without traversing the intervening pages', async () => {
     const api = new FakeZeta(FakeZeta.messages(1022));
     api.most = 80;
@@ -309,15 +452,12 @@ test('snapshot-bound cursors switch to the current listing and stop once every r
     const { messages: known } = await walk(fetch, { index });
     const through = known[330].id;
     const verify = () => latest(fetch, { index, known, through, required: [through] });
-    for (let occurrence = 0; occurrence < 2; occurrence++) {
-        assert.equal((await verify()).needsHistory, true);
-        await walk(fetch, { index });
-    }
     const before = api.requests.length;
     for (let check = 0; check < 3; check++) {
         const page = await verify();
         assert.equal(page.end, END.ThroughMessage);
-        assert.ok(page.messages.some((row) => row.id === through));
+        assert.ok(page.verified.some((row) => row.id === through));
+        assert.equal(page.messages.at(-1).id, known.at(-1).id);
     }
     assert.equal(api.requests.length - before, 6);
     assert.equal(expired, 2);

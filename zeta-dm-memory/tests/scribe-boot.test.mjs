@@ -1671,7 +1671,8 @@ test('the model is asked by role', async () => {
     assert.deepEqual(asked(run.sent.calls[0]), [DEFAULTS.analyzer, false]);
     answer(run.sent.calls[0], 200, completion('The plain answer.', 0.25));
     const result = await plain;
-    assert.deepEqual(Object.keys(result), ['text', 'cost', 'stopped']);
+    assert.deepEqual(Object.keys(result), ['text', 'cost', 'finish', 'stopped']);
+    assert.equal(result.finish, 'stop');
     assert.equal(result.stopped, 0);
     assert.equal(result.text, 'The plain answer.');
     assert.equal(result.cost, 0.25);
@@ -2060,10 +2061,10 @@ test('everything billed is counted', async () => {
     const first = failureOf(live(ScribeBoot.Role.Pedant, SYSTEM, USER));
     for (const pauseMs of [2000, 4000, 0]) {
         await settle();
-        answer(run.sent.calls.at(-1), 200, finished('stop', '   ', 1));
+        answer(run.sent.calls.at(-1), 200, finished('error', '', 1));
         await pass(run, pauseMs);
     }
-    assert.equal((await first).message.startsWith('answer has no usable content'), true);
+    assert.equal((await first).message.startsWith('answer ended in an error'), true);
     assert.equal(run.sent.calls.length, 3);
     assert.equal(ScribeStore.spent(run.storage, 'harbour', DAY), 3);
     for (let count = 0; count < 5; count++) {
@@ -2076,7 +2077,7 @@ test('everything billed is counted', async () => {
     run.clock.day = NEXT_DAY;
     const mended = live(ScribeBoot.Role.Scribe, SYSTEM, USER);
     await settle();
-    answer(run.sent.calls.at(-1), 200, finished('error', 'Half a scene', 0.4));
+    answer(run.sent.calls.at(-1), 200, finished('error', '', 0.4));
     await pass(run, 2000);
     answer(run.sent.calls.at(-1), 200, finished('stop', 'The scene.', 0.01));
     const scene = await mended;
@@ -2084,15 +2085,18 @@ test('everything billed is counted', async () => {
     assert.equal(scene.cost, 0.4 + 0.01);
     assert.equal(ScribeStore.spent(run.storage, 'harbour', NEXT_DAY), 0.4 + 0.01);
     run.clock.day = '2026-11-17';
-    const cut = failureOf(keeper(ScribeBoot.Role.Analyzer, SYSTEM, USER));
+    const cut = keeper(ScribeBoot.Role.Analyzer, SYSTEM, USER);
     await settle();
     answer(run.sent.calls.at(-1), 200, finished('length', 'A stretch cut short', 0.7));
-    assert.equal((await cut).message.startsWith('answer was cut off'), true);
-    assert.equal(ScribeStore.spent(run.storage, 'harbour', '2026-11-17'), 0.7);
+    const partial = await cut;
+    assert.equal(partial.text, 'A stretch cut short');
+    assert.equal(partial.finish, 'length');
+    assert.equal(partial.cost, 0.7);
+    assert.equal(ScribeStore.spent(run.storage, 'harbour', '2026-11-17'), 0);
     run.clock.day = '2026-11-18';
     const twice = keeper(ScribeBoot.Role.Analyzer, SYSTEM, USER);
     await settle();
-    answer(run.sent.calls.at(-1), 200, finished('stop', '   ', 0.25));
+    answer(run.sent.calls.at(-1), 200, finished('error', '', 0.25));
     await pass(run, 2000);
     answer(run.sent.calls.at(-1), 200, finished('stop', 'The stretch.', 0.25));
     const stretch = await twice;

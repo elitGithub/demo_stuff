@@ -26,6 +26,7 @@ function load(core, page) {
 
 const {
     ZetaSource,
+    ScribeText,
     ScribeIntake,
     ScribeAnswer,
     ScribeLog,
@@ -278,15 +279,26 @@ const AGE = factIn(state, '34');
 const EYES = factIn(state, 'grey');
 const BUILD = factIn(state, 'scarred and lean');
 const MIRELLE = state.subjects.find((subject) => subject.label === 'Mirelle').id;
-const PEDANT = answer({
-    CONTRADICTIONS: [
-        `${AGE} | Halvard | age | forty`,
-        `${AGE} | Halvard | age | thirty`,
-        `${EYES} | Halvard | eyes | green`,
-    ],
-    LEAKS: [`${BUILD} | Mirelle | Your scars ache`],
-    MISSPELLINGS: ['N1'],
-});
+function decisionsForReply(verdicts) {
+    return (input) => {
+        const reply = input.split(/REPLY \(#\d+\):\n/).at(-1);
+        const sections = {};
+        for (const [fixtureText, section, verdict] of verdicts) {
+            if (reply.includes(fixtureText)) {
+                (sections[section] ??= []).push(verdict);
+            }
+        }
+        return answer(sections);
+    };
+}
+
+const PEDANT = decisionsForReply([
+    ['forty winters old', 'CONTRADICTIONS', `${AGE} | Halvard | age | forty`],
+    ['thirty winters old', 'CONTRADICTIONS', `${AGE} | Halvard | age | thirty`],
+    ['eyes green tonight', 'CONTRADICTIONS', `${EYES} | Halvard | eyes | green`],
+    ['Your scars ache', 'LEAKS', `${BUILD} | Mirelle | Your scars ache`],
+    ['Halvart', 'MISSPELLINGS', 'Halvart | Halvard'],
+]);
 
 const MANY = Object.freeze([
     'Halvard | age | 34 | #5',
@@ -327,18 +339,17 @@ const MANY_ORDER = Object.freeze([
     MANY_IDS.mirelleHair,
     MANY_IDS.mirelleBuild,
 ]);
-const PEDANT_MANY = answer({
-    CONTRADICTIONS: [
-        `${MANY_IDS.halvardAge} | Halvard | age | forty`,
-        `${MANY_IDS.halvardEyes} | Halvard | eyes | green`,
-        `${MANY_IDS.halvardHair} | Halvard | hair | white`,
-        `${MANY_IDS.mirelleAge} | Mirelle | age | sixty`,
-        `${MANY_IDS.mirelleEyes} | Mirelle | eyes | blue`,
-        `${MANY_IDS.mirelleHair} | Mirelle | hair | gold`,
-        `${MANY_IDS.mirelleBuild} | Mirelle | build | broad and heavy`,
-    ],
-    LEAKS: [`${MANY_IDS.orlaBuild} | Mirelle | Your scars must ache`],
-});
+const PEDANT_MANY = decisionsForReply([
+    [MANY_REPLIES[0][0][1], 'CONTRADICTIONS', `${MANY_IDS.halvardAge} | Halvard | age | forty`],
+    ['Halvard, fifty winters old, waits.', 'CONTRADICTIONS', `${MANY_IDS.halvardAge} | Halvard | age | fifty`],
+    [MANY_REPLIES[1][0][1], 'CONTRADICTIONS', `${MANY_IDS.halvardEyes} | Halvard | eyes | green`],
+    [MANY_REPLIES[2][0][1], 'CONTRADICTIONS', `${MANY_IDS.halvardHair} | Halvard | hair | white`],
+    [MANY_REPLIES[3][0][1], 'CONTRADICTIONS', `${MANY_IDS.mirelleAge} | Mirelle | age | sixty`],
+    [MANY_REPLIES[4][0][1], 'CONTRADICTIONS', `${MANY_IDS.mirelleEyes} | Mirelle | eyes | blue`],
+    [MANY_REPLIES[5][0][1], 'CONTRADICTIONS', `${MANY_IDS.mirelleHair} | Mirelle | hair | gold`],
+    [MANY_REPLIES[6][0][1], 'CONTRADICTIONS', `${MANY_IDS.mirelleBuild} | Mirelle | build | broad and heavy`],
+    ['Your scars must ache, Orla.', 'LEAKS', `${MANY_IDS.orlaBuild} | Mirelle | Your scars must ache`],
+]);
 
 const SUMMER = Array(33).fill('夏夏夏夏夏').join(' ');
 const ALREADY = Array(33).fill('既既既既既').join(' ');
@@ -349,12 +360,10 @@ const LONG = Object.freeze([
 ]);
 const long = bookState(LONG);
 const LONG_IDS = Object.freeze({ halvard: factIn(long, SUMMER), mirelle: factIn(long, ALREADY) });
-const PEDANT_LONG = answer({
-    CONTRADICTIONS: [
-        `${LONG_IDS.halvard} | Halvard | build | broad as a barn`,
-        `${LONG_IDS.mirelle} | Mirelle | build | thin as a reed`,
-    ],
-});
+const PEDANT_LONG = decisionsForReply([
+    ['Halvard is broad as a barn tonight.', 'CONTRADICTIONS', `${LONG_IDS.halvard} | Halvard | build | broad as a barn`],
+    ['Mirelle is thin as a reed now.', 'CONTRADICTIONS', `${LONG_IDS.mirelle} | Mirelle | build | thin as a reed`],
+]);
 
 /**
  * @param {string} user
@@ -404,13 +413,13 @@ function modelOf() {
         if (system === ScribeScene.Prompt) {
             text = model.scene;
         } else if (system === ScribePedant.Prompt) {
-            text = model.pedant;
+            text = typeof model.pedant === 'function' ? model.pedant(user) : model.pedant;
         } else if (system === ScribeMuse.SuggestPrompt) {
             text = model.line;
         } else if (system === ScribeAnalyzer.NotesPrompt) {
             text = model.understood;
         } else if (system === ScribeReminder.StoryPrompt) {
-            text = model.story;
+            text = model.rawStory ?? JSON.stringify({ status: 'recap', text: model.story });
         }
         return { text, cost: 0.001 };
     };
@@ -705,7 +714,7 @@ test('a reply gives a scene and findings', async () => {
             reach: 'Private',
             present: ['Halvard', 'Mirelle', 'Orla'],
             summary: 'They talk',
-            changed: true,
+            changed: false,
         },
     );
     assert.deepEqual(statuses(live), [['Contradiction', 'MESSAGE-41', 'Open']]);
@@ -817,7 +826,7 @@ test('a failed check raises no spelling finding', async () => {
     model.failing.add('Pedant');
     await live.reply(at(43));
     assert.equal(model.calls.at(-1).role, 'Pedant');
-    assert.equal(model.calls.at(-1).user.includes('NAME CANDIDATES:'), true);
+    assert.match(model.calls.at(-1).user, /SUBJECT ROSTER[\s\S]*Halvard \| character/);
     assert.deepEqual(statuses(live), []);
     assert.equal(typeof live.view().problem, 'string');
 
@@ -970,7 +979,7 @@ test('a failing model changes nothing it should not', async () => {
     assert.equal(typeof live.view().problem, 'string');
     const rebuilt = ScribeStore.read(storage, ROOM, ScribeStore.Kind.Live).ready;
     assert.notEqual(rebuilt, tentReminder);
-    assert.ok(reminds(rebuilt, 'Halvard is aged 34.'), rebuilt);
+    assert.ok(reminds(rebuilt, 'Halvard: age: 34.'), rebuilt);
     assert.equal(live.outgoing('Onward.'), `Onward.${lineOf(rebuilt)}`);
 
     breakView(keeper, { messages: [...story.slice(0, 48), at(49)] }, 'unread');
@@ -1416,17 +1425,17 @@ test('a suggestion is offered and never repeated in a scene', async () => {
     await live.reply(at(47));
     model.line = 'LINE: none';
     await live.suggest();
-    assert.equal(live.view().offer, null);
+    assert.equal(live.view().offer.text, 'none');
     assert.equal(offers().length, 5);
     model.line = `LINE: ${COURIER}`;
     await live.suggest();
-    assert.deepEqual(plain(live.view().offer), { thread: 'T2', text: COURIER });
+    assert.deepEqual(plain(live.view().offer), { thread: 'T1', text: COURIER });
     assert.deepEqual(plain([...new Set(offers().map((call) => call.role))]), ['Scribe']);
 
     live.use('Something else entirely.');
-    assert.deepEqual(plain(live.view().offer), { thread: 'T2', text: COURIER });
+    assert.deepEqual(plain(live.view().offer), { thread: 'T1', text: COURIER });
     live.use('A gull\n  cries over\tthe mill.');
-    assert.equal(live.view().suggestion, GULL);
+    assert.equal(live.view().suggestion, 'A gull\n  cries over\tthe mill.');
     model.scene = YARD;
     await live.reply(at(49));
     assert.equal(live.view().now.place, 'The yard');
@@ -1481,7 +1490,7 @@ test("the player's words are filed only on confirmation", async () => {
     assert.deepEqual(plain(live.view().understood.lines), []);
     assert.equal(live.view().understood.count, 0);
     await live.confirm();
-    assert.equal(keeper.filed.length, 2);
+    assert.equal(keeper.filed.length, 3);
     assert.equal(keeper.previews.length, previews);
     assert.deepEqual(plain([...new Set(analyses().map((call) => call.role))]), ['Analyzer']);
 });
@@ -1622,7 +1631,7 @@ test('a contradicted fact goes first', async () => {
     await live.reply(variant(45, MANY_REPLIES[1], null));
     assert.deepEqual(ledOf(storage), [MANY_IDS.halvardEyes, MANY_IDS.halvardAge]);
     const led = live.view().ready;
-    assert.ok(led.startsWith(`${TOLD} Halvard has grey eyes. Halvard is aged 34. `), led);
+    assert.ok(led.startsWith(`${TOLD} Halvard: eyes: grey. Halvard: age: 34. `), led);
     assert.equal(led.includes('scarred'), false, led);
 
     live.dismiss(keyOf(live, 'Contradiction', 'MESSAGE-45'));
@@ -1649,16 +1658,7 @@ test('a contradicted fact goes first', async () => {
     assert.deepEqual(ledOf(spent.storage), [MANY_IDS.mirelleEyes, MANY_IDS.mirelleAge]);
 
     const repeated = rig({ state: many });
-    repeated.model.pedant = answer({
-        CONTRADICTIONS: [
-            `${MANY_IDS.halvardAge} | Halvard | age | forty`,
-            `${MANY_IDS.halvardAge} | Halvard | age | fifty`,
-            `${MANY_IDS.halvardEyes} | Halvard | eyes | green`,
-            `${MANY_IDS.halvardHair} | Halvard | hair | white`,
-            `${MANY_IDS.mirelleAge} | Mirelle | age | sixty`,
-            `${MANY_IDS.mirelleEyes} | Mirelle | eyes | blue`,
-        ],
-    });
+    repeated.model.pedant = PEDANT_MANY;
     await repeated.live.force();
     for (const [index, blocks] of [
         MANY_REPLIES[4],
@@ -1801,8 +1801,8 @@ test('what is understood is what the engine would do', async () => {
         anchor,
         ask: async () => ({ text: model.understood }),
     });
-    assert.equal(direct.operations.length, 1);
-    assert.deepEqual(plain(direct.refused.map((item) => item.reason)), ['WrongPosition']);
+    assert.equal(direct.operations.length, 2);
+    assert.deepEqual(plain(direct.refused), []);
     await live.tell('Mirelle has black hair.');
     assert.deepEqual(plain(model.roles()), ['Analyzer']);
     assert.equal(keeper.previews.length, 1);
@@ -1813,15 +1813,14 @@ test('what is understood is what the engine would do', async () => {
     assert.ok(expected.some((line) => line.includes('black')), expected.join(' / '));
     const understood = live.view().understood;
     assert.deepEqual(plain(understood.lines), expected);
-    assert.deepEqual(plain(understood.refused.map((item) => item.reason)), ['WrongPosition', 'Held back']);
-    assert.equal(understood.count, 1);
+    assert.deepEqual(plain(understood.refused.map((item) => item.reason)), ['Held back']);
+    assert.equal(understood.count, 2);
 
     model.understood = answer({ FACTS: ['Mirelle | build | tall | #12'] });
     await live.tell('Mirelle is tall.');
-    assert.equal(keeper.previews.length, 1);
-    assert.deepEqual(plain(live.view().understood.lines), []);
-    assert.equal(live.view().understood.count, 0);
-    assert.deepEqual(plain(live.view().understood.refused.map((item) => item.reason)), ['WrongPosition']);
+    assert.equal(keeper.previews.length, 2);
+    assert.equal(live.view().understood.count, 1);
+    assert.deepEqual(plain(live.view().understood.refused.map((item) => item.reason)), ['Held back']);
 
     model.understood = answer({ FACTS: ['Mirelle | hair | black | #40'] });
     keeper.refusePreview = true;
@@ -1845,12 +1844,13 @@ test('confirm files only what was shown', async () => {
     const operations = keeper.previews.at(-1).operations;
     const moved = [...FACTS, 'Mirelle | hair | brown | #9'];
     keeper.change({ state: bookState(moved) });
-    keeper.previewer = previewFrom(moved);
+    const privatePreview = (rows) => previewFrom(moved)(rows.map((row) => ({ ...row, hidden: true })));
+    keeper.previewer = privatePreview;
     await live.confirm();
     assert.equal(keeper.filed.length, 1);
     const fresh = plain(live.view().understood.lines);
     assert.notDeepEqual(fresh, shown);
-    const seen = previewFrom(moved)(operations);
+    const seen = privatePreview(operations);
     assert.deepEqual(fresh, plain(ScribeMuse.changes(seen.before, seen.state)));
     assert.equal(live.view().understood.count, 1);
     await live.confirm();
@@ -1880,33 +1880,26 @@ test("the lines come from the preview's own states", async () => {
     assert.deepEqual(plain(live.view().understood.lines), expected);
 
     const aged = [...FACTS, 'Mirelle | age | 30 | #9'];
-    keeper.previewer = previewFrom(aged);
+    const hiddenPreview = (rows) => previewFrom(aged)(rows.map((row) => ({ ...row, hidden: true })));
+    keeper.previewer = hiddenPreview;
     await live.confirm();
     assert.equal(keeper.filed.length, 0);
-    const other = previewFrom(aged)(operations);
+    const other = hiddenPreview(operations);
     const shown = plain(ScribeMuse.changes(other.before, other.state));
     assert.notDeepEqual(shown, expected);
     assert.notDeepEqual(shown, plain(ScribeMuse.changes(state, other.state)));
     assert.deepEqual(plain(live.view().understood.lines), shown);
 });
 
-test('an unmarked answer offers nothing', async () => {
-    const { model, notices, live } = rig();
+test('an unmarked answer offers all the returned words', async () => {
+    const { model, live } = rig();
     await live.reply(at(41));
-    await live.suggest();
-    assert.deepEqual(plain(live.view().offer), { thread: 'T2', text: COURIER });
     model.line = RIDER;
-    const told = notices.count;
     await live.suggest();
-    assert.equal(live.view().offer, null);
-    assert.equal(notices.count, told + 1);
+    assert.equal(live.view().offer.text, RIDER);
     model.line = 'LINE: none';
     await live.suggest();
-    assert.equal(live.view().offer, null);
-    assert.equal(notices.count, told + 2);
-    model.line = `LINE: ${RIDER}`;
-    await live.suggest();
-    assert.deepEqual(plain(live.view().offer), { thread: 'T1', text: RIDER });
+    assert.equal(live.view().offer.text, 'none');
 });
 
 test('starting over is told by the edition', async () => {
@@ -2039,7 +2032,7 @@ test('a reminder goes out only if it is still true', async () => {
     await moved.live.force();
     await moved.live.reply(at(41));
     const said = moved.live.view().ready;
-    assert.ok(said.includes('Halvard is aged 34.'), said);
+    assert.ok(said.includes('Halvard: age: 34.'), said);
     const age = keyOf(moved.live, 'Contradiction', 'MESSAGE-41');
     moved.keeper.change({
         state: revised(bookState(FACTS.map((fact) => fact.replace('Halvard | age | 34', 'Halvard | age | forty')))),
@@ -2053,7 +2046,7 @@ test('a reminder goes out only if it is still true', async () => {
     const fresh = moved.live.view().ready;
     assert.ok(reminds(fresh, 'Halvard'), fresh);
     assert.ok(!fresh.includes('34'), fresh);
-    assert.ok(fresh.includes('aged forty'), fresh);
+    assert.ok(fresh.includes('age: forty'), fresh);
     assert.equal(moved.live.outgoing('Again.'), `Again.${lineOf(fresh)}`);
 
     const between = rig();
@@ -2270,8 +2263,8 @@ test('dismissed stays dismissed', async () => {
     const { live } = rig({}, storage);
     assert.equal(live.view().findings.length, 200);
     await live.reply(at(43));
-    assert.equal(live.view().findings.length, 200);
-    assert.equal(live.view().findings.some((finding) => finding.fault === spelling.fault), false);
+    assert.equal(live.view().findings.length, 202);
+    assert.equal(live.view().findings.find((finding) => finding.fault === spelling.fault)?.status, 'Dismissed');
     /**
      * @return {string[][]}
      */
@@ -2291,7 +2284,7 @@ test('dismissed stays dismissed', async () => {
         ['Contradiction', 'MESSAGE-43'],
         ['Leak', 'MESSAGE-43'],
     ]);
-    assert.equal(live.view().findings.length, 200);
+    assert.equal(live.view().findings.length, 202);
     assert.ok(ScribeStore.read(storage, ROOM, ScribeStore.Kind.Live).dismissed.includes(spelling.fault));
     live.close();
     const again = rig({}, storage);
@@ -2311,12 +2304,12 @@ test('dismissed stays dismissed', async () => {
     const capped = rig({}, crowded);
     await capped.live.reply(at(43));
     const keptKeys = ScribeStore.read(crowded, ROOM, ScribeStore.Kind.Live).dismissed;
-    assert.deepEqual(plain([keptKeys.length, keptKeys[0], keptKeys.at(-1)]), [500, 'old-100', 'old-599']);
+    assert.deepEqual(plain([keptKeys.length, keptKeys[0], keptKeys.at(-1)]), [600, 'old-0', 'old-599']);
     const leak = keyOf(capped.live, 'Leak', 'MESSAGE-43');
     const leakFault = findingOf(capped.live, leak).fault;
     capped.live.dismiss(leak);
     const later = ScribeStore.read(crowded, ROOM, ScribeStore.Kind.Live).dismissed;
-    assert.deepEqual(plain([later.length, later[0], later.at(-1)]), [500, 'old-101', leakFault]);
+    assert.deepEqual(plain([later.length, later[0], later.at(-1)]), [601, 'old-0', leakFault]);
 });
 
 test('no model call while the keeper is not reading', async () => {
@@ -2728,7 +2721,7 @@ test('an older reply edited loses its findings at once', async () => {
     const { keeper, storage, model, live } = rig();
     await live.force();
     await live.reply(at(41));
-    model.pedant = answer({ CONTRADICTIONS: [], MISSPELLINGS: ['N1'] });
+    model.pedant = answer({ MISSPELLINGS: ['Halvart | Halvard'] });
     await live.reply(at(43));
     assert.deepEqual(statuses(live), [
         ['Spelling', 'MESSAGE-43', 'Open'],
@@ -3025,7 +3018,7 @@ test('a reminder is made with no model call of its own', async () => {
     keeper.change({ state: revised(bookState(BIG.map((fact) => fact.replace('skin | pale', 'skin | dark')))) });
     live.view();
     await ticks();
-    assert.equal(live.view().ready.includes('dark skin'), true, live.view().ready);
+    assert.equal(live.view().ready.includes('skin: dark'), true, live.view().ready);
     keeper.change({ edition: 2 });
     live.view();
     await ticks();
@@ -3326,10 +3319,10 @@ test('went marks only what went', async () => {
     assert.equal(away.notices.count, awayTold);
 
     const kept = new FakeStorage();
-    const basis = { revision: state.revision, first: [AGE], notes: ScribeLive.marked([]), story: 'abcd1234' };
+    const basis = { revision: state.revision, first: [AGE], notes: ScribeLive.marked([]), story: 'recap2:abcd1234' };
     ScribeStore.write(kept, ROOM, ScribeStore.Kind.Live, {
         now: null,
-        ready: `${TOLD} Halvard is aged 34.`,
+        ready: `${TOLD} Halvard: age: 34.`,
         led: [],
         basis,
         sends: 0,
@@ -3404,7 +3397,7 @@ test('a contradiction makes nothing go early, leads at the count, and is marked 
     assert.equal(live.view().sends, 2);
     await live.reply(at(45));
     const ready = live.view().ready;
-    assert.ok(ready.startsWith(`${TOLD} Halvard is aged 34. `), ready);
+    assert.ok(ready.startsWith(`${TOLD} Halvard: age: 34. `), ready);
     assert.deepEqual(ledOf(storage), [AGE]);
     assert.equal(statusOf(live, age), 'Open');
     assert.equal(live.outgoing('Three.'), `Three.${lineOf(ready)}`);
@@ -3868,7 +3861,7 @@ test('force does not start a second rebuild while one is running', async () => {
     await ticks();
     assert.equal(cast.reads.story, 4);
     assert.notEqual(live.view().ready, null);
-    assert.equal(live.view().ready.includes('dark skin'), true, live.view().ready);
+    assert.equal(live.view().ready.includes('skin: dark'), true, live.view().ready);
     assert.equal(chooses(model), 0);
 });
 
@@ -3884,7 +3877,7 @@ test('a due automatic paragraph uses the saved tail when the book advances durin
     await ticks();
     assert.equal(live.view().forced, false);
     assert.equal(ScribeStore.read(storage, ROOM, 'live').basis.revision, newer.revision);
-    assert.ok(live.lines().ready.includes('aged forty'));
+    assert.ok(live.lines().ready.includes('age: forty'));
     assert.equal(countOf(model, ScribePedant.Prompt), 1);
 });
 
@@ -3933,7 +3926,9 @@ test('an edit is made into one of the scribe\'s own lines', async () => {
         assert.ok(ScribeIntake.own(stored), stored);
         const builder = new CampaignBuilder('Orla');
         builder.player(`I wave.\n@: ${stored}`);
-        const read = ScribeIntake.read(builder.messages);
+        const post = { floor: 0, after: null, carried: stored, suggestion: null, submission: ScribeText.submission('I wave.'), confirmed: true };
+        assert.ok(ScribeIntake.read(builder.messages).messages[0].text.includes(stored));
+        const read = ScribeIntake.read(builder.messages, { posts: [post] });
         assert.deepEqual(plain(read.own.map((line) => line.text)), [`@: ${stored}`], stored);
         assert.equal(JSON.stringify(read.messages).includes('line one'), false);
         assert.equal(JSON.stringify(read.messages).includes('Hello there'), false);
@@ -4093,7 +4088,9 @@ test('a doubled lead is stripped, the edit goes out with one lead, and the next 
         assert.equal(sent, `I wave.${lineOf(stored)}`, typed);
         const builder = new CampaignBuilder('Orla');
         builder.player(sent);
-        const read = ScribeIntake.read(builder.messages);
+        const post = { floor: 0, after: null, carried: stored, suggestion: null, submission: ScribeText.submission('I wave.'), confirmed: true };
+        assert.ok(ScribeIntake.read(builder.messages).messages[0].text.includes(stored));
+        const read = ScribeIntake.read(builder.messages, { posts: [post] });
         assert.deepEqual(plain(read.own.map((line) => line.text)), [`@: ${stored}`], typed);
         assert.equal(read.messages[0].text, 'Orla (player): I wave.', typed);
         live.sent();
@@ -4216,7 +4213,7 @@ test('narrowing public evidence withdraws a shared ruling before send and reload
     const publicRuling = fixture(13, 'The noon bell marks the handover.', 'watch');
     const hidden = fixture(7, 'The scar identifies the deserter.', 'scar');
     const uncovered = fixture(41, 'A private letter names the courier.', 'letter');
-    const mentioned = fixture(15, 'Halvard is scarred and lean.', 'appearance');
+    const mentioned = { ...fixture(15, 'Halvard is scarred and lean.', 'appearance'), factIds: [BUILD] };
     const ruled = { ...state, checkerRulings: [publicRuling, hidden, uncovered, mentioned] };
     const first = rig({ state: ruled, settings: { refresh: 1, budget: 3 } });
     await first.live.reply(at(41));
@@ -4303,7 +4300,7 @@ test('a situation finding is raised, kept, dismissed and dropped with its reply'
         assert.equal(statusOf(again, key), 'Dismissed', said);
         assert.deepEqual(
             statuses(again).filter((entry) => entry[1] === 'MESSAGE-41'),
-            [['Situation', 'MESSAGE-41', 'Dismissed']],
+            [...(said === SITUATION_SAID ? [] : [['Situation', 'MESSAGE-41', 'Open']]), ['Situation', 'MESSAGE-41', 'Dismissed']],
             said,
         );
     }
@@ -4411,16 +4408,18 @@ test('notes for a name in the possessive and for the player with his suffix are 
     const player = rig();
     player.model.pedant = nowOf('Orla (player) | wearing | a grey travel cloak');
     await player.live.reply(at(43));
-    assert.deepEqual(notesOf(player.storage), [stamped(at(43), 'Orla', 'Wearing', 'a grey travel cloak')]);
+    assert.deepEqual(notesOf(player.storage), [stamped(at(43), 'Orla (player)', 'Wearing', 'a grey travel cloak')]);
 });
 
-test('a filler note never replaces a stated one', async () => {
+test('the latest Checker statement is saved even when it expresses uncertainty', async () => {
     const { storage, model, live } = rig();
     model.pedant = nowOf('Halvard | wearing | a dented breastplate');
     await live.reply(at(41));
-    model.pedant = nowOf('Halvard | wearing | not stated', 'Mirelle | wearing | unknown', 'Halvard | looks | -');
+model.pedant = nowOf('Halvard | wearing | not stated', 'Mirelle | wearing | unknown', 'Halvard | looks | -', 'Halvard | looks');
     await live.reply(at(43));
-    assert.deepEqual(notesOf(storage), [stamped(at(41), 'Halvard', 'Wearing', 'a dented breastplate')]);
+    assert.deepEqual(notesOf(storage), [stamped(at(43), 'Halvard', 'Wearing', 'not stated'), stamped(at(43), 'Mirelle', 'Wearing', 'unknown'),
+        stamped(at(43), 'Halvard', 'Looks', '-')]);
+    assert.ok(live.view().checkerRows.some((row) => row.statement.includes('looks')));
 });
 
 test('a newer wearing note replaces the older one and an older reply never does', async () => {
@@ -4466,19 +4465,21 @@ test('noted keys a note by its name without case or a leading the, and by its ki
     ]);
 });
 
-test('noted keeps the newest hundred by position', () => {
+test('noted retains all named subjects and multiple distinct notes from one Checker answer', () => {
     const notes = Array.from({ length: 100 }, (unused, index) =>
         stamped({ id: `M${index + 1}`, fingerprint: 'f', position: index + 1 }, `Name${index + 1}`, 'Wearing', 'x'),
     );
     const newest = { id: 'M101', fingerprint: 'f', position: 101 };
     const added = ScribeLive.noted(notes, [{ name: 'Fresh', kind: 'Wearing', text: 'y' }], newest);
-    assert.equal(added.length, 100);
-    assert.equal(added.some((note) => note.name === 'Name1'), false);
+    assert.equal(added.length, 101);
+    assert.equal(added.some((note) => note.name === 'Name1'), true);
     assert.equal(added.some((note) => note.name === 'Fresh'), true);
     const oldest = { id: 'M0', fingerprint: 'f', position: 0 };
     const refused = ScribeLive.noted(notes, [{ name: 'Stale', kind: 'Wearing', text: 'y' }], oldest);
-    assert.equal(refused.length, 100);
-    assert.equal(refused.some((note) => note.name === 'Stale'), false);
+    assert.equal(refused.length, 101);
+    assert.equal(refused.some((note) => note.name === 'Stale'), true);
+    const garments = ScribeLive.noted([], ['a cloak', 'a hat'].map((text) => ({ name: 'Ada', kind: 'Wearing', text })), newest);
+    assert.deepEqual(plain(garments.map((note) => note.text)), ['a cloak', 'a hat']);
 });
 
 test('a regenerated or an edited reply drops the notes it gave and its new check adds the new ones', async () => {
@@ -4565,7 +4566,7 @@ test('a checker that did not run leaves the notes as they were and asks for noth
 
 test('a checked reply seen again gives its notes back without a call, and an old entry gives none', async () => {
     const first = rig();
-    first.model.pedant = `${PEDANT}\n${nowOf('Halvard | wearing | a cloak')}`;
+    first.model.pedant = (input) => PEDANT(input) + '\n' + nowOf('Halvard | wearing | a cloak');
     await first.live.reply(at(41));
     first.live.close();
     const saved = ScribeStore.read(first.storage, ROOM, ScribeStore.Kind.Live);
@@ -4600,7 +4601,7 @@ test('a checked reply seen again gives its notes back without a call, and an old
     }
 });
 
-test('a hundred notes are kept, and junk notes in storage are dropped one by one', async () => {
+test('all saved subject notes are kept and malformed records are dropped one by one', async () => {
     const seeded = Array.from({ length: 100 }, (unused, index) => ({
         name: `Seed${index}`,
         kind: 'Wearing',
@@ -4615,8 +4616,8 @@ test('a hundred notes are kept, and junk notes in storage are dropped one by one
     model.pedant = nowOf('Halvard | wearing | a cloak');
     await live.reply(at(41));
     const kept = notesOf(storage);
-    assert.equal(kept.length, 100);
-    assert.equal(kept.some((note) => note.name === 'Seed0'), false);
+    assert.equal(kept.length, 101);
+    assert.equal(kept.some((note) => note.name === 'Seed0'), true);
     assert.equal(kept.some((note) => note.name === 'Seed1'), true);
     assert.equal(kept.some((note) => note.name === 'Halvard'), true);
 
@@ -4625,8 +4626,8 @@ test('a hundred notes are kept, and junk notes in storage are dropped one by one
         7,
         'note',
         [seeded[3]],
-        { ...seeded[3], kind: 'Hair' },
-        { ...seeded[3], kind: 'wearing' },
+        { ...seeded[3], kind: 12 },
+        { ...seeded[3], kind: null },
         { ...seeded[3], position: undefined },
         { ...seeded[3], position: 1.5 },
         { ...seeded[3], name: 5 },
@@ -4725,7 +4726,7 @@ test('a failed read makes everyone custom with a notice, leaves the profile out 
         "The story's characters could not be read, so every character counts as custom: Zeta answered HTTP 404 " +
         'The chat profile could not be read, so it is left out of the calls: Zeta gave no profile text for this chat';
     assert.equal(live.view().notice, notice);
-    assert.equal(live.view().ready.includes('Mirelle: brown eyes.'), true, live.view().ready);
+    assert.equal(live.view().ready.includes('Mirelle: eyes: brown.'), true, live.view().ready);
     await live.reply(at(47));
     assert.deepEqual(plain(cast.reads), { story: 1, profile: 1 });
     assert.deepEqual(plain(cast.plots), [null]);
@@ -5154,7 +5155,7 @@ test('the story so far leads the reminder, is reused while the timeline and the 
     await live.reply(at(41));
     await live.force();
     const ready = live.view().ready;
-    assert.equal(ready.startsWith(`${TOLD} Halvard is aged 34.`), true, ready);
+    assert.equal(ready.startsWith(`${TOLD} Halvard: age: 34.`), true, ready);
     assert.equal(tellings(model), 1);
     const [input] = inputsOf(model, ScribeReminder.StoryPrompt);
     assert.equal(input.startsWith('TIMELINE:\nDay 1 | The mill | They talk\n\nOPEN THREADS:\n- the debt to Brandt\n'), true, input);
@@ -5177,7 +5178,7 @@ test('the story so far leads the reminder, is reused while the timeline and the 
 
 test('a writer refusal parks its paid input until an intentional retry', async () => {
     const { model, moment, storage, live } = timed();
-    model.story = "I can't write this story.\n\n[Summary goes here.]";
+    model.rawStory = '{"status":"declined"}';
     await live.reply(at(41));
     await live.force();
     const calls = model.calls.length;
@@ -5197,7 +5198,8 @@ test('a writer refusal parks its paid input until an intentional retry', async (
     assert.equal(saved.untold.tries, ScribeLive.Settings.RetryMs.length);
     assert.equal(model.calls.length, calls);
     assert.equal(tellings(model), 1);
-    model.story = '“I can’t write this story,” said Mirra.';
+    model.rawStory = null;
+    model.story = 'I can offer a summary of the siege, the captain said.';
     live.rekey();
     await ticks();
     assert.equal(model.calls.length, calls + 1);
@@ -5210,6 +5212,17 @@ test('a writer refusal parks its paid input until an intentional retry', async (
     assert.equal(live.outgoing('Again.'), 'Again.');
 });
 
+test('the Writer’s plain dialogue reaches the outgoing message unchanged', async () => {
+    const { live, model } = rig();
+    model.rawStory = '“Unable to assist with that request,” Mirelle said.';
+    await live.reply(at(41));
+    await live.force();
+    const ready = live.lines().ready;
+    assert.ok(ready.includes(model.rawStory));
+    assert.equal(live.outgoing('Go.'), 'Go.\n@: ' + ready);
+    assert.deepEqual(plain(live.view().failing), []);
+});
+
 test('cold automatic cache and preview cleanup leaves edits, selections, drafts and independent offers intact', async () => {
     const fields = { messages: story.slice(0, 41), unread: story.slice(40, 41) };
     const original = await preparedRoom(fields);
@@ -5217,10 +5230,11 @@ test('cold automatic cache and preview cleanup leaves edits, selections, drafts 
     original.live.close();
     const text = 'I can’t write this story.';
     const preview = '[Scribe] The story so far: ' + text;
-    const cache = { ...base.story, text };
+    const legacyKey = 'legacy story';
+    const cache = { key: legacyKey, text };
     for (const variant of ['cache only', 'preview only', 'edit', 'selection', 'failed write', 'different cache', 'development']) {
         const storage = new FakeStorage();
-        const saved = { ...base, ready: preview, story: cache, draft: '[Scribe] My unsaved draft.' };
+        const saved = { ...base, ready: preview, basis: { ...base.basis, story: legacyKey }, story: cache, draft: '[Scribe] My unsaved draft.' };
         if (variant === 'cache only') {
             Object.assign(saved, { ready: null, basis: null });
         } else if (variant === 'preview only') {
@@ -5232,6 +5246,7 @@ test('cold automatic cache and preview cleanup leaves edits, selections, drafts 
         } else if (variant === 'different cache') {
             saved.story = { key: 'older story', text };
             saved.ready = base.ready;
+            saved.basis = base.basis;
         } else if (variant === 'development') {
             saved.suggestion = COURIER;
         }
@@ -5259,14 +5274,14 @@ test('cold automatic cache and preview cleanup leaves edits, selections, drafts 
             assert.equal(kept.story, null, variant);
         }
         await ticks();
-        assert.equal(model.calls.length, 0, variant);
+        assert.equal(model.calls.length, expected === null ? 1 : 0, variant);
         live.close();
     }
 });
 
 test('confirming a manual replacement clears the refusal warning while its original key stays parked', async () => {
     const { live, model } = rig({ settings: { refresh: 1, budget: 3 } });
-    model.story = "I can't write this story.";
+    model.rawStory = '{"status":"declined"}';
     await live.reply(at(41));
     assert.equal(live.view().failing.length, 1);
     await live.force(null, 'Orla stayed at the mill.');
@@ -5316,6 +5331,7 @@ test('a legacy refusal receipt survives reload and explicit resend retains its i
         live.uncertain(post);
         live.close();
         const saved = ScribeStore.read(storage, ROOM, ScribeStore.Kind.Live);
+        saved.story.key = saved.basis.story = 'legacy key';
         saved.story.text = "I can't write this story.";
         saved.ready = '[Scribe] The story so far: ' + saved.story.text;
         Object.assign(saved.posts[0], { ready: saved.ready, carried: saved.ready });
@@ -5374,12 +5390,12 @@ test('no story so far, no reminder: the failure is said, retried on the schedule
     assert.equal(live.view().ready.startsWith(TOLD), true);
 
     const empty = timed();
-    empty.model.story = '  [ ] @ ';
+    empty.model.rawStory = '  ';
     await empty.live.reply(at(41));
     await empty.live.force();
     assert.equal(empty.live.view().ready, null);
     assert.equal(empty.live.view().held, 'The story recap is unavailable. See Progress for details.');
-    assert.deepEqual(plain(empty.live.view().failing), [{ role: 'recap', reason: 'the answer held no story', retrying: false }]);
+    assert.deepEqual(plain(empty.live.view().failing), [{ role: 'recap', reason: ScribeLive.Settings.Messages.StoryEmpty, retrying: false }]);
     for (const value of [15000, 75000, 375000, 5000000]) {
         await moveTo(empty.live, empty.moment, value);
     }
@@ -5610,7 +5626,7 @@ test('a trimmed reminder marks as reminded only what it carried, on both paths',
     await live.reply(at(41));
     await live.force();
     const ready = live.view().ready;
-    assert.equal(ready.includes('Halvard is aged 34.'), true, ready);
+    assert.equal(ready.includes('Halvard: age: 34.'), true, ready);
     const story = `[Scribe] The story so far: ${CROWDED}`;
     const player = 'x'.repeat(LIMIT - bytes(lineOf(story)) - 5);
     const sent = live.outgoing(player);
@@ -6665,8 +6681,8 @@ test('a saved offer that matches the block on the player message after its targe
     const uncertain = new FakeStorage();
     ScribeStore.write(uncertain, ROOM, ScribeStore.Kind.Live, record);
     const stays = rig({ ...fields, messages: other.messages, own: other.own }, uncertain);
-    assert.equal(stays.live.view().prepared, true);
-    assert.equal(ScribeStore.read(uncertain, ROOM, ScribeStore.Kind.Live).ready, offer);
+    assert.equal(stays.live.view().unconfirmed.text, offer);
+    assert.equal(stays.live.lines().ready, null);
 });
 
 test('records saved before delivery identities, and damaged identity fields, load as empty and mint from one', async () => {

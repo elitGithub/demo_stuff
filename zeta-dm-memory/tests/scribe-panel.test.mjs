@@ -1,4 +1,5 @@
 import assert from 'node:assert/strict';
+import declaredJudgments from './support/DeclaredJudgments.mjs';
 import { readFileSync } from 'node:fs';
 import test from 'node:test';
 import CampaignBuilder from './support/CampaignBuilder.mjs';
@@ -57,7 +58,7 @@ function answer(blocks) {
  * @return {object}
  */
 function replay(log) {
-    return ScribeReplay.run(log, storyOrder);
+    return declaredJudgments(ScribeReplay.run(log, storyOrder), log, ScribeReplay);
 }
 
 /**
@@ -193,6 +194,7 @@ function disputedBook() {
         1,
         3,
     );
+    log.fixtureJudgments = { conflictRows: [['F1', 'F2'], ['F3', 'F4']] };
     return readTo(log, 40);
 }
 
@@ -224,6 +226,7 @@ function rulingsBook() {
         1,
         5,
     );
+    log.fixtureJudgments = { conflictRows: [['F1', 'F2']], identityPairs: [['S3', 'S4'], ['S5', 'S6']] };
     rule(log, { type: 'Widen', fact: 'F3', to: 'Everyone' });
     return readTo(log, 40);
 }
@@ -533,6 +536,7 @@ test('the summary is written from the book', () => {
         1,
         40,
     );
+    log.fixtureJudgments = { conflictRows: [['F1', 'F2']], identityPairs: [['S4', 'S5'], ['S6', 'S7']] };
     apply(log, answer({ THREADS: ['CLOSE T1 | paid in full | #45'] }), 45, 45);
     rule(log, { type: 'Merge', from: 'S8', into: 'S3' });
     rule(log, { type: 'Answer', question: 'Q1', text: 'She does' });
@@ -540,7 +544,7 @@ test('the summary is written from the book', () => {
     const state = replay(log);
     assert.deepEqual(
         plain(state.lookAlikes.map((item) => item.reason)).sort(),
-        ['SameName', 'Spelling'],
+        ['Alias', 'Alias'],
     );
     const summary = plain(PanelView.summary(state));
     assert.deepEqual(summary.needs, { conflicts: 1, lookAlikes: 2, questions: 1 });
@@ -1710,7 +1714,7 @@ test('everything is locked while the keeper is busy', async () => {
         ],
         Book: [...Array(4).fill(['Remove', 'Make public', 'Edit']).flat(), 'Add the fact', 'Split'],
         Findings: ['They were told'],
-        Progress: ['Pull the chat again', 'Resume', 'Start the book over'],
+        Progress: ['Pull the chat again', 'Resume', 'Retry', 'Retry input', 'Start the book over'],
         Settings: ['Save settings'],
     };
     const free = {
@@ -1827,6 +1831,8 @@ test('a watching tab can save the shared key while room changes stay locked', as
         'Pause',
         'Pull the chat again',
         'Resume',
+        'Retry',
+        'Retry input',
         'Start the book over',
     ]);
     await panel.tab('Settings');
@@ -2121,7 +2127,7 @@ test("the player's words are worked out, shown, then filed", async () => {
     await panel.tab('Rulings');
     const field = panel.byId('scribe-tell');
     assert.equal(field.tagName, 'TEXTAREA');
-    assert.equal(field.getAttribute('maxlength'), '2000');
+    assert.equal(field.getAttribute('maxlength'), null);
     assert.equal(field.getAttribute('aria-required'), 'true');
     assert.equal(field.parent.textContent, 'What should the book know? *');
     assert.equal(
@@ -2137,8 +2143,8 @@ test("the player's words are worked out, shown, then filed", async () => {
     field.value = 'x'.repeat(2001);
     panel.click('scribe-tell-work');
     await panel.flush();
-    assert.deepEqual(panel.live.calls, []);
-    assert.equal(panel.text('scribe-tell-outcome'), 'Write at most 2,000 characters.');
+    assert.deepEqual(panel.live.calls, [{ name: 'tell', args: [field.value] }]);
+    panel.live.calls.length = 0;
     const words = 'Mirelle is thirty-five, not thirty.\nShe keeps a knife in her boot.';
     field.value = words;
     const held = panel.live.hold();
@@ -2581,10 +2587,10 @@ test('a broken tab or row is contained', async () => {
         await panel.tab('Progress');
         assert.equal(panel.byId('scribe-failure-progress').hidden, true);
         assert.deepEqual(panel.rowTexts('lines'), [
-            '#1 to #40: 3 stored, 0 refused, $0.0100 spent, 40 of 100 read',
-            '#1 to #40: 3 stored, 0 refused, $0.0100 spent, 40 of 100 read',
+            '#1 to #40: 3 stored, 0 refused, $0.0100 spent today, 40 of 100 read',
+            '#1 to #40: 3 stored, 0 refused, $0.0100 spent today, 40 of 100 read',
             'This entry could not be shown.',
-            '#41 to #80: 3 stored, 0 refused, $0.0100 spent, 40 of 100 read',
+            '#41 to #80: 3 stored, 0 refused, $0.0100 spent today, 40 of 100 read',
         ]);
         assert.deepEqual(panel.rowTexts('calls'), ['Call 3: StoryThe answer']);
         panel.live.current = { ...bare, findings: 5 };
@@ -2694,7 +2700,7 @@ test("a row's buttons wait together", async () => {
     ]);
 });
 
-test('a Book editor retains a stale draft and a collision refusal but discards the draft on room exit', async () => {
+test('a Book editor retains a stale draft and a storage refusal but discards the draft on room exit', async () => {
     const log = disputedBook();
     const panel = mounted(log);
     await panel.tab('Book');
@@ -2702,13 +2708,14 @@ test('a Book editor retains a stale draft and a collision refusal but discards t
     await panel.flush();
     const row = () => panel.rowSaying('facts', 'twenty-five');
     const field = () => row().descendants().find((element) => element.tagName === 'TEXTAREA');
-    panel.keeper.rule = async (operation) => ScribeLog.rule(log, replay(log), operation);
+    panel.keeper.rule = async () => { throw new Error('The save failed'); };
     panel.button(row(), 'Edit').click();
     await panel.flush();
     field().value = 'thirty';
     panel.button(row(), 'Save').click();
     await panel.flush();
-    assert.match(row().textContent, /combine two facts/);
+    assert.match(row().textContent, /The save failed/);
+    panel.keeper.rule = async (operation) => ScribeLog.rule(log, replay(log), operation);
     assert.equal(field().value, 'thirty');
     field().value = 'forty';
     rule(log, { type: 'Widen', fact: 'F1', to: ['S2'] });
@@ -3644,8 +3651,7 @@ test('the draft fits the field', async () => {
     const opening = 'Mirelle, eyes: ';
     assert.equal(draft.startsWith(opening), true);
     const reply = draft.slice(opening.length);
-    assert.equal(reply.length, 200);
-    assert.equal(reply, `${'a'.repeat(197)}...`);
+    assert.equal(reply, 'a'.repeat(3000));
     assert.equal(PanelView.findings(state, liveView([{ ...long, said: 'a'.repeat(200) }]))[0].draft, opening + 'a'.repeat(200));
     const panel = mounted(findingsBook(), { live: liveView([contradiction()]) });
     await panel.tab('Rulings');
@@ -3654,8 +3660,8 @@ test('the draft fits the field', async () => {
     await panel.tab('Findings');
     panel.button(panel.rows('findings')[0], 'Rule it...').click();
     await panel.flush();
-    assert.equal(panel.byId('scribe-tell').value, filled);
-    assert.equal(panel.text('scribe-tell-outcome'), 'The field is full: clear it or file it first.');
+    assert.equal(panel.byId('scribe-tell').value, filled + '\nMirelle, eyes: blue');
+    assert.equal(panel.text('scribe-tell-outcome'), '');
     assert.equal(panel.section('Rulings').hidden, false);
     assert.equal(panel.root.activeElement === panel.byId('scribe-tell'), true);
     panel.byId('scribe-tell').value = 'b'.repeat(1980);
@@ -3952,6 +3958,93 @@ test('the header offers the next step', () => {
     ]) {
         assert.equal(offered(changes).hidden, true, JSON.stringify(changes));
     }
+});
+
+test('Progress sends the displayed Story retry range and keeps Resume separate', async () => {
+    const storage = new FakeStorage();
+    ScribeStore.setKey(storage, 'synthetic-reading-key');
+    const retry = { first: 528, last: 533, through: 530, token: 'reading-1' };
+    const panel = mounted(ScribeLog.create(), { storage, keeper: { phase: Phase.Stopped, storyRetry: retry,
+        stop: { reason: 'Failed', storyFailure: { first: 528, last: 533, reason: 'Reference' }, problem: 'private model text' } } });
+    panel.keeper.retryStory = (displayed) => panel.keeper.answer('retryStory', [displayed]);
+    await panel.tab('Progress');
+    assert.match(panel.text('scribe-problem-details'), /#528 to #533 remain unread/);
+    assert.match(panel.text('scribe-problems'), /#528.*book entry refers to a record that does not exist.*Use Retry in Progress/is);
+    assert.doesNotMatch(panel.text('scribe-problems') + panel.text('scribe-problem-details'), /private model text/);
+    assert.equal(panel.text('scribe-story-retry'), 'Retry #528–#530');
+    assert.equal(panel.byId('scribe-story-retry').hidden, false);
+    panel.click('scribe-story-retry');
+    await panel.flush();
+    assert.equal(panel.keeper.called('retryStory').length, 1);
+    assert.deepEqual(panel.keeper.called('resume'), []);
+    assert.deepEqual(panel.keeper.called('retryStory'), [[retry]]);
+    panel.keeper.current.storyRetry = { ...retry, last: 528, through: 528 };
+    panel.redraw();
+    assert.equal(panel.text('scribe-story-retry'), 'Retry #528');
+    const previouslyShown = panel.byId('scribe-story-retry');
+    panel.keeper.current.reader = false;
+    panel.redraw();
+    assert.equal(panel.byId('scribe-story-retry').hidden, true);
+    panel.keeper.current = { ...panel.keeper.current, reader: true, storyRetry: null };
+    panel.redraw();
+    assert.equal(panel.byId('scribe-story-retry').hidden, true);
+    previouslyShown.click();
+    await panel.flush();
+    assert.equal(panel.keeper.called('retryStory').length, 1);
+    assert.deepEqual(panel.keeper.called('resume'), []);
+});
+
+test('a reading warning uses only the numbered failure and its known reason in the folded and open panel', async () => {
+    const secret = 'private-test-key';
+    const storage = new FakeStorage();
+    ScribeStore.setKey(storage, secret);
+    const failure = { first: 1035, last: 1038, reason: 'Quote' };
+    const panel = mounted(ScribeLog.create(), { storage, keeper: { phase: Phase.Stopped,
+        stop: { reason: 'Failed', storyFailure: failure, problem: 'untrusted answer ' + secret } } });
+    const folded = panel.text('scribe-problems-compact');
+    assert.match(folded, /#1035.*quote does not appear verbatim in the cited block/);
+    await panel.tab('Progress');
+    assert.ok(panel.text('scribe-problems').startsWith(folded));
+    assert.equal(panel.text('scribe-problem-details'), 'Scribe · book reading · #1035 to #1038 remain unread.');
+    assert.doesNotMatch(panel.text('scribe-problems'), /Use Retry/);
+    for (const fields of [
+        { ...failure, reason: 'legacy' },
+        { ...failure, first: secret, reason: secret },
+        { ...failure, reason: 'constructor' },
+    ]) {
+        panel.keeper.current.stop = { reason: 'Failed', storyFailure: fields, problem: 'untrusted answer ' + secret };
+        panel.redraw();
+        const warning = panel.text('scribe-problems');
+        assert.match(warning, fields.reason === 'legacy' ? /previous reading stopped/ : /reason for this reading failure was not recorded/);
+        assert.doesNotMatch([folded, panel.text('scribe-problems-compact'), warning, panel.text('scribe-problem-details')].join(' '),
+            /untrusted answer|private-test-key|constructor/);
+    }
+});
+
+test('restoring invalid Story failure metadata conceals its raw problem and never offers a scoped retry', async () => {
+    const privateText = 'untrusted narrative from local storage';
+    const saved = { first: 1035, last: 1038, reason: 'Quote', stamp: '12345678' };
+    const panel = mounted(ScribeLog.create(), { keeper: { phase: Phase.Stopped } });
+    await panel.tab('Progress');
+    for (const fields of [
+        { ...saved, reason: 'FutureCode' }, { ...saved, reason: ['Quote'] }, { ...saved, last: 1034 },
+        { ...saved, stamp: 12345678 }, { ...saved, reason: 'legacy', stamp: privateText }, null,
+    ]) {
+        const stop = scripts.ScribeKeeper.stopOf({ reason: 'Failed', problem: privateText, storyFailure: fields });
+        assert.equal(stop.reason, 'Failed');
+        assert.equal(stop.storyFailure, null);
+        assert.equal(scripts.ScribeKeeper.storyRetry({ stop, reader: true, phase: Phase.Stopped }), null);
+        panel.keeper.current.stop = stop;
+        panel.redraw();
+        assert.equal(panel.byId('scribe-story-retry').hidden, true);
+        assert.match(panel.text('scribe-problems'), /reason for this reading failure was not recorded/);
+        assert.doesNotMatch(JSON.stringify(stop) + panel.text('scribe-problems-compact') + panel.text('scribe-problems') +
+            panel.text('scribe-problem-details'), /untrusted narrative|FutureCode/);
+    }
+    const legacy = scripts.ScribeKeeper.stopOf({ reason: 'Failed', problem: 'The answer for #1035 to #1038 held no line that could be read.' });
+    assert.deepEqual({ ...legacy.storyFailure }, { first: 1035, last: 1038, reason: 'legacy' });
+    const network = scripts.ScribeKeeper.stopOf({ reason: 'Failed', problem: 'HTTP 403', source: 'OpenRouter' });
+    assert.deepEqual({ ...network }, { reason: 'Failed', problem: 'HTTP 403', source: 'OpenRouter' });
 });
 
 test('the header button does what the Progress button does', async () => {

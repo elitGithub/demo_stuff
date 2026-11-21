@@ -169,6 +169,267 @@ function cited(facts, records, marks, section = 'FACTS') {
     })), READ: marks });
 }
 
+test('reading reports count context messages and a filed source without a repeated READ line', async () => {
+    const room = ScribeIntake.read(new CampaignBuilder('Orla').narrator('They reach the harbour.')
+        .narrator('They look around.').narrator('The gate has a bronze bell.').messages);
+    const run = await adopt({ campaign: room, answering: () => cited(['Harbour gate | feature | bronze bell | #3'],
+        [{ messageNumber: 3, quote: 'a bronze bell' }], ['#1 | read', '#2 | read']) });
+    assert.equal(run.result.stop, 'Done', run.result.problem);
+    assert.equal(run.calls.length, 1);
+    const restored = plain(run.log);
+    assert.deepEqual(restored.entries[0].sources.map((source) => [source.position, source.result]),
+        [[1, 'read'], [2, 'read'], [3, 'processed']]);
+    assert.equal(ScribeReplay.run(restored, orderOf(room)).facts[0].text, 'bronze bell');
+    const book = { log: restored, fingerprints: Object.fromEntries(room.messages.map((row) => [row.id, row.fingerprint])) };
+    assert.deepEqual(plain(ScribeLog.coverage(book, room.messages)), { writtenThrough: 3, verificationPending: ['MESSAGE-3'], legacyClaims: [] });
+});
+
+test('at #1037 an earlier scene, Night and Thread survive an imperfect answer and the next batch runs', async () => {
+    const builder = new CampaignBuilder('Orla');
+    for (const position of numbers(1, 1039)) {
+        builder.narrator('The party crosses station ' + position + '.');
+    }
+    const room = ScribeIntake.read(builder.messages);
+    const log = ScribeLog.create();
+    markRead(log, room, 1, 1036);
+    const evidence = (section, row, messageNumber, quote) => JSON.stringify({ section, row, messageNumber,
+        blockNumber: 1, quote, attribution: 'witnessed', form: null, dimension: null });
+    const content = answer({ SCENES: ['Day 3 | #1017-#1037 | Quay | public | present: Orla | The party crosses the quay.'],
+        NIGHTS: ['#1037 | Camp on the quay.'], THREADS: ['OPEN | Who follows the party? | #1038'],
+        FACTS: ['unauthorized shape'], EVIDENCE: [evidence('SCENES', 1, 1037, 'station 1037'),
+            evidence('NIGHTS', 1, 1037, 'The camp'), evidence('THREADS', 1, 1038, 'A visitor'),
+            evidence('FACTS', 1, 1038, 'station 1038')], READ: ['#1037 | read', '#1038 | read'] });
+    const run = await adopt({ campaign: room, log, size: 2, rawStory: true, answering: (_call, index) => index === 1 ?
+        '```text\n' + content + '\n```' : answer({READ: ['#1039 | no change']}) });
+    assert.equal(run.result.stop, 'Done', run.result.problem);
+    assert.deepEqual(passes(run.calls), [['Story', [1037, 1038]], ['Story', [1039, 1039]]]);
+    const restored = plain(log);
+    const replay = ScribeReplay.run(restored, orderOf(room));
+    assert.deepEqual([replay.scenes[0].firstPosition, replay.scenes[0].lastPosition], [1017, 1037]);
+    assert.equal(replay.nights[0].marker, 'Camp on the quay.');
+    assert.equal(replay.threads[0].text, 'Who follows the party?');
+    const rows = ScribeLog.checkIndex({ log: restored }, room.messages).rows;
+    for (const [position, quote] of [[1037, 'The camp'], [1038, 'A visitor']]) {
+        const record = rows[position - 1].written.find((item) => item.modelCitation?.quote === quote);
+        assert.equal(record.source, undefined);
+        assert.deepEqual(plain(record.modelCitation.original.pieces), [{offset: 0, quote: 'The party crosses station ' + position + '.'}]);
+        assert.equal(record.modelCitation.attribution, 'witnessed');
+    }
+    assert.equal(rows[1036].written.some((item) => item.text === 'unauthorized shape'), false);
+    assert.equal(rows[1037].written.filter((item) => item.text === 'unauthorized shape').length, 1);
+    assert.equal((await adopt({campaign: room, log: restored})).calls.length, 0);
+});
+
+test('an explicit source retry repairs one citation in place and retains an unresolved model proposal', async () => {
+    const room = ScribeIntake.read(new CampaignBuilder('Orla').narrator('The quay is quiet.').narrator('A bell rings.').messages);
+    const initial = await adopt({ campaign: room, answering: () => answer({
+        FACTS: ['Quay | feature | quiet | #1'], CHANGES: ['F999 | Quay | feature | FULLER: old bell | #2'],
+        EVIDENCE: ['FACTS', 'CHANGES'].map((section, index) => JSON.stringify({ section, row: 1,
+            messageNumber: index + 1, blockNumber: 1, quote: index ? 'bell' : 'silent',
+            attribution: 'witnessed', form: null, dimension: null })), READ: ['#1 | read', '#2 | read'],
+    }) });
+    const ids = orderOf(room);
+    const log = plain(initial.log);
+    const id = ScribeReplay.run(log, ids).facts[0].id;
+    const retry = await adopt({ campaign: room, log, retrySources: [ids[0]], rawStory: true, answering: () =>
+        cited(['Quay | feature | quiet | #1'], [{ messageNumber: 1, quote: 'quiet' }], ['#1 | read']) });
+    assert.equal(retry.result.stop, 'Done', retry.result.problem);
+    assert.deepEqual(passes(retry.calls), [['Story', [1, 1]]]);
+    const repaired = ScribeReplay.run(log, ids).facts;
+    assert.deepEqual(plain(repaired.map((fact) => [fact.id, fact.evidence.quote])), [[id, 'quiet']]);
+    const unchanged = await adopt({ campaign: room, log, retrySources: [ids[1]], rawStory: true,
+        answering: () => answer({READ: ['#2 | no change']}) });
+    assert.equal(unchanged.calls.length, 1);
+    assert.deepEqual(plain(ScribeAdoption.pendingSources(log, room.messages).map((item) => item.id)), [ids[1]]);
+    assert.equal(log.entries[0].proposals[0].operation.fact, 'F999');
+    assert.equal((await adopt({campaign: room, log})).calls.length, 0);
+});
+
+test('two explicit notes sharing a source retain their full responses and cost one call each', async () => {
+    const room = ScribeIntake.read(new CampaignBuilder('Orla').narrator('The quay is quiet.').narrator('A bell rings.').messages);
+    const campaign = { ...room, notes: [{position: 1, text: 'The horn is brass.'}, {position: 1, text: 'The bell is bronze.'}] };
+    const notes = (call) => call.user.includes('The horn is brass.') ? answer({ FACTS: ['Horn | feature | brass | #1'],
+        CHANGES: ['F999 | Horn | feature | FULLER: brass | #1'] }) : answer({ FACTS: ['Bell | feature | bronze | #1'] });
+    const first = await adopt({ campaign, answering: (call) => call.pass === 'Notes' ? notes(call) : answer({ READ: ['#1 | read', '#2 | read'] }) });
+    assert.equal(first.result.stop, 'Done', first.result.problem);
+    assert.deepEqual(plain(first.log.notes), ['The horn is brass.', 'The bell is bronze.']);
+    const key = ScribeAdoption.inputKey(campaign.notes[0], room.messages[0]);
+    const retry = await adopt({ campaign, log: first.log, retryInputs: [key], answering: () => answer({ FACTS: ['Horn | feature | brass | #1'] }) });
+    assert.equal(retry.calls.length, 0);
+    assert.equal(first.log.entries.filter((entry) => entry.origin === 'Notes' && entry.modelResponse).length, 2);
+    assert.deepEqual(plain(ScribeReplay.run(first.log, orderOf(room)).facts.map((fact) => fact.text)), ['brass', 'bronze']);
+});
+
+test('repairing the same source and row keeps the original model response in history and removes only its active filing issue', async () => {
+    const room = ScribeIntake.read(new CampaignBuilder('Orla').narrator('The guard has red hair.')
+        .narrator('The guard has blue eyes.').messages);
+    for (const independent of [false, true]) {
+        const unfiled = ['Guard | hair | #1', 'Guard | eyes | #2', ...(independent ? ['Guard | clothing | #1'] : [])];
+        const citations = [{ messageNumber: 1, quote: 'red' }, { messageNumber: 2, quote: 'blue' },
+            ...(independent ? [{ messageNumber: 1, quote: 'guard' }] : [])];
+        const first = await adopt({ campaign: room, answering: () => cited(unfiled, citations, ['#1 | read', '#2 | read']) });
+        const repaired = await adopt({ campaign: room, log: first.log, retrySources: ['MESSAGE-1'],
+            answering: () => cited(['Guard | hair | red | #1'], [{messageNumber: 1, quote: 'red'}], ['#1 | read']) });
+        assert.equal(repaired.result.stop, 'Done', repaired.result.problem);
+        assert.equal(ScribeReplay.run(first.log, orderOf(room)).facts[0].text, 'red');
+        const historical = first.log.entries[0].unfiledRows;
+        assert.equal(historical[0].line, unfiled[0]);
+        assert.equal(historical[0].resolvedBy, 2);
+        assert.ok(historical.slice(1).every((line) => !line.resolvedBy));
+        const rows = ScribeLog.checkIndex({log: first.log}, room.messages).rows;
+        const active = rows.flatMap((row) => row.written.filter((item) => item.filing === 'unfiled model answer').map((item) => item.text));
+        assert.deepEqual([...active].sort(), unfiled.slice(1).sort());
+        assert.deepEqual(plain(ScribeAdoption.pendingSources(first.log, room.messages).map((item) => item.position)), [2]);
+    }
+});
+
+test('standalone readings remain available without paid re-reading; a mixed answer keeps its independent unresolved rows', async () => {
+    const room = ScribeIntake.read(new CampaignBuilder('Orla').narrator('The guard had red hair.').messages);
+    const prose = 'The guard had red hair.';
+    const fact = cited(['Guard | hair | red | #1'], [{messageNumber: 1, quote: 'red'}], ['#1 | read']);
+    for (const [initial, retried, remains, facts, legacy] of [
+        [prose, fact, false, 0, false],
+        [prose, fact, false, 0, true],
+        [prose, answer({READ: ['#1 | no change']}), false, 0, false],
+        [prose + '\n' + fact, fact, true, 1, false],
+        [prose, 'Still an unstructured answer.', false, 0, false],
+    ]) {
+        const first = await adopt({campaign: room, rawStory: true, answering: () => initial});
+        const log = plain(first.log);
+        if (legacy) {
+            delete log.entries[0].modelReading;
+            log.entries[0].unfiledRows = [{ block: 'PREAMBLE', line: prose, reason: 'Shape', reviewAt: 'MESSAGE-1', wholeAnswer: true }];
+            log.entries[0].sources[0].result = 'unverified';
+            log.entries[0].sources[0].filingPending = [{ reason: 'format' }, { reason: 'missingRead' }];
+        }
+        const repeat = await adopt({campaign: room, log, retrySources: ['MESSAGE-1'], rawStory: true, answering: () => retried});
+        assert.equal(repeat.calls.length, 0);
+        assert.equal(repeat.result.stop, 'Done');
+        if (!remains) {
+            assert.equal(ScribeLog.modelReading(log.entries[0]), prose);
+        } else {
+            assert.equal(log.entries[0].unfiledRows[0].line, prose);
+        }
+        assert.equal(ScribeReplay.run(log, orderOf(room)).facts.length, facts);
+        assert.equal(ScribeAdoption.pendingSources(log, room.messages).length, 0);
+        assert.ok(ScribeLog.checkIndex({log}, room.messages).rows[0].written.some((item) => item.text === prose));
+        assert.equal((await adopt({campaign: room, log})).calls.length, 0);
+    }
+});
+
+test('correcting the target of a reference proposal retires only the corresponding model change', async () => {
+    const room = ScribeIntake.read(new CampaignBuilder('Orla').narrator('The guard has red hair.')
+        .narrator('The hair is red and long.').messages);
+    for (const independent of [false, true]) {
+        const first = await adopt({ campaign: room, readThrough: 1, answering: () =>
+            cited(['Guard | hair | red | #1'], [{messageNumber: 1, quote: 'red'}], ['#1 | read']) });
+        const bad = ['F999 | Guard | hair | FULLER: red and long | #2',
+            ...(independent ? ['F998 | Guard | hair | FULLER: tied back | #2'] : [])];
+        const records = bad.map(() => ({messageNumber: 2, quote: 'red and long'}));
+        await adopt({ campaign: room, log: first.log, answering: () => cited(bad, records, ['#2 | read'], 'CHANGES') });
+        const retried = await adopt({ campaign: room, log: first.log, retrySources: ['MESSAGE-2'], answering: () =>
+            cited([bad[0].replace('F999', 'F1')], [records[0]], ['#2 | read'], 'CHANGES') });
+        assert.equal(retried.result.stop, 'Done', retried.result.problem);
+        assert.ok(ScribeReplay.run(first.log, orderOf(room)).facts.some((fact) => fact.id === 'F2' && fact.text === 'red and long'));
+        assert.equal(first.log.entries[1].proposals[0].operation.fact, 'F999');
+        assert.equal(first.log.entries[1].proposals[0].resolvedBy, 3);
+        const open = ScribeLog.checkIndex({log:first.log}, room.messages).rows[1].written.filter((row) => row.filing === 'unfiled proposal');
+        assert.deepEqual(plain(open.map((row) => JSON.parse(row.text).fact)), independent ? ['F998'] : []);
+        assert.deepEqual(plain(ScribeAdoption.pendingSources(first.log, room.messages).map((item) => item.position)), independent ? [2] : []);
+    }
+});
+
+test('different row and evidence citations retain the original positions and disputed quote', async () => {
+    const room = ScribeIntake.read(new CampaignBuilder('Orla').says('Mirelle', 'I keep the seals.')
+        .says('Oswin', 'I keep the seals.').messages);
+    const run = await adopt({ campaign: room, answering: () => cited(['Mirelle | role | keeper of seals | #2'],
+        [{ messageNumber: 1, quote: 'I keep the seals.', attribution: 'claimed' }], []) });
+    assert.equal(run.result.stop, 'Done');
+    assert.ok(run.log.entries[0].sources[1].filingPending.some((item) => item.reason === 'Citation'));
+    assert.deepEqual(Object.keys(run.log.read), ['MESSAGE-1', 'MESSAGE-2']);
+    const fact = ScribeReplay.run(plain(run.log), orderOf(room)).facts[0];
+    assert.deepEqual([fact.cite, fact.position, fact.evidence.speaker, fact.evidence.messageId],
+        ['MESSAGE-2', 2, null, 'MESSAGE-2']);
+    assert.equal(fact.evidence.citedMessage, 1);
+    assert.equal(fact.evidence.verified, false);
+});
+
+test('a mismatching row citation cannot bypass the shown batch, exact block or source quote', async () => {
+    const room = ScribeIntake.read(new CampaignBuilder('Orla').narrator('The quay is quiet.')
+        .narrator('The gate has a bell.').messages);
+    for (const [position, messageNumber, blockNumber, quote, reason] of [
+        [9, 1, 1, 'quay', 'proposal'],
+        [2, 9, 1, 'quay', 'Citation'],
+        [2, 2, 4, 'quay', 'Block'],
+        [2, 2, 1, 'no bell at all', 'Quote'],
+    ]) {
+        const run = await adopt({ campaign: room, answering: () => cited(['Quay | feature | quiet | #' + position],
+            [{ messageNumber, blockNumber, quote }], ['#1 | read', '#2 | read']) });
+        assert.equal(run.result.stop, 'Done');
+        const [fact] = ScribeReplay.run(run.log, orderOf(room)).facts;
+        if (reason === 'proposal') {
+            assert.equal(fact, undefined);
+            assert.equal(run.log.entries[0].proposals[0].operation.modelEvidence.messageNumber, 1);
+            continue;
+        }
+        assert.equal(fact.evidence.issue ?? null, reason);
+        assert.equal(fact.evidence.quote, reason ? null : quote);
+        if (reason) {
+            assert.equal(fact.evidence.modelQuote, quote);
+        }
+    }
+});
+
+test('a missing numbered receipt leaves the source processed and keeps the later receipt', async () => {
+    const room = ScribeIntake.read(new CampaignBuilder('Orla').narrator('Ships arrive.')
+        .narrator('The tide turns.').narrator('Ropes are cast.').messages);
+    const run = await adopt({ campaign: room, answering: () => answer({ READ: ['#1 | read', '#3 | no change'] }) });
+    assert.equal(run.result.stop, 'Done');
+    assert.deepEqual(plain(run.log.entries[0].sources.map((item) => item.result)), ['read', 'processed', 'no change']);
+    assert.deepEqual(plain(ScribeAdoption.pendingSources(run.log, room.messages)), []);
+});
+
+test('a truncated or repeated numbered result leaves the valid prefix read and the defective message pending', async () => {
+    const room = ScribeIntake.read(new CampaignBuilder('Orla').narrator('The tide turns.')
+        .narrator('Ships arrive.').narrator('The gate has a bronze bell.').messages);
+    for (const [last, reason] of [
+        [['#3 | rea'], 'invalidRead'], [['#3'], 'invalidRead'],
+        [['#3 | read', '#3 | read'], 'duplicateRead'], [['#3 | read', '#3 | no change'], 'duplicateRead'],
+    ]) {
+        const run = await adopt({ campaign: room, answering: () => cited(['Gate | feature | bronze bell | #3'],
+            [{ messageNumber: 3, quote: 'a bronze bell' }], ['#1 | read', '#2 | read', ...last]) });
+        assert.equal(run.result.stop, 'Done');
+        assert.ok(run.log.entries[0].sources[2].filingPending.some((item) => item.reason === reason));
+        assert.deepEqual(Object.keys(run.log.read), ['MESSAGE-1', 'MESSAGE-2', 'MESSAGE-3']);
+        assert.equal(ScribeReplay.run(run.log, orderOf(room)).facts.length, 1);
+    }
+    for (const malformed of ['unfinished', '#4 | rea', '#2 | read #3 | rea']) {
+        const run = await adopt({ campaign: room, answering: () => answer({ READ: ['#1 | read', '#2 | read', '#3 | read', malformed] }) });
+        assert.equal(run.result.stop, 'Done');
+        assert.equal(run.log.entries[0].unfiledRows[0].line, malformed);
+    }
+});
+
+test('a model source row acknowledges the reading while preserving conflicts and unresolved references', async () => {
+    const room = ScribeIntake.read(new CampaignBuilder('Orla').narrator('The ships sail.')
+        .narrator('The gate has a bronze bell.').messages);
+    for (const [section, row, quote, finalMark, reason] of [
+        ['FACTS', 'Gate | feature | bronze bell | #2', 'a bronze bell', '#2 | no change', 'conflictingRead'],
+        ['FACTS', 'Gate | feature | a stone wall | #2', 'a stone wall', '#2 | read', 'Quote'],
+        ['CHANGES', 'F999 | Gate | feature | FULLER: bronze bell | #2', 'a bronze bell', null, 'Reference'],
+    ]) {
+        const run = await adopt({ campaign: room, answering: () => cited([row], [{ messageNumber: 2, quote }],
+            ['#1 | read', ...(finalMark ? [finalMark] : [])], section) });
+        assert.equal(run.result.stop, 'Done');
+        assert.ok(run.log.entries[0].sources[1].filingPending.some((item) => item.reason === reason));
+        assert.equal(run.log.entries[0].sources[1].result, reason === 'conflictingRead' ? 'no change' : finalMark ? 'read' : 'processed');
+        assert.equal(ScribeReplay.run(run.log, orderOf(room)).facts.length, reason === 'Reference' ? 0 : 1);
+        if (reason === 'Reference') {
+            assert.equal(run.log.entries[0].proposals[0].operation.fact, 'F999');
+        }
+    }
+});
+
 test('separately sourced forms survive adoption, serialization and replay at #196', async () => {
     const builder = new CampaignBuilder('Frost');
     while (builder.messages.length < 196) {
@@ -212,113 +473,155 @@ test('the weapon account at #199 persists separately from the reward at #209', a
     const marks = numbers(198, 209).map((number) => '#' + number + ([199, 209].includes(number) ? ' | read' : ' | no change'));
     const records = [{ messageNumber: 199, quote: weapon, attribution: 'claimed' },
         { messageNumber: 209, quote: reward, attribution: 'claimed' }];
-    const first = await adopt({ campaign: book, log, answering: () => cited([
-        'Magera | background | raised as a weapon and given the artifact as a reward | #199',
-        'Magera | background | ' + reward + ' | #209',
+    const summary = 'Her captors intended to turn her into a weapon of war.';
+    const run = await adopt({ campaign: book, log, answering: () => cited([
+        'Magera | background | ' + summary + ' | #199', 'Magera | background | ' + reward + ' | #209',
     ], records, marks) });
-    assert.equal(first.result.stop, 'Failed');
-    assert.equal(readCount(log, book), 198);
-    assert.equal(ScribeReplay.run(log, orderOf(book)).facts.length, 0);
-    const retry = await adopt({ campaign: book, log, answering: () => cited([
-        'Magera | background | ' + weapon + ' | #199', 'Magera | background | ' + reward + ' | #209',
-    ], records, marks.slice(1)) });
-    assert.equal(retry.result.stop, 'Done', retry.result.problem);
+    assert.equal(run.result.stop, 'Done', run.result.problem);
+    assert.equal(readCount(log, book), 209);
     assert.deepEqual(plain(ScribeReplay.run(plain(log), orderOf(book)).facts.map((fact) =>
-        [fact.evidence.speaker, fact.evidence.attribution, fact.evidence.messageNumber, fact.text])), [
-        ['Magera', 'claimed', 199, weapon], ['Magera', 'claimed', 209, reward],
+        [fact.evidence.speaker, fact.evidence.attribution, fact.evidence.messageNumber, fact.evidence.quote, fact.text])), [
+        ['Magera', 'claimed', 199, weapon, summary], ['Magera', 'claimed', 209, reward, reward],
     ]);
 });
 
-test('an omitted source scope cannot overwrite another form and explicit subjects and attributes stay bound', async () => {
+test('model-declared measurement scopes and change references survive replay', async () => {
     const book = ScribeIntake.read(new CampaignBuilder('Frost').narrator('In human form Sera is five foot nine.')
-        .narrator('In full dragon form Sera is 20 m long.').narrator('Sera watches Tima. Tima has silver hair.')
-        .narrator('Sera has blue eyes.').narrator('Frost suspects Malachai broke the seal.').messages);
+        .narrator('In full dragon form Sera is 20 m long.').messages);
     const first = await adopt({ campaign: book, readThrough: 1, answering: () =>
-        cited(['Sera | build | five foot nine | #1'], [{ messageNumber: 1, quote: 'five foot nine' }], ['#1 | read']) });
-    assert.equal(first.result.stop, 'Done');
+        cited(['Sera | build | five foot nine | #1'], [{ messageNumber: 1, quote: 'five foot nine',
+            form: 'humanoid', dimension: 'stature' }], ['#1 | read']) });
+    assert.equal(first.result.stop, 'Done', first.result.problem);
     const log = first.saved[0];
-    const change = await adopt({ campaign: book, log: plain(log), readThrough: 2, answering: () => cited([
-        'F1 | Sera | build | 20 m | #2',
-    ], [{ messageNumber: 2, quote: '20 m' }], ['#2 | read'], 'CHANGES') });
-    assert.equal(change.result.stop, 'Failed');
-    assert.equal(readCount(change.log, book), 1);
-    const second = await adopt({ campaign: book, log: plain(log), readThrough: 2, answering: () => cited([
-        'Sera | build | 20 m | #2',
-    ], [{ messageNumber: 2, quote: '20 m' }], ['#2 | read']) });
-    assert.equal(second.result.stop, 'Done');
-    const replay = ScribeReplay.run(plain(second.log), orderOf(book));
-    assert.deepEqual(plain(replay.facts.map((fact) => [fact.form, fact.dimension])), [['human', 'height'], ['full dragon', 'length']]);
-    assert.equal(replay.conflicts.length, 0);
-    const ledger = ScribeAnalyzer.statement(replay.facts[1], ScribeAnalyzer.labels(replay));
-    assert.equal(ledger, 'build: 20 m (#2) [scope: full dragon / length]');
-    const category = ledger.split(':')[0];
-    assert.equal(ScribeAnswer.parse('=== CHANGES\nF2 | Sera | ' + category + ' | 12 m | #3').refused.length, 0);
-    for (const [number, line, quote, attribution] of [
-        [3, 'Sera | hair | silver | #3', 'Tima has silver hair.', 'witnessed'],
-        [4, 'Sera | hair | blue | #4', 'Sera has blue eyes.', 'witnessed'],
-        [5, 'Malachai | background | broke the seal | #5', 'broke the seal', 'ruled'],
-    ]) {
-        const current = ScribeLog.create();
-        markRead(current, book, 1, number - 1);
-        const run = await adopt({ campaign: book, log: current, readThrough: number, answering: () => cited([line],
-            [{ messageNumber: number, quote, attribution }], ['#' + number + ' | read']) });
-        assert.equal(run.result.stop, 'Failed', line);
-        assert.equal(Object.hasOwn(current.read, 'MESSAGE-' + number), false, line);
+    const source = { messageNumber: 2, quote: '20 m', form: 'draconic', dimension: 'body length' };
+    for (const id of ['F1', 'F999']) {
+        const change = await adopt({ campaign: book, log: plain(log), readThrough: 2, answering: () => cited([
+            id + ' | Sera | build | 20 m | #2',
+        ], [source], ['#2 | read'], 'CHANGES') });
+        assert.equal(change.result.stop, 'Done');
+        assert.equal(readCount(change.log, book), 2);
+        if (id === 'F1') {
+            assert.equal(change.reports.at(-1).refusedOperations.length, 0);
+            assert.deepEqual(plain(change.log.entries.at(-1).operations[0].declared), {
+                label: 'Sera', category: 'build', target: null, form: 'draconic', dimension: 'body length',
+            });
+        } else {
+            assert.equal(change.reports.at(-1).refusedOperations[0].reason, 'Reference');
+        }
     }
+    const second = await adopt({ campaign: book, log: plain(log), answering: () =>
+        cited(['Sera | build | 20 m | #2'], [source], ['#2 | read']) });
+    assert.equal(second.result.stop, 'Done', second.result.problem);
+    const replay = ScribeReplay.run(plain(second.log), orderOf(book));
+    assert.deepEqual(plain(replay.facts.map((fact) => [fact.form, fact.dimension])),
+        [['humanoid', 'stature'], ['draconic', 'body length']]);
+    assert.equal(replay.conflicts.length, 0);
+    const noScope = await adopt({ campaign: book, readThrough: 1, answering: () => cited([
+        'Sera | build | five foot nine in human form | #1',
+    ], [{ messageNumber: 1, quote: 'five foot nine' }], ['#1 | read']) });
+    const [fact] = ScribeReplay.run(plain(noScope.log), orderOf(book)).facts;
+    assert.deepEqual([fact.form, fact.dimension], [null, null]);
 });
 
-test('inference, promises, subject identity, scope and exact block evidence constrain a read', async () => {
+test('model readings distinguish measurements even when the quoted numbers convert to the same quantity', async () => {
+    const book = ScribeIntake.read(new CampaignBuilder('Frost').narrator('Its length was guessed at twenty meters.')
+        .narrator('Its regulated limit is two thousand centimeters.').messages);
+    const records = book.messages.map((message, index) => ({ messageNumber: message.position,
+        quote: message.blocks[0].text, attribution: index ? 'claimed' : 'inferred', form: 'draconic', dimension: 'length',
+        value: index ? 'allowed limit' : 'estimated size', related: null }));
+    const run = await adopt({ campaign: book, answering: () => cited([
+        'Sera | build | 20 m | #1', 'Sera | build | 2,000 cm | #2',
+    ], records, ['#1 | read', '#2 | read']) });
+    assert.equal(run.result.stop, 'Done', run.result.problem);
+    const state = ScribeReplay.run(plain(run.log), orderOf(book));
+    assert.deepEqual(plain(state.facts.map((fact) => [fact.text, fact.evidence.value])),
+        [['20 m', 'estimated size'], ['2,000 cm', 'allowed limit']]);
+    assert.ok(state.facts.every((fact) => fact.status === 'InForce'));
+    assert.equal(state.conflicts.length, 0);
+});
+
+test('matching model values retain both citations and different accounts remain available to the Checker', async () => {
+    const book = ScribeIntake.read(new CampaignBuilder('Frost').narrator('Her eyes are green.')
+        .narrator('Her irises were emeralds.').says('Cole', 'I saw amber eyes.').messages);
+    const records = book.messages.map((message, index) => ({ messageNumber: message.position,
+        quote: message.blocks[0].text, value: index === 2 ? 'amber' : 'green', attribution: index === 2 ? 'claimed' : 'witnessed' }));
+    const run = await adopt({ campaign: book, answering: () => cited(['Sera | eyes | green eyes | #1',
+        'Sera | eyes | emerald irises | #2', 'Sera | eyes | amber eyes | #3'], records, ['#1 | read', '#2 | read', '#3 | read']) });
+    assert.equal(run.result.stop, 'Done', run.result.problem);
+    const state = ScribeReplay.run(plain(run.log), orderOf(book));
+    assert.deepEqual(plain(state.facts.map((fact) => [fact.status, fact.claims.map((claim) => claim.evidence.messageNumber)])),
+        [['InForce', [1]], ['InForce', [2]], ['InForce', [3]]]);
+    assert.equal(state.conflicts.length, 0);
+});
+
+test('identical measurements in a saved book and a new reading retain both source receipts', async () => {
+    const book = ScribeIntake.read(new CampaignBuilder('Frost').narrator('She stands five feet tall.')
+        .narrator('She measures five feet in human form.').messages);
+    const fact = (number) => cited(['Sera | build | 5 ft | #' + number], [{ messageNumber: number,
+        quote: book.messages[number - 1].blocks[0].text, form: 'human', dimension: 'height', value: '5 ft' }], ['#' + number + ' | read']);
+    const first = await adopt({ campaign: book, readThrough: 1, answering: () => fact(1) });
+    const saved = plain(first.log);
+    for (const entry of saved.entries) {
+        for (const operation of entry.operations) {
+            if (operation.evidence) {
+                delete operation.evidence.valueSupplied;
+            }
+        }
+    }
+    const next = await adopt({ campaign: book, log: saved, answering: () => fact(2) });
+    assert.equal(next.result.stop, 'Done', next.result.problem);
+    const state = ScribeReplay.run(plain(next.log), orderOf(book));
+    assert.equal(state.facts.length, 2);
+    assert.deepEqual(plain(state.facts.flatMap((fact) => fact.claims.map((claim) => claim.evidence.messageNumber))), [1, 2]);
+    assert.equal(state.conflicts.length, 0);
+});
+
+test('only a genuine citation to the right block binds; a player ruling requires a player source', async () => {
     const builder = new CampaignBuilder('Frost').player('I suspect Malachai guarded the staff.')
         .says('Mavan', 'I will give you the staff.').reply([['Sera', 'I wait.'], ['Narrator', 'Sera has silver hair.']]);
     const book = ScribeIntake.read(builder.messages);
-    for (const [number, section, line, record] of [
-        [1, 'FACTS', 'Frost | background | Malachai guarded the staff | #1', { quote: 'Malachai guarded the staff' }],
-        [2, 'FACTS', 'Mavan | belonging | the staff | #2', { quote: 'the staff', attribution: 'promised' }],
-        [2, 'FACTS', 'Mavan | belonging | the staff | #2', { quote: 'the staff' }],
-        [3, 'THREADS', 'OPEN | Sera stole the crown jewels | #3', { blockNumber: 2, quote: 'Sera has silver hair.' }],
-        [3, 'FACTS', 'Tima | hair | silver | #3', { blockNumber: 2, quote: 'silver hair' }],
-        [3, 'FACTS', 'Sera | hair | silver | #3', { blockNumber: 1, quote: 'silver hair' }],
-        [3, 'FACTS', 'Sera | build | silver | #3', { blockNumber: 2, quote: 'silver hair', form: 'dragon', dimension: 'length' }],
+    for (const [record, reason, detail] of [
+        [{ blockNumber: 1, quote: 'silver hair' }, 'Quote', /does not appear verbatim in the cited block/],
+        [{ blockNumber: 2, quote: 'golden hair' }, 'Quote', /does not appear verbatim in the cited block/],
+        [{ blockNumber: 9, quote: 'silver hair' }, 'Block', /block that does not exist/],
+        [{ blockNumber: 2, quote: 'silver hair', attribution: 'ruled' }, 'Player', /non-player source/],
     ]) {
         const log = ScribeLog.create();
-        if (number > 1) {
-            markRead(log, book, 1, number - 1);
-        }
-        const run = await adopt({ campaign: book, log, size: 1, answering: () =>
-            cited([line], [{ messageNumber: number, ...record }], ['#' + number + ' | read'], section) });
-        assert.equal(run.result.stop, 'Failed', line);
-        assert.equal(readCount(log, book), number - 1, line);
+        markRead(log, book, 1, 2);
+        const run = await adopt({ campaign: book, log, answering: () =>
+            cited(['Sera | hair | silver | #3'], [{ messageNumber: 3, ...record }], ['#3 | read']) });
+        assert.equal(run.result.stop, 'Done');
+        const fact = ScribeReplay.run(log, orderOf(book)).facts[0];
+        assert.equal(fact.evidence.issue, reason);
+        assert.equal(fact.evidence.quote, null);
+        assert.match(ScribeAdoption.Settings.StoryReasons[reason], detail);
+        assert.equal(readCount(log, book), 3);
     }
     const run = await adopt({ campaign: book, answering: () => answer({
-        FACTS: ['Frost | background | I suspect Malachai guarded the staff | #1', 'Sera | hair | silver | #3'],
-        THREADS: ['OPEN | I will give you the staff | #2'],
+        FACTS: ['Frost | background | Suspects Malachai served as the staff’s guardian | #1', 'Sera | hair | silver | #3'],
+        THREADS: ['OPEN | Mavan has pledged his staff | #2'],
         EVIDENCE: [
             { section: 'FACTS', row: 1, messageNumber: 1, blockNumber: 1, quote: 'I suspect Malachai guarded the staff.', attribution: 'inferred' },
             { section: 'FACTS', row: 2, messageNumber: 3, blockNumber: 2, quote: 'Sera has silver hair.', attribution: 'witnessed' },
-            { section: 'THREADS', row: 1, messageNumber: 2, blockNumber: 1, quote: 'I will give you the staff.', attribution: 'promised' },
+            { section: 'THREADS', row: 1, messageNumber: 2, blockNumber: 1, quote: 'I will give you the staff.', attribution: 'promised',
+                event: 'a proposed inheritance', subject: 'the wizard', attribute: 'bequest', value: 'a future gift', related: ['his heir'] },
         ].map((item) => JSON.stringify({ ...item, form: null, dimension: null })),
         READ: ['#1 | read', '#2 | read', '#3 | read'],
     }) });
     assert.equal(run.result.stop, 'Done', run.result.problem);
     const state = ScribeReplay.run(plain(run.log), orderOf(book));
-    assert.equal(state.threads[0].evidence.attribution, 'promised');
+    const { attribution, event, subject, attribute, value, related } = state.threads[0].evidence;
+    assert.deepEqual(plain([attribution, event, subject, attribute, value, related]),
+        ['promised', 'a proposed inheritance', 'the wizard', 'bequest', 'a future gift', ['his heir']]);
     assert.deepEqual(plain(state.facts.map((fact) => [fact.evidence.attribution, fact.evidence.speaker, fact.evidence.blockNumber])),
         [['inferred', 'Frost', 1], ['witnessed', 'Narrator', 2]]);
-    assert.ok(state.facts.every((fact) => fact.category !== 'belonging'));
 });
 
-test('witnessing a report does not establish the reported theft', async () => {
+test('the reader labels an account and a witnessed act independently', async () => {
     const account = 'Magera claimed Frost stole the sword.';
     const book = ScribeIntake.read(new CampaignBuilder('Frost').narrator(account).narrator(
         'Magera claimed Frost stole the sword, then Frost dropped the sword.').messages);
     const row = 'Frost | background | stole the sword | #1';
-    for (const quote of [account, 'stole the sword']) {
-        const run = await adopt({ campaign: book, readThrough: 1, answering: () => cited([row], [
-            { messageNumber: 1, quote, attribution: 'witnessed' },
-        ], ['#1 | read']) });
-        assert.equal(run.result.stop, 'Failed', quote);
-        assert.equal(run.log.entries.length, 0);
-    }
     const run = await adopt({ campaign: book, answering: () => cited([
         row, 'Magera | background | claimed Frost stole the sword | #1', 'Frost | background | dropped the sword | #2',
     ], [{ messageNumber: 1, quote: account, attribution: 'claimed' },
@@ -329,11 +632,11 @@ test('witnessing a report does not establish the reported theft', async () => {
     assert.deepEqual(plain(ScribeReplay.run(run.log, orderOf(book)).facts.map((fact) => fact.evidence.attribution)),
         ['claimed', 'witnessed', 'witnessed']);
 });
-const notedCampaign = campaign({
-    6: `*(\n${firstNote}\n)*`,
-    50: `I wave to the ferryman.\n*(\n${firstNote}\n)*`,
-    55: `I count the crates.\n*(\n${laterNote}\n)*`,
-});
+const notedCampaign = { ...campaign({
+    6: '',
+    50: 'I wave to the ferryman.',
+    55: 'I count the crates.',
+}), notes: [{ text: firstNote, position: 6 }, { text: laterNote, position: 55 }] };
 const prompts = new Map([
     [ScribeAnalyzer.Prompt, 'Story'],
     [ScribeAnalyzer.NotesPrompt, 'Notes'],
@@ -442,8 +745,8 @@ function timesSaid(state, text) {
  */
 function marksOf(pass, user) {
     if (pass === 'Story') {
-        const heading = user.match(/NEW MESSAGES \(#(\d+) to #(\d+)\):/);
-        return [Number(heading[1]), Number(heading[2])];
+        const positions = [...CitedStory.messages(user).keys()];
+        return [positions[0], positions.at(-1)];
     }
     return [...user.matchAll(/^\[#(\d+)\] /gm)].map((match) => Number(match[1]));
 }
@@ -535,6 +838,9 @@ async function adopt(chosen = {}) {
     const result = await ScribeAdoption.run({
         messages: book.messages,
         readThrough: chosen.readThrough,
+        retrySources: chosen.retrySources,
+        retryInputs: chosen.retryInputs,
+        diagnostic: chosen.diagnostic,
         notes: book.notes,
         player: book.player,
         profile: chosen.profile,
@@ -685,7 +991,7 @@ async function answeredLog() {
     return run.log;
 }
 
-test('the next stretch is the first unread run', () => {
+test('the next stretch packs the earliest unread messages up to the room batch size', () => {
     const messages = plainCampaign.messages;
     const log = ScribeLog.create();
     const fresh = ScribeAdoption.next(log, messages, 40);
@@ -702,7 +1008,7 @@ test('the next stretch is the first unread run', () => {
     const islanded = ScribeLog.create();
     markRead(islanded, plainCampaign, 1, 40);
     markRead(islanded, plainCampaign, 61, 70);
-    assert.deepEqual(positionsOf(ScribeAdoption.next(islanded, messages, 40)), numbers(41, 60));
+    assert.deepEqual(positionsOf(ScribeAdoption.next(islanded, messages, 40)), [...numbers(41, 60), ...numbers(71, 90)]);
     const whole = ScribeLog.create();
     markRead(whole, plainCampaign, 1, 100);
     assert.deepEqual(plain(ScribeAdoption.next(whole, messages, 40)), []);
@@ -794,34 +1100,13 @@ test('notes are filed once', async () => {
     assert.deepEqual(plain(run.log.notes), [firstNote, laterNote]);
 });
 
-test('a mixed stretch reads an echo-only row but accepts story citations only from the surviving release at #217', async () => {
-    const builder = new CampaignBuilder('Frost');
-    while (builder.messages.length < 215) {
-        builder.narrator('Frost waits.');
-    }
-    const attendance = '[Scribe] Mavan stands beside the chains.';
-    const release = 'The chains break and Magera takes cat form.';
-    builder.narrator(attendance).reply([['Mavan', attendance], ['Narrator', release]]);
-    const chosen = ScribeIntake.read(builder.messages);
-    const log = ScribeLog.create();
-    markRead(log, chosen, 1, 215);
-    const result = await adopt({
-        campaign: chosen,
-        log,
-        answering: () => answer({
-            FACTS: ['Magera | trait | takes cat form | #217'],
-        }),
-    });
-    assert.equal(result.result.stop, 'Done');
-    assert.equal(result.calls.length, 1);
-    assert.ok(result.calls[0].user.includes(`[#217] [block 2] Narrator: ${release}`));
-    assert.ok(result.calls[0].user.includes('[#216] (no story text)'));
-    assert.ok(!result.calls[0].user.includes('Mavan'));
-    assert.deepEqual(plain(result.reports[0].refusedOperations), []);
-    assert.deepEqual(plain(log.entries.at(-1).messageIds), ['MESSAGE-216', 'MESSAGE-217']);
-    const state = ScribeReplay.run(log, orderOf(chosen));
-    assert.deepEqual(plain(state.facts.map((fact) => [fact.text, fact.cite])), [['takes cat form', 'MESSAGE-217']]);
-    assert.equal((await adopt({ campaign: chosen, log })).calls.length, 0);
+test('marker text in a mixed stretch reaches the model with its original blocks', async () => {
+    const room = ScribeIntake.read(new CampaignBuilder('Frost').narrator('[Scribe] Mavan waits.')
+        .reply([['Mavan', '[Scribe] Mavan stands beside the chains.'], ['Narrator', 'The chains break.']]).messages);
+    const result = await adopt({campaign: room, answering: () => answer({ READ: ['#1 | read', '#2 | read'] })});
+    assert.ok(result.calls[0].user.includes('[#1] Narrator: [Scribe] Mavan waits.'));
+    assert.ok(result.calls[0].user.includes('[block 1] Mavan: [Scribe] Mavan stands beside the chains.'));
+    assert.ok(result.calls[0].user.includes('[block 2] Narrator: The chains break.'));
 });
 
 test('a disputed position stays out of Story, legacy notes and historical attendance citations', async () => {
@@ -832,81 +1117,30 @@ test('a disputed position stays out of Story, legacy notes and historical attend
         messages: intake.messages.map((message) => message.position === 2 ? { ...message, attributionPending: true } : message) };
     const run = await adopt({
         campaign: chosen,
-        answering: (call) => answer({ SCENES: call.marks.includes(1) ? [
-            'Day 1 | #1-#1 | Inn | public | present: Frost (from #1) | I enter the Inn',
-        ] : [
+        answering: () => answer({ SCENES: [
             'Day 1 | #1-#4 | Inn | public | present: Mavan (from #2 until #4) | Rain falls',
             'Day 1 | #1-#4 | Inn | public | present: Frost (from #1 until #4) | Rain falls',
         ] }),
     });
-    assert.equal(run.result.stop, 'Failed');
-    assert.deepEqual(run.calls.map((call) => [call.pass, call.marks]), [['Story', [1, 1]], ['Story', [3, 4]]]);
+    assert.equal(run.result.stop, 'Done');
+    assert.deepEqual(run.calls.map((call) => [call.pass, [...CitedStory.messages(call.user).keys()]]), [['Story', [1, 3, 4]]]);
     assert.ok(run.calls.every((call) => !call.user.includes('disputed')));
     assert.deepEqual(plain(run.reports.at(-1).refusedOperations.map((item) => item.reason)), ['Citation']);
-    assert.deepEqual(Object.keys(run.log.read), ['MESSAGE-1', 'MESSAGE-3']);
+    assert.deepEqual(Object.keys(run.log.read), ['MESSAGE-1', 'MESSAGE-3', 'MESSAGE-4']);
     assert.deepEqual(plain(run.log.notes), []);
     const state = ScribeReplay.run(run.log, orderOf(chosen));
     assert.deepEqual(plain(state.subjects.map((subject) => subject.label)), ['Frost']);
-    assert.equal(state.scenes[0].lastPosition, 1);
+    assert.equal(state.scenes[0].lastPosition, 4);
 });
 
-test('adoption marks a storyteller echo-only stretch read with zero claims and zero model calls', async () => {
-    const chosen = ScribeIntake.read(new CampaignBuilder('Frost').narrator('@: [Scribe] Mavan is here.').messages);
-    const result = await adopt({ campaign: chosen, budget: 0 });
-    assert.deepEqual(plain(result.result), ended('Done', null, 0, 0));
-    assert.equal(result.calls.length, 0);
-    const saved = result.saved.at(-1);
-    assert.equal(saved.read['MESSAGE-1'], saved.entries[0].sequence);
-    assert.deepEqual(saved.entries[0].operations, []);
-});
-
-test('both scene attendance bounds reject echo-only sources before allocating subjects', async () => {
-    const builder = new CampaignBuilder('Frost').player('I enter the Inn to look for Mavan.').narrator('[Scribe] Mavan is here.').narrator('The door closes.');
-    const chosen = ScribeIntake.read(builder.messages);
-    const run = await adopt({
-        campaign: chosen,
-        answering: () => answer({
-            SCENES: [
-                'Day 1 | #1-#3 | Inn | public | present: Mavan (from #2) | The door closes',
-                'Day 1 | #1-#3 | Inn | public | present: Mavan (until #2) | The door closes',
-                'Day 1 | #1-#3 | Inn | public | present: Frost (from #1 until #3) | The door closes',
-            ],
-        }),
-    });
-    assert.equal(run.result.stop, 'Failed');
-    assert.deepEqual(plain(run.reports[0].refusedOperations.map((item) => item.reason)), ['Citation', 'Citation']);
-    const state = ScribeReplay.run(run.log, orderOf(chosen));
-    assert.deepEqual(plain(state.subjects), []);
-    assert.equal(state.scenes.length, 0);
-    assert.equal(readCount(run.log, chosen), 2);
-});
-
-test('continuing a scene checks historical attendance bounds against the original story rows', async () => {
-    const builder = new CampaignBuilder('Frost').player('I enter the Inn to look for Mavan.').narrator('[Scribe] Mavan is here.').narrator('The door closes.');
-    const first = await adopt({
-        campaign: ScribeIntake.read(builder.messages),
-        answering: () => answer({ SCENES: ['Day 1 | #1-#3 | Inn | public | present: Frost (from #1) | The door closes'] }),
-    });
-    const chosen = ScribeIntake.read(builder.narrator('It rains.').messages);
-    const next = await adopt({
-        campaign: chosen,
-        log: plain(first.saved.at(-1)),
-        answering: () => answer({
-            SCENES: [
-                'Day 1 | #1-#4 | Inn | public | present: Mavan (from #2 until #4) | It rains',
-                'Day 1 | #1-#4 | Inn | public | present: Frost (from #1 until #2) | It rains',
-                'Day 1 | #1-#4 | Inn | public | present: Frost (from #1 until #4) | It rains',
-            ],
-        }),
-    });
-    assert.equal(next.result.stop, 'Failed');
-    assert.deepEqual(plain(next.reports[0].refusedOperations.map((item) => item.reason)), ['Citation', 'Citation']);
-    const state = ScribeReplay.run(next.log, orderOf(chosen));
-    assert.deepEqual(plain(state.subjects.map((subject) => subject.label)), ['Frost']);
-    assert.equal(state.scenes.length, 1);
-    assert.equal(state.scenes[0].lastPosition, 3);
-    assert.equal(state.scenes[0].summary, 'The door closes');
-    assert.equal(readCount(next.log, chosen), 3);
+test('a marker-only message waits for a funded Story pass before accepting a model receipt', async () => {
+    const room = ScribeIntake.read(new CampaignBuilder('Frost').narrator('[Scribe] Mavan is here.').messages);
+    const waiting = await adopt({ campaign: room, budget: 0 });
+    assert.deepEqual(plain(waiting.result), ended('Budget', null, 0, 0));
+    assert.equal(waiting.log.read['MESSAGE-1'], undefined);
+    const read = await adopt({ campaign: room, log: waiting.log, answering: () => answer({ READ: ['#1 | read'] }) });
+    assert.ok(read.calls[0].user.includes('[Scribe] Mavan is here.'));
+    assert.equal(read.log.entries[0].sources[0].result, 'read');
 });
 
 test('an empty stretch and an empty answer are both read', async () => {
@@ -920,11 +1154,12 @@ test('an empty stretch and an empty answer are both read', async () => {
     assert.equal(readCount(log, notedCampaign), 100);
     assert.deepEqual(plain(log.entries.at(-1)), {
         sequence: 4,
+        sourceAuthority: true,
         kind: 'Update',
         origin: 'Story',
         messageIds: ['MESSAGE-6'],
         operations: [],
-        sources: [{ id: 'MESSAGE-6', position: 6, fingerprint: notedCampaign.messages[5].fingerprint, result: 'no change' }],
+        sources: [{ id: 'MESSAGE-6', position: 6, fingerprint: notedCampaign.messages[5].fingerprint, result: 'processed' }],
         withdrawn: false,
     });
     assert.deepEqual(plain(lone.saved.at(-1)), plain(log));
@@ -953,120 +1188,53 @@ test('an empty stretch and an empty answer are both read', async () => {
     ]);
 });
 
-test('an unreadable answer is recorded and reported', async () => {
-    /**
-     * @param {{ pass: string, marks: number[] }} call
-     * @param {number} index
-     * @return {string}
-     */
-    const failing = (call, index) => (index === 2 ? prose : scripted(call));
-    const run = await adopt({ answering: failing });
-    assert.deepEqual(
-        plain(run.result),
-        ended('Failed', 'The answer for #41 to #80 held no line that could be read.', 0.5, 2),
-    );
-    assert.equal(readCount(run.log, plainCampaign), 40);
-    assert.equal(run.log.entries.length, 1);
-    assert.equal(run.saved.length, 1);
-    assert.deepEqual(plain(run.log), run.saved[0]);
-    assert.deepEqual(plain(run.records), [
-        {
-            sequence: 1,
-            pass: 'Story',
-            system: ScribeAnalyzer.Prompt,
-            input: run.calls[0].user,
-            answer: run.calls[0].answer,
-            readable: true,
-        },
-        {
-            sequence: null,
-            pass: 'Story',
-            system: ScribeAnalyzer.Prompt,
-            input: run.calls[1].user,
-            answer: prose,
-            readable: false,
-        },
-    ]);
-    assert.deepEqual(plain(run.reports[1]), {
-        pass: 'Story',
-        first: 41,
-        last: 80,
-        read: 40,
-        total: 100,
-        spent: 0.5,
-        calls: 2,
-        unpriced: 0,
-        stored: 0,
-        refusedLines: [{ block: 'PREAMBLE', line: prose, reason: 'Shape' }],
-        refusedOperations: [],
-    });
-    const again = await adopt({ log: plain(run.saved[0]) });
-    assert.deepEqual(plain(again.result), ended('Done', null, 0.5, 2));
-    assert.deepEqual(passes(again.calls), [
-        ['Story', [41, 80]],
-        ['Story', [81, 100]],
-    ]);
-    const noted = await adopt({
-        campaign: notedCampaign,
-        answering: (call) => (call.pass === 'Notes' ? prose : scripted(call)),
-    });
-    assert.deepEqual(
-        plain(noted.result),
-        ended('Failed', 'The answer for the notes in #1 to #40 held no line that could be read.', 0.25, 1),
-    );
-    assert.deepEqual(plain(noted.log), plain(ScribeLog.create()));
-    assert.deepEqual(noted.saved, []);
-    assert.deepEqual(plain(noted.records.map((item) => [item.sequence, item.pass, item.readable])), [
-        [null, 'Notes', false],
-    ]);
+test('a plain model reading is saved while later messages finish once', async () => {
+    const run = await adopt({ answering: (call, index) => index === 2 ? prose : scripted(call) });
+    assert.deepEqual(plain(run.result), ended('Done', null, 0.75, 3));
+    assert.equal(readCount(run.log, plainCampaign), 100);
+    assert.equal(run.saved.length, 3);
+    assert.deepEqual(plain(run.records.map((item) => [item.sequence, item.readable])), [[1, true], [2, true], [3, true]]);
+    assert.equal(run.records[1].answer, prose);
+    assert.equal(run.reports[1].read, 80);
+    assert.equal(run.log.entries[1].modelReading, prose);
+    assert.ok(run.records[2].input.includes(prose));
+    const checked = ScribeLog.checkIndex({log: run.log}, plainCampaign.messages).rows;
+    assert.deepEqual(plain(checked.flatMap((row, index) => row.written.filter((item) => item.text === prose).map(() => index + 1))), [80]);
+    assert.deepEqual(plain(ScribeAdoption.pendingSources(run.log, plainCampaign.messages)), []);
+    const single = await adopt({ log: plain(run.saved.at(-1)), retrySources: ['MESSAGE-41'], rawStory: true,
+        answering: () => answer({ READ: ['#41 | no change'] }) });
+    assert.equal(single.calls.length, 0);
+    assert.deepEqual(plain(ScribeAdoption.pendingSources(single.log, plainCampaign.messages)), []);
+    const again = await adopt({ log: plain(run.saved.at(-1)) });
+    assert.deepEqual(plain(again.result), ended('Done', null, 0, 0));
+    const noted = await adopt({ campaign: notedCampaign, answering: (call) => call.pass === 'Notes' ? prose : scripted(call) });
+    assert.equal(noted.result.stop, 'Done');
+    assert.deepEqual(plain(noted.log.notes), [firstNote, laterNote]);
+    assert.ok(noted.log.entries.some((entry) => entry.origin === 'Notes' && entry.modelResponse === prose));
     const log = await answeredLog();
-    const kept = plain(log);
-    const answers = await adopt({
-        log,
-        answering: (call) => (call.pass === 'Answers' ? prose : scripted(call)),
-    });
-    assert.deepEqual(
-        plain(answers.result),
-        ended('Failed', 'The answer for the answered questions held no line that could be read.', 0.25, 1),
-    );
-    assert.deepEqual(passes(answers.calls), [['Answers', [12]]]);
-    assert.deepEqual(plain(log), kept);
-    assert.deepEqual(answers.saved, []);
-    assert.deepEqual(plain(answers.records.map((item) => [item.sequence, item.pass, item.readable])), [
-        [null, 'Answers', false],
-    ]);
+    const answers = await adopt({ log, answering: (call) => call.pass === 'Answers' ? prose : scripted(call) });
+    assert.equal(answers.result.stop, 'Done');
+    assert.ok(log.entries.some((entry) => entry.origin === 'Answers' && entry.modelResponse === prose));
+    assert.ok(ScribeReplay.run(log, orderOf(plainCampaign)).questions.some((item) => item.answer && item.dismissed));
+    const refresh = await adopt({ log: plain(log) });
+    assert.equal(refresh.calls.length, 0);
 });
 
-test('a refusal that starts with none is unreadable', async () => {
-    for (const refusal of [
-        'None of this is something I am able to summarise for you.',
-        'Nothing here can be processed: the text appears to be cut off.',
-        'No new information can be extracted because the content violates policy.',
-    ]) {
-        const run = await adopt({ answering: (call, index) => (index === 1 ? refusal : scripted(call)) });
-        assert.deepEqual(
-            plain(run.result),
-            ended('Failed', 'The answer for #1 to #40 held no line that could be read.', 0.25, 1),
-            refusal,
-        );
-        assert.equal(readCount(run.log, plainCampaign), 0, refusal);
-        assert.deepEqual(plain(run.records.map((item) => [item.answer, item.readable])), [[refusal, false]]);
+test('free prose and empty protocol headers cannot claim an acknowledgment or stop later reading', async () => {
+    for (const refusal of ['None of this is something I am able to summarise for you.',
+        'Nothing here can be processed: the text appears to be cut off.', 'No new information can be extracted.']) {
+        const run = await adopt({ answering: (call, index) => index === 1 ? refusal : scripted(call) });
+        assert.equal(run.result.stop, 'Done');
+        assert.equal(run.records[0].readable, true);
+        assert.equal(run.records[0].answer, refusal);
+        assert.ok(run.log.entries[0].sources.every((item) => item.result === 'processed'));
+        assert.equal(run.calls.length, 3);
     }
-    const headers = [
-        '=== SUBJECTS',
-        '=== NAMES',
-        '=== FACTS',
-        '=== CHANGES',
-        '=== TOLD',
-        '=== SCENES',
-        '=== NIGHTS',
-        '=== THREADS',
-        '=== QUESTIONS',
-    ].join('\n');
-    for (const empty of ['none', '(none)', 'No new facts.', headers]) {
+    for (const empty of ['none', '(none)', 'No new facts.', '=== SUBJECTS\n=== NAMES\n=== FACTS']) {
         const run = await adopt({ rawStory: true, answering: () => empty });
-        assert.equal(run.result.stop, 'Failed', empty);
-        assert.equal(readCount(run.log, plainCampaign), 0, empty);
+        assert.equal(run.result.stop, 'Done');
+        assert.equal(ScribeAdoption.pendingSources(run.log, plainCampaign.messages).length, 0);
+        assert.equal(run.calls.length, 3);
     }
 });
 
@@ -1143,7 +1311,7 @@ test('the budget guards every pass', async () => {
     empty.notes.push(firstNote, laterNote);
     const lone = await adopt({ campaign: notedCampaign, log: empty, budget: 0 });
     assert.deepEqual(plain(lone.result), ended('Done', null, 0, 0));
-    assert.equal(empty.read['MESSAGE-6'], 3);
+    assert.equal(empty.entries.at(-1).sources[0].result, 'processed');
     assert.equal(lone.saved.length, 1);
 });
 
@@ -1327,14 +1495,14 @@ test('a completion marker cannot launder malformed or uncited rows', async () =>
               }) + '\n=== READ\n#45 | no change'
             : scripted(call);
     const run = await adopt({ answering: mixed });
-    assert.equal(run.result.stop, 'Failed');
+    assert.equal(run.result.stop, 'Done');
     assert.deepEqual(plain(run.reports[1].refusedLines), [{ block: 'FACTS', line: malformed, reason: 'Shape' }]);
-    assert.equal(run.reports[1].stored, 0);
+    assert.ok(run.reports[1].stored >= 2);
     const state = ScribeReplay.run(run.log, orderOf(plainCampaign));
-    assert.equal(timesSaid(state, 'patient with the ferry'), 0);
-    assert.equal(timesSaid(state, 'fond of salt fish'), 0);
+    assert.equal(timesSaid(state, 'patient with the ferry'), 1);
+    assert.equal(timesSaid(state, 'fond of salt fish'), 1);
     assert.equal(timesSaid(state, 'stern'), 0);
-    assert.equal(readCount(run.log, plainCampaign), 40);
+    assert.equal(readCount(run.log, plainCampaign), 100);
 });
 
 test('every call is recorded', async () => {
@@ -1368,17 +1536,10 @@ test('every call is recorded', async () => {
     markRead(log, notedCampaign, 7, 100);
     log.notes.push(laterNote);
     const lone = await adopt({ campaign: notedCampaign, log, answering: padded });
-    assert.equal(lone.calls.length, 1);
-    assert.deepEqual(plain(lone.records), [
-        {
-            sequence: 3,
-            pass: 'Notes',
-            system: ScribeAnalyzer.NotesPrompt,
-            input: lone.calls[0].user,
-            answer: lone.calls[0].answer,
-            readable: true,
-        },
-    ]);
+    assert.deepEqual(lone.calls.map((call) => call.pass), ['Notes']);
+    assert.deepEqual(plain(lone.records), lone.calls.map((call, index) => ({
+        sequence: index + 3, pass: call.pass, system: call.system, input: call.user, answer: call.answer, readable: true,
+    })));
     assert.deepEqual(plain(lone.reports.map((report) => report.pass)), ['Notes', 'Story']);
 });
 
@@ -1596,7 +1757,7 @@ test('after the answers pass the loop starts again', async () => {
         log: first.log,
         answering: (call) =>
             call.pass === 'Answers'
-                ? answer({ FACTS: ['Kira | trait | rang the bell at line 12 | #12'] })
+                ? answer({ FACTS: ['Kira | trait | rang the bell at line 12 | #12'] }) + '\n=== FILED\nQ1 | #12'
                 : scripted(call),
     });
     assert.deepEqual(plain(run.result), ended('Done', null, 0.75, 3));
@@ -1678,25 +1839,25 @@ test('answers run even when every message is read', async () => {
     assert.deepEqual(passes(second.calls), [['Answers', [12]]]);
 });
 
-test('notes are known by their words', async () => {
+test('a changed explicit note is filed separately from the saved wording', async () => {
     const run = await adopt({ campaign: notedCampaign });
-    const shouted = campaign({
-        6: '*(\nHALVARD served ten years, with the pikes!\n)*',
+    const shouted = { ...campaign({
+        6: '[Operator note] HALVARD served ten years, with the pikes!',
         50: 'I wave to the ferryman.',
-        55: `I count the crates.\n*(\n${laterNote}\n)*`,
-    });
+        55: `I count the crates.\n[Operator note] ${laterNote}`,
+    }), notes: [{ text: 'HALVARD served ten years, with the pikes!', position: 6 }, { text: laterNote, position: 55 }] };
     assert.deepEqual(plain(shouted.notes.map((note) => note.text)), [
         'HALVARD served ten years, with the pikes!',
         laterNote,
     ]);
     const entries = run.log.entries.length;
     const settled = await adopt({ campaign: shouted, log: run.log });
-    assert.deepEqual(plain(settled.result), ended('Done', null, 0, 0));
-    assert.equal(run.log.entries.length, entries);
+    assert.deepEqual(plain(settled.result), ended('Done', null, 0.25, 1));
+    assert.equal(run.log.entries.length, entries + 1);
     ScribeLog.withdraw(run.log, 'MESSAGE-3');
     const again = await adopt({ campaign: shouted, log: run.log });
     assert.deepEqual(passes(again.calls), [['Story', [1, 40]]]);
-    assert.equal(run.log.entries.filter((entry) => entry.origin === 'Notes').length, 2);
+    assert.equal(run.log.entries.filter((entry) => entry.origin === 'Notes').length, 3);
 });
 
 test('no note is left behind', async () => {
@@ -1710,7 +1871,7 @@ test('no note is left behind', async () => {
         ['Story', [81, 100]],
     ]);
     assert.deepEqual(plain(behind.notes), [firstNote, laterNote]);
-    const single = campaign({ 6: `*(\n${firstNote}\n)*` });
+    const single = { ...campaign({ 6: firstNote }), notes: [{ text: firstNote, position: 6 }] };
     const whole = ScribeLog.create();
     markRead(whole, single, 1, 100);
     const last = await adopt({ campaign: single, log: whole });
@@ -1981,8 +2142,10 @@ test('unsupported adverse reports remain owed even with a valid completion marke
         const bad = cited([line], [{ messageNumber: seen, quote: 'Sela has guarded the Staff of Tides' }],
             numbers(41, 80).map((number) => '#' + number + (number === seen ? ' | read' : ' | no change')), 'CONTRADICTIONS');
         const failed = await adopt({ campaign: chosen, log: initial.log, answering: () => bad });
-        assert.equal(failed.result.stop, 'Failed', line);
-        assert.ok(!Object.hasOwn(failed.log.read, 'MESSAGE-45'), line);
+        assert.equal(failed.result.stop, 'Done', line);
+        assert.ok(Object.hasOwn(failed.log.read, 'MESSAGE-45'), line);
+        assert.ok(failed.log.entries.some((entry) => entry.proposals?.some((item) => item.reason === 'checkerOnly') ||
+            entry.unfiledRows?.some((item) => item.block === 'CONTRADICTIONS')), line);
         assert.equal(ScribeReplay.run(failed.log, orderOf(chosen)).contradictions.length, 0, line);
     }
 });

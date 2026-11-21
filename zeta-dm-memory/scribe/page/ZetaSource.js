@@ -87,6 +87,7 @@ const ZetaSource = Object.freeze({
             NoPause: 'Could not pause between requests',
             NoLogin: 'No login seen yet',
             NoRoom: 'No chat is open',
+            EmptyContinuation: 'Zeta returned an empty history page with a link to more messages',
             NoPlot: 'Zeta named no story for this chat',
         }),
     }),
@@ -849,7 +850,7 @@ const ZetaSource = Object.freeze({
      * @return {Promise<{ status: number, body: * }>}
      * @throws {Error}
      */
-    async get(request, path) {
+    async get(request, path, fresh = false) {
         const settings = ZetaSource.Settings;
         const words = settings.Messages;
         const address = `${settings.ApiOrigin}${path}`;
@@ -861,7 +862,7 @@ const ZetaSource = Object.freeze({
         const reach = async () => {
             let response = null;
             try {
-                response = await send(address, { headers: { [settings.AuthorizationHeader]: request.token } });
+                response = await send(address, { headers: { [settings.AuthorizationHeader]: request.token }, ...(fresh ? { cache: 'no-store' } : {}) });
             } catch {
                 throw ZetaSource.failure(words.Unreachable, null, true);
             }
@@ -1166,6 +1167,59 @@ const ZetaSource = Object.freeze({
     },
 
     /**
+     * @param {object[]} saved
+     * @param {object|null} hints
+     * @return {object|null}
+     */
+    savedPages(saved, hints) {
+        const rows = new Map(saved.map((row) => [row.id, row]));
+        if (!rows.size || rows.size !== saved.length) {
+            return null;
+        }
+        const ids = [...rows.keys()];
+        let transport = ids;
+        const boundaries = new Map();
+        const locations = new Map();
+        if (hints && Number.isSafeInteger(hints.count) && hints.count > 0 && hints.count <= ids.length &&
+            hints.first === ids[0] && hints.last === ids[hints.count - 1] &&
+            Array.isArray(hints.pages) && hints.pages.length <= ZetaSource.Settings.MostPages) {
+            if (Array.isArray(hints.transport)) {
+                if (hints.count !== ids.length || hints.transport.length < rows.size ||
+                    hints.transport.some((id) => !rows.has(id)) || new Set(hints.transport).size !== rows.size) {
+                    return { rows, transport, boundaries, locations };
+                }
+                const chronological = ZetaSource.ordered(hints.transport.map((id) => rows.get(id)).reverse());
+                if (!chronological.every((row, position) => row.id === ids[position])) {
+                    return { rows, transport, boundaries, locations };
+                }
+                transport = hints.transport;
+            }
+            const head = (hints.transport ? transport.length : hints.count) - 1;
+            let start = head;
+            for (const point of hints.pages) {
+                if (!Array.isArray(point) || ![2, 5].includes(point.length)) {
+                    return { rows, transport, boundaries: new Map(), locations: new Map() };
+                }
+                const [cursor, last, high = start, first = high, seenHead = head] = point;
+                if (![last, high, first, seenHead].every(Number.isSafeInteger) || last < 0 || last > high ||
+                    high > start || first < 0 || first > seenHead || boundaries.has(cursor) ||
+                    (cursor !== null && typeof cursor !== 'string')) {
+                    return { rows, transport, boundaries: new Map(), locations: new Map() };
+                }
+                boundaries.set(cursor, { first, head: seenHead });
+                for (let position = high; position >= last; position--) {
+                    const id = transport[position];
+                    if (!locations.has(id)) {
+                        locations.set(id, cursor);
+                    }
+                }
+                start = last - 1;
+            }
+        }
+        return { rows, transport, boundaries, locations };
+    },
+
+    /**
      * @param {{ fetch: Function, token: string|null, roomId: string|null, pause: (milliseconds: number) => Promise<void>, onPage?: (count: number) => void, through?: string|null }} request
      * @return {Promise<Readonly<{ messages: object[], end: string, problem: string|null, skipped: number }>>}
      * @throws {Error}
@@ -1179,6 +1233,11 @@ const ZetaSource = Object.freeze({
         const locations = new Map();
         const boundaries = new Map();
         const used = new Set();
+        let saved = request.saved && request.index ? ZetaSource.savedPages(request.saved, request.hints) : null;
+        let overlap = -1;
+        const positions = saved ? new Map(saved.transport.map((id, position) => [id, position])) : null;
+        let priorPosition = saved?.transport.length;
+        let ordered = true;
         let skipped = 0;
         let cursor = null;
         for (let read = 0; read < settings.MostPages; read++) {
@@ -1198,6 +1257,11 @@ const ZetaSource = Object.freeze({
                 return ZetaSource.outcome(received, ends.Failed, error.message, skipped);
             }
             skipped += page.skipped;
+            if (read === 0 && request.index && !skipped) {
+                request.index.headIds = new Set(page.messages.map((row) => row.id));
+                request.index.completeHead = page.nextCursor === null && (page.messages.length > 0 || page.emptyRoom);
+                request.index.cheapDepth = page.messages.length;
+            }
             const before = distinct.size;
             if (request.index && page.messages.length) {
                 boundaries.set(cursor, received.length);
@@ -1221,6 +1285,102 @@ const ZetaSource = Object.freeze({
                 );
             }
             const next = page.nextCursor;
+            if (saved && next !== null && !skipped && page.messages.length && distinct.size > before && !used.has(next)) {
+                if (overlap < 0) {
+                    const within = page.messages.findIndex((row) => saved.rows.has(row.id));
+                    if (within >= 0) {
+                        overlap = received.length - page.messages.length + within;
+                    }
+                }
+                if (overlap >= 0) {
+                    const old = saved.transport;
+                    for (const row of page.messages) {
+                        const position = positions.get(row.id);
+                        if (position !== undefined) {
+                            ordered &&= position < priorPosition;
+                            priorPosition = position;
+                        }
+                    }
+                    const exactStart = old.length - (received.length - overlap);
+                    const suffix = exactStart >= 0 && received.slice(overlap).every((row, offset) => old[old.length - 1 - offset] === row.id);
+                    let uniqueSuffix = suffix;
+                    if (suffix && positions.size !== old.length) {
+                        for (let start = old.indexOf(received.at(-1).id); start >= 0 && start < exactStart;
+                            start = old.indexOf(received.at(-1).id, start + 1)) {
+                            if (received.slice(overlap).every((row, offset) => old[start + received.length - overlap - 1 - offset] === row.id)) {
+                                uniqueSuffix = false;
+                                break;
+                            }
+                        }
+                    }
+                    const prefix = suffix ? exactStart : positions.get(received.at(-1).id);
+                    let matched = 0;
+                    while (prefix !== undefined && matched < received.length && old[prefix + matched] === received[received.length - 1 - matched].id) {
+                        matched++;
+                    }
+                    const exact = matched === received.length - overlap && prefix + matched === old.length;
+                    let currentHead = overlap > 0 || received[0].id === old.at(-1);
+                    const unambiguous = ordered && distinct.size === received.length && positions.size === old.length;
+                    if (!currentHead && read === 0 && overlap === 0 && unambiguous && matched === settings.PageSize &&
+                        matched === received.length && prefix > 0 && prefix + matched < old.length) {
+                        let metadata = null;
+                        try {
+                            metadata = (await ZetaSource.get(request, settings.RoomsPath + encodeURIComponent(request.roomId), true)).body;
+                        } catch (error) {
+                            return ZetaSource.outcome(received, ends.Failed, error.message, skipped);
+                        }
+                        if (metadata?.id === request.roomId && metadata.lastMessage?.id === received[0].id) {
+                            currentHead = true;
+                        } else {
+                            return ZetaSource.outcome(received, ends.Failed, 'Zeta’s room details and latest history page disagree. Scribe will check again.', skipped);
+                        }
+                    }
+                    if (prefix > 0 && currentHead && (uniqueSuffix || unambiguous && (exact || matched >= 2))) {
+                        const older = old.slice(0, prefix);
+                        const transport = older.concat(received.map((row) => row.id).reverse());
+                        const messages = ZetaSource.ordered(received.concat(older.slice().reverse().map((id) => saved.rows.get(id))));
+                        const unique = [...new Set(transport.slice().reverse())].reverse();
+                        const index = request.index;
+                        index.transport = transport;
+                        index.order = new Map(transport.map((id, position) => [id, position]));
+                        index.disordered = messages.some((row, position) => row.id !== unique[position]);
+                        index.boundaries = saved.boundaries;
+                        index.locations = saved.locations;
+                        const head = transport.length - 1;
+                        for (const [token, offset] of boundaries) {
+                            index.boundaries.set(token, { first: head - offset, head });
+                        }
+                        for (const [id, token] of locations) {
+                            index.locations.set(id, token);
+                        }
+                        if (request.remember && (!exact || overlap > 0)) {
+                            const pages = [];
+                            const recorded = new Set();
+                            for (let high = head; high >= 0;) {
+                                const token = index.locations.get(transport[high]);
+                                let low = high;
+                                while (low > 0 && index.locations.get(transport[low - 1]) === token) {
+                                    low--;
+                                }
+                                const origin = index.boundaries.get(token);
+                                if (origin && !recorded.has(token)) {
+                                    pages.push([token, low, high, origin.first, origin.head]);
+                                    recorded.add(token);
+                                }
+                                high = low - 1;
+                            }
+                            ZetaSource.quietly(null, request.remember, { count: messages.length, first: messages[0].id,
+                                last: messages.at(-1).id, pages: pages.slice(0, settings.MostPages),
+                                ...(index.disordered || unique.length !== transport.length ? { transport } : {}) });
+                        }
+                        return { messages, end: ends.ThroughMessage, skipped: 0, problem: null,
+                            observed: ZetaSource.ordered(received) };
+                    }
+                    if (!currentHead || !unambiguous && !suffix) {
+                        saved = null;
+                    }
+                }
+            }
             let end = null;
             if (page.messages.length === 0) {
                 end = ends.EmptyPage;
@@ -1234,8 +1394,9 @@ const ZetaSource = Object.freeze({
                 end = ends.RepeatedCursor;
             }
             if (end !== null) {
-                const result = ZetaSource.outcome(received, end, null, skipped);
-                const complete = !skipped && (end === ends.NoCursor || end === ends.EmptyPage);
+                const problem = end === ends.EmptyPage && next !== null ? settings.Messages.EmptyContinuation : null;
+                const result = ZetaSource.outcome(received, end, problem, skipped);
+                const complete = !problem && !skipped && (end === ends.NoCursor || end === ends.EmptyPage);
                 if (complete && request.index) {
                     request.index.locations = locations;
                     const head = received.length - 1;
@@ -1246,6 +1407,14 @@ const ZetaSource = Object.freeze({
                     request.index.order = new Map(transport.map((id, position) => [id, position]));
                     const unique = [...distinct].reverse();
                     request.index.disordered = result.messages.some((row, position) => unique[position] !== row.id);
+                    if (request.remember && result.messages.length) {
+                        const pages = [...boundaries];
+                        const hints = { count: result.messages.length, first: result.messages[0].id,
+                            last: result.messages.at(-1).id, pages: pages.map(([token], position) =>
+                                [token, received.length - (pages[position + 1]?.[1] ?? received.length)]),
+                            ...(request.index.disordered || unique.length !== transport.length ? { transport } : {}) };
+                        ZetaSource.quietly(null, request.remember, hints);
+                    }
                 }
                 return Object.freeze({ ...result, ...(complete ? { completeHistory: true } : {}),
                     ...(page.emptyRoom ? { emptyRoom: true } : {}) });
@@ -1267,11 +1436,32 @@ const ZetaSource = Object.freeze({
         }
         const ends = ZetaSource.End;
         ZetaSource.ready(request);
+        const historical = new Map();
+        if (!request.savedRoom && !request.check && request.through && request.index?.expirations > 0) {
+            for (const id of request.required ?? []) {
+                const cursor = request.index.locations.get(id);
+                if (cursor == null || historical.has(cursor)) {
+                    continue;
+                }
+                try {
+                    historical.set(cursor, await ZetaSource.page(request, cursor));
+                } catch (error) {
+                    if (![400, ZetaSource.Settings.NotFound, 410].includes(error.status)) {
+                        throw error;
+                    }
+                    historical.set(cursor, null);
+                }
+            }
+        }
         const page = await ZetaSource.page(request, null);
         const result = ZetaSource.outcome(page.messages, page.messages.length === 0 ? ends.EmptyPage : ends.NoCursor, null, page.skipped);
         if (request.index && !page.skipped) {
             request.index.headIds = new Set(page.messages.map((row) => row.id));
             request.index.completeHead = page.nextCursor === null && (page.messages.length > 0 || page.emptyRoom);
+            const tip = request.index.disordered ? request.index.transport?.at(-1) : request.known?.at(-1)?.id;
+            if (tip && page.nextCursor !== null && page.messages.length && !request.index.headIds.has(tip)) {
+                return { needsHistory: true, changedHead: page };
+            }
         }
         if (request.index && (request.through || request.index.disordered)) {
             const limited = request.check && (request.index.expirations >= 2 || request.check.previouslyLimited &&
@@ -1297,7 +1487,7 @@ const ZetaSource = Object.freeze({
                 join++;
             }
             if (join === transport.length) {
-                return repair;
+                return { ...repair, changedHead: page };
             }
             for (let position = transport.length; position < join + headIds.length; position++) {
                 const id = headIds[position - join];
@@ -1309,22 +1499,33 @@ const ZetaSource = Object.freeze({
             const verified = new Map();
             const locations = request.index.locations;
             const fetched = new Map();
+            const cached = new Set();
             let direct = false;
+            let reserved = false;
             const latest = request.known.at(-1);
             for (const id of new Set([...(request.required ?? []), latest.id])) {
                 let cursor = locations.get(id);
                 let adjacent = null;
-                if (cursor === null && !observed.has(id)) {
+                if (historical.has(cursor) && historical.get(cursor) === null) {
+                    cursor = null;
+                }
+                if (cursor == null && known.has(id) && !observed.has(id)) {
+                    if (request.savedRoom && join - known.get(id) > ZetaSource.Settings.PageSize) {
+                        cached.add(id);
+                        continue;
+                    }
                     cursor = page.nextCursor;
                     adjacent = join - 1;
                 }
                 let attempts = 0;
                 while (!observed.has(id)) {
-                    if (request.index.expirations >= 2 && !request.check) {
-                        return ZetaSource.history({ ...request, through: request.index.disordered || transport.length !== known.size
-                            ? null : request.through, firstPage: page, required: [...(request.required ?? []), latest.id] });
+                    if (request.savedRoom && timeline.has(id) && (historical.get(cursor) === null ||
+                        attempts > 0 && (attempts >= 2 || adjacent === null || adjacent - known.get(id) >= ZetaSource.Settings.PageSize))) {
+                        cached.add(id);
+                        break;
                     }
-                    if (cursor == null || !known.has(id) || attempts++ >= 3) {
+                    if (cursor == null || !known.has(id) || attempts++ >= ZetaSource.Settings.MostPages ||
+                        (adjacent !== null && adjacent < known.get(id))) {
                         return repair;
                     }
                     if (fetched.has(cursor)) {
@@ -1333,13 +1534,36 @@ const ZetaSource = Object.freeze({
                         adjacent = previous.last - 1;
                         continue;
                     }
+                    if (!reserved && !locations.has(id) && request.check?.previouslyLimited &&
+                        fetched.size >= ZetaSource.Settings.CheapCheckPages - 1) {
+                        reserved = request.check.reserve();
+                        if (!reserved) {
+                            return { deferredCheck: true };
+                        }
+                    }
                     await ZetaSource.wait(request, ZetaSource.Settings.PauseMs);
                     let older;
                     try {
-                        older = await ZetaSource.page(request, cursor);
+                        older = historical.get(cursor) ?? await ZetaSource.page(request, cursor);
                     } catch (error) {
                         if ([400, ZetaSource.Settings.NotFound, 410].includes(error.status)) {
                             request.index.expirations = (request.index.expirations ?? 0) + 1;
+                            if (request.savedRoom && timeline.has(id)) {
+                                if (request.check && !reserved && (limited || request.index.expirations >= 2)) {
+                                    reserved = request.check.reserve();
+                                    if (!reserved) {
+                                        return { deferredCheck: true };
+                                    }
+                                }
+                                historical.set(cursor, null);
+                                cached.add(id);
+                                break;
+                            }
+                            if (!request.check && request.through && adjacent === null && cursor !== page.nextCursor) {
+                                cursor = page.nextCursor;
+                                adjacent = join - 1;
+                                continue;
+                            }
                             if (request.check && (request.index.expirations >= 2 || limited)) {
                                 return ZetaSource.history({ ...request, firstPage: page,
                                     through: request.index.disordered || transport.length !== known.size ? null : request.through,
@@ -1355,6 +1579,30 @@ const ZetaSource = Object.freeze({
                     const first = candidates.find((start) => Number.isInteger(start) && rows.length > 0 &&
                         rows.every((row, offset) => transport[start - offset] === row.id) &&
                         (older.nextCursor === null) === (start - rows.length + 1 === 0));
+                    if (first === undefined && request.savedRoom && !request.index.disordered && !older.skipped &&
+                        rows.length && known.size === transport.length) {
+                        const high = known.get(rows[0].id);
+                        const low = older.nextCursor === null ? 0 : known.get(rows.at(-1).id);
+                        const observedRows = [...rows, ...verified.values(), ...page.messages];
+                        if (Number.isInteger(high) && Number.isInteger(low) && high >= low &&
+                            new Set(rows.map((row) => row.id)).size === rows.length &&
+                            rows.every((row) => !known.has(row.id) || known.get(row.id) >= low && known.get(row.id) <= high)) {
+                            const replacement = [...transport.slice(0, low), ...rows.map((row) => row.id).reverse(), ...transport.slice(high + 1)];
+                            const data = new Map([...timeline, ...observedRows.map((row) => [row.id, row])]);
+                            const campaign = ZetaSource.ordered(replacement.map((key) => data.get(key)).reverse());
+                            if (campaign.every((row, position) => row.id === replacement[position])) {
+                                request.index.transport = replacement;
+                                request.index.order = new Map(replacement.map((key, position) => [key, position]));
+                                request.index.boundaries.set(cursor, { first: low + rows.length - 1, head: replacement.length - 1 });
+                                for (const row of rows) {
+                                    locations.set(row.id, cursor);
+                                }
+                                return { ...result, end: ends.ThroughMessage, reconciled: campaign, verified: observedRows };
+                            }
+                        }
+                        cached.add(id);
+                        break;
+                    }
                     if (older.skipped || first === undefined) {
                         return repair;
                     }
@@ -1375,7 +1623,7 @@ const ZetaSource = Object.freeze({
                     cursor = older.nextCursor;
                 }
             }
-            if (direct) {
+            if (direct && !historical.size) {
                 request.index.expirations = 0;
             }
             for (const id of headIds) {
@@ -1385,7 +1633,7 @@ const ZetaSource = Object.freeze({
                 verified.set(row.id, row);
             }
             const additions = result.messages.filter((row) => !timeline.has(row.id));
-            const suffix = [verified.get(latest.id), ...additions];
+            const suffix = [cached.has(latest.id) ? latest : verified.get(latest.id), ...additions];
             const orderedSuffix = ZetaSource.ordered([...suffix].reverse());
             if (orderedSuffix.some((row, position) => row.id !== suffix[position].id) ||
                 [...verified.values()].some((row) => timeline.has(row.id) && timeline.get(row.id).messageTime !== row.messageTime)) {
@@ -1394,7 +1642,8 @@ const ZetaSource = Object.freeze({
             for (const row of suffix) {
                 verified.delete(row.id);
             }
-            return { ...result, end: ends.ThroughMessage, messages: suffix, verified: [...verified.values()] };
+            return { ...result, end: ends.ThroughMessage, messages: suffix, verified: [...verified.values()],
+                ...(cached.size ? { cached: [...cached] } : {}) };
         }
         if (request.index && !page.skipped) {
             for (const row of page.messages) {

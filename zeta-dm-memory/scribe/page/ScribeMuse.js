@@ -1,23 +1,16 @@
 const ScribeMuse = Object.freeze({
     Settings: Object.freeze({
-        LineBytes: 300,
         Recent: 10,
-        WordsLimit: 2000,
         LabelLimit: 60,
         TextLimit: 200,
         FirstEntry: 0,
         NoSceneBefore: 0,
-        ContentGroup: 1,
-        LabelReach: 40,
-        OneMarked: 1,
         Nothing: '',
         Space: ' ',
         Newline: '\n',
         BlankLine: '\n\n',
         Comma: ', ',
         Colon: ': ',
-        Marker: '@',
-        ScribeStart: '[scribe',
         Joiner: ' | ',
         Day: 'Day ',
         Present: 'present: ',
@@ -74,12 +67,6 @@ const ScribeMuse = Object.freeze({
             Thread: 'THREAD:',
             Recent: 'RECENT MESSAGES:',
         }),
-        Reasons: Object.freeze({
-            NotFromANote: 'NotFromANote',
-            WrongPosition: 'WrongPosition',
-        }),
-        Brackets: Object.freeze(['()', '[]']),
-        NormalForm: 'NFKC',
         Quote: '"',
         Apostrophe: "'",
         ReasonGiven: ', reason given for the end: ',
@@ -88,12 +75,6 @@ const ScribeMuse = Object.freeze({
         LookChanges: 'A look-alike changes: ',
         EndedStatus: 'Ended',
 
-        /**
-         * @return {RegExp}
-         */
-        get LineBreak() {
-            return /\r\n|(?!\t)[\p{Cc}\p{Zl}\p{Zp}]/u;
-        },
 
         /**
          * @return {RegExp}
@@ -109,54 +90,6 @@ const ScribeMuse = Object.freeze({
             return /\p{Cf}/gu;
         },
 
-        /**
-         * @return {RegExp}
-         */
-        get LeadingCitation() {
-            return /^(?:\[#\d+\]\s*)+/;
-        },
-
-        /**
-         * @return {RegExp}
-         */
-        get MarkedLine() {
-            return /^[ >*_#`]*LINE:\s*(.*)$/;
-        },
-
-        /**
-         * @return {RegExp}
-         */
-        get Ignorable() {
-            return /[\p{Default_Ignorable_Code_Point}\p{Cf}]/gu;
-        },
-
-        /**
-         * @return {RegExp}
-         */
-        get DressStart() {
-            return /^[*_`]+/;
-        },
-
-        /**
-         * @return {RegExp}
-         */
-        get DressEnd() {
-            return /[*_`]+$/;
-        },
-
-        /**
-         * @return {RegExp}
-         */
-        get DressMarks() {
-            return /[*_`]/g;
-        },
-
-        /**
-         * @return {RegExp}
-         */
-        get QuoteMark() {
-            return /^\p{Quotation_Mark}$/u;
-        },
 
         /**
          * @return {RegExp}
@@ -165,57 +98,15 @@ const ScribeMuse = Object.freeze({
             return /(?!['’])\p{Quotation_Mark}/gu;
         },
 
-        /**
-         * @return {RegExp}
-         */
-        get Letters() {
-            return /[\p{L}\p{N}]/u;
-        },
 
-        /**
-         * @return {RegExp}
-         */
-        get LabelInside() {
-            return /^(?:[^\s:]+ ){0,3}[^\s:]+ ?:(?!\d)/;
-        },
-
-        /**
-         * @return {RegExp}
-         */
-        get NoneAnswer() {
-            return /^none(?:[\p{P}\s]*$|[.,:;]| \p{Pd} )/iu;
-        },
-
-        /**
-         * @return {RegExp}
-         */
-        get Refusal() {
-            return /^(?:(?:i['’]m sorry|i am sorry|i can['’]t|i cannot|i won['’]t|as an ai)(?!\p{L})|(?:sorry|sure|certainly)[,.!]|here(?: is|['’]s) (?:a|the|your) (?:\S+ ){0,3}(?:line|suggestion|narrator|option|version)(?!\p{L}))/iu;
-        },
 
         PromptLines: Object.freeze([
             'You help a storyteller keep an ongoing adult fiction roleplay moving. You do not continue the story yourself.',
             'You receive the SCENE as it stands, one open THREAD the story left hanging, and the RECENT MESSAGES.',
             'Write one narrator line, at most 40 words, that brings the THREAD back into this scene as a development the characters must react to: an arrival, a discovery, a message, a consequence. It must fit the scene and contradict nothing in the recent messages.',
-            'Answer with exactly one line that begins with LINE: followed by the narrator line, all on that one line. No quotation marks around it, no label inside it, nothing before it and nothing after it.',
-            'If the thread cannot fit this scene at all, answer with exactly: NONE',
+            'Return the suggestion in your own words.',
         ]),
 
-        /**
-         * @return {readonly string[]}
-         */
-        get Filed() {
-            const types = ScribeAnswer.Type;
-            return [
-                types.Subject,
-                types.Alias,
-                types.Fact,
-                types.Change,
-                types.Refine,
-                types.End,
-                types.ThreadOpen,
-            ];
-        },
     }),
 
     /**
@@ -293,7 +184,7 @@ const ScribeMuse = Object.freeze({
                  */
                 (person) => ScribeIntake.collapse(person.label),
             );
-            scene = [
+            scene = now.modelResponse ?? [
                 settings.Day + now.day,
                 ScribeIntake.collapse(now.place),
                 now.reach.toLowerCase(),
@@ -313,72 +204,11 @@ const ScribeMuse = Object.freeze({
      * @return {string|null}
      */
     line(text) {
-        const settings = ScribeMuse.Settings;
-        if (typeof text !== 'string') {
+        if (typeof text !== 'string' || !text.trim()) {
             return null;
         }
-        const lines = text.split(settings.LineBreak).map(
-            /**
-             * @param {string} raw
-             * @return {string}
-             */
-            (raw) => raw.replace(settings.FormatCharacter, settings.Nothing).trim(),
-        );
-        const marked = [];
-        for (const [index, candidate] of lines.entries()) {
-            const found = candidate.match(settings.MarkedLine);
-            if (found !== null) {
-                marked.push({ index, content: found[settings.ContentGroup] });
-            }
-        }
-        if (marked.length !== settings.OneMarked) {
-            return null;
-        }
-        const following = lines[marked[settings.FirstEntry].index + 1];
-        if (following !== undefined && following !== settings.Nothing) {
-            return null;
-        }
-        let kept = marked[settings.FirstEntry].content
-            .normalize(settings.NormalForm)
-            .replace(settings.Ignorable, settings.Nothing);
-        let changed = true;
-        while (changed) {
-            const before = kept;
-            kept = kept
-                .trim()
-                .replace(settings.DressStart, settings.Nothing)
-                .replace(settings.DressEnd, settings.Nothing)
-                .trim();
-            const points = Array.from(kept);
-            const first = points[settings.FirstEntry];
-            const last = points.at(-1);
-            const inner = points.slice(1, -1).join(settings.Nothing);
-            const wrapped =
-                points.length >= 2 &&
-                ((settings.QuoteMark.test(first) && settings.QuoteMark.test(last)) ||
-                    settings.Brackets.some(
-                        /**
-                         * @param {string} pair
-                         * @return {boolean}
-                         */
-                        (pair) => first === pair[0] && last === pair[1],
-                    ));
-            if (wrapped && !inner.includes(first) && !inner.includes(last)) {
-                kept = inner.trim();
-            }
-            changed = kept !== before;
-        }
-        kept = ScribeIntake.collapse(kept);
-        const label = kept.replace(settings.DressMarks, settings.Nothing).match(settings.LabelInside);
-        const refused =
-            !settings.Letters.test(kept) ||
-            settings.NoneAnswer.test(kept) ||
-            kept.toLowerCase().includes(settings.ScribeStart) ||
-            kept.includes(settings.Marker) ||
-            (label !== null && Array.from(label[settings.FirstEntry]).length <= settings.LabelReach) ||
-            settings.Refusal.test(kept) ||
-            ScribeText.bytes(kept) > settings.LineBytes;
-        return refused ? null : kept;
+        const marked = /^LINE:[ \t]*(\S[^\r\n]*)$/iu.exec(text);
+        return marked ? marked[1] : text;
     },
 
     /**
@@ -405,42 +235,18 @@ const ScribeMuse = Object.freeze({
      * @return {Promise<Readonly<{ operations: readonly object[], refused: readonly object[] }>|null>}
      */
     async tell({ state, player, words, anchor, ask }) {
-        const settings = ScribeMuse.Settings;
-        const note = Array.from(
-            ScribeIntake.collapse(
-                words
-                    .replace(settings.FormatCharacter, settings.Nothing)
-                    .replace(settings.Controls, settings.Space)
-                    .trim()
-                    .replace(settings.LeadingCitation, settings.Nothing),
-            ),
-        )
-            .slice(settings.FirstEntry, settings.WordsLimit)
-            .join(settings.Nothing)
-            .trim();
-        if (note === settings.Nothing || anchor === null) {
+        if (!words.trim() || anchor === null) {
             return null;
         }
+        const notes = [{ text: words, position: anchor.position }];
         let answer;
         try {
-            const notes = [{ text: note, position: anchor.position }];
             answer = (await ask(ScribeAnalyzer.NotesPrompt, ScribeAnalyzer.notesInput(state, player, notes))).text;
-        } catch {
-            answer = null;
+        } catch (error) {
+            return Object.freeze({ operations: [], refused: [], operatorText: words, modelResponse: null, failure: error });
         }
-        const parsed = ScribeAnswer.parse(typeof answer === 'string' ? answer : settings.Nothing);
-        const operations = [];
-        const refused = [...parsed.refused];
-        for (const operation of parsed.operations) {
-            if (!settings.Filed.includes(operation.type)) {
-                refused.push(Object.freeze({ operation, reason: settings.Reasons.NotFromANote }));
-            } else if (operation.type !== ScribeAnswer.Type.Subject && operation.position !== anchor.position) {
-                refused.push(Object.freeze({ operation, reason: settings.Reasons.WrongPosition }));
-            } else {
-                operations.push(operation);
-            }
-        }
-        return Object.freeze({ operations: Object.freeze(operations), refused: Object.freeze(refused) });
+        const parsed = ScribeAnswer.parse(typeof answer === 'string' ? answer : '');
+        return Object.freeze({ operations: parsed.operations, refused: parsed.refused, operatorText: words, modelResponse: answer });
     },
 
     /**

@@ -12,10 +12,7 @@ const ScribeLive = Object.freeze({
     Settings: Object.freeze({
         MessageBytes: 4500,
         Recent: 20,
-        FindingsKept: 200,
-        DismissedKept: 500,
         CheckedKept: 8,
-        NotesKept: 100,
         FirstMost: 5,
         FirstFinding: 0,
         FirstEpoch: 0,
@@ -24,6 +21,7 @@ const ScribeLive = Object.freeze({
         SettledKept: 50,
         CountedKept: 50,
         NoSerial: 0,
+        RecapKeyPrefix: 'recap2:',
         IdPrefix: '#reminder-',
         AttemptPrefix: '#attempt-',
         PostPrefix: '#post-',
@@ -80,7 +78,8 @@ const ScribeLive = Object.freeze({
             UnreadOpen: 'No reminder: the scene has not been read yet; the latest reply is #',
             FullStop: '.',
             SceneUnreadable: "the Scribe's answer about the scene could not be read",
-            StoryEmpty: 'the answer held no story',
+            LegacyStoryFormat: 'the writer returned no usable recap in the requested format',
+            StoryEmpty: 'the writer returned no recap text',
             StoryDeclined: 'the writer declined to produce a recap',
             Untold: 'The story recap is unavailable. See Progress for details.',
             EditStale: 'Your edit was written before the latest reply; Save it again to send it.',
@@ -166,12 +165,11 @@ const ScribeLive = Object.freeze({
                  */
                 (name) => ScribeLive.isText(value[name]),
             ) &&
-            value.place !== settings.Nothing &&
+            (value.place !== settings.Nothing || (value.day === null && typeof value.modelResponse === 'string' && value.modelResponse.trim())) &&
             (value.fingerprint === undefined || ScribeLive.isText(value.fingerprint)) &&
             Number.isSafeInteger(value.position) &&
-            Number.isSafeInteger(value.day) &&
-            value.day >= settings.FirstDay &&
-            typeof value.changed === settings.BooleanType &&
+            (value.day === null || (Number.isSafeInteger(value.day) && value.day >= settings.FirstDay)) &&
+            (value.changed === null || typeof value.changed === settings.BooleanType) &&
             Array.isArray(value.present) &&
             value.present.every(
                 /**
@@ -212,7 +210,7 @@ const ScribeLive = Object.freeze({
         if (!sound) {
             return null;
         }
-        const fault = value.fault === undefined ? value.key : value.fault;
+        const fault = ScribePedant.key(value);
         const kept = {
             ...value,
             fault,
@@ -294,7 +292,7 @@ const ScribeLive = Object.freeze({
             ScribeLive.isObject(value) &&
             ScribeLive.isText(value.name) &&
             value.name !== settings.Nothing &&
-            Object.values(ScribePedant.Note).includes(value.kind) &&
+            ScribeLive.isText(value.kind) &&
             ScribeLive.isText(value.text) &&
             value.text !== settings.Nothing &&
             ScribeLive.isText(value.message) &&
@@ -359,44 +357,17 @@ const ScribeLive = Object.freeze({
      * @return {object[]}
      */
     noted(notes, given, message) {
-        const settings = ScribeLive.Settings;
-        const keyOf =
-            /**
-             * @param {{ name: string, kind: string }} note
-             * @return {string}
-             */
-            (note) => JSON.stringify([ScribeText.normaliseName(note.name), note.kind]);
-        const standing = new Map();
-        for (const note of notes) {
-            if (note.message !== message.id) {
-                standing.set(keyOf(note), note);
+        const grouped = new Map();
+        for (const note of [...notes.filter((prior) => prior.message !== message.id), ...ScribeLive.stamped(given, message)]) {
+            const key = JSON.stringify([ScribeText.normaliseName(note.name), note.kind]);
+            const group = grouped.get(key);
+            if (group === undefined || group[0].position < note.position || (group[0].position === note.position && group[0].message !== note.message)) {
+                grouped.set(key, [note]);
+            } else if (group[0].position === note.position && !group.some((prior) => prior.name === note.name && prior.text === note.text)) {
+                group.push(note);
             }
         }
-        for (const note of ScribeLive.stamped(given, message)) {
-            const key = keyOf(note);
-            const older = standing.get(key);
-            if (older === undefined || older.position <= note.position) {
-                standing.set(key, note);
-            }
-        }
-        const all = [...standing.values()];
-        const youngest = [...all]
-            .sort(
-                /**
-                 * @param {{ position: number }} first
-                 * @param {{ position: number }} second
-                 * @return {number}
-                 */
-                (first, second) => second.position - first.position,
-            )
-            .slice(settings.FirstFinding, settings.NotesKept);
-        return all.filter(
-            /**
-             * @param {object} note
-             * @return {boolean}
-             */
-            (note) => youngest.includes(note),
-        );
+        return [...grouped.values()].flat();
     },
 
     /**
@@ -648,24 +619,7 @@ const ScribeLive = Object.freeze({
                 });
             }
         }
-        const all = [...added, ...findings];
-        const youngest = [...all]
-            .sort(
-                /**
-                 * @param {{ position: number }} first
-                 * @param {{ position: number }} second
-                 * @return {number}
-                 */
-                (first, second) => second.position - first.position,
-            )
-            .slice(settings.FirstFinding, settings.FindingsKept);
-        return all.filter(
-            /**
-             * @param {object} finding
-             * @return {boolean}
-             */
-            (finding) => youngest.includes(finding),
-        );
+        return [...added, ...findings];
     },
 
     /**
@@ -708,6 +662,7 @@ const ScribeLive = Object.freeze({
             forbiddenSend: false,
             streamWarning: null,
             findings: [],
+            checkerRows: [],
             notes: [],
             dismissed: [],
             suggestion: null,
@@ -722,6 +677,7 @@ const ScribeLive = Object.freeze({
         };
         live.problem = null;
         live.preparationFailure = null;
+        live.offer = null;
         live.awaiting = false;
         live.recovering.clear();
         if (saved === undefined) {
@@ -747,7 +703,7 @@ const ScribeLive = Object.freeze({
             Number.isSafeInteger(basis.revision) &&
             ScribeLive.isTexts(basis.first) &&
             ScribeLive.isText(basis.notes) &&
-            ScribeLive.isText(basis.story);
+            ScribeLive.isText(basis.story) && basis.story.startsWith(settings.RecapKeyPrefix);
         const composed = sound && ScribeLive.isText(saved.ready);
         live.owed = ScribeLive.isText(saved.ready) && !composed;
         record.ready = composed ? saved.ready : null;
@@ -828,6 +784,9 @@ const ScribeLive = Object.freeze({
         live.recovering = new Set(record.posts.filter((post) => !post.confirmed).map((post) => post.key));
         live.awaiting = ScribeLive.awaitingReceipt(live);
         record.findings = ScribeLive.findings(saved.findings);
+        record.checkerRows = Array.isArray(saved.checkerRows) ? saved.checkerRows.filter((row) =>
+            row && typeof row.id === 'string' && typeof row.fingerprint === 'string' &&
+            Number.isSafeInteger(row.position) && typeof row.statement === 'string') : [];
         record.notes = ScribeLive.notes(saved.notes);
         const dismissed = ScribeLive.isTexts(saved.dismissed) ? [...saved.dismissed] : [];
         for (const finding of [...record.findings].reverse()) {
@@ -835,8 +794,9 @@ const ScribeLive = Object.freeze({
                 dismissed.push(finding.fault);
             }
         }
-        record.dismissed = dismissed.slice(-settings.DismissedKept);
+        record.dismissed = dismissed;
         record.suggestion = ScribeLive.isText(saved.suggestion) ? saved.suggestion : null;
+        live.offer = saved.offer && typeof saved.offer.text === 'string' && typeof saved.offer.thread === 'string' ? saved.offer : null;
         const seen = saved.seen;
         if (
             ScribeLive.isObject(seen) &&
@@ -861,8 +821,8 @@ const ScribeLive = Object.freeze({
             }
         }
         const story = saved.story;
-        if (ScribeLive.isObject(story) && ScribeLive.isText(story.key) && ScribeLive.isText(story.text)) {
-            record.story = { key: story.key, text: story.text };
+        if (ScribeLive.isObject(story) && ScribeLive.isText(story.key) && story.key.startsWith(settings.RecapKeyPrefix) && ScribeLive.isText(story.text)) {
+            record.story = { key: story.key, text: story.text, ...(typeof story.modelResponse === 'string' ? { modelResponse: story.modelResponse } : {}) };
         }
         const untold = saved.untold;
         const owed =
@@ -872,30 +832,14 @@ const ScribeLive = Object.freeze({
             Number.isSafeInteger(untold.tries) &&
             untold.tries >= settings.FirstTry &&
             Number.isFinite(untold.at);
-        if (owed) {
+        if (owed && untold.reason !== settings.Messages.LegacyStoryFormat) {
             record.untold = { key: untold.key, reason: untold.reason, tries: untold.tries, at: untold.at,
+                ...(typeof untold.modelResponse === 'string' ? { modelResponse: untold.modelResponse } : {}),
                 ...(ScribeLive.isText(untold.failureId) ? { failureId: untold.failureId } : {}),
                 ...(ScribeStore.localSource(untold.source) ? { source: untold.source } : {}),
             };
         }
-        const rejectedCache = record.story !== null && ScribeReminder.declined(record.story.text);
-        const opening = ScribeIntake.Settings.OwnMarker + settings.Space + ScribeReminder.Settings.StoryOpen;
-        const rejectedOffer = record.ready?.startsWith(opening) && ScribeReminder.declined(record.ready.slice(opening.length));
-        const rejectedKey = rejectedOffer ? record.basis.story : rejectedCache ? record.story.key : null;
-        if (rejectedKey !== null) {
-            if (rejectedOffer || record.basis?.story === rejectedKey) {
-                record.ready = null;
-                record.basis = null;
-                record.led = [];
-                record.reminded = null;
-            }
-            if (rejectedCache) {
-                record.story = null;
-            }
-            record.untold = { key: rejectedKey, reason: settings.Messages.StoryDeclined,
-                tries: settings.RetryMs.length, at: live.clock.now() };
-        }
-        const oldOffer = record.edited ?? record.ready;
+        const oldOffer = record.edited ?? record.ready ?? (ScribeLive.isText(basis?.story) && ScribeLive.isText(saved.ready) ? saved.ready : null);
         const oldTarget = (record.edited && record.editedFor?.id) || record.now?.message || record.seen?.id;
         if (record.delivery === null && oldOffer !== null) {
             ScribeLive.mint(live).prior = { target: oldTarget ?? null, offer: oldOffer, released: false };
@@ -954,6 +898,7 @@ const ScribeLive = Object.freeze({
      */
     save(live) {
         try {
+            live.record.offer = live.offer;
             ScribeStore.write(live.storage, live.roomId, ScribeStore.Kind.Live, live.record);
             live.repairRulings = false;
         } catch (error) {
@@ -1266,7 +1211,11 @@ const ScribeLive = Object.freeze({
      * @return {boolean}
      */
     carries(owned, message, carried) {
-        return message?.fromPlayer === true && carried !== null && owned.some((entry) =>
+        if (message?.fromPlayer !== true || !carried) {
+            return false;
+        }
+        const wire = ScribeIntake.Submissions.get(message);
+        return (typeof wire === 'string' && ScribeText.reminderSpan(wire, carried) !== null) || owned.some((entry) =>
             entry.position === message.position && ScribeLive.isText(entry.text) &&
             ScribeLive.line(entry.text) === ScribeLive.line(carried),
         );
@@ -1404,7 +1353,10 @@ const ScribeLive = Object.freeze({
                 continue;
             }
             const same = record.posts.filter((post) => !post.manual && eligible(post, message) && sameSubmission(post, message));
+            const wire = ScribeIntake.Submissions.get(message) ?? '';
+            const marked = wire.split(/\r?\n/).filter(ScribeText.reminderLine);
             const post = same.find((entry) => entry.carried === null) ?? same.find((entry) =>
+                marked.some((line) => ScribeLive.line(entry.carried).startsWith(ScribeLive.line(line))) ||
                 owned.some((block) => block.position === message.position && ScribeLive.isText(block.text) &&
                     ScribeLive.line(entry.carried).startsWith(ScribeLive.line(block.text))),
             );
@@ -1450,7 +1402,7 @@ const ScribeLive = Object.freeze({
             const reminder = !post?.ignored && match?.carried ? post.reminder : null;
             const reset = ScribeLive.firstDelivery(deliveries, reminder);
             if (post) {
-                if (post.manual && match?.carried) {
+                if (match?.carried && ScribeIntake.carried(message, post)) {
                     ScribeLive.contestProjection(record, post);
                     const wire = ScribeIntake.Submissions.get(message);
                     const range = ScribeIntake.playerRange(wire, post);
@@ -1630,10 +1582,11 @@ const ScribeLive = Object.freeze({
                 throw Object.assign(new Error(refused), { source: noted.source });
             }
             try {
+                const keys = ScribeStore.diagnosticKeys(live.storage);
                 const answer = await live.ask(role, system, user);
                 ScribeLive.stoppedCalls(live, role, answer);
                 ScribeLive.called(live, role, answer, null);
-                return answer;
+                return { ...answer, text: typeof answer.text === 'string' ? ScribeStore.redactor(live.storage, keys)(answer.text) : answer.text };
             } catch (error) {
                 const reason = ScribeLive.words(error);
                 const status = error?.status;
@@ -1784,10 +1737,13 @@ const ScribeLive = Object.freeze({
      * @return {boolean}
      */
     holds(basis, reminded, now, findings, notes, state) {
+        const audienceChanged = reminded && now && (reminded.reach !== now.reach ||
+            JSON.stringify([...ScribeScene.identities(reminded)].sort()) !== JSON.stringify([...ScribeScene.identities(now)].sort()));
         const differs =
             basis === null ||
             state.revision !== basis.revision ||
-            !ScribeScene.same(reminded, now) ||
+            Boolean(reminded) !== Boolean(now) || audienceChanged ||
+            (now?.changed === true && reminded?.message !== now.message) ||
             ScribeLive.marked(notes) !== basis.notes;
         if (differs) {
             return false;
@@ -1817,8 +1773,7 @@ const ScribeLive = Object.freeze({
             record.ready !== null &&
             record.basis !== null &&
             (record.basis.story === record.story?.key ||
-                (record.story === null && record.untold?.reason === ScribeLive.Settings.Messages.StoryDeclined &&
-                    record.basis.story !== record.untold.key && record.basis.story === ScribeLive.storyKey(view, record.now))) &&
+                (record.story === null && record.basis.story === ScribeLive.storyKey(view, record.now))) &&
             ScribeLive.holds(
                 record.basis,
                 record.reminded,
@@ -2018,13 +1973,13 @@ const ScribeLive = Object.freeze({
         const scene =
             now === null
                 ? null
-                : [now.day, ScribeText.normaliseName(now.place), now.reach, [...ScribeScene.identities(now)].sort()];
+                : now.day === null ? now.modelResponse : [now.day, ScribeText.normaliseName(now.place), now.reach, [...ScribeScene.identities(now)].sort()];
         const inputs = [ScribeReminder.storyInput(view.state, null, corrections, rulings), scene];
         const stamp = ScribeLive.checkerStamp(view.state, view.messages, rulings);
         if (stamp !== null) {
             inputs.push(stamp);
         }
-        return ScribeText.fingerprint(JSON.stringify(inputs));
+        return ScribeLive.Settings.RecapKeyPrefix + ScribeText.fingerprint(JSON.stringify(inputs));
     },
 
     /**
@@ -2089,13 +2044,16 @@ const ScribeLive = Object.freeze({
         const tell = async () => {
             const noted = { failure: null, retryable: false };
             let text = null;
+            let modelResponse = null;
             try {
                 const ask = ScribeLive.asker(live, settings.Roles.Scribe, noted);
                 const answer = await ask(ScribeReminder.StoryPrompt, ScribeReminder.storyInput(view.state, now, corrections, rulings));
-                if (ScribeReminder.declined(answer.text)) {
+                modelResponse = answer.text;
+                const recap = ScribeReminder.recap(answer.text);
+                if (recap?.status === 'declined') {
                     noted.failure = settings.Messages.StoryDeclined;
                 } else {
-                    text = ScribeReminder.told(answer.text);
+                    text = recap?.text ?? null;
                 }
             } catch (error) {
                 noted.failure ??= ScribeStore.diagnostic(live.storage, ScribeLive.words(error));
@@ -2105,7 +2063,7 @@ const ScribeLive = Object.freeze({
                 return null;
             }
             if (text !== null) {
-                record.story = { key, text };
+                record.story = { key, text, modelResponse };
                 record.untold = null;
                 return text;
             }
@@ -2117,6 +2075,7 @@ const ScribeLive = Object.freeze({
                 key,
                 failureId: crypto.randomUUID(),
                 reason: superseded ? '' : noted.failure ?? settings.Messages.StoryEmpty,
+                ...(modelResponse ? { modelResponse } : {}),
                 ...(ScribeStore.localSource(noted.source) ? { source: noted.source } : {}),
                 tries: parked ? settings.RetryMs.length : tries,
                 at: parked ? moment : moment + settings.RetryMs[tries],
@@ -2231,6 +2190,7 @@ const ScribeLive = Object.freeze({
         const failed = { scene: null, check: null, sceneRetryable: false, checkRetryable: false };
         let found = null;
         let raised = null;
+        let checkerRows = null;
         let notes = null;
         if (remembered === undefined) {
             let profile = null;
@@ -2271,18 +2231,29 @@ const ScribeLive = Object.freeze({
             if (asking.check) {
                 const pedantNoted = { failure: null, retryable: false };
                 try {
+                    const credentials = ScribeStore.diagnosticKeys(live.storage);
+                    const ask = ScribeLive.asker(live, roles.Pedant, pedantNoted);
                     const reviewed = await ScribePedant.review({
                         state: view.state,
                         player: view.player,
                         message,
                         unread: view.unread,
                         messages: view.messages,
-                        ask: ScribeLive.asker(live, roles.Pedant, pedantNoted),
-                        detailsOnly: view.checksEnabled === true && view.checkedThrough >= message.position,
+                        ask: async (system, input) => {
+                            const response = await ask(system, input);
+                            return typeof response?.text === 'string' ?
+                                { ...response, text: ScribeStore.redactor(live.storage, credentials)(response.text) } : response;
+                        },
                         profile,
                     });
                     raised = reviewed.findings;
                     notes = reviewed.notes;
+                    checkerRows = (reviewed.unfiled ?? []).map((line) => ({ id: message.id, fingerprint: message.fingerprint,
+                        position: message.position, statement: ScribeStore.diagnostic(live.storage, line) }));
+                    if (reviewed.modelReading) {
+                        checkerRows.push({ id: message.id, fingerprint: message.fingerprint, position: message.position,
+                            modelReading: true, statement: ScribeStore.diagnostic(live.storage, reviewed.modelReading) });
+                    }
                 } catch (error) {
                     if (!pedantNoted.keyChanged) {
                         live.problem = ScribeLive.words(error);
@@ -2342,7 +2313,7 @@ const ScribeLive = Object.freeze({
             return;
         }
         const latest = live.keeper.view();
-        if (found !== null && !ScribeScene.same(previous, found)) {
+        if (found?.changed === true) {
             live.offer = null;
             live.excluded = [];
         }
@@ -2358,6 +2329,11 @@ const ScribeLive = Object.freeze({
             remembered !== undefined,
         );
         ScribeLive.applyRulings(live, latest, record.findings);
+        if (checkerRows !== null) {
+            const prints = new Map((latest.messages ?? []).map((item) => [item.id, item.fingerprint]));
+            record.checkerRows = [...record.checkerRows.filter((row) =>
+                row.id !== message.id && prints.get(row.id) === row.fingerprint), ...checkerRows];
+        }
         if (notes !== null) {
             record.notes = ScribeLive.noted(ScribeLive.standing(record.notes, latest), notes, message);
         }
@@ -3174,7 +3150,7 @@ const ScribeLive = Object.freeze({
                 (kept) => kept !== fault,
             ),
             fault,
-        ].slice(-ScribeLive.Settings.DismissedKept);
+        ];
         ScribeLive.changed(live);
     },
 
@@ -3231,8 +3207,8 @@ const ScribeLive = Object.freeze({
         if (!ScribeLive.active(live)) {
             return;
         }
-        const line = ScribeIntake.collapse(text);
-        if (line === ScribeLive.Settings.Nothing) {
+        const line = text;
+        if (typeof line !== 'string' || !line.trim()) {
             return;
         }
         live.record.suggestion = line;
@@ -3421,7 +3397,7 @@ const ScribeLive = Object.freeze({
         if (offer !== null) {
             excluded.push(offer.thread);
         }
-        ScribeLive.announce(live);
+        ScribeLive.changed(live);
     },
 
     /**
@@ -3433,7 +3409,7 @@ const ScribeLive = Object.freeze({
             return;
         }
         live.offer = null;
-        ScribeLive.announce(live);
+        ScribeLive.changed(live);
     },
 
     /**
@@ -3471,7 +3447,7 @@ const ScribeLive = Object.freeze({
                 result = await ScribeMuse.tell({
                     state: view.state,
                     player: view.player,
-                    words,
+                    words: ScribeStore.diagnostic(live.storage, words),
                     anchor,
                     ask: ScribeLive.asker(live, settings.Roles.Analyzer, noted),
                 });
@@ -3503,6 +3479,8 @@ const ScribeLive = Object.freeze({
             }
             live.understood = {
                 operations: result.operations,
+                operatorText: ScribeStore.diagnostic(live.storage, result.operatorText),
+                modelResponse: result.modelResponse,
                 resolution,
                 anchor,
                 mused: result.refused,
@@ -3558,7 +3536,7 @@ const ScribeLive = Object.freeze({
         }
         const doubt = ScribeLive.distrust(live);
         const understood = live.understood;
-        if (understood === null || understood.operations.length === ScribeLive.Settings.NoCount) {
+        if (understood === null) {
             return;
         }
         if (doubt !== null) {
@@ -3571,7 +3549,7 @@ const ScribeLive = Object.freeze({
         try {
             let foreseen = null;
             try {
-                foreseen = await ScribeLive.foresee(live, understood.operations, understood.anchor);
+                foreseen = understood.operations.length ? await ScribeLive.foresee(live, understood.operations, understood.anchor) : { lines: [], refused: [] };
             } catch (error) {
                 if (live.closed) {
                     return;
@@ -3608,7 +3586,8 @@ const ScribeLive = Object.freeze({
                 return;
             }
             try {
-                await live.keeper.file(understood.operations, understood.anchor, understood.resolution);
+                await live.keeper.file(understood.operations, understood.anchor, understood.resolution,
+                    { operatorText: understood.operatorText, modelResponse: understood.modelResponse });
             } catch (error) {
                 if (live.closed) {
                     return;
@@ -3692,7 +3671,7 @@ const ScribeLive = Object.freeze({
                 untold.tries < settings.RetryMs.length &&
                 untold.at <= live.clock.now() &&
                 record.ready === null;
-            const newStory = due && untold?.reason === settings.Messages.StoryDeclined && record.ready === null &&
+            const newStory = due && (untold?.reason === settings.Messages.StoryDeclined || untold?.reason === settings.Messages.StoryEmpty) && record.ready === null &&
                 record.edited === null && record.selection === null && record.now !== null &&
                 (record.story?.key === untold.key || ScribeLive.storyKey(keeperView, record.now) !== untold.key);
             const intervalReached = (newStory || untold === null) && (record.sends > settings.NoSends || !record.intervalHeld || record.forced);
@@ -3742,10 +3721,11 @@ const ScribeLive = Object.freeze({
         const awaiting = unconfirmed !== null;
         const typed = !awaiting && record.edited !== null && ScribeLive.written(record, keeperView);
         const declined = record.untold?.reason === messages.StoryDeclined;
-        const pending = declined && record.selection === null && !typed && ScribeLive.due(record, keeperView) &&
+        const noRecap = declined || record.untold?.reason === messages.StoryEmpty;
+        const pending = noRecap && record.selection === null && !typed && ScribeLive.due(record, keeperView) &&
             (record.forced || !record.intervalHeld || record.sends > settings.NoSends) &&
             (record.ready === null || (keeperView.state && !ScribeLive.fresh(live, keeperView)));
-        if (record.untold?.reason && (!declined || pending)) {
+        if (record.untold?.reason && (!noRecap || pending)) {
             include('recap', record.untold.reason, record.untold.tries < settings.RetryMs.length, record.untold.source);
         }
         const untold = record.untold !== null && !declined && record.ready === null ? messages.Untold : null;
@@ -3785,6 +3765,9 @@ const ScribeLive = Object.freeze({
             preparationBlock: live.preparationFailure ?? preparationBlock,
             failing: Object.freeze(failing.map(Object.freeze)),
             calls: Object.freeze([...live.calls]),
+            checkerRows: record.checkerRows.filter((row) =>
+                keeperView.messages?.[row.position - 1]?.fingerprint === row.fingerprint &&
+                keeperView.messages[row.position - 1]?.id === row.id),
             due: ScribeLive.due(record, keeperView),
             edited: typed,
             prepared: record.ready !== null,
@@ -3819,6 +3802,8 @@ const ScribeLive = Object.freeze({
                           lines: understood.lines,
                           refused: understood.refused,
                           count: understood.operations.length,
+                          operatorText: understood.operatorText,
+                          modelResponse: understood.modelResponse,
                       }),
             problem: ScribeStore.diagnostic(live.storage, live.problem),
         });

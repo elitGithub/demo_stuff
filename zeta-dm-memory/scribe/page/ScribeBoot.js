@@ -515,6 +515,7 @@ const ScribeBoot = Object.freeze({
                     return ScribeGateway.call({
                         fetch,
                         key,
+                        reading: true,
                         model,
                         system,
                         user: asked,
@@ -623,7 +624,7 @@ const ScribeBoot = Object.freeze({
         try {
             const answer = await ScribeBoot.call(session, role, system, user, bill, 'keeper');
             bill.settled = true;
-            return { text: answer.text, cost: bill.amount, stopped: answer.stopped };
+            return { text: answer.text, cost: bill.amount, finish: answer.finish, stopped: answer.stopped };
         } catch (error) {
             bill.settled = true;
             ScribeBoot.charge(session, bill.amount);
@@ -2045,6 +2046,7 @@ const ScribeBoot = Object.freeze({
                 },
             });
             const historyIndex = { locations: new Map(), boundaries: new Map() };
+            const pagesKey = ScribeStore.name(ScribeStore.Settings.Types.HistoryPages, ScribeStore.room(session.roomId));
             const options = {
                 storage: environment.storage,
                 roomId: session.roomId,
@@ -2053,22 +2055,27 @@ const ScribeBoot = Object.freeze({
                     /**
                      * @param {(count: number) => void} onPage
                      * @param {Function|null} allowExpensive
+                     * @param {object[]|null} saved
+                     * @param {object|null} firstPage
                      * @return {Promise<object>}
                      */
-                    history: (onPage, allowExpensive = null) =>
+                    history: (onPage, allowExpensive = null, saved = null, firstPage = null) =>
                         ZetaSource.history({ fetch, token: ScribeBoot.token(boot), roomId: session.roomId, pause, onPage,
-                            index: historyIndex, allowExpensive }),
+                            index: historyIndex, allowExpensive, saved, firstPage,
+                            hints: saved && ZetaSource.quietly(null, () => environment.storage.get(pagesKey, null)),
+                            remember: (hints) => environment.storage.set(pagesKey, hints) }),
 
                     /**
                      * @param {string|null} through
                      * @param {readonly string[]} required
                      * @param {readonly object[]} known
                      * @param {object|null} check
+                     * @param {boolean} savedRoom
                      * @return {Promise<object>}
                      */
-                    newest: (through = null, required = [], known = [], check = null) =>
+                    newest: (through = null, required = [], known = [], check = null, savedRoom = false) =>
                         ZetaSource.newest({ fetch, token: ScribeBoot.token(boot), roomId: session.roomId, pause, through,
-                            required, known, index: historyIndex, check }),
+                            required, known, index: historyIndex, check, savedRoom }),
 
                     /**
                      * @param {string} id

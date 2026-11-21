@@ -96,7 +96,7 @@ const ScribeScene = Object.freeze({
             'You receive PLAYER CHARACTER, SUBJECTS (everyone and everything known so far), LAST KNOWN SCENE and the RECENT MESSAGES.',
             "PLAYER CHARACTER PROFILE is the player's own description of their character; trust it for that character.",
             '',
-            'Answer with exactly two lines and nothing else:',
+            'When these details are known, you can report them in this layout:',
             '',
             'Day N | Place | public or private | present: Label, Label | what is going on, in under 25 words',
             'CHANGED: yes or no',
@@ -183,7 +183,7 @@ const ScribeScene = Object.freeze({
         const scenes = [];
         if (previous !== null) {
             scenes.push(
-                ScribeScene.line(
+                previous.modelResponse ?? ScribeScene.line(
                     previous.day,
                     previous.place,
                     previous.reach,
@@ -526,23 +526,23 @@ const ScribeScene = Object.freeze({
         } catch {
             return null;
         }
-        const parsed = ScribeScene.parse(text);
-        if (parsed === null) {
+        if (typeof text !== 'string' || !text.trim()) {
             return null;
         }
+        const parsed = ScribeScene.parse(text) ?? { day: null, place: '', reach: '', present: [], summary: text, changed: null };
         const newest = messages.at(ScribeScene.Settings.Last);
         const found = {
             message: newest.id,
             fingerprint: newest.fingerprint,
             position: newest.position,
+            modelResponse: text,
             day: parsed.day,
             place: parsed.place,
             reach: parsed.reach,
             present: ScribeScene.resolve(state, parsed.present),
             summary: parsed.summary,
-            changed: false,
+            changed: parsed.changed,
         };
-        const changed = previous === null || !ScribeScene.same(previous, found) || parsed.changed === true;
-        return Object.freeze({ ...found, changed });
+        return Object.freeze(found);
     },
 });

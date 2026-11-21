@@ -366,8 +366,10 @@ test('an empty answer is refused', async () => {
     expectFailure(none, false, 200, null);
 });
 
-test('content must be a string', async () => {
-    for (const content of [[{ type: 'text', text: CONTENT }], 12, { text: CONTENT }, true]) {
+test('gateway preserves provider text parts in order and ignores media', async () => {
+    const parts = [{ type: 'text', text: 'First ' }, { type: 'reasoning', text: 'private' }, { type: 'refusal', refusal: 'second.' }];
+    assert.equal((await run(json(answer('stop', parts)))).text, 'First second.');
+    for (const content of [12, { text: CONTENT }, true]) {
         const error = await failureOf(run(json(answer('stop', content))));
         expectFailure(error, true, 200, 'stop');
     }

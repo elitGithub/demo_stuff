@@ -1290,6 +1290,7 @@ const BenchPage = Object.freeze({
                     const controller = new environment.AbortController();
                     return ScribeGateway.call({
                         fetch: environment.fetch,
+                        reading: true,
                         key: page.elements.Key.value.trim(),
                         model: call.model,
                         system: call.system,
@@ -1412,7 +1413,7 @@ const BenchPage = Object.freeze({
         if (held === null) {
             return;
         }
-        const number = held.readable ? held.sequence : settings.UnreadablePart + page.environment.now();
+        const number = held.readable ? held.sequence : settings.UnreadablePart + page.environment.now() + settings.Dash + held.sequence;
         const name = settings.CallsPrefix + run.room + settings.Dash + number + settings.JsonSuffix;
         const record = { ...held, refusedLines: report.refusedLines, refusedOperations: report.refusedOperations };
         try {
@@ -1443,7 +1444,8 @@ const BenchPage = Object.freeze({
         const stops = ScribeAdoption.Stop;
         let reason = words.Stopped + result.problem;
         if (result.stop === stops.Done && run.stop === null) {
-            reason = words.Done;
+            const pending = ScribeAdoption.pendingSources(page.book, page.campaign.messages).length;
+            reason = pending ? 'Done: every message was processed. Filing is pending for ' + pending + ' messages.' : words.Done;
         } else if (result.stop === stops.Done) {
             const messages = page.campaign.messages;
             const read = messages.filter(

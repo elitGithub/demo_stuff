@@ -1,4 +1,4 @@
-import { readFileSync, realpathSync, renameSync, rmSync, writeFileSync } from 'node:fs';
+import { closeSync, openSync, readFileSync, realpathSync, renameSync, rmSync, writeFileSync } from 'node:fs';
 import path from 'node:path';
 import { fileURLToPath } from 'node:url';
 import vm from 'node:vm';
@@ -66,17 +66,40 @@ export const ScribePack = Object.freeze({
     ]),
 
     /**
+     * @param {string} script
+     * @return {string}
+     */
+    version(script) {
+        const lines = script.replace(ScribePack.Settings.ByteOrderMark, '').split(/\r?\n/);
+        const end = lines.indexOf(ScribePack.Settings.HeaderClose);
+        const versions = lines.slice(1, end).filter((line) => /^\/\/[ \t]+@version\b/.test(line));
+        const match = versions.length === 1 && /^\/\/[ \t]+@version[ \t]+((?:0|[1-9]\d*)\.(?:0|[1-9]\d*)\.(?:0|[1-9]\d*))[ \t]*$/.exec(versions[0]);
+        if (lines[0] !== ScribePack.Settings.HeaderOpen || end < 0 || !match) {
+            throw new Error('Expected one numeric major.minor.patch @version in the userscript header.');
+        }
+        return match[1];
+    },
+
+    /**
      * @param {(relativePath: string) => string} read
+     * @param {string|null} version
      * @return {string}
      * @throws {Error}
      */
-    build(read) {
+    build(read, version = null) {
         const settings = ScribePack.Settings;
         const messages = settings.Messages;
-        const header = read(settings.Header).replace(settings.ByteOrderMark, '').replace(settings.CarriageReturn, '');
+        let header = read(settings.Header).replace(settings.ByteOrderMark, '').replace(settings.CarriageReturn, '');
         const headerLines = header.split(settings.LineBreak);
         if (headerLines[0] !== settings.HeaderOpen || !headerLines.includes(settings.HeaderClose)) {
             throw new Error(messages.BadHeader);
+        }
+        if (version !== null) {
+            ScribePack.version(header);
+            header = header.replace(/^(\/\/[ \t]+@version[ \t]+)\S+/m, (_, prefix) => prefix + version);
+            if (ScribePack.version(header) !== version) {
+                throw new Error('Invalid userscript version.');
+            }
         }
         const parts = [
             header.endsWith(settings.LineBreak) ? header : `${header}${settings.LineBreak}`,
@@ -114,28 +137,48 @@ export const ScribePack = Object.freeze({
 
     /**
      * @param {string} root
-     * @return {{ path: string, bytes: number, files: number }}
+     * @return {{ path: string, bytes: number, files: number, version: string }}
      * @throws {Error}
      */
     write(root) {
         const settings = ScribePack.Settings;
-        const output = ScribePack.build(
-            /**
-             * @param {string} relativePath
-             * @return {string}
-             */
-            (relativePath) => readFileSync(path.join(root, relativePath), settings.Encoding),
-        );
+        const read = (relativePath) => readFileSync(path.join(root, relativePath), settings.Encoding);
         const target = path.join(root, settings.Output);
         const temporary = `${target}${settings.TempSuffix}`;
+        const reservation = openSync(temporary, 'wx');
         try {
-            writeFileSync(temporary, output, settings.Encoding);
+            let version;
+            let output;
+            try {
+                const minimum = ScribePack.version(read(settings.Header));
+                version = minimum;
+                let previous;
+                try {
+                    previous = ScribePack.version(read(settings.Output)).split('.').map(BigInt);
+                } catch (error) {
+                    if (error.code !== 'ENOENT') {
+                        throw error;
+                    }
+                }
+                if (previous) {
+                    const floor = minimum.split('.').map(BigInt);
+                    const difference = previous.findIndex((part, index) => part !== floor[index]);
+                    if (difference < 0 || previous[difference] > floor[difference]) {
+                        previous[2]++;
+                        version = previous.join('.');
+                    }
+                }
+                output = ScribePack.build(read, version);
+                writeFileSync(reservation, output, settings.Encoding);
+            } finally {
+                closeSync(reservation);
+            }
             renameSync(temporary, target);
+            return { path: target, bytes: Buffer.byteLength(output, settings.Encoding), files: ScribePack.Files.length, version };
         } catch (error) {
             rmSync(temporary, { force: true });
             throw error;
         }
-        return { path: target, bytes: Buffer.byteLength(output, settings.Encoding), files: ScribePack.Files.length };
     },
 });
 
@@ -143,7 +186,7 @@ const modulePath = fileURLToPath(import.meta.url);
 if (process.argv[1] !== undefined && realpathSync(process.argv[1]) === realpathSync(modulePath)) {
     try {
         const result = ScribePack.write(path.resolve(path.dirname(modulePath), '..'));
-        console.log(`${ScribePack.Settings.Messages.Packed} ${result.files} files, ${result.bytes} bytes: ${ScribePack.Settings.Output}`);
+        console.log(`${ScribePack.Settings.Messages.Packed} ${result.files} files, version ${result.version}, ${result.bytes} bytes: ${ScribePack.Settings.Output}`);
     } catch (error) {
         console.log(error.message);
         process.exit(1);

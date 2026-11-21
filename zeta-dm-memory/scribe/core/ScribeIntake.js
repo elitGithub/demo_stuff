@@ -31,13 +31,6 @@ const ScribeIntake = Object.freeze({
         /**
          * @return {RegExp}
          */
-        get LineBreakParts() {
-            return /(\r?\n)/;
-        },
-
-        /**
-         * @return {RegExp}
-         */
         get LineBreak() {
             return /\r?\n/;
         },
@@ -122,6 +115,13 @@ const ScribeIntake = Object.freeze({
         if (typeof wire !== 'string') {
             return null;
         }
+        if (!post.manual && !post.retained) {
+            const suffix = '\n@: ' + post.carried + (post.suggestion == null ? '' : '\n@: ' + post.suggestion);
+            if (post.submission && wire.endsWith(suffix) && ScribeText.submission(wire.slice(0, -suffix.length)) === post.submission) {
+                return { start: wire.length - suffix.length, end: wire.length };
+            }
+            return null;
+        }
         if (post.retained) {
             const span = ScribeText.reminderSpan(wire, post.carried, post.suggestion);
             if (!span || (Boolean(post.suggestion) !== span.suggestion)) {
@@ -198,12 +198,11 @@ const ScribeIntake = Object.freeze({
             }
         }
 
-        const notePositions = new Map();
         const lifted = [];
         const saved = new Map((Array.isArray(evidence?.attachments) ? evidence.attachments : [])
             .filter((entry) => entry && Number.isSafeInteger(entry.length) && entry.length >= 0)
             .map((entry) => [entry.id, entry]));
-        const pending = (Array.isArray(evidence?.posts) ? evidence.posts : []).filter((post) => post?.manual === true &&
+        const pending = (Array.isArray(evidence?.posts) ? evidence.posts : []).filter((post) => post &&
             typeof post.carried === 'string' && Number.isSafeInteger(post.floor) && post.floor >= 0);
         const uncertainCopies = new Set();
         for (const message of parsed) {
@@ -218,7 +217,6 @@ const ScribeIntake = Object.freeze({
             }
         }
         const messages = parsed.map((message) => {
-            const found = [];
             const original = message.blocks.map((block) => [block.speakerName, block.position, block.text].join(settings.Newline)).join(settings.Newline);
             const fingerprint = ScribeText.fingerprint(original);
             const { posted, parts, wire } = message;
@@ -268,96 +266,10 @@ const ScribeIntake = Object.freeze({
             });
             if (length !== null) {
                 lifted.push(Object.freeze({ text: wire.slice(length).replace(/^\r?\n/, '').split(settings.LineBreak, 1)[0], position: message.position }));
-            } else if (message.fromPlayer && !bound) {
-                for (const { block } of sources) {
-                    for (const line of block.text.split(settings.LineBreak)) {
-                        if (ScribeIntake.own(line)) {
-                            lifted.push(Object.freeze({ text: line.trim(), position: message.position }));
-                        }
-                    }
-                }
-                while (sources.length > 0) {
-                    const written = sources[sources.length - 1].kept
-                        .split(settings.LineBreak)
-                        .filter((line) => line.trim() !== settings.Nothing);
-                    if (!written.every((line) => ScribeIntake.own(line))) {
-                        break;
-                    }
-                    sources.pop();
-                }
-                if (sources.length > 0) {
-                    const last = sources[sources.length - 1];
-                    const parts = last.kept.split(settings.LineBreakParts);
-                    let end = parts.length - 1;
-                    let owned = false;
-                    while (end >= 0 && (parts[end].trim() === settings.Nothing || ScribeIntake.own(parts[end]))) {
-                        owned = owned || ScribeIntake.own(parts[end]);
-                        end -= 2;
-                    }
-                    if (owned) {
-                        last.kept = parts.slice(0, end + 1).join(settings.Nothing);
-                    }
-                }
             }
-            const lastIndex = sources.length - 1;
             const blocks = [];
-            sources.forEach(({ block, kept }, index) => {
-                let text = kept;
-                if (message.fromPlayer) {
-                    const closing = [];
-                    const inside = [];
-                    if (index === lastIndex) {
-                        const parts = text.split(settings.LineBreakParts);
-                        let last = parts.length - 1;
-                        while (last >= 0 && parts[last].trim() === settings.Nothing) {
-                            last -= 2;
-                        }
-                        let runStart = last + 2;
-                        while (runStart >= 2) {
-                            const line = parts[runStart - 2].trim();
-                            if (
-                                line.length <= settings.MinWrappedLength ||
-                                !settings.WrappedLine.test(line) ||
-                                !settings.WordCharacter.test(line)
-                            ) {
-                                break;
-                            }
-                            runStart -= 2;
-                        }
-                        if ((last + 2 - runStart) / 2 >= settings.MinPasteLines) {
-                            for (let part = runStart; part <= last; part += 2) {
-                                closing.push(ScribeIntake.collapse(parts[part].trim().slice(1, -1)));
-                            }
-                            text = parts.slice(0, runStart).join(settings.Nothing);
-                        }
-                    }
-                    text = text.replace(settings.ParenthesisedPaste, (whole, inner) => {
-                        if (!settings.LineBreak.test(inner)) {
-                            return whole;
-                        }
-                        for (const line of inner.split(settings.LineBreak)) {
-                            const note = ScribeIntake.collapse(line);
-                            if (note !== settings.Nothing && !ScribeIntake.own(line)) {
-                                inside.push(note);
-                            }
-                        }
-                        return settings.Nothing;
-                    });
-                    found.push(...inside, ...closing);
-                }
-                if (length === null && !bound && text.includes(settings.OwnMarker)) {
-                    const pieces = text.split(settings.LineBreakParts);
-                    text = settings.Nothing;
-                    for (let part = 0; part < pieces.length; part += 2) {
-                        if (!ScribeIntake.own(pieces[part])) {
-                            text += pieces.slice(part, part + 2).join(settings.Nothing);
-                        }
-                    }
-                }
-                if (text !== kept || (length === null && text !== block.text)) {
-                    text = text.replace(settings.ExcessBreaks, settings.BlankLine);
-                }
-                text = text.trim();
+            sources.forEach(({ block, kept }) => {
+                const text = kept.trim();
                 if (text === settings.Nothing) {
                     return;
                 }
@@ -373,12 +285,6 @@ const ScribeIntake = Object.freeze({
                 }
                 blocks.push(retained);
             });
-            for (const note of found) {
-                const key = ScribeText.words(note).join(settings.Space);
-                if (!notePositions.has(key)) {
-                    notePositions.set(key, { text: note, position: message.position });
-                }
-            }
             const lines = blocks.map((block) => {
                 const suffix = block.role === ScribeIntake.Role.Player ? settings.PlayerSuffix : settings.Nothing;
                 return block.speaker + suffix + settings.SpeakerSeparator + block.text;
@@ -403,13 +309,9 @@ const ScribeIntake = Object.freeze({
             return entry;
         });
 
-        const notes = [];
-        for (const { text, position } of notePositions.values()) {
-            notes.push(Object.freeze({ text, position }));
-        }
         return Object.freeze({
             messages: Object.freeze(messages),
-            notes: Object.freeze(notes),
+            notes: Object.freeze([]),
             own: Object.freeze(lifted),
             player,
         });

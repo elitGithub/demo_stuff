@@ -1,5 +1,7 @@
 import assert from 'node:assert/strict';
-import { readFileSync } from 'node:fs';
+import { existsSync, mkdirSync, mkdtempSync, readFileSync, rmSync, writeFileSync } from 'node:fs';
+import { tmpdir } from 'node:os';
+import path from 'node:path';
 import test from 'node:test';
 import { fileURLToPath } from 'node:url';
 import vm from 'node:vm';
@@ -192,8 +194,9 @@ test('a missing file passes through with its path', () => {
 });
 
 test('the real files pack and compile', () => {
-    const output = ScribePack.build((relativePath) => readFileSync(`${ROOT}${relativePath}`, 'utf8'));
-    assert.ok(realRead(ScribePack.Settings.Output).replaceAll('\r\n', '\n') === output, 'the delivered userscript must match the current sources');
+    const delivered = realRead(ScribePack.Settings.Output).replaceAll('\r\n', '\n');
+    const output = ScribePack.build(realRead, ScribePack.version(delivered));
+    assert.ok(delivered === output, 'the delivered userscript must match the current sources');
     assert.equal(output.length > 0, true);
     assert.doesNotThrow(() => new vm.Script(output));
     for (const file of ScribePack.Files) {
@@ -203,6 +206,49 @@ test('the real files pack and compile', () => {
     assert.equal(/^ *(import|export) /m.test(output), false);
     assert.equal(output.startsWith('// ==UserScript==\n'), true);
     assert.equal(output.endsWith(`\n${CLOSING}\n`), true);
+});
+
+test('writing the same sources twice advances the released version each time', (context) => {
+    const root = mkdtempSync(path.join(tmpdir(), 'scribe-pack-'));
+    context.after(() => rmSync(root, { recursive: true, force: true }));
+    const header = HEADER.replace('// @name', '// @version      0.1.0\n// @name');
+    const files = invented({ [ScribePack.Settings.Header]: header });
+    for (const [file, text] of files) {
+        const target = path.join(root, file);
+        mkdirSync(path.dirname(target), { recursive: true });
+        writeFileSync(target, text);
+    }
+    const delivered = path.join(root, ScribePack.Settings.Output);
+    const read = (file) => readFileSync(path.join(root, file), 'utf8');
+    assert.equal(ScribePack.write(root).version, '0.1.0');
+    writeFileSync(delivered, read(ScribePack.Settings.Output).replace('0.1.0', '0.3.9'));
+    for (const version of ['0.3.10', '0.3.11']) {
+        assert.equal(ScribePack.write(root).version, version);
+        const result = read(ScribePack.Settings.Output);
+        assert.equal(ScribePack.version(result), version);
+        assert.equal(ScribePack.build(read, version), result);
+        assert.equal(read(ScribePack.Settings.Output), result);
+    }
+    const last = read(ScribePack.Settings.Output);
+    const reservation = delivered + ScribePack.Settings.TempSuffix;
+    writeFileSync(reservation, 'other build');
+    assert.throws(() => ScribePack.write(root), { code: 'EEXIST' });
+    assert.equal(readFileSync(reservation, 'utf8'), 'other build');
+    assert.equal(read(ScribePack.Settings.Output), last);
+    rmSync(reservation);
+    writeFileSync(path.join(root, FIRST), '');
+    assert.throws(() => ScribePack.write(root), /source file is empty/);
+    assert.equal(existsSync(reservation), false);
+    assert.equal(read(ScribePack.Settings.Output), last);
+    writeFileSync(path.join(root, FIRST), files.get(FIRST));
+    assert.equal(ScribePack.write(root).version, '0.3.12');
+    writeFileSync(path.join(root, ScribePack.Settings.Header), header.replace('0.1.0', '1.0.0'));
+    assert.equal(ScribePack.write(root).version, '1.0.0');
+    const invalid = read(ScribePack.Settings.Output).replace('1.0.0', 'unknown');
+    writeFileSync(delivered, invalid);
+    assert.throws(() => ScribePack.write(root), /major.minor.patch/);
+    assert.equal(read(ScribePack.Settings.Output), invalid);
+    assert.equal(existsSync(reservation), false);
 });
 
 /**

@@ -67,7 +67,7 @@ const UNCONFIRMED = 'The save could not be confirmed; the book was loaded again'
 const UNREAD_STORAGE = 'The storage could not be read';
 const BAD_ANCHOR = 'The argument is not valid: anchor';
 const MINUTE = 60000;
-const PROSE = 'I could not tell which lines of this long stretch of the tale matter to the book.';
+const MALFORMED_ROW = '=== FACTS\nRiven | trait';
 const MISMATCH =
     'The chat on the site no longer matches what is saved (checked twice). Starting the book over discards the book and your rulings.';
 const CAMPAIGN = /^scribe:(?:head|part):[^:]+:campaign(?::|$)/;
@@ -99,15 +99,17 @@ function checkedModel(onCheck) {
         assert.equal(role, 'Pedant');
         const page = JSON.parse(input);
         calls.push(page);
-        await onCheck(page, input);
-        return { text: JSON.stringify({ page: page.page, complete: true, claims: [], findings: [] }), cost: 0.01 };
+        const result = await onCheck(page, input);
+        return { text: JSON.stringify({ page: page.page, complete: true, claims: result?.claims ?? [], findings: [] }), cost: 0.01 };
     } };
 }
 
 test('Keeper re-observes both cited accounts before saving a ruling, refuses partial coverage and serializes two clicks', async () => {
     const chat = new FakeChat(2);
     chat.edit(1, 'The town is called Talon.').edit(2, 'The town is called Harrow.');
-    const model = checkedModel(() => {});
+    const model = checkedModel((page) => ({ claims: page.position === 1 ? [
+        { source: { ref: 'm1b1', quote: 'The town is called Talon.' }, attribution: 'witnessed' },
+    ] : [] }));
     const ask = model.ask;
     model.ask = async (role, system, user) => {
         const answer = await ask(role, system, user);
@@ -147,7 +149,8 @@ test('Keeper re-observes both cited accounts before saving a ruling, refuses par
     assert.equal(next.keeper.view().state.checkerRulings[0].status, 'deferred');
     chat.edit(1, 'The town is called Rowan.');
     await assert.rejects(next.keeper.ruling({ ...change, action: 'choose', account: 'earlier' }));
-    assert.equal(next.keeper.view().state.checkerRulings[0].status, 'reopened');
+    assert.equal(next.keeper.view().state.checkerRulings[0].status, 'deferred');
+    assert.equal(next.keeper.view().state.checkerRulings[0].sourceStale, true);
     assert.equal(savedBook(storage).log.entries.filter((entry) => entry.checkerRuling).length, 1);
 });
 
@@ -251,7 +254,9 @@ for (const refusal of ['dropSetsMatching', 'refuseSetsMatching', 'refuseGetsMatc
 
 test('a near Checker target waits before paying for distant evidence across reload and runs when the room fits on the head', async () => {
     const chat = new FakeChat(64);
-    const model = checkedModel(() => {});
+    const model = checkedModel((page) => ({ claims: page.position === 1 ? [
+        { source: { ref: page.target[0].ref, quote: page.target[0].quote }, attribution: 'witnessed' },
+    ] : [] }));
     const clock = clockAt();
     const zeta = chat.zeta.bind(chat);
     let fits = false;
@@ -401,6 +406,14 @@ test('a recent-only comparison verifies its own source range without pulling the
     original.keeper.close();
     for (let position = 1; position < 100; position++) {
         const work = ScribeLog.checkWork(book, messages, false);
+        if (position === 99) {
+            await ScribePedant.checkPassage({ ...work, ask: async (system, input) => {
+                const page = JSON.parse(input);
+                const source = { ref: page.target[0].ref, quote: page.target[0].quote };
+                return { text: JSON.stringify({ page: page.page, complete: true, claims: [{ source, attribution: 'witnessed' }], findings: [] }), cost: 0 };
+            }, savePage: async (page) => assert.equal(ScribeLog.saveCheck(book, messages, work, page), true) });
+            continue;
+        }
         const id = 'checked-' + position;
         const answer = JSON.stringify({ page: id, complete: true, claims: [], findings: [] });
         assert.equal(ScribeLog.saveCheck(book, messages, work, { id, index: 0, total: 1, complete: true, answer, claims: [], findings: [] }), true);
@@ -565,6 +578,7 @@ function scripted(call, options, input) {
     if (call.pass !== 'Story') {
         return answer({
             FACTS: call.marks.map((mark) => `Halvard | trait | settled by the answers at line ${mark} | #${mark}`),
+            ...(call.pass === 'Answers' ? { FILED: [...input.matchAll(/^\[#(\d+)\] \[(Q\d+)\]/gm)].map(([, mark, id]) => id + ' | #' + mark) } : {}),
         });
     }
     if (options.blank === true) {
@@ -627,7 +641,12 @@ function analyst(options = {}) {
             throw new Error(model.broken);
         }
         if (model.unreadable !== null && model.unreadable(call)) {
-            return { text: PROSE, cost: model.cost };
+            if (options.unboundReferences) {
+                const [first, last] = call.marks;
+                return { text: '=== CHANGES\n' + Array.from({length: last - first + 1}, (_, index) =>
+                    'F999 | Ferry | feature | FULLER: red | #' + (first + index)).join('\n'), cost: model.cost };
+            }
+            return { text: MALFORMED_ROW, cost: model.cost };
         }
         return { text: scripted(call, options, user), cost: model.cost };
     };
@@ -752,6 +771,25 @@ async function adopted(options = {}) {
     const opening = await opened(chat, model, options);
     await opening.keeper.adopt({});
     return { chat, model, ...opening };
+}
+
+/**
+ * @param {object} options
+ * @return {Promise<object>}
+ */
+async function reopenedWithLegacyAgeDispute(options = {}) {
+    const first = await adopted({ ...options, conflict: true });
+    assert.equal(first.keeper.view().state.conflicts.length, 0);
+    first.keeper.close();
+    const book = savedBook(first.storage);
+    const ages = book.log.entries.flatMap((entry) => entry.operations).filter((operation) => operation.category === 'age');
+    assert.equal(ages.length, 2);
+    for (const operation of ages) {
+        delete operation.evidence.valueSupplied;
+    }
+    ScribeStore.write(first.storage, ROOM, ScribeStore.Kind.Book, book);
+    const reopened = await opened(first.chat, first.model, { storage: first.storage, clock: first.clock });
+    return { chat: first.chat, model: first.model, ...reopened };
 }
 
 /**
@@ -1397,9 +1435,8 @@ test('a reply event is sent for a new or changed newest message', async () => {
 test('an edited message is read again', async () => {
     const held = gate();
     let rereading = false;
-    const { chat, model, keeper, storage } = await adopted({
+    const { chat, model, keeper, storage } = await reopenedWithLegacyAgeDispute({
         count: 45,
-        conflict: true,
         /**
          * @param {{ marks: number[] }} call
          * @return {Promise<void>|null}
@@ -1407,7 +1444,7 @@ test('an edited message is read again', async () => {
         hold: (call) => (rereading && call.marks[0] === 20 ? held.promise : null),
     });
     assert.deepEqual(ranges(model), ['Story 1-40', 'Story 41-45']);
-    assert.equal(keeper.view().state.conflicts.length, 1);
+    assert.equal(factsSaying(keeper, 'thirty')[0].pinned, false);
     await keeper.rule(PIN);
     assert.equal(keeper.view().state.conflicts.length, 0);
     chat.edit(20, 'The tale turns another way, line 20.');
@@ -1581,11 +1618,11 @@ test('the daily budget stops reading and a new day lifts it', async () => {
 });
 
 test('an empty stretch edited into a note stays unread at the budget and is filed once on the next day', async () => {
-    const chat = new FakeChat(2).edit(2, '*(\n\n)*');
+    const chat = new FakeChat(2).edit(2, '');
     const note = 'Mirelle keeps the clocktower logs.';
     const model = analyst({ hold: (call) => {
         if (call.pass === 'Story') {
-            chat.edit(2, `*(\n${note}\n)*`);
+            chat.edit(2, '[Operator note] ' + note);
         }
         return null;
     } });
@@ -1598,9 +1635,9 @@ test('an empty stretch edited into a note stays unread at the budget and is file
     clock.day = NEXT_DAY;
     await keeper.tick();
     await keeper.tick();
-    assert.deepEqual(ranges(model), ['Story 1-1', 'Notes 2']);
+    assert.deepEqual(ranges(model), ['Story 1-1', 'Story 2-2']);
     assert.equal(savedReads(storage), 2);
-    assert.deepEqual(plain(savedBook(storage).log.notes), [note]);
+    assert.ok(keeper.view().calls[0].input.includes('[Operator note] ' + note));
     assert.equal(ScribeStore.spent(storage, ROOM, NEXT_DAY), model.cost);
 });
 
@@ -1645,8 +1682,8 @@ test('a failed pull says why and tries again', async () => {
 });
 
 test('rulings are saved before they are shown', async () => {
-    const shown = await adopted({ conflict: true });
-    assert.equal(shown.keeper.view().state.conflicts.length, 1);
+    const shown = await reopenedWithLegacyAgeDispute();
+    assert.equal(factsSaying(shown.keeper, 'thirty')[0].pinned, false);
     await shown.keeper.rule(PIN);
     const saved = savedBook(shown.storage);
     const last = saved.log.entries.at(-1);
@@ -1656,11 +1693,11 @@ test('rulings are saved before they are shown', async () => {
     assert.equal(ScribeReplay.run(saved.log, order).conflicts.length, 0);
     assert.equal(shown.keeper.view().state.conflicts.length, 0);
 
-    const failing = await adopted({ conflict: true });
+    const failing = await reopenedWithLegacyAgeDispute();
     const before = storedText(failing.storage, BOOK);
     failing.storage.refuseSetsMatching(BOOK);
     await assert.rejects(failing.keeper.rule(PIN), { message: UNCONFIRMED });
-    assert.equal(failing.keeper.view().state.conflicts.length, 1);
+    assert.equal(factsSaying(failing.keeper, 'thirty')[0].pinned, false);
     assert.equal(storedText(failing.storage, BOOK) === before, true);
     failing.storage.allow();
     await assert.rejects(failing.keeper.rule({ ...PIN, category: 'colour' }), { message: 'InvalidOperation' });
@@ -1705,6 +1742,33 @@ test('an answered question is filed on the next tick', async () => {
     await keeper.tick();
     assert.equal(model.calls.length, 4);
 });
+
+for (const outcome of ['finish', 'close', 'lose lease']) {
+    test('a manual Pull during a historical check follows the original reader: ' + outcome, async () => {
+        const chat = new FakeChat(80);
+        const held = gate();
+        const model = checkedModel(() => held.promise);
+        let reader = true;
+        const { keeper } = await opened(chat, model, { checkPassage: ScribePedant.checkPassage, lease: () => reader });
+        await keeper.adopt({});
+        const checking = keeper.tick();
+        await until(() => model.calls.length === 1);
+        const before = chat.count('tab-1', 'history');
+        const pulls = Promise.allSettled([keeper.pull(), keeper.pull()]);
+        if (outcome === 'close') {
+            keeper.close();
+        } else if (outcome === 'lose lease') {
+            reader = false;
+        }
+        assert.equal(chat.count('tab-1', 'history'), before);
+        held.release();
+        await checking;
+        const results = await pulls;
+        const completed = results.filter((row) => row.status === 'fulfilled').length;
+        assert.equal(completed, outcome === 'finish' ? 1 : 0);
+        assert.equal(chat.count('tab-1', 'history'), before + completed);
+    });
+}
 
 test('one thing at a time', async () => {
     const chat = new FakeChat(100);
@@ -1971,6 +2035,38 @@ test('a page that does not join what is saved brings a whole pull', async () => 
     assert.equal(chat.count('tab-1', 'newest') - newestBefore, 2);
     assert.equal(savedIds(storage).length, 170);
     assert.equal(keeper.view().total, 170);
+});
+
+test('an interrupted startup repair keeps the confirmed tail through reload until full reconciliation succeeds', async () => {
+    const { chat, model, keeper, storage, clock } = await adopted({ count: 120 });
+    keeper.close();
+    const zeta = chat.zeta.bind(chat);
+    let interrupted = true;
+    const requests = [];
+    chat.zeta = (label) => {
+        const source = zeta(label);
+        return { ...source, history: (onPage, allowExpensive, saved) => {
+            requests.push(saved?.length ?? null);
+            if (interrupted) {
+                return { messages: chat.raw.slice(70, 101), end: 'Failed', skipped: 0, problem: 'Interrupted walk' };
+            }
+            return source.history(onPage, allowExpensive);
+        } };
+    };
+    const retry = await opened(chat, model, { storage, clock });
+    assert.deepEqual(requests, [120]);
+    assert.equal(savedIds(storage).length, 120);
+    assert.equal(savedReads(storage), 120);
+    assert.match(retry.keeper.view().problem, /Interrupted walk/);
+    assert.equal(ScribeStore.read(storage, ROOM, 'campaign').needsHistory, true);
+    retry.keeper.close();
+    interrupted = false;
+    chat.raw.splice(101);
+    const repaired = await opened(chat, model, { storage, clock });
+    assert.deepEqual(requests, [120, null]);
+    assert.equal(savedIds(storage).length, 101);
+    assert.equal(repaired.keeper.view().problem, null);
+    assert.equal(ScribeStore.read(storage, ROOM, 'campaign').needsHistory, undefined);
 });
 
 test('a pull cut short withdraws nothing outside it', async () => {
@@ -2310,7 +2406,7 @@ test('a new failed book read keeps both credentials out of stored settings after
     reopened.keeper.close();
 });
 
-test('an unreadable book response masks both keys in the retained call and Readings before rotation', async () => {
+test('a book response outside the suggested format masks both keys before rotation', async () => {
     const storage = new FakeStorage();
     const provider = 'or-fixture';
     const worker = 'private-worker-fixture';
@@ -2320,16 +2416,18 @@ test('an unreadable book response masks both keys in the retained call and Readi
     const chat = new FakeChat(8).edit(1, reply);
     const model = { ask: async (role, system, input) => {
         assert.ok(input.includes(reply));
-        return { text: reply, cost: 0 };
+        return { text: '=== FACTS\n' + reply, cost: 0 };
     } };
     const { keeper } = await opened(chat, model, { storage });
     await keeper.adopt({});
     ScribeStore.setKey(storage, 'rotated-provider');
     ScribeStore.setCloudKey(storage, 'rotated-worker');
     const { calls, lines, stop, messages } = keeper.view();
-    assert.equal(stop.reason, 'Failed');
-    assert.equal(calls[0].readable, false);
-    assert.equal(calls[0].sequence, null);
+    assert.equal(stop.reason, 'Done');
+    assert.equal(calls[0].readable, true);
+    assert.match(savedBook(storage).log.entries[0].modelResponse, /\[key\] and \[key\]/);
+    assert.equal(calls[0].sequence, 1);
+    assert.ok(!JSON.stringify(savedBook(storage).log.entries[0].unfiledRows).includes(worker));
     assert.match(calls[0].input, /\[key\] and \[key\]/);
     assert.match(calls[0].answer, /\[key\] and \[key\]/);
     assert.match(lines[0].refusedLines[0].line, /\[key\] and \[key\]/);
@@ -2355,7 +2453,7 @@ test('a book read masks credentials seen at dispatch, response, and retention wi
     let changedAfterResponse = false;
     const reply = [
         '=== FACTS', 'Riven | trait | checks the bell or-fixture | #1',
-        'Riven | trait | ' + pairs.flat().join(' / ') + ' | #2',
+        '=== CHANGES', 'F999 | Riven | trait | ' + pairs.flat().join(' / ') + ' | #2',
     ].join('\n');
     const model = { ask: async (role, system, input) => {
         dispatched.release();
@@ -2380,7 +2478,7 @@ test('a book read masks credentials seen at dispatch, response, and retention wi
     const { calls, lines, state } = keeper.view();
     assert.equal(calls[0].sequence, 1);
     assert.equal(lines[0].first, 1);
-    assert.equal(keeper.view().read, 1);
+    assert.equal(keeper.view().read, 8);
     assert.deepEqual(plain(lines[0].refusedLines), []);
     assert.equal(lines[0].refusedOperations[0].operation.text, pairs.flat().map(() => '[key]').join(' / '));
     assert.equal(state.facts[0].text, 'checks the bell or-fixture');
@@ -2397,7 +2495,8 @@ test('refusing either key read withholds book diagnostics without losing their c
         ScribeStore.setCloudKey(storage, 'private-worker-fixture');
         const model = { ask: async (role, system, input) => {
             storage.refuseGetsMatching(slot);
-            return { text: CitedStory.answer(input, '=== FACTS\nRiven | trait | checks the bell | #1\nRiven | trait | or-fixture | #2'), cost: 0 };
+            return { text: CitedStory.answer(input,
+                '=== FACTS\nRiven | trait | checks the bell | #1\n=== CHANGES\nF999 | Riven | trait | or-fixture | #2'), cost: 0 };
         } };
         const { keeper } = await opened(new FakeChat(8).edit(1, 'Riven checks the bell.'), model, { storage });
         await keeper.adopt({});
@@ -2732,7 +2831,7 @@ test('a storage failure is tried again', async () => {
 test('a save that threw is looked at again', async () => {
     const base = new FakeStorage();
     const wrapper = guarded(base);
-    const stored = await adopted({ conflict: true, storage: wrapper });
+    const stored = await reopenedWithLegacyAgeDispute({ storage: wrapper });
     wrapper.refuseReadBack(BOOK_HEAD);
     await assert.rejects(stored.keeper.rule(PIN), { message: UNCONFIRMED });
     assert.equal(rulingsSaved(base), 1);
@@ -2744,11 +2843,11 @@ test('a save that threw is looked at again', async () => {
     assert.equal(stored.keeper.view().read, 141);
     assert.equal(rulingsSaved(base), 1);
 
-    const lost = await adopted({ conflict: true });
+    const lost = await reopenedWithLegacyAgeDispute();
     lost.storage.refuseSetsMatching(BOOK_HEAD);
     await assert.rejects(lost.keeper.rule(PIN), { message: UNCONFIRMED });
     assert.equal(rulingsSaved(lost.storage), 0);
-    assert.equal(lost.keeper.view().state.conflicts.length, 1);
+    assert.equal(factsSaying(lost.keeper, 'thirty')[0].pinned, false);
 });
 
 test('a malformed book is damage, not a crash', async () => {
@@ -2853,6 +2952,14 @@ test('a stop survives a reload', async () => {
          */
         unreadable: (call) => call.marks[0] === 41,
     });
+    const previousAsk = unreadable.ask;
+    unreadable.ask = async (...args) => {
+        const answer = await previousAsk(...args);
+        if (answer.text === MALFORMED_ROW) {
+            throw new Error('Fixture transport rejected the reading');
+        }
+        return answer;
+    };
     const failed = await opened(failing, unreadable, {
         storage: failingStorage,
         clock,
@@ -3032,14 +3139,15 @@ test('the lost claim stops writes', async () => {
     assert.equal(keeper.view().reader, false);
 });
 
-test("the owner's notes are filed", async () => {
+test("the owner's direction goes to the Scribe intact alongside their dialogue", async () => {
     const chat = new FakeChat(99);
-    chat.edit(98, 'I wave to the ferryman.\n*(\nHalvard served ten years with the pikes.\n)*');
+    chat.edit(98, 'I wave to the ferryman.\n[Operator note] Halvard served ten years with the pikes.');
     const model = analyst();
     const { keeper, storage } = await opened(chat, model);
     await keeper.adopt({});
-    assert.deepEqual(ranges(model), ['Story 1-40', 'Story 41-80', 'Notes 98', 'Story 81-99']);
-    assert.equal(savedBook(storage).log.notes.includes('Halvard served ten years with the pikes.'), true);
+    assert.deepEqual(ranges(model), ['Story 1-40', 'Story 41-80', 'Story 81-99']);
+    assert.ok(keeper.view().calls[0].input.includes('I wave to the ferryman.\n[Operator note] Halvard served ten years with the pikes.'));
+    assert.equal(savedReads(storage), 99);
 });
 
 test('a filing that fails or is all refused leaves nothing', async () => {
@@ -3274,6 +3382,104 @@ function savedStop(storage) {
     const record = ScribeStore.read(storage, ROOM, ScribeStore.Kind.Settings);
     return record === null ? null : record.stop;
 }
+
+test('an unfiled response records every processed message and only retries the selected source on request', async () => {
+    const chat = new FakeChat(6);
+    const model = analyst({ unreadable: () => true, unboundReferences: true });
+    const { keeper } = await opened(chat, model);
+    await keeper.adopt({});
+    assert.equal(keeper.view().read, 6);
+    assert.equal(keeper.view().phase, 'Idle');
+    const retry = keeper.view().storyRetry;
+    assert.equal(retry.first, 1);
+    for (let turn = 0; turn < 4; turn++) {
+        await keeper.tick();
+    }
+    assert.equal(model.calls.length, 1);
+    model.unreadable = null;
+    await keeper.retryStory(retry);
+    assert.deepEqual(model.calls.at(-1).marks, [1, 1]);
+    assert.equal(keeper.view().read, 6);
+    await assert.rejects(keeper.retryStory(retry), /changed/);
+    assert.equal(model.calls.length, 2);
+    assert.equal(keeper.view().storyRetry.first, 1);
+    const later = keeper.filingRetry('story', keeper.view().messages[3].id);
+    await keeper.retryStory(later);
+    assert.deepEqual(model.calls.at(-1).marks, [4, 4]);
+    assert.equal(keeper.view().storyRetry.first, 1);
+});
+
+test('a source edit invalidates a displayed retry before another model call', async () => {
+    const chat = new FakeChat(6);
+    const model = analyst({ unreadable: () => true, unboundReferences: true });
+    const { keeper } = await opened(chat, model);
+    await keeper.adopt({});
+    const retry = keeper.view().storyRetry;
+    chat.edit(1, 'The ferry sailed yesterday.');
+    await assert.rejects(keeper.retryStory(retry), /changed/);
+    assert.equal(model.calls.length, 1);
+});
+
+test('pausing a paid retry cannot file an edited source against the old text', async () => {
+    const chat = new FakeChat(6);
+    const held = gate();
+    const model = analyst({ unreadable: () => true, unboundReferences: true, hold: (call) => call.marks[1] === 1 ? held.promise : null });
+    const { keeper, storage } = await opened(chat, model);
+    await keeper.adopt({});
+    model.unreadable = null;
+    const retrying = keeper.retryStory(keeper.view().storyRetry);
+    await until(() => model.calls.length === 2);
+    chat.edit(1, 'The ferry returned instead.');
+    keeper.pause();
+    held.release();
+    await retrying;
+    assert.equal(savedBook(storage).log.entries.some((entry) => entry.retrySources?.length), false);
+    assert.equal(keeper.view().stop.reason, 'Paused');
+    await keeper.tick();
+    assert.equal(model.calls.length, 2);
+});
+
+test('legacy content stops release at the actual first unread message on refresh', async () => {
+    const chat = new FakeChat(1036);
+    const model = analyst({ cost: 0 });
+    const { keeper, storage } = await opened(chat, model);
+    await keeper.adopt({});
+    assert.equal(keeper.view().read, 1036);
+    keeper.close();
+    const baseline = model.calls.length;
+    const config = ScribeStore.read(storage, ROOM, ScribeStore.Kind.Settings);
+    config.stop = { reason: 'Failed', problem: null, storyFailure: { first: 1037, last: 1037, reason: 'Citation', stamp: '12345678' } };
+    ScribeStore.write(storage, ROOM, ScribeStore.Kind.Settings, config);
+    chat.add(1);
+    const { keeper: reopened } = await opened(chat, model, { storage, tabId: 'successor' });
+    await reopened.tick();
+    assert.equal(reopened.view().phase, 'Idle');
+    assert.equal(reopened.view().read, 1037);
+    assert.equal(savedStop(storage), null);
+    assert.deepEqual(model.calls.slice(baseline).map((call) => call.marks), [[1037, 1037]]);
+});
+
+test('a player direction and the complete model response survive refresh without another charge', async () => {
+    const note = 'Mirelle keeps the clocktower logs.';
+    const chat = new FakeChat(2).edit(2, '[Operator note] ' + note);
+    const model = analyst({ unreadable: (call) => call.pass === 'Story' });
+    const { keeper, storage } = await opened(chat, model);
+    await keeper.adopt({});
+    const initial = model.calls.length;
+    assert.equal(initial, 1);
+    assert.equal(keeper.view().inputRetry, null);
+    assert.ok(keeper.view().calls[0].input.includes('[Operator note] ' + note));
+    assert.equal(keeper.view().read, 2);
+    keeper.close();
+    const { keeper: fresh } = await opened(chat, model, { storage, tabId: 'next' });
+    await fresh.tick();
+    await fresh.tick();
+    assert.equal(model.calls.length, initial);
+    assert.equal(savedBook(storage).log.entries[0].modelResponse, MALFORMED_ROW);
+    assert.equal(fresh.view().modelReadings[0].statement, MALFORMED_ROW);
+    assert.equal(fresh.view().inputRetry, null);
+    assert.equal(fresh.view().storyRetry, null);
+});
 
 test('a full storage never pays twice', async () => {
     const chat = new FakeChat(100);
@@ -3830,13 +4036,12 @@ test('what the view keeps is capped and kept', async () => {
     });
     const { keeper } = await opened(new FakeChat(101), model);
     await keeper.adopt({ size: 2 });
-    assert.equal(keeper.view().stop.reason, 'Failed');
-    await keeper.resume();
-    assert.equal(model.calls.length, 52);
+    assert.equal(keeper.view().stop.reason, 'Done');
+    assert.equal(model.calls.length, 51);
     const view = keeper.view();
     assert.equal(view.calls.length, 20);
-    assert.equal(view.calls.filter((item) => !item.readable).length, 1);
-    assert.equal(view.calls.at(-1).readable, false);
+    assert.ok(view.calls.every((item) => item.readable));
+    assert.ok(view.modelReadings.some((item) => item.statement === MALFORMED_ROW));
     assert.equal(view.lines.length, 50);
 });
 
@@ -3908,14 +4113,14 @@ test('Answers can refine a Story fact at the newest eligible question beyond the
     const model = { ask: async (role, system, user) => {
         assert.equal(system, ScribeAnalyzer.AnswersPrompt);
         prompts.push(user);
-        return { text: answer({ CHANGES: [fact.id + ' | Nera | trait | FULLER: ' + fuller + ' | #91'] }), cost: 0.04 };
+        return { text: answer({ CHANGES: [fact.id + ' | Nera | trait | FULLER: ' + fuller + ' | #91'], FILED: [question.id + ' | #91'] }), cost: 0.04 };
     } };
     const { keeper } = await opened(chat, model, { storage, clock, tabId: 'tab-2' });
     await keeper.tick();
     await keeper.tick();
     assert.equal(prompts.length, 1);
     assert.ok(prompts[0].includes(original));
-    assert.ok(prompts[0].includes('[#91] Which hour does Nera sail?'));
+    assert.ok(prompts[0].includes('[#91] [' + question.id + '] Which hour does Nera sail?'));
     const saved = ScribeReplay.run(savedBook(storage).log, order);
     const change = saved.facts.find((item) => item.text === fuller);
     assert.equal(change?.cite, newest.id);
@@ -4191,10 +4396,10 @@ test('resume keeps what was paid for', async () => {
     });
     const failing = await opened(new FakeChat(100), unreadable);
     await failing.keeper.adopt({});
-    assert.equal(failing.keeper.view().stop.reason, 'Failed');
-    assert.equal(unreadable.calls.length, 2);
+    assert.equal(failing.keeper.view().stop.reason, 'Done');
+    assert.equal(unreadable.calls.length, 3);
     await failing.keeper.resume();
-    assert.deepEqual(ranges(unreadable), ['Story 1-40', 'Story 41-80', 'Story 41-80', 'Story 81-100']);
+    assert.deepEqual(ranges(unreadable), ['Story 1-40', 'Story 41-80', 'Story 81-100']);
     assert.equal(failing.keeper.view().read, 100);
 });
 
@@ -5214,13 +5419,12 @@ test('a lease that is not a function is refused', async () => {
 test('a saved key clears a failed reading and the next tick reads at once', async () => {
     const chat = new FakeChat(100);
     const storage = new FakeStorage();
-    const model = analyst({
-        /**
-         * @param {{ marks: number[] }} call
-         * @return {boolean}
-         */
-        unreadable: (call) => call.marks[0] === 41,
-    });
+    const model = analyst({ hold: (call) => {
+        if (call.marks[0] === 41 && model.calls.length === 2) {
+            model.broken = 'OpenRouter returned HTTP 401.';
+        }
+        return null;
+    } });
     const { keeper } = await opened(chat, model, { storage });
     await keeper.adopt({});
     assert.equal(keeper.view().stop.reason, 'Failed');
@@ -5228,7 +5432,7 @@ test('a saved key clears a failed reading and the next tick reads at once', asyn
     await keeper.tick();
     assert.equal(keeper.view().phase, 'Stopped');
     assert.equal(model.calls.length, 2);
-    model.unreadable = null;
+    model.broken = null;
     keeper.rekey();
     assert.equal(keeper.view().stop, null);
     assert.equal(savedStop(storage), null);

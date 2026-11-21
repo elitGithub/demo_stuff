@@ -155,7 +155,7 @@ const ScribeKnowledge = Object.freeze({
      */
     shareableFinding(state, finding, messages, wording = null) {
         const support = finding.support;
-        if (!Array.isArray(messages) || !support?.length || !finding.source ||
+        if (finding.incompleteLinks || !Array.isArray(messages) || !support?.length || !finding.source ||
             [finding.source, finding.earlier].filter(Boolean).some((citation) => !support.some((source) =>
                 source.messageId === citation.messageId && source.blockNumber === citation.blockNumber && source.quote === citation.quote))) {
             return false;
@@ -181,12 +181,33 @@ const ScribeKnowledge = Object.freeze({
             }
             facts.add(record.fact);
         }
-        const words = wording ? ' ' + ScribeReplay.wording(wording) + ' ' : '';
+        const citesSupport = (claim) => support.some((source) => {
+            const evidence = claim.evidence;
+            if (source.messageId !== (evidence?.messageId ?? claim.cite) ||
+                (evidence?.blockNumber != null && evidence.blockNumber !== source.blockNumber)) {
+                return false;
+            }
+            if (!evidence?.quote || evidence.verified === false) {
+                return true;
+            }
+            const message = messages[source.position - 1];
+            const block = message?.blocks.find((item) => item.blockNumber === source.blockNumber);
+            const text = block && (ScribeIntake.Originals.get(block) ?? block.text);
+            if (!text || !text.includes(evidence.quote)) {
+                return true;
+            }
+            for (let start = text.indexOf(source.quote); start >= 0; start = text.indexOf(source.quote, start + 1)) {
+                const first = Math.max(0, start - evidence.quote.length + 1);
+                const other = text.indexOf(evidence.quote, first);
+                if (other >= 0 && other < start + source.quote.length) {
+                    return true;
+                }
+            }
+            return false;
+        });
         for (const fact of state.facts) {
-            const linked = facts.delete(fact.id) || cited.has(fact.cite) ||
-                fact.claims?.some((claim) => cited.has(claim.cite) || cited.has(claim.evidence?.messageId));
-            const mentioned = words && fact.text && words.includes(' ' + ScribeReplay.wording(fact.text) + ' ');
-            if ((linked || mentioned) && (fact.hidden || ScribeKnowledge.audience(state, fact) !== ScribeKnowledge.Everyone)) {
+            const linked = facts.delete(fact.id) || citesSupport(fact) || fact.claims?.some(citesSupport);
+            if (linked && (fact.hidden || ScribeKnowledge.audience(state, fact) !== ScribeKnowledge.Everyone)) {
                 return false;
             }
         }

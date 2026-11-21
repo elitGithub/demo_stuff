@@ -854,15 +854,16 @@ const ScribeAnswer = Object.freeze({
         const rows = new Map();
         const refused = [];
         const rejectedRows = new Map();
+        const rejectedRead = new Map();
         let block = ScribeAnswer.Settings.Preamble;
         for (const raw of text.split(ScribeAnswer.Settings.LineBreak)) {
             const line = raw.trim();
-            if (!line) {
+            if (!line || /^`{3,}(?:[\w+-]+)?$/.test(line)) {
                 continue;
             }
-            const heading = /^===\s+([A-Z]+)$/.exec(line);
-            if (heading && sections.has(heading[1])) {
-                block = heading[1];
+            const heading = ScribeAnswer.bare(line).toUpperCase();
+            if (sections.has(heading) && !line.includes('|') && !line.startsWith('{')) {
+                block = heading;
                 continue;
             }
             if (block === 'EVIDENCE') {
@@ -881,7 +882,7 @@ const ScribeAnswer = Object.freeze({
                     nullable(item.form) && nullable(item.dimension) &&
                     ['event', 'time', 'subject', 'attribute', 'value'].every((key) => item[key] === undefined || nullable(item[key])) &&
                     (item.day === undefined || nullable(item.day) || Number.isSafeInteger(item.day) && item.day > 0) &&
-                    (item.related === undefined || Array.isArray(item.related) && item.related.every(string));
+                    (item.related == null || Array.isArray(item.related) && item.related.every(string));
                 const key = shape ? item.section + ':' + item.row : null;
                 if (!shape || evidence.has(key)) {
                     refused.push({ block, line, reason: ScribeAnswer.Reason.Shape });
@@ -892,9 +893,14 @@ const ScribeAnswer = Object.freeze({
             }
             if (block === 'READ') {
                 const mark = /^#([1-9]\d*)\s*\|\s*(read|no change)$/i.exec(line);
-                const number = mark ? Number(mark[1]) : null;
+                const prefix = mark ?? /^#([1-9]\d*)\s*(?:\|[^#]*)?$/.exec(line);
+                const number = prefix ? Number(prefix[1]) : null;
                 if (!mark || !Number.isSafeInteger(number) || read.has(number)) {
-                    refused.push({ block, line, reason: ScribeAnswer.Reason.Shape });
+                    const problem = { block, line, reason: ScribeAnswer.Reason.Shape };
+                    refused.push(problem);
+                    if (Number.isSafeInteger(number)) {
+                        rejectedRead.set(problem, { number, reason: mark ? 'duplicateRead' : 'invalidRead' });
+                    }
                 } else {
                     read.set(number, mark[2].toLowerCase());
                 }
@@ -903,22 +909,21 @@ const ScribeAnswer = Object.freeze({
             const row = (counts.get(block) ?? 0) + 1;
             counts.set(block, row);
             const result = ScribeAnswer.parse('=== ' + block + '\n' + line);
-            let singleCite = true;
-            if (['FACTS', 'NAMES', 'CHANGES', 'TOLD', 'THREADS', 'QUESTIONS', 'NIGHTS'].includes(block)) {
-                const fields = line.split('|').map((field) => field.trim());
-                const field = block === 'NIGHTS' ? fields[0].split(':')[0] :
-                    fields.at(-1).toLowerCase() === 'hidden' ? fields.at(-2) : fields.at(-1);
-                singleCite = /^#[1-9]\d*$/.test(field);
-            }
-            if (result.operations.length !== 1 || result.refused.length || !singleCite) {
+            if (result.operations.length !== 1 || result.refused.length) {
                 const problem = { block, line, reason: result.refused.at(-1)?.reason ?? ScribeAnswer.Reason.Shape };
                 refused.push(problem);
                 rejectedRows.set(problem, block + ':' + row);
             } else {
-                rows.set(block + ':' + row, result.operations[0]);
+                const operation = result.operations[0];
+                const fields = line.split('|').map((field) => field.trim());
+                const field = block === 'NIGHTS' ? fields[0].split(':')[0] :
+                    fields.at(-1).toLowerCase() === 'hidden' ? fields.at(-2) : fields.at(-1);
+                const cited = operation.position && field ? ScribeAnswer.citation(field) : null;
+                rows.set(block + ':' + row, cited && (cited.first !== cited.last || cited.count > 1) ?
+                    { ...operation, sourceCitation: field } : operation);
             }
         }
-        return { rows, read, evidence, refused, rejectedRows };
+        return { rows, read, evidence, refused, rejectedRows, rejectedRead };
     },
 
     /**

@@ -173,7 +173,7 @@ function richBook() {
 function examples(prompt) {
     const lines = prompt.split('\n');
     const first = lines.findIndex((line) => line.startsWith('=== '));
-    const categories = lines.findIndex((line) => line.startsWith('Categories.'));
+    const categories = lines.findIndex((line) => line.startsWith('Use a precise category'));
     return lines.slice(first, categories);
 }
 
@@ -340,18 +340,21 @@ test('only in-force facts are sent', () => {
     const state = rule(log, { type: 'RemoveFact', fact: 'F8' });
     assert.deepEqual(plain(state.facts.map((fact) => [fact.id, fact.status])), [
         ['F1', 'InForce'],
-        ['F3', 'Replaced'],
+        ['F3', 'InForce'],
         ['F5', 'InForce'],
         ['F6', 'Ended'],
-        ['F7', 'Expired'],
-        ['F2', 'Disputed'],
+        ['F7', 'InForce'],
+        ['F2', 'InForce'],
         ['F4', 'InForce'],
         ['F8', 'Removed'],
     ]);
     assert.deepEqual(ledgerOf(state, 'Halvard waits.'), [
         '## Halvard',
         'F1 age: forty (#2)',
+        'F3 location: the mill (#2)',
         'F5 trait: proud (#2)',
+        'F7 condition: a fever (#2)',
+        'F2 age: fifty (#3)',
         'F4 location: the inn (#3)',
     ]);
 });
@@ -362,6 +365,7 @@ test('relations name their target', () => {
         log,
         answer({
             SUBJECTS: ['Halvard | character', 'Mirelle | character'],
+            NAMES: ['Mirelle-san | Mirelle | #2'],
             FACTS: [
                 'Halvard | relation to Mirelle-san | trusts her | #2',
                 'Halvard | relation to Brandt | owes him money | #2',
@@ -660,11 +664,15 @@ test('sections are in order', () => {
             '## Halvard',
             'F1 age: forty (#2)',
             'F2 relation to Tamsin: trusts her (#5) (check: the other side has changed)',
+            'F4 condition: a fever (#7)',
             '## Mirelle',
             'F6 trait: hates the cold (owner)',
             'F3 trait: proud (#6) hidden',
             '## Corvane',
             '(no facts yet)',
+            '',
+            'Operator answers (final)',
+            '{"question":"Does Mirelle trust Halvard?","answer":"Only a little","position":11}',
             '',
             'LAST SCENES:',
             'Day 1 | #15-#20 | The yard | private | present: Tamsin | She trains',
@@ -813,8 +821,8 @@ test('the answers input lists questions with answers', () => {
             'F2 role: bell-ringer (#3)',
             '',
             'ANSWERED QUESTIONS:',
-            '[#2] Does Halvard trust Kira? ANSWER: He does not',
-            '[#3] Who rang the bell? ANSWER: Brandt rang it',
+            '[#2] [Q1] Does Halvard trust Kira? ANSWER: He does not',
+            '[#3] [Q2] Who rang the bell? ANSWER: Brandt rang it',
         ].join('\n'),
     );
 });
@@ -833,7 +841,7 @@ test('owner and pinned facts are marked apart', () => {
         }),
         pick(2, 3),
     );
-    assert.equal(ScribeLog.keepFirst(log, disputed).length, 2);
+    assert.equal(ScribeLog.keepFirst(log, disputed).length, 0);
     const pin = { type: 'Pin', subject: 'S1', category: 'hair', target: null, text: 'black', hidden: false };
     rule(log, pin);
     rule(log, { ...pin, category: 'skin', text: 'pale', hidden: true });
@@ -856,22 +864,26 @@ test('owner and pinned facts are marked apart', () => {
                 .map((fact) => [fact.id, fact.origin, fact.pinned, fact.hidden]),
         ),
         [
-            ['F9', 'Operator', false, false],
-            ['F10', 'Operator', false, true],
-            ['F1', 'Story', true, false],
-            ['F3', 'Story', true, true],
-            ['F7', 'Operator', true, false],
-            ['F8', 'Operator', true, true],
+            ['F7', 'Operator', false, false],
+            ['F8', 'Operator', false, true],
+            ['F1', 'Story', false, false],
+            ['F3', 'Story', false, true],
+            ['F2', 'Story', false, false],
+            ['F4', 'Story', false, false],
+            ['F5', 'Operator', true, false],
+            ['F6', 'Operator', true, true],
         ],
     );
     assert.deepEqual(ledgerOf(state, 'Halvard waits.'), [
         '## Halvard',
-        'F9 trait: kind to strangers (owner)',
-        'F10 trait: fears the sea (owner) hidden',
-        'F1 age: forty (#2) pinned',
-        'F3 eyes: grey (#2) pinned hidden',
-        'F7 hair: black (owner) pinned',
-        'F8 skin: pale (owner) pinned hidden',
+        'F7 trait: kind to strangers (owner)',
+        'F8 trait: fears the sea (owner) hidden',
+        'F1 age: forty (#2)',
+        'F3 eyes: grey (#2) hidden',
+        'F2 age: fifty (#3)',
+        'F4 eyes: blue (#3)',
+        'F5 hair: black (owner) pinned',
+        'F6 skin: pale (owner) pinned hidden',
     ]);
 });
 
@@ -964,8 +976,8 @@ test('answers input skips unanswered questions', () => {
     assert.deepEqual(plain(state.questions.map((question) => question.answer)), ['He does not', null, 'Nobody did']);
     const text = ScribeAnalyzer.answersInput(state, 'Orla', state.questions);
     assert.deepEqual(sectionOf(text, 'ANSWERED QUESTIONS:'), [
-        '[#2] Does Halvard trust Kira? ANSWER: He does not',
-        '[#4] Who rang the bell? ANSWER: Nobody did',
+        '[#2] [Q1] Does Halvard trust Kira? ANSWER: He does not',
+        '[#4] [Q3] Who rang the bell? ANSWER: Nobody did',
     ]);
     assert.deepEqual(sectionOf(text, 'LEDGER:'), ['## Halvard', '(no facts yet)']);
 });
@@ -1300,22 +1312,22 @@ test('the prompts are exact', () => {
             ScribeAnalyzer.Prompt.split('\nEvery row in every block')[0],
             '15. Preserve each account and its speaker when the sources disagree. Leave comparisons and discrepancy findings to the independent Checker.',
             15,
-            9352,
-            '9454efae',
+            9163,
+            '1a0f6f05',
         ],
         [
             ScribeAnalyzer.NotesPrompt,
-            '7. A note that cannot be read as a fact about a subject is left out. Never guess.',
+            '7. Keep the operator’s wording when a note falls outside these blocks.',
             7,
-            3222,
-            'e81d5b63',
+            3220,
+            'e5abc335',
         ],
         [
             ScribeAnalyzer.AnswersPrompt,
-            '6. An answer that settles nothing ("leave it open", "not decided") produces no line. Never guess.',
-            6,
-            2553,
-            'b3928396',
+            '5. Mark a fact hidden when the answer says it is a secret, a thought, or known only to the subject.',
+            5,
+            2464,
+            'f723269a',
         ],
     ];
     for (const [prompt, lastRule, ruleCount, length, fingerprint] of prompts) {

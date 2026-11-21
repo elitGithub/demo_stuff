@@ -145,7 +145,7 @@ export default class FakeZeta {
         return {
             id: this.room,
             createdAt: '2026-01-01T00:00:00.000Z',
-            lastMessage: { id: 'm001', text: 'A line of the tale.' },
+            lastMessage: this.messages.length ? { id: this.messages.at(-1).id } : null,
             isActive: true,
             title: 'The harbour tale',
             unreadCount: 0,

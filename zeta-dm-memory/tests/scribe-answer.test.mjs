@@ -22,9 +22,10 @@ test('live evidence preserves literal JSON and one-based section row identities'
         const result = ScribeAnswer.parseStory('=== EVIDENCE\n' + JSON.stringify({ ...row, ...bad }));
         assert.equal(result.refused.length, 1);
     }
-    for (const bad of ['=== READ\n#1 | read\n#1 | no change', '=== EVIDENCE\n{', '=== FACTS\nSera | hair | silver | #1-#3']) {
+    for (const bad of ['=== READ\n#1 | read\n#1 | no change', '=== EVIDENCE\n{']) {
         assert.equal(ScribeAnswer.parseStory(bad).refused.length, 1);
     }
+    assert.equal(ScribeAnswer.parseStory('=== FACTS ===\nSera | hair | silver | #1-#3').rows.get('FACTS:1').sourceCitation, '#1-#3');
 });
 
 /**
@@ -536,9 +537,9 @@ test('changes name the subject and the category', () => {
     assertRefused('CHANGES', 'F12 | Narrator | location | the mill | #33', 'Name');
     assertRefused('CHANGES', 'F12 |  | location | the mill | #33', 'Name');
     assertRefused('CHANGES', 'F12 | Narrator | mood | sad | soon', 'Name');
-    assertRefused('CHANGES', 'F12 | Halvard | mood | sad | #33', 'Category');
-    assertRefused('CHANGES', 'F12 | Halvard | mood | sad | soon', 'Category');
-    assertRefused('CHANGES', 'F12 | Halvard | relation to | sad | #33', 'Category');
+    assert.equal(only('CHANGES', 'F12 | Halvard | mood | sad | #33').category, 'mood');
+    assertRefused('CHANGES', 'F12 | Halvard | mood | sad | soon', 'Citation');
+    assert.equal(only('CHANGES', 'F12 | Halvard | relation to | sad | #33').category, 'relation to');
 });
 
 test('told lines name the owner', () => {
@@ -621,7 +622,7 @@ test('unsafe numbers are refused', () => {
     assertRefused('SCENES', sceneWithPresent(`Halvard (until #${huge})`), 'Shape');
 });
 
-test('unknown category refuses only that line', () => {
+test('a free category is preserved alongside known categories', () => {
     const result = inBlock('FACTS', [
         factLine,
         'Halvard | knows | the way | #2',
@@ -629,9 +630,10 @@ test('unknown category refuses only that line', () => {
     ]);
     assert.deepEqual(
         result.operations.map((operation) => operation.position),
-        [1, 3],
+        [1, 2, 3],
     );
-    assert.deepEqual(result.refused, [{ block: 'FACTS', line: 'Halvard | knows | the way | #2', reason: 'Category' }]);
+    assert.equal(result.operations[1].category, 'knows');
+    assert.deepEqual(result.refused, []);
     assertRefused('FACTS', 'Halvard |  | the way | #2', 'Category');
 });
 
@@ -675,7 +677,7 @@ test('relation target', () => {
     assert.equal(joint.category, 'relation');
     assert.equal(joint.target, 'Halvard and Tamsin');
     assert.equal(only('FACTS', 'Mirelle | trait | sworn allies | #63').target, null);
-    assertRefused('FACTS', 'Mirelle | relation to | sworn allies | #64', 'Category');
+    assert.equal(only('FACTS', 'Mirelle | relation to | sworn allies | #64').category, 'relation to');
 });
 
 test('names block', () => {
@@ -910,7 +912,7 @@ test('a line in the wrong block is refused', () => {
 
 test('several faults report the first in order', () => {
     assertRefused('FACTS', 'Narrator | knows | the way | soon', 'Name');
-    assertRefused('FACTS', 'Halvard | knows | the way | soon', 'Category');
+    assertRefused('FACTS', 'Halvard | knows | the way | soon', 'Citation');
     assertRefused('FACTS', 'Halvard | trait | the way | soon', 'Citation');
     assertRefused('FACTS', 'Narrator | knows |  | soon', 'Shape');
     assertRefused('FACTS', 'Narrator | knows | soon', 'Shape');
@@ -919,7 +921,7 @@ test('several faults report the first in order', () => {
     assertRefused('TOLD', 'F1 | Halvard | Mirelle | soon', 'Citation');
     assertRefused('NAMES', 'Narrator | Aldric | soon', 'Name');
     assertRefused('CHANGES', 'F1 | Narrator | mood | x | soon', 'Name');
-    assertRefused('CHANGES', 'F1 | Halvard | mood | x | soon', 'Category');
+    assertRefused('CHANGES', 'F1 | Halvard | mood | x | soon', 'Citation');
     assertRefused('CHANGES', 'F1 | Halvard | trait | x | soon', 'Citation');
     assertRefused('CHANGES', 'F1 | Narrator | mood |  | soon', 'Shape');
 });
@@ -948,11 +950,11 @@ test('line endings, bullets and fences', () => {
 
 test('prepared lines are what refusals carry', () => {
     const result = plain(
-        ScribeAnswer.parse('=== FACTS\n  - **Halvard | knows | the way | #1**  \n   Halvard | knows | x | #2   '),
+        ScribeAnswer.parse('=== FACTS\n  - **Halvard | knows | the way | yesterday**  \n   Halvard | knows | x | tomorrow   '),
     );
     assert.deepEqual(
         result.refused.map((entry) => entry.line),
-        ['Halvard | knows | the way | #1', 'Halvard | knows | x | #2'],
+        ['Halvard | knows | the way | yesterday', 'Halvard | knows | x | tomorrow'],
     );
     assert.deepEqual(plain(ScribeAnswer.parse('=== FACTS\n**')).refused, [
         { block: 'UNKNOWN', line: '**', reason: 'Shape' },

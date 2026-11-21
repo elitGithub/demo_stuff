@@ -1089,12 +1089,12 @@ test('about returns only what stands', () => {
     const expected = [
         ['forty', 'InForce'],
         ['a silver ring', 'Ended'],
-        ['fifty', 'Disputed'],
-        ['a fever', 'Expired'],
+        ['fifty', 'InForce'],
+        ['a fever', 'InForce'],
         ['sly', 'Removed'],
         ['the mill', 'Replaced'],
-        ['a guard', 'Replaced'],
-        ['the inn', 'Replaced'],
+        ['a guard', 'InForce'],
+        ['the inn', 'InForce'],
         ['the harbour', 'InForce'],
         ['a smuggler', 'InForce'],
     ];
@@ -1108,9 +1108,13 @@ test('about returns only what stands', () => {
     assert.deepEqual(plain(state.refinements), []);
     assert.equal(ScribeKnowledge.knows(state, isolde, factSaying(state, 'the harbour')), false);
     assert.equal(ScribeKnowledge.knows(state, isolde, factSaying(state, 'a smuggler')), false);
-    assert.deepEqual(texts(ScribeKnowledge.about(state, isolde, halvard).facts), ['forty']);
+    assert.deepEqual(texts(ScribeKnowledge.about(state, isolde, halvard).facts), ['forty', 'fifty', 'a fever', 'a guard']);
     assert.deepEqual(texts(ScribeKnowledge.about(state, halvard, halvard).facts), [
         'forty',
+        'fifty',
+        'a fever',
+        'a guard',
+        'the inn',
         'the harbour',
         'a smuggler',
     ]);

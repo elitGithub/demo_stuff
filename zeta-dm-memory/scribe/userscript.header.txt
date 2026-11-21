@@ -1,7 +1,7 @@
 // ==UserScript==
 // @name         Zeta Scribe
 // @namespace    zeta-scribe
-// @version      0.1.0
+// @version      0.3.0
 // @description  Keeps the book of a Zeta campaign, tells the scene what it knows, and checks replies against the book.
 // @match        https://zeta-ai.io/*
 // @match        https://frame.pingpong.ai/*

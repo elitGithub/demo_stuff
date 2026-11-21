@@ -75,7 +75,7 @@ function disputed(words, filing = '') {
     return { book, messages, order, fingerprints, state, source, certify, rule, rows };
 }
 
-test('a bound bounty ruling corrects the subject, preserves the original and reopens on loss of its sole source', () => {
+test('a bound bounty ruling corrects the subject and preserves the operator decision when its citation changes', () => {
     const room = disputed(['Mirra has a bounty of 50,000 gold.'],
         '=== SUBJECTS\nMirra | character\nAcnademia | character\n=== FACTS\nAcnademia | status | bounty of 50,000 gold | #1');
     const operation = room.book.log.entries[0].operations.find((item) => item.fact);
@@ -95,12 +95,43 @@ test('a bound bounty ruling corrects the subject, preserves the original and reo
     const changed = [{ ...room.messages[0], fingerprint: 'new', blocks: [{ ...room.messages[0].blocks[0], text: 'Mirra has no bounty.' }] }];
     const state = ScribeReplay.run(newBook.log, room.order, null, new Map([[room.order[0], 'new']]), null, null, changed);
     assert.equal(state.checkerRulings[0].sequence, decision.sequence);
-    assert.equal(state.checkerRulings[0].status, 'reopened');
-    assert.ok(state.facts.every((item) => item.status !== 'InForce'));
+    assert.equal(state.checkerRulings[0].status, 'settled');
+    assert.equal(state.checkerRulings[0].sourceStale, true);
+    assert.equal(state.checkerRulings[0].shareInReminder, false);
+    assert.equal(state.facts[0].text, '50,000 gold');
+    assert.equal(state.facts[0].evidence, undefined);
     assert.equal(ScribeLog.checkProgress(newBook, changed).findings[0].actionable, false);
     const cosmetic = [{ ...room.messages[0], fingerprint: 'new', blocks: [{ ...room.messages[0].blocks[0],
         text: room.messages[0].blocks[0].text + ' A dog runs outside.' }] }];
     assert.equal(ScribeReplay.run(newBook.log, room.order, null, null, null, null, cosmetic).checkerRulings[0].status, 'settled');
+});
+
+test('operator-selected fixed and moving values survive a later Story claim and remain distinct from other attributes', () => {
+    for (const [category, attribute] of [['eyes', 'iris'], ['location', 'location']]) {
+        const room = disputed(['Nia is described.', 'Nia is described differently.'],
+            '=== SUBJECTS\nNia | character\n=== FACTS\nNia | ' + category + ' | original | #1');
+        const item = room.book.log.entries[0].operations.find((operation) => operation.fact);
+        item.evidence = { ...room.source(1), valueSupplied: true, value: 'original', attribute, attribution: 'witnessed' };
+        const record = { ref: 'w1', text: JSON.stringify(item) };
+        room.certify(1, { subject: 'Nia', attribute, value: 'chosen' }, [{
+            kind: 'Citation', source: room.source(1), earlier: null, record, question: 'Which account stands?' }]);
+        room.rule(room.rows()[0], { action: 'choose', account: 'source' });
+        const operation = { ...item, fact: 'F2', cite: room.order[1], position: 2, text: 'different',
+            evidence: { ...room.source(2), valueSupplied: true, value: 'different', attribute, attribution: 'witnessed' } };
+        room.book.log.entries[0].operations.push(operation);
+        if (category === 'eyes') {
+            room.book.log.entries[0].operations.push({ ...operation, fact: 'F3', text: 'different sclera',
+                evidence: { ...operation.evidence, attribute: 'sclera' } });
+        }
+        room.book.log = JSON.parse(JSON.stringify(room.book.log));
+        const state = room.state();
+        assert.equal(state.checkerRulings[0].canonical, 'chosen');
+        assert.equal(state.facts.find((row) => row.id === 'F1').status, 'InForce');
+        assert.equal(state.facts.find((row) => row.id === 'F2').status, 'Reported');
+        if (category === 'eyes') {
+            assert.equal(state.facts.find((row) => row.id === 'F3').status, 'InForce');
+        }
+    }
 });
 
 test('two points with identical witnesses and text are ruled independently, and an open point remains actionable after reload', () => {
@@ -119,7 +150,7 @@ test('two points with identical witnesses and text are ruled independently, and 
     assert.deepEqual(Array.from(room.state().checkerRulings, (row) => row.status), ['settled', 'superseded', 'settled']);
 });
 
-test('a later incompatible hair account reopens the affected ruling while a town question stays deferred', () => {
+test('a later incompatible hair account creates a separate finding and keeps the chosen account', () => {
     const room = disputed(['Galahan has dark hair.', 'Galahan has silver hair.', 'They arrive in Thornwall.', 'Galahan has red hair.']);
     room.certify(1, { subject: 'Galahan', attribute: 'hair', value: 'dark' });
     const question = (number) => ({ kind: 'Question', question: 'What color is Galahan’s hair?',
@@ -130,10 +161,10 @@ test('a later incompatible hair account reopens the affected ruling while a town
     room.rule(hair, { action: 'choose', account: 'earlier' });
     room.rule(town, { action: 'open' });
     room.certify(4, { subject: 'Galahan', attribute: 'hair', value: 'red' }, [question(4)]);
-    assert.deepEqual(Array.from(room.rows(), (row) => [row.id, row.status]), [[hair.id, 'reopened'], [town.id, 'deferred']]);
-    assert.equal(room.state().checkerRulings[0].status, 'reopened');
-    room.rule(room.rows()[0], { action: 'choose', account: 'earlier' });
-    assert.deepEqual(Array.from(room.rows(), (row) => row.status), ['settled', 'deferred']);
+    assert.deepEqual(Array.from(room.rows(), (row) => row.status), ['settled', 'deferred', 'open']);
+    assert.deepEqual(Array.from(room.rows().slice(0, 2), (row) => row.id), [hair.id, town.id]);
+    assert.notEqual(room.rows()[2].id, hair.id);
+    assert.equal(room.state().checkerRulings[0].canonical, 'Galahan has dark hair.');
 });
 
 test('the same hair question and common earlier citation keep two subjects separate across reload and a later contradiction', () => {
@@ -151,11 +182,12 @@ test('the same hair question and common earlier citation keep two subjects separ
     room.rule(mirra, { action: 'choose', account: 'earlier' });
     room.certify(4, { subject: 'Galahan', attribute: 'hair', value: 'blue' }, [question(4)]);
     const current = new Map(room.rows().map((item) => [item.id, [item.source.position, item.status]]));
-    assert.deepEqual(current.get(galahan.id), [4, 'reopened']);
+    assert.deepEqual(current.get(galahan.id), [2, 'settled']);
+    assert.ok(room.rows().some((row) => row.source.position === 4 && row.status === 'open'));
     assert.deepEqual(current.get(mirra.id), [3, 'settled']);
 });
 
-test('the next Checker call excludes the challenged ruling and sees only its replacement after reload', () => {
+test('the next Checker call retains an existing ruling and receives a second operator decision after reload', () => {
     const room = disputed(['Galahan has dark hair.', 'Galahan has silver hair.', 'Galahan has red hair.', 'Dawn breaks.']);
     const question = (number) => ({ kind: 'Question', source: room.source(number), earlier: room.source(1),
         record: null, question: 'What color is Galahan’s hair?' });
@@ -167,19 +199,19 @@ test('the next Checker call excludes the challenged ruling and sees only its rep
     assert.deepEqual(canonical(), ['Galahan has dark hair.']);
     room.certify(3, { subject: 'Galahan', attribute: 'hair', value: 'red' }, [question(3)]);
     assert.equal(context().checkedThrough, 3);
-    assert.deepEqual(canonical(), []);
+    assert.deepEqual(canonical(), ['Galahan has dark hair.']);
     const unfinished = context();
-    room.rule(room.rows()[0], { action: 'choose', account: 'source' });
+    room.rule(room.rows()[1], { action: 'explain', explanation: 'The red claim refers to dye.' });
     room.book.log = JSON.parse(JSON.stringify(room.book.log));
     assert.equal(context().message.position, 4);
-    assert.deepEqual(canonical(), ['Galahan has red hair.']);
+    assert.deepEqual(canonical(), ['Galahan has dark hair.', 'The red claim refers to dye.']);
     assert.equal(ScribeLog.saveCheck(room.book, room.messages, unfinished, page(room.messages[3])), false);
-    assert.deepEqual(Array.from(room.state().checkerRulings, (row) => row.status), ['superseded', 'settled']);
+    assert.deepEqual(Array.from(room.state().checkerRulings, (row) => row.status), ['settled', 'settled']);
     room.certify(4, {});
     assert.equal(context().checkedThrough, 4);
 });
 
-test('leaving a reopened correction open keeps the discredited book value out until an account is chosen', () => {
+test('a new citation finding cannot undo an operator correction when left open', () => {
     const room = disputed(['Frost owns a black horse.', 'Frost owns a brown horse.', 'Mirra owns a white mare.'],
         '=== SUBJECTS\nFrost | character\nMirra | character\n=== FACTS\nFrost | belonging | a white horse | #1\nMirra | belonging | a white mare | #3');
     const record = { ref: 'w1', text: JSON.stringify(room.book.log.entries[0].operations.find((operation) => operation.fact)) };
@@ -188,20 +220,13 @@ test('leaving a reopened correction open keeps the discredited book value out un
     room.certify(1, { subject: 'Frost', attribute: 'owns', value: 'black horse' }, [citation(1)]);
     room.rule(room.rows()[0], { action: 'choose', account: 'source' });
     room.certify(2, { subject: 'Frost', attribute: 'owns', value: 'brown horse' }, [citation(2)]);
-    assert.equal(room.rows()[0].status, 'reopened');
-    room.rule(room.rows()[0], { action: 'open' });
+    assert.equal(room.rows()[0].status, 'settled');
+    assert.equal(room.rows()[1].status, 'open');
+    room.rule(room.rows()[1], { action: 'open' });
     room.book.log = JSON.parse(JSON.stringify(room.book.log));
-    const facts = room.state().facts;
-    assert.equal(facts.find((fact) => fact.text === 'a white horse').status, 'Removed');
-    assert.equal(facts.find((fact) => fact.text === 'a white mare').status, 'InForce');
-    assert.equal(room.rows()[0].status, 'deferred');
-    const deferred = JSON.stringify(room.book.log);
-    room.rule(room.rows()[0], { action: 'explain', explanation: 'Frost sold the black horse and later bought the brown horse.' });
-    assert.equal(room.state().facts.find((fact) => fact.text === 'a white horse').status, 'Removed');
-    room.book.log = JSON.parse(deferred);
-    room.rule(room.rows()[0], { action: 'choose', account: 'record' });
-    assert.equal(room.state().facts.find((fact) => fact.text === 'a white horse').status, 'InForce');
-    assert.deepEqual(Array.from(room.state().checkerRulings, (row) => row.status), ['superseded', 'superseded', 'settled']);
+    assert.equal(room.state().facts.find((fact) => fact.text === 'black horse').status, 'InForce');
+    assert.equal(room.state().facts.find((fact) => fact.text === 'a white mare').status, 'InForce');
+    assert.deepEqual(Array.from(room.rows(), (row) => row.status), ['settled', 'deferred']);
 });
 
 test('the Last Mage combined weapon and reward entry splits into independently cited accounts without creating a transfer', () => {
@@ -274,6 +299,35 @@ test('existing Aedelas and Galahan answers settle their own cited questions and 
     assert.equal(room.state().checkerRulings.find((item) => item.finding === hair.id).status, 'settled');
 });
 
+test('a blue crown ruling never answers who stole it, including after loading a cached legacy binding', () => {
+    const color = 'What color is Ada’s crown?';
+    const theft = 'Who stole the crown from Ada?';
+    for (const legacy of [true, false]) {
+        const room = disputed(['Ada owns a blue crown.', 'A thief stole the crown from Ada.'],
+            legacy ? '=== QUESTIONS\n' + color + ' | #1' : '');
+        if (legacy) {
+            const state = room.state();
+            const entry = ScribeLog.rule(room.book.log, state, { type: 'Answer', question: 'Q1', text: 'blue' });
+            ScribeLog.link(entry, state, [], room.messages);
+        }
+        room.certify(1, { subject: 'Ada', attribute: 'crown', value: 'blue' }, [{
+            kind: 'Question', source: room.source(1), earlier: null, record: null, question: color }]);
+        if (!legacy) {
+            room.rule(room.rows()[0], { action: 'explain', explanation: 'blue' });
+        }
+        room.certify(2, { subject: 'Ada', attribute: 'crown', value: 'blue' }, [{
+            kind: 'Question', source: room.source(2), earlier: room.source(1), record: null, question: theft }]);
+        const [settled, open] = room.rows();
+        if (legacy) {
+            room.book.log.entries.at(-1).check.legacyRulings = [{ ...settled.ruling, finding: open.id, version: open.version,
+                question: theft, support: open.support }];
+        }
+        room.book.log = JSON.parse(JSON.stringify(room.book.log));
+        assert.deepEqual(Array.from(room.rows(), (row) => [row.question, row.status, row.ruling?.canonical]),
+            [[color, 'settled', 'blue'], [theft, 'open', undefined]]);
+    }
+});
+
 test('an identical general question on a newly identified subject leaves the earlier ruling alone', () => {
     const room = disputed(['Galahan has dark hair.', 'Galahan has silver hair.', 'The shop is in another town.']);
     room.certify(1, { subject: 'Galahan', attribute: 'hair', value: 'dark' });
@@ -344,6 +398,29 @@ test('the final page publishes checked progress and findings together without ch
     assert.equal(JSON.stringify(ScribeReplay.run(restored.log, order)), canonical);
     assert.equal(JSON.stringify(restored.log.read), originalMarks);
     assert.equal(restored.log.entries.filter((entry) => entry.origin === 'Checker').length, 1);
+});
+
+test('upgrading keeps finished Checker messages and restarts only an unfinished comparison with the new page plan', () => {
+    const { book, messages, order } = campaign();
+    ScribeLog.append(book.log, ScribeReplay.run(book.log, order), [], { messages, origin: 'Story' });
+    for (const [index, total] of [[0, 1], [1, 3]]) {
+        const work = ScribeLog.checkWork(book, messages);
+        assert.equal(ScribeLog.saveCheck(book, messages, work, page(messages[index], 0, total)), true);
+        delete book.log.entries.at(-1).check.planVersion;
+    }
+    const work = ScribeLog.checkWork(book, messages);
+    assert.equal(work.checkedThrough, 1);
+    assert.equal(work.completed.length, 0);
+    const fresh = page(messages[1]);
+    const interpretation = { subject: 'Magera', attribute: 'ownership', value: 'the staff has a new holder' };
+    Object.assign(fresh.claims[0], interpretation);
+    const raw = JSON.parse(fresh.answer);
+    Object.assign(raw.claims[0], interpretation);
+    fresh.answer = JSON.stringify(raw);
+    assert.equal(ScribeLog.saveCheck(book, messages, work, fresh), true);
+    const resumed = ScribeLog.checkWork(JSON.parse(JSON.stringify(book)), messages);
+    assert.equal(resumed.checkedThrough, 2);
+    assert.ok(resumed.earlierClaims.some((claim) => claim.value === interpretation.value && claim.text === 'Magera takes the staff.'));
 });
 
 test('target-version checks refuse stale jobs, invented excerpts, bad speaker and later-source references', () => {

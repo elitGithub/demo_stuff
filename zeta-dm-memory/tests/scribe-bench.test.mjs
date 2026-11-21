@@ -1,4 +1,5 @@
 import assert from 'node:assert/strict';
+import declaredJudgments from './support/DeclaredJudgments.mjs';
 import { readdirSync, readFileSync } from 'node:fs';
 import test from 'node:test';
 import CampaignBuilder from './support/CampaignBuilder.mjs';
@@ -46,7 +47,7 @@ function answer(blocks) {
  * @return {object}
  */
 function replay(log) {
-    return ScribeReplay.run(log, storyOrder);
+    return declaredJudgments(ScribeReplay.run(log, storyOrder), log, ScribeReplay);
 }
 
 /**
@@ -133,7 +134,8 @@ function scripted(call) {
     }
     const marks = [...call.user.matchAll(/^\[#(\d+)\] /gm)].map((match) => Number(match[1]));
     return {
-        content: answer({ FACTS: marks.map((mark) => `Halvard | background | settled at line ${mark} | #${mark}`) }),
+        content: answer({ FACTS: marks.map((mark) => `Halvard | background | settled at line ${mark} | #${mark}`),
+            FILED: [...call.user.matchAll(/^\[#(\d+)\] \[(Q\d+)\]/gm)].map(([, mark, id]) => id + ' | #' + mark) }),
         cost: 0.01,
     };
 }
@@ -374,7 +376,7 @@ test('a subject shows status, source and audience', () => {
         category: 'age',
         text: 'thirty',
         source: '#3',
-        status: 'Disputed',
+        status: 'InForce',
         audience: 'Everyone',
         hidden: false,
         pinned: false,
@@ -452,7 +454,7 @@ test('a shifted fact and its equivalent reading retain both current and original
     const state = ScribeReplay.run(log, storyOrder.slice(1));
     const row = BenchView.subject(state, 'S1').facts[0];
     assert.match(row.source, /#1 \(originally #2\), block 1, Sera \(claimed\) “20 m/);
-    assert.match(row.source, /#2 \(originally #3\), block 1, Sera \(claimed\) “2,000 cm/);
+    assert.match(BenchView.subject(state, 'S1').facts[1].source, /#2 \(originally #3\), block 1, Sera \(claimed\) “2,000 cm/);
     const audited = BenchView.audit(state, story.slice(1), 5);
     assert.equal(audited[0].source, row.source);
     assert.equal(audited[0].message, story[1].text);
@@ -480,6 +482,7 @@ test('rulings lists what the owner must decide', () => {
     );
     apply(log, answer({ CHANGES: ['F1 | Halvard | age | FULLER: twenty-five at most | #6'] }), 6, 6);
     rule(log, { type: 'Answer', question: 'Q1', text: 'She does not' });
+    log.fixtureJudgments = { conflictRows: [['F3', 'F2']], identityPairs: [['S2', 'S3'], ['S4', 'S5']] };
     const state = replay(log);
     const rulings = plain(BenchView.rulings(state));
     assert.deepEqual(rulings.conflicts, [
@@ -495,8 +498,8 @@ test('rulings lists what the owner must decide', () => {
         },
     ]);
     assert.deepEqual(rulings.lookAlikes, [
-        { first: 'S2', second: 'S3', firstLabel: 'Oswin', secondLabel: 'Oswin (the miller)', reason: 'SameName' },
-        { first: 'S4', second: 'S5', firstLabel: 'Aldrich', secondLabel: 'Aldric', reason: 'Spelling' },
+        { first: 'S2', second: 'S3', firstLabel: 'Oswin', secondLabel: 'Oswin (the miller)', reason: 'Alias' },
+        { first: 'S4', second: 'S5', firstLabel: 'Aldrich', secondLabel: 'Aldric', reason: 'Alias' },
     ]);
     assert.deepEqual(rulings.publicScenes, [
         {
@@ -517,7 +520,7 @@ test('rulings lists what the owner must decide', () => {
         { label: 'Halvard', category: 'age', from: 'twenty-five', to: 'twenty-five at most' },
     ]);
     assert.deepEqual(rulings.aliases, [{ subject: 'S1', label: 'Halvard', name: 'Brandt' }]);
-    assert.equal(BenchView.blocking(state), 2);
+    assert.equal(BenchView.blocking(state), 3);
     rule(log, { type: 'Dismiss', question: 'Q2' });
     rule(log, { type: 'Narrow', scene: 'MESSAGE-1' });
     rule(log, { type: 'Distinct', first: 'S4', second: 'S5' });
@@ -622,11 +625,11 @@ test('the audit excludes what is not in force or not from the story', () => {
     });
     const state = replay(log);
     const kinds = new Set(state.facts.map((fact) => fact.status).concat(state.facts.map((fact) => fact.origin)));
-    for (const kind of ['Disputed', 'Expired', 'Ended', 'Removed', 'Replaced', 'Notes', 'Operator']) {
+    for (const kind of ['InForce', 'Ended', 'Removed', 'Replaced', 'Notes', 'Operator']) {
         assert.equal(kinds.has(kind), true, kind);
     }
     const drawn = BenchView.audit(state, story, 5);
-    assert.deepEqual(plain(drawn.map((row) => row.text)).sort(), ['asleep', 'keeps watch', 'twenty-five']);
+    assert.deepEqual(plain(drawn.map((row) => row.text)).sort(), ['asleep', 'keeps watch', 'thirty', 'tired', 'twenty-five']);
 });
 
 test('progress lines', () => {
@@ -852,6 +855,7 @@ function disputedBook() {
         1,
         3,
     );
+    log.fixtureJudgments = { conflictRows: [['F1', 'F2'], ['F3', 'F4']] };
     return readTo(log, 40);
 }
 
@@ -1161,7 +1165,7 @@ test('a failed call shows why and can be resumed', async () => {
     assert.equal(page.text('status'), 'Done: every message is read.');
 });
 
-test('a malformed extra row keeps the stretch owed and appears in the saved reading', async () => {
+test('a malformed extra row remains in diagnostics while every stretch is processed', async () => {
     const page = await opened(null);
     const bad = 'Halvard | trait | #5';
     page.server.model = (call) => {
@@ -1170,11 +1174,11 @@ test('a malformed extra row keeps the stretch owed and appears in the saved read
     };
     page.click('start');
     await page.idle();
-    assert.equal(page.server.postsOf('log-a.json').length, 0);
-    const diagnostic = page.saved(`calls-a-unreadable-${FakePage.StartTime}.json`);
-    assert.equal(diagnostic.readable, false);
+    assert.equal(readCount(page.saved('log-a.json')), 100);
+    const diagnostic = page.saved('calls-a-1.json');
+    assert.equal(diagnostic.readable, true);
     assert.ok(diagnostic.refusedLines.some((line) => line.line === bad));
-    assert.match(page.rows('progress-list').at(-1).textContent, /0 of 100 read/);
+    assert.match(page.rows('progress-list').at(-1).textContent, /40 of 100 read/);
 });
 
 test('a failed save reloads the saved book', async () => {
@@ -1252,6 +1256,7 @@ test('controls are locked while a run is in flight', async () => {
         1,
         4,
     );
+    log.fixtureJudgments = { conflictRows: [['F1', 'F2']], identityPairs: [['S2', 'S3']] };
     rule(log, { type: 'Widen', fact: 'F3', to: 'Everyone' });
     const page = await opened(readTo(log, 40));
     await openSubject(page, 'Halvard');
@@ -1345,6 +1350,11 @@ test('the bench saves a dragon-length ruling and keeps the human height', async 
             'Sera | build | in her full dragon form 20 m long | #2',
             'Sera | build | in her full dragon form 12 m long | #3'],
     }), 1, 3);
+    const facts = log.entries[0].operations.filter((row) => row.type === 'Fact');
+    for (const [index, fact] of facts.entries()) {
+        Object.assign(fact, index === 0 ? { form: 'human', dimension: 'height' } : { form: 'full dragon', dimension: 'length' });
+    }
+    log.fixtureJudgments = { conflictRows: [['F2', 'F3']] };
     const page = await opened(log);
     page.click('tab-rulings');
     await page.idle();
@@ -1406,6 +1416,7 @@ test('merge and distinct clear a look-alike', async () => {
         1,
         3,
     );
+    log.fixtureJudgments = { identityPairs: [['S1', 'S2'], ['S3', 'S4']] };
     const page = await opened(readTo(log, 40));
     page.click('tab-rulings');
     await page.idle();
@@ -1708,39 +1719,38 @@ test('saving an audit', async () => {
     );
 });
 
-test('an unreadable answer is kept and shown', async () => {
+test('a response with an unbound row is kept and shown as processed', async () => {
     const page = await opened(null);
-    page.server.model = () => ({ content: prose, cost: 0.01 });
+    const malformed = '=== FACTS\nGuard | eyes | green | #unknown';
+    page.server.model = () => ({ content: malformed, cost: 0.01 });
     page.click('start');
     await page.idle();
-    const problem = 'Stopped: The answer for #1 to #40 held no line that could be read.';
+    const problem = 'Done: every message is read.';
     assert.equal(page.text('status'), problem);
-    const name = `calls-a-unreadable-${FakePage.StartTime}.json`;
-    assert.deepEqual(
-        page.server.posts.map((request) => request.url),
-        [`/private/${name}`],
-    );
+    const name = 'calls-a-1.json';
+    assert.equal(readCount(page.saved('log-a.json')), 100);
     assert.deepEqual(page.saved(name), {
-        sequence: null,
+        sequence: 1,
         pass: 'Story',
         system: ScribeAnalyzer.Prompt,
         input: page.server.modelCalls[0].user,
-        answer: prose,
-        readable: false,
-        refusedLines: [{ block: 'PREAMBLE', line: prose, reason: 'Shape' }],
+        answer: malformed,
+        readable: true,
+        refusedLines: [{ block: 'FACTS', line: 'Guard | eyes | green | #unknown', reason: 'Citation' }],
         refusedOperations: [],
     });
-    const [stopped, step] = page.rows('progress-list');
-    assert.equal(stopped.textContent, problem);
-    assert.equal(step.children[0].textContent, '#1 to #40: 0 stored, 1 refused, $0.0100 spent, 0 of 100 read');
+    const rows = page.rows('progress-list');
+    const step = rows.at(-1);
+    assert.equal(rows[0].textContent, problem);
+    assert.equal(step.children[0].textContent, '#1 to #40: 0 stored, 1 refused, $0.0100 spent, 40 of 100 read');
     assert.deepEqual(
         step
             .descendants()
             .filter((element) => element.tagName === 'LI')
             .map((element) => element.textContent),
-        [`${prose} (Shape)`],
+        ['Guard | eyes | green | #unknown (Citation)'],
     );
-    assert.equal(page.byId('continue').disabled, true);
+    assert.equal(page.byId('continue').disabled, false);
 });
 
 test('calls without a price are counted', async () => {
@@ -2097,20 +2107,18 @@ test('the audit holds its thirty', async () => {
 
 test('unreadable records never overwrite', async () => {
     const page = await opened(null);
-    page.server.model = () => ({ content: prose, cost: 0.01 });
+    page.server.model = () => ({ content: '', cost: 0.01 });
     page.click('start');
     await page.idle();
     page.clock.advance(1000);
     page.click('start');
     await page.idle();
-    const first = `calls-a-unreadable-${FakePage.StartTime}.json`;
-    const second = `calls-a-unreadable-${FakePage.StartTime + 1000}.json`;
-    assert.deepEqual(
-        page.server.posts.map((request) => request.url),
-        [`/private/${first}`, `/private/${second}`],
-    );
-    assert.equal(page.saved(first).readable, false);
-    assert.equal(page.saved(second).readable, false);
+    const records = page.server.posts.map((request) => request.url).filter((url) => url.includes('-unreadable-'));
+    assert.equal(new Set(records).size, records.length);
+    assert.ok(records.length >= 3);
+    for (const url of records) {
+        assert.equal(page.saved(url.split('/').at(-1)).readable, false);
+    }
 });
 
 test('a redraw keeps what was typed and where the focus was', async () => {
@@ -2134,6 +2142,7 @@ test('a redraw keeps what was typed and where the focus was', async () => {
         1,
         40,
     );
+    log.fixtureJudgments = { conflictRows: [['F1', 'F2'], ['F3', 'F4']] };
     const page = await opened(log);
     page.click('tab-rulings');
     await page.idle();

@@ -4,7 +4,7 @@ export default class CitedStory {
      * @return {Map<number, object[]>}
      */
     static messages(input) {
-        const transcript = input.split(/NEW MESSAGES \(#\d+ to #\d+\):\n/).at(-1);
+        const transcript = input.split(/NEW MESSAGES \(#[\d#, to]+\):\n/).at(-1);
         const messages = new Map();
         let blocks;
         for (const line of transcript.split('\n')) {

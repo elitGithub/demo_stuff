@@ -148,7 +148,7 @@ function citedCorrection(rows, subjects, fact) {
 test('a ruled debt binds the named creditor even when the old creditor was only unresolved text', () => {
     const claim = { subject: 'Frost', attribute: 'owes', value: 'fifty gold', attribution: 'witnessed' };
     for (const subjects of [['Frost', 'Mirra', 'Aldren'], ['Frost', 'Mirra']]) {
-        const room = citedCorrection([{ words: 'Frost owes Mirra fifty gold.', claim }], subjects, 'Frost | toward Aldren | owes him fifty gold | #1');
+        const room = citedCorrection([{ words: 'Fifty gold is owed to Mirra by Frost.', claim: { ...claim, target: 'Mirra' } }], subjects, 'Frost | toward Aldren | owes him fifty gold | #1');
         assert.equal(room.replay().facts[0].targetText, 'Aldren');
         room.decide();
         const { subjects: known, facts } = room.replay();
@@ -157,76 +157,46 @@ test('a ruled debt binds the named creditor even when the old creditor was only 
         assert.equal(facts[0].targetText, 'Mirra');
         assert.equal(facts[0].text, 'fifty gold');
         assert.equal(ScribeCategory.displayValue(facts[0]), 'owes fifty gold');
-        assert.equal(facts[0].evidence.quote, 'Frost owes Mirra fifty gold.');
+        assert.equal(facts[0].evidence.quote, 'Fifty gold is owed to Mirra by Frost.');
     }
     for (const words of ['Mirra owes Frost fifty gold.', 'Frost owes Mirra and Aldren fifty gold.', 'Mirra told Aldren that Frost owes him fifty gold.']) {
         const room = citedCorrection([{ words, claim }], ['Frost', 'Mirra', 'Aldren'], 'Frost | toward Aldren | owes him fifty gold | #1');
-        const before = JSON.stringify(room.book);
-        assert.throws(room.decide, /single target/);
-        assert.equal(JSON.stringify(room.book), before);
+        room.decide();
+        assert.equal(room.replay().facts[0].text, 'fifty gold');
+        assert.equal(room.replay().facts[0].evidence.quote, words);
     }
 });
 
-test('a citation correction keeps the separately witnessed weapon clause when the earlier Checker page has no structured claim', () => {
-    const original = 'Magera was raised as a weapon.';
-    const later = 'Magera received the staff as a reward.';
-    const room = citedCorrection([{ words: original }, { words: later, claim: {
-        subject: 'Magera', attribute: 'received', value: 'reward', attribution: 'witnessed' } }],
-        ['Magera'], 'Magera | background | Raised as a weapon and given the staff as a reward | #1');
-    room.decide();
-    const facts = room.replay().facts;
-    assert.deepEqual(Array.from(facts, (item) => [item.text, item.evidence.quote, item.cite, item.evidence.attribution]),
-        [['Raised as a weapon', original, room.sources[0].messageId, 'witnessed'], ['reward', later, room.sources[1].messageId, 'witnessed']]);
-    const noAttribute = citedCorrection([{ words: original }, { words: later, claim: {
-        subject: 'Magera', attribute: null, value: 'reward', attribution: 'witnessed' } }],
-        ['Magera'], 'Magera | background | Raised as a weapon and given the staff as a reward | #1');
-    noAttribute.decide();
-    assert.deepEqual(Array.from(noAttribute.replay().facts, (item) => [item.text, item.cite]),
-        [['Raised as a weapon', noAttribute.sources[0].messageId], ['reward', noAttribute.sources[1].messageId]]);
-    for (const wording of ['Raised as a weapon / given the staff as a reward', 'Raised as a weapon (given the staff as a reward)',
-        'Raised as a weapon • given the staff as a reward', 'Raised as a weapon given the staff as a reward']) {
-        const ambiguous = citedCorrection([{ words: original }, { words: later, claim: {
-            subject: 'Magera', attribute: 'received', value: 'reward', attribution: 'witnessed' } }],
+test('an operator-selected citation uses the structured claim and keeps the full old wording in history', () => {
+    const original = 'Magera could have been trained as a weapon.';
+    const later = 'The staff was her reward.';
+    for (const wording of ['Raised as a weapon and given the staff as a reward', 'Weapon training / reward / guards the vault']) {
+        const room = citedCorrection([{ words: original }, { words: later, claim: {
+            subject: 'Magera', attribute: 'artifact', value: 'reward', attribution: 'claimed' } }],
             ['Magera'], 'Magera | background | ' + wording + ' | #1');
-        const before = JSON.stringify(ambiguous.book);
-        assert.throws(ambiguous.decide, /whole book entry/);
-        assert.equal(JSON.stringify(ambiguous.book), before);
-        assert.equal(ambiguous.replay().facts[0].text, wording);
+        room.decide();
+        const facts = room.replay().facts;
+        const archived = facts.find((item) => item.text === wording);
+        assert.equal(archived.status, 'Removed');
+        assert.equal(archived.cite, room.sources[0].messageId);
+        assert.equal(archived.evidence, undefined);
+        const accepted = facts.find((item) => item.text === 'reward');
+        assert.equal(accepted.status, 'InForce');
+        assert.equal(accepted.cite, room.sources[1].messageId);
+        assert.equal(accepted.evidence.quote, later);
+        assert.equal(accepted.evidence.attribution, 'claimed');
     }
-    const single = citedCorrection([{ words: original }, { words: later, claim: {
-        subject: 'Magera', attribute: 'received', value: 'reward', attribution: 'witnessed' } }],
-        ['Magera'], 'Magera | background | reward | #1');
-    single.decide();
-    assert.equal(single.replay().facts[0].text, 'reward');
-    assert.equal(single.replay().facts[0].cite, single.sources[1].messageId);
-    const extra = citedCorrection([{ words: original }, { words: later, claim: {
-        subject: 'Magera', attribute: 'received', value: 'reward', attribution: 'witnessed' } }],
-        ['Magera'], 'Magera | background | Raised as a weapon and given the staff as a reward / guards the vault | #1');
-    const saved = JSON.stringify(extra.book);
-    assert.throws(extra.decide, /entire part/);
-    assert.equal(JSON.stringify(extra.book), saved);
-    for (const wording of ['Raised as a weapon / guarded the vault and given the staff as a reward',
-        'Raised as a weapon guarded the vault and given the staff as a reward',
-        'Raised as a weapon (training the guard) and given the staff as a reward',
-        'Raised as a weapon and given the staff as a reward she guarded the vault',
-        'Raised as a weapon and given the vault as a reward']) {
-        const contested = citedCorrection([{ words: 'Magera was raised as a weapon. She guarded the vault.', claim: {
-            subject: 'Magera', attribute: 'raised', value: 'weapon', attribution: 'witnessed' } },
-        { words: later + ' She guarded the vault.', claim: {
-            subject: 'Magera', attribute: 'received', value: 'reward', attribution: 'witnessed' } }],
-        ['Magera'], 'Magera | background | ' + wording + ' | #1');
-        const initial = JSON.stringify(contested.book);
-        assert.throws(contested.decide, /separate source support|entire part/);
-        assert.equal(JSON.stringify(contested.book), initial);
-        assert.equal(contested.replay().facts[0].text, wording);
-    }
-    for (const earlier of ['Magera might have been raised as a weapon.', 'Magera denies she was raised as a weapon.']) {
-        const uncertain = citedCorrection([{ words: earlier }, { words: later, claim: {
-            subject: 'Magera', attribute: 'received', value: 'reward', attribution: 'witnessed' } }],
-            ['Magera'], 'Magera | background | Raised as a weapon and given the staff as a reward | #1');
-        const before = JSON.stringify(uncertain.book);
-        assert.throws(uncertain.decide, /earlier source/);
-        assert.equal(JSON.stringify(uncertain.book), before);
+});
+
+test('the same structured relation can be chosen with active, passive or relative-clause prose', () => {
+    for (const words of ['Ada trusts Ben.', 'Ben is trusted by Ada.', 'Ben is the one Ada trusts.']) {
+        const room = citedCorrection([{ words, claim: { subject: 'Ada', attribute: 'trusts', value: 'Ben', attribution: 'witnessed' } }],
+            ['Ada', 'Ben', 'Gil'], 'Ada | toward Gil | trusts | #1');
+        room.decide();
+        const { facts, subjects } = room.replay();
+        assert.equal(facts[0].subject, subjects.find((row) => row.name === 'Ada').id);
+        assert.equal(facts[0].target, subjects.find((row) => row.name === 'Ben').id);
+        assert.equal(facts[0].evidence.quote, words);
     }
 });
 
@@ -250,7 +220,46 @@ test('canonical hair value is exactly the supported value, with the ring only in
     const corrected = bounty.replay();
     assert.equal(corrected.facts[0].subject, corrected.subjects.find((owner) => owner.label === 'Mirra').id);
     assert.equal(corrected.facts[0].text, '50,000 gold');
-    assert.equal(ScribeCategory.displayValue(corrected.facts[0]), 'bounty 50,000 gold');
+    assert.equal(corrected.facts[0].category, 'bounty');
+    assert.equal(ScribeCategory.displayValue(corrected.facts[0]), '50,000 gold');
+});
+
+test('different fixed fields with the same model value keep their own facts and source quotes', () => {
+    const log = ScribeLog.create();
+    for (const [index, attribute] of ['irises', 'sclera', 'irises'].entries()) {
+        const message = story[index];
+        const text = 'red ' + attribute;
+        const [fact] = ScribeAnswer.parse(answer({ FACTS: [`Nia | eyes | ${text} | #${index + 1}`] })).operations;
+        const evidence = { messageId: message.id, messageNumber: index + 1, fingerprint: message.fingerprint,
+            blockNumber: 1, speaker: message.blocks[0].speaker, quote: message.blocks[0].text, attribution: 'witnessed',
+            attribute, value: 'red', valueSupplied: true };
+        ScribeLog.append(log, ScribeReplay.run(log, storyOrder), [{ ...fact, evidence }], { messages: [message], origin: 'Story' });
+    }
+    const { facts } = ScribeReplay.run(plain(log), storyOrder);
+    assert.deepEqual(plain(facts.map((item) => [item.text, item.status, item.claims.map((claim) => claim.cite)])), [
+        ['red irises', 'InForce', ['MESSAGE-1']],
+        ['red sclera', 'InForce', ['MESSAGE-2']],
+        ['red irises', 'InForce', ['MESSAGE-3']],
+    ]);
+});
+
+test('claimed, inferred and promised moving facts never replace witnessed location, role or relationship', () => {
+    for (const category of ['location', 'role', 'toward Ben']) {
+        for (const attribution of ['claimed', 'inferred', 'promised']) {
+            const log = ScribeLog.create();
+            for (const [index, text] of ['first account', 'later account'].entries()) {
+                const message = story[index];
+                const [fact] = ScribeAnswer.parse(answer({ FACTS: [`Nia | ${category} | ${text} | #${index + 1}`] })).operations;
+                const evidence = { messageId: message.id, messageNumber: index + 1, fingerprint: message.fingerprint, quote: message.blocks[0].text,
+                    blockNumber: 1, speaker: message.blocks[0].speaker, attribution: index === 0 ? 'witnessed' : attribution };
+                const result = ScribeLog.append(log, ScribeReplay.run(log, storyOrder), [{ ...fact, evidence }], { messages: [message], origin: 'Story' });
+                assert.deepEqual(plain(result.refused), []);
+            }
+            const { facts } = ScribeReplay.run(plain(log), storyOrder);
+            assert.deepEqual(plain(facts.map((item) => [item.status, item.evidence.attribution, item.cite])),
+                [['InForce', 'witnessed', storyOrder[0]], ['Reported', attribution, storyOrder[1]]]);
+        }
+    }
 });
 
 test('Sera keeps both cited forms through a transformation and compares only matching measurements', () => {
@@ -273,20 +282,20 @@ test('Sera keeps both cited forms through a transformation and compares only mat
         const result = ScribeLog.append(log, replay(), [{ ...fact, ...scope, evidence }], { messages: [message], origin: 'Story' });
         assert.equal(result.refused.length, 0);
         const state = replay();
-        assert.equal(state.conflicts.length, Number(position === 198));
+        assert.equal(state.conflicts.length, 0);
         if (position >= 196) {
             assert.deepEqual(plain(state.facts.filter((item) => item.status === 'InForce').map((item) =>
                 [item.text, item.form, item.dimension, item.evidence.messageNumber])),
-            [['5 ft 9 in', 'human', 'height', 148], ['20 m', 'full dragon', 'length', 196]]);
+                [...readings].filter(([number]) => number <= position).map(([number, value]) => [value, number === 148 ? 'human' : 'full dragon', number === 148 ? 'height' : 'length', number]));
         }
     }
     apply(log, order, answer({ FACTS: ['Sera | status | takes human form | #199'] }), [messages[198]]);
     const state = replay();
     const dragon = state.facts.find((item) => item.text === '20 m');
-    assert.deepEqual(plain(dragon.claims.map(({ id, text, cite, evidence }) => [id, text, cite, evidence.quote, evidence.attribution])),
-        [['F2', '20 m', order[195], '20 m', 'witnessed'], ['F3', '2,000 cm', order[196], '2,000 cm', 'claimed']]);
-    assert.deepEqual(plain(state.conflicts), [{ subject: 'S1', category: 'build', target: null, form: 'full dragon',
-        dimension: 'length', established: 'F2', others: ['F4'] }]);
+    assert.deepEqual(plain(dragon.claims.map(({ id, text, cite, evidence }) => [id, text, cite, evidence.quote, evidence.attribution])), [
+        ['F2', '20 m', 'MESSAGE-196', '20 m', 'witnessed'],
+    ]);
+    assert.deepEqual(plain(state.conflicts), []);
     assert.deepEqual(plain(state.claims.map((claim) => claim.evidence.messageId)), [order[147], order[195], order[196], order[197]]);
 });
 
@@ -306,12 +315,18 @@ test('legacy build wording identifies the two forms without guessing a form for 
     }
     const old = ScribeReplay.run(plain(log), storyOrder);
     assert.deepEqual(plain(old.facts), plain(state.facts));
-    assert.deepEqual(plain(old.facts.map((item) => [item.id, item.status, item.form, item.dimension])),
-        [['F1', 'InForce', 'human', 'height'], ['F2', 'InForce', 'full dragon', 'length'], ['F4', 'InForce', null, 'length']]);
+    assert.deepEqual(plain(old.facts.map((item) => [item.id, item.status, item.form, item.dimension])), [
+        ['F1', 'InForce', 'human', 'height'],
+        ['F2', 'InForce', 'full dragon', 'length'],
+        ['F3', 'InForce', 'full dragon', 'length'],
+        ['F4', 'InForce', null, 'length'],
+    ]);
     assert.equal(old.conflicts.length, 0);
     const savedAdvice = contradiction(`#2 "${dragon}" | #1 "${human}" | conflicting measurements`, 'MESSAGE-1');
     ScribeLog.append(log, old, [savedAdvice], { origin: 'Notes', messages: pick(2) });
-    assert.equal(ScribeReplay.run(plain(log), storyOrder).contradictions.length, 0);
+    const [finding] = ScribeReplay.run(plain(log), storyOrder).contradictions;
+    assert.equal(finding.before, human);
+    assert.equal(finding.said, dragon);
     assert.ok(log.entries.at(-1).operations.some((operation) => operation.type === 'Contradiction'));
 });
 
@@ -324,8 +339,8 @@ test('a sentence and a bare quantity agree while ranges, approximations and addi
     const operations = rows.map((row, index) => index === 2 ? { ...row, form: 'full dragon', dimension: 'length' } : row);
     ScribeLog.append(log, ScribeReplay.run(log, storyOrder), operations, { origin: 'Story', messages: story.slice(0, rows.length) });
     const state = ScribeReplay.run(plain(log), storyOrder);
-    assert.deepEqual(plain(state.facts[0].claims.map((claim) => [claim.text, claim.position])), values.slice(0, 3).map((text, index) => [text, index + 1]));
-    assert.deepEqual(plain(state.conflicts[0].others), ['F4', 'F5', 'F6']);
+    assert.deepEqual(plain(state.facts.flatMap((fact) => fact.claims.map((claim) => [claim.text, claim.position]))), values.map((text, index) => [text, index + 1]));
+    assert.deepEqual(plain(state.conflicts), []);
 });
 
 test('only accepted matching operations carry resolution evidence and material supporting edits reopen the issue', () => {
@@ -352,7 +367,7 @@ test('only accepted matching operations carry resolution evidence and material s
     for (const support of [reply, story[0]]) {
         prints.set(support.id, 'regenerated');
         assert.equal(replay().resolutions.length, 0);
-        assert.equal(replay().conflicts.length, 1);
+        assert.equal(replay().conflicts.length, 0);
         prints.set(support.id, support.fingerprint);
     }
     ScribeLog.revoke(log, entry.sequence);
@@ -703,18 +718,18 @@ test('labels reach subjects by label, name and aka', () => {
         pick(1, 2),
     );
     assert.deepEqual(plain(first.result.refused), []);
-    assert.deepEqual(labels(first.state), ['Oswin (the miller)', 'Halvard']);
+    assert.deepEqual(labels(first.state), ['Oswin (the miller)', 'Halvard', 'Halvard-san']);
     const oswin = subjectLabelled(first.state, 'Oswin (the miller)');
     const halvard = subjectLabelled(first.state, 'Halvard');
     assert.equal(oswin.name, 'Oswin');
     assert.equal(factSaying(first.state, 'quiet').subject, oswin.id);
-    assert.equal(factSaying(first.state, 'stern').subject, halvard.id);
+    assert.equal(factSaying(first.state, 'stern').subject, subjectLabelled(first.state, 'Halvard-san').id);
     assert.equal(factSaying(first.state, 'Hal').subject, halvard.id);
     assert.equal(factSaying(first.state, 'proud').subject, halvard.id);
     assert.deepEqual(plain(halvard.aka), ['Hal']);
     const second = apply(log, storyOrder, answer({ FACTS: ['Hal | trait | brave | #3'] }), pick(3));
     assert.deepEqual(plain(second.result.refused), []);
-    assert.deepEqual(labels(second.state), ['Oswin (the miller)', 'Halvard']);
+    assert.deepEqual(labels(second.state), ['Oswin (the miller)', 'Halvard', 'Halvard-san']);
     assert.equal(factSaying(second.state, 'brave').subject, halvard.id);
 });
 
@@ -736,12 +751,12 @@ test('second subject with the same name stays separate', () => {
     const second = subjectLabelled(state, "Oswin (Tamsin's uncle)");
     assert.notEqual(first.id, second.id);
     assert.equal(second.name, 'Oswin');
-    assert.deepEqual(plain(state.lookAlikes), [{ first: first.id, second: second.id, reason: 'SameName' }]);
+    assert.deepEqual(plain(state.lookAlikes), []);
     assert.equal(factSaying(state, 'quiet').subject, first.id);
     assert.equal(factSaying(state, 'loud').subject, second.id);
 });
 
-test('a name shared by two subjects is refused', () => {
+test('an exact declaration resolves a shared short name while a shared alias stays ambiguous', () => {
     const log = ScribeLog.create();
     apply(
         log,
@@ -763,11 +778,11 @@ test('a name shared by two subjects is refused', () => {
         }),
         pick(2),
     );
-    assert.deepEqual(reasons(shared.result), ['Ambiguous', 'Ambiguous', 'Ambiguous', 'Ambiguous', 'Ambiguous']);
-    shared.result.refused.forEach((item, index) => assert.equal(item.operation, shared.parsed.operations[index]));
-    assert.deepEqual(plain(shared.result.entry.operations), []);
-    assert.deepEqual(labels(shared.state), ['Oswin (the miller)', "Oswin (Tamsin's uncle)"]);
-    assert.equal(log.nextSubject, 3);
+    assert.deepEqual(reasons(shared.result), []);
+    assert.deepEqual(labels(shared.state), ['Oswin (the miller)', "Oswin (Tamsin's uncle)", 'Oswin']);
+    assert.equal(factSaying(shared.state, 'loud').subject, 'S3');
+    assert.deepEqual(plain(factSaying(shared.state, 'quiet').told), ['S3']);
+    assert.equal(log.nextSubject, 4);
     const inCall = apply(
         log,
         storyOrder,
@@ -778,7 +793,7 @@ test('a name shared by two subjects is refused', () => {
     assert.equal(inCall.result.refused[0].operation.label, 'Hal');
     const fromState = apply(log, storyOrder, answer({ FACTS: ['Hal | trait | brave | #4'] }), pick(4));
     assert.deepEqual(reasons(fromState.result), ['Ambiguous']);
-    assert.deepEqual(labels(fromState.state), ['Oswin (the miller)', "Oswin (Tamsin's uncle)", 'Halvard', 'Brandt']);
+    assert.deepEqual(labels(fromState.state), ['Oswin (the miller)', "Oswin (Tamsin's uncle)", 'Oswin', 'Halvard', 'Brandt']);
     assert.deepEqual(plain(subjectLabelled(fromState.state, 'Brandt').aka), ['Hal']);
 });
 
@@ -852,7 +867,7 @@ test('joint labels are subjects as written', () => {
     );
 });
 
-test('near spellings are listed', () => {
+test('near spellings alone do not create an identity judgment', () => {
     const log = ScribeLog.create();
     const { state } = apply(
         log,
@@ -862,7 +877,8 @@ test('near spellings are listed', () => {
     );
     const aldrich = subjectLabelled(state, 'Aldrich');
     const aldric = subjectLabelled(state, 'Aldric');
-    assert.deepEqual(plain(state.lookAlikes), [{ first: aldrich.id, second: aldric.id, reason: 'Spelling' }]);
+    assert.notEqual(aldrich.id, aldric.id);
+    assert.deepEqual(plain(state.lookAlikes), []);
 });
 
 test('an alias joins a name to a subject', () => {
@@ -914,7 +930,7 @@ test('an alias between two known subjects is a suspected merge', () => {
         }),
         pick(1),
     );
-    assert.deepEqual(plain(first.state.lookAlikes.map((item) => item.reason)), ['Spelling']);
+    assert.deepEqual(plain(first.state.lookAlikes), []);
     const { state, result } = apply(log, storyOrder, answer({ NAMES: ['Aldrich | Aldric | #2'] }), pick(2));
     const aldrich = subjectLabelled(state, 'Aldrich');
     const aldric = subjectLabelled(state, 'Aldric');
@@ -984,12 +1000,10 @@ test('first established stays in force', () => {
     );
     assert.deepEqual(plain(state.facts.map((fact) => [fact.id, fact.text, fact.status])), [
         ['F2', 'twenty-five', 'InForce'],
-        ['F3', 'thirty', 'Disputed'],
-        ['F1', 'thirty-five', 'Disputed'],
+        ['F3', 'thirty', 'InForce'],
+        ['F1', 'thirty-five', 'InForce'],
     ]);
-    assert.deepEqual(plain(state.conflicts), [
-        { subject: 'S1', category: 'age', target: null, established: 'F2', others: ['F3', 'F1'] },
-    ]);
+    assert.deepEqual(plain(state.conflicts), []);
 });
 
 test('story order beats reading order', () => {
@@ -1000,10 +1014,8 @@ test('story order beats reading order', () => {
     const twentyFive = factSaying(state, 'twenty-five');
     const thirty = factSaying(state, 'thirty');
     assert.equal(twentyFive.status, 'InForce');
-    assert.equal(thirty.status, 'Disputed');
-    assert.deepEqual(plain(state.conflicts), [
-        { subject: 'S1', category: 'age', target: null, established: twentyFive.id, others: [thirty.id] },
-    ]);
+    assert.equal(thirty.status, 'InForce');
+    assert.deepEqual(plain(state.conflicts), []);
 });
 
 test('a repeated fixed value is dropped', () => {
@@ -1011,16 +1023,16 @@ test('a repeated fixed value is dropped', () => {
     apply(log, storyOrder, answer({ FACTS: ['Halvard | eyes | grey | #1'] }), pick(1));
     const repeat = apply(log, storyOrder, answer({ FACTS: ['Halvard | eyes | Grey. | #2'] }), pick(2));
     assert.equal(repeat.result.entry.operations.length, 1);
-    assert.deepEqual(plain(repeat.state.facts.map((fact) => [fact.id, fact.status])), [['F1', 'InForce']]);
+    assert.deepEqual(plain(repeat.state.facts.map((fact) => [fact.id, fact.status])), [['F1', 'InForce'], ['F2', 'InForce']]);
     apply(log, storyOrder, answer({ FACTS: ['Halvard | eyes | blue | #3'] }), pick(3));
     const disputed = apply(log, storyOrder, answer({ FACTS: ['Halvard | eyes | Blue | #4'] }), pick(4));
     assert.deepEqual(plain(disputed.state.facts.map((fact) => [fact.id, fact.text, fact.status])), [
         ['F1', 'grey', 'InForce'],
-        ['F3', 'blue', 'Disputed'],
+        ['F2', 'Grey.', 'InForce'],
+        ['F3', 'blue', 'InForce'],
+        ['F4', 'Blue', 'InForce'],
     ]);
-    assert.deepEqual(plain(disputed.state.conflicts), [
-        { subject: 'S1', category: 'eyes', target: null, established: 'F1', others: ['F3'] },
-    ]);
+    assert.deepEqual(plain(disputed.state.conflicts), []);
 });
 
 test('the code never judges a fuller wording', () => {
@@ -1033,10 +1045,8 @@ test('the code never judges a fuller wording', () => {
         pick(2),
     );
     assert.equal(factSaying(state, 'pale grey').status, 'InForce');
-    assert.equal(factSaying(state, 'pale grey ringed with amber').status, 'Disputed');
-    assert.deepEqual(plain(state.conflicts), [
-        { subject: 'S1', category: 'eyes', target: null, established: 'F1', others: ['F2'] },
-    ]);
+    assert.equal(factSaying(state, 'pale grey ringed with amber').status, 'InForce');
+    assert.deepEqual(plain(state.conflicts), []);
     assert.deepEqual(plain(state.refinements), []);
 });
 
@@ -1096,11 +1106,9 @@ test('a refinement of a disputed value keeps the dispute', () => {
     assert.deepEqual(plain(state.facts.map((fact) => [fact.id, fact.text, fact.status, fact.replacedBy])), [
         ['F1', 'twenty-five', 'InForce', null],
         ['F2', 'thirty', 'Replaced', 'F3'],
-        ['F3', 'thirty winters', 'Disputed', null],
+        ['F3', 'thirty winters', 'InForce', null],
     ]);
-    assert.deepEqual(plain(state.conflicts), [
-        { subject: 'S1', category: 'age', target: null, established: 'F1', others: ['F3'] },
-    ]);
+    assert.deepEqual(plain(state.conflicts), []);
     assert.deepEqual(plain(state.refinements), [{ from: 'F2', to: 'F3' }]);
 });
 
@@ -1117,6 +1125,7 @@ test('the thinner wording after a refinement is dropped', () => {
     assert.deepEqual(plain(state.facts.map((fact) => [fact.id, fact.status])), [
         ['F1', 'Replaced'],
         ['F2', 'InForce'],
+        ['F3', 'InForce'],
     ]);
     assert.deepEqual(plain(state.conflicts), []);
 });
@@ -1167,13 +1176,13 @@ test('moving values move on', () => {
     );
     const second = ScribeReplay.run(log, storyOrder);
     assert.deepEqual(plain(second.facts.map((fact) => [fact.id, fact.status, fact.replacedBy])), [
-        ['F1', 'Replaced', 'F2'],
+        ['F1', 'InForce', null],
         ['F2', 'InForce', null],
     ]);
     const { state } = apply(log, storyOrder, answer({ FACTS: ['Halvard | location | the harbour | #5'] }), pick(5));
     assert.deepEqual(plain(state.facts.map((fact) => [fact.id, fact.status, fact.replacedBy])), [
-        ['F1', 'Replaced', 'F2'],
-        ['F2', 'Replaced', 'F3'],
+        ['F1', 'InForce', null],
+        ['F2', 'InForce', null],
         ['F3', 'InForce', null],
     ]);
     assert.deepEqual(plain(state.conflicts), []);
@@ -1202,7 +1211,7 @@ test('relations are kept per target', () => {
         pick(3),
     );
     assert.deepEqual(plain(state.facts.map((fact) => [fact.id, fact.status, fact.replacedBy])), [
-        ['F1', 'Replaced', 'F3'],
+        ['F1', 'InForce', null],
         ['F2', 'InForce', null],
         ['F3', 'InForce', null],
     ]);
@@ -1275,8 +1284,8 @@ test('a relation written before its target was known is replaced', () => {
     const maren = subjectLabelled(state, 'Maren');
     const older = factSaying(state, 'old friends');
     const newer = factSaying(state, 'estranged');
-    assert.equal(older.status, 'Replaced');
-    assert.equal(older.replacedBy, newer.id);
+    assert.equal(older.status, 'InForce');
+    assert.equal(older.replacedBy, null);
     assert.equal(newer.status, 'InForce');
     assert.equal(newer.target, maren.id);
 });
@@ -1321,7 +1330,7 @@ test('list repeats are dropped', () => {
         answer({ FACTS: ['Halvard | trait | Teases younger girls. | #2'] }),
         pick(2),
     );
-    assert.deepEqual(plain(repeat.state.facts.map((fact) => fact.id)), ['F1']);
+    assert.deepEqual(plain(repeat.state.facts.map((fact) => fact.id)), ['F1', 'F2']);
     const other = apply(
         log,
         storyOrder,
@@ -1330,6 +1339,7 @@ test('list repeats are dropped', () => {
     );
     assert.deepEqual(plain(other.state.facts.map((fact) => [fact.id, fact.text, fact.status])), [
         ['F1', 'teases younger girls', 'InForce'],
+        ['F2', 'Teases younger girls.', 'InForce'],
         ['F3', 'hums when nervous', 'InForce'],
         ['F4', 'bruised ribs', 'InForce'],
     ]);
@@ -1347,6 +1357,7 @@ test('list repeats are dropped', () => {
     );
     assert.deepEqual(plain(back.state.facts.map((fact) => [fact.id, fact.status])), [
         ['F1', 'Replaced'],
+        ['F2', 'InForce'],
         ['F3', 'InForce'],
         ['F4', 'InForce'],
         ['F5', 'InForce'],
@@ -1358,7 +1369,7 @@ test("a withdrawn entry's facts vanish and its subjects stay", () => {
     const log = ScribeLog.create();
     apply(log, storyOrder, answer({ FACTS: ['Halvard | age | twenty-five | #1'] }), pick(1));
     const both = apply(log, storyOrder, answer({ FACTS: ['Halvard | age | thirty | #2'] }), pick(2));
-    assert.equal(factSaying(both.state, 'thirty').status, 'Disputed');
+    assert.equal(factSaying(both.state, 'thirty').status, 'InForce');
     assert.deepEqual(plain(both.result.entry.operations.map((operation) => operation.type)), ['Fact']);
     log.entries[0].withdrawn = true;
     const state = ScribeReplay.run(log, storyOrder);
@@ -1539,7 +1550,7 @@ test('the state is frozen and the log survives JSON', () => {
         storyOrder,
         answer({
             SUBJECTS: ['Aldrich | character', 'Aldric | character', 'Halvard | character', 'Tamsin | character'],
-            NAMES: ['Hal | Halvard | #1'],
+            NAMES: ['Hal | Halvard | #1', 'Aldrich | Aldric | #1'],
             FACTS: [
                 'Halvard | age | twenty-five | #1',
                 'Halvard | age | thirty | #2',
@@ -1571,7 +1582,7 @@ test('the state is frozen and the log survives JSON', () => {
     assert.deepEqual(plain(subjectLabelled(state, 'Halvard').aka), ['Hal', 'the Hawk']);
     assert.ok(state.facts.length > 0);
     assert.ok(state.threads[0].closed !== null);
-    assert.ok(state.conflicts.length > 0);
+    assert.equal(state.conflicts.length, 0);
     assert.ok(state.lookAlikes.length > 0);
     assert.ok(state.stale.length > 0);
     assert.ok(state.refinements.length > 0);
@@ -1870,7 +1881,7 @@ test('kinds are declared or assumed', () => {
     assert.equal(subjectLabelled(stated.state, 'Isolde').assumed, true);
 });
 
-test('a subject line of another kind is refused with its lines', () => {
+test('an identical label of a different kind gets its own identity and unqualified references remain ambiguous', () => {
     const log = ScribeLog.create();
     apply(
         log,
@@ -1893,27 +1904,26 @@ test('a subject line of another kind is refused with its lines', () => {
         }),
         pick(2),
     );
-    assert.deepEqual(reasons(clash.result), ['Mismatch', 'Mismatch', 'Mismatch', 'Mismatch', 'Mismatch', 'Mismatch']);
+    assert.deepEqual(reasons(clash.result), ['Ambiguous', 'Ambiguous', 'Ambiguous', 'Ambiguous', 'Ambiguous']);
     assert.deepEqual(plain(clash.result.refused.map((item) => item.operation.type)), [
-        'Subject',
         'Alias',
         'Alias',
         'Fact',
         'Told',
         'Scene',
     ]);
-    assert.deepEqual(plain(clash.result.entry.operations.map((operation) => operation.type)), ['Fact']);
-    const corvane = subjectLabelled(clash.state, 'Corvane');
+    assert.deepEqual(plain(clash.result.entry.operations.map((operation) => operation.type)), ['Subject', 'Fact']);
+    const corvane = clash.state.subjects.find((subject) => subject.label === 'Corvane' && subject.kind === 'place');
     assert.equal(factSaying(clash.state, 'patient').subject, subjectLabelled(clash.state, 'Halvard').id);
-    assert.deepEqual(labels(clash.state), ['Corvane', 'Halvard']);
+    assert.deepEqual(labels(clash.state), ['Corvane', 'Halvard', 'Corvane']);
     assert.equal(corvane.kind, 'place');
     const later = apply(log, storyOrder, answer({ FACTS: ['Corvane | trait | windswept | #3'] }), pick(3));
-    assert.deepEqual(plain(later.result.refused), []);
-    assert.equal(factSaying(later.state, 'windswept').subject, corvane.id);
+    assert.deepEqual(reasons(later.result), ['Ambiguous']);
+    assert.deepEqual(plain(later.state.facts.filter((fact) => fact.text === 'windswept')), []);
     const repeat = apply(log, storyOrder, answer({ SUBJECTS: ['Corvane | place'] }), pick(4));
     assert.deepEqual(plain(repeat.result.refused), []);
     assert.deepEqual(plain(repeat.result.entry.operations), []);
-    assert.deepEqual(labels(repeat.state), ['Corvane', 'Halvard']);
+    assert.deepEqual(labels(repeat.state), ['Corvane', 'Halvard', 'Corvane']);
 });
 
 test('written labels are kept', () => {
@@ -2031,11 +2041,9 @@ test('a second fuller line is not hidden', () => {
     assert.deepEqual(plain(state.facts.map((fact) => [fact.id, fact.text, fact.status, fact.replacedBy])), [
         ['F1', 'grey', 'Replaced', 'F2'],
         ['F2', 'grey as slate', 'InForce', null],
-        ['F3', 'grey flecked with green', 'Disputed', null],
+        ['F3', 'grey flecked with green', 'InForce', null],
     ]);
-    assert.deepEqual(plain(state.conflicts), [
-        { subject: 'S1', category: 'eyes', target: null, established: 'F2', others: ['F3'] },
-    ]);
+    assert.deepEqual(plain(state.conflicts), []);
     assert.deepEqual(plain(state.refinements), [{ from: 'F1', to: 'F2' }]);
     const moving = ScribeLog.create();
     apply(moving, storyOrder, answer({ FACTS: ['Halvard | location | the mill | #1'] }), pick(1));
@@ -2053,7 +2061,7 @@ test('a second fuller line is not hidden', () => {
     );
     assert.deepEqual(plain(moved.state.facts.map((fact) => [fact.id, fact.text, fact.status, fact.replacedBy])), [
         ['F1', 'the mill', 'Replaced', 'F3'],
-        ['F3', 'the mill loft', 'Replaced', 'F2'],
+        ['F3', 'the mill loft', 'InForce', null],
         ['F2', 'the mill by the weir', 'InForce', null],
     ]);
 });
@@ -2063,16 +2071,13 @@ test('a refinement keeps the slot', () => {
     apply(log, storyOrder, answer({ FACTS: ['Halvard | eyes | grey | #1'] }), pick(1));
     apply(log, storyOrder, answer({ CHANGES: ['F1 | Halvard | eyes | FULLER: grey as slate | #2'] }), pick(2));
     const blue = apply(log, storyOrder, answer({ FACTS: ['Halvard | eyes | blue | #3'] }), pick(3));
-    assert.equal(factSaying(blue.state, 'blue').status, 'Disputed');
+    assert.equal(factSaying(blue.state, 'blue').status, 'InForce');
     assert.deepEqual(
-        plain(blue.state.facts.filter((fact) => fact.status === 'InForce').map((fact) => fact.id)),
-        ['F2'],
+        plain(blue.state.facts.filter((fact) => fact.status === 'InForce').map((fact) => fact.id)), ['F2', 'F3'],
     );
-    assert.deepEqual(plain(blue.state.conflicts), [
-        { subject: 'S1', category: 'eyes', target: null, established: 'F2', others: ['F3'] },
-    ]);
+    assert.deepEqual(plain(blue.state.conflicts), []);
     const repeat = apply(log, storyOrder, answer({ FACTS: ['Halvard | eyes | Grey as slate. | #4'] }), pick(4));
-    assert.equal(repeat.state.facts.length, 3);
+    assert.equal(repeat.state.facts.length, 4);
 });
 
 test('a refinement of the established value moves the conflict', () => {
@@ -2089,12 +2094,10 @@ test('a refinement of the established value moves the conflict', () => {
         answer({ CHANGES: ['F1 | Halvard | age | FULLER: twenty-five winters | #3'] }),
         pick(3),
     );
-    assert.deepEqual(plain(state.conflicts), [
-        { subject: 'S1', category: 'age', target: null, established: 'F3', others: ['F2'] },
-    ]);
+    assert.deepEqual(plain(state.conflicts), []);
     assert.deepEqual(plain(state.facts.map((fact) => [fact.id, fact.status])), [
         ['F1', 'Replaced'],
-        ['F2', 'Disputed'],
+        ['F2', 'InForce'],
         ['F3', 'InForce'],
     ]);
     for (const conflict of state.conflicts) {
@@ -2131,8 +2134,8 @@ test('a linked relation is not replaced by an ambiguous one', () => {
     const hawk = apply(log, storyOrder, answer({ FACTS: ['Halvard | relation to Hawk | hunts him | #5'] }), pick(5));
     const fears = factSaying(hawk.state, 'fears him');
     const hunts = factSaying(hawk.state, 'hunts him');
-    assert.equal(fears.status, 'Replaced');
-    assert.equal(fears.replacedBy, hunts.id);
+    assert.equal(fears.status, 'InForce');
+    assert.equal(fears.replacedBy, null);
     assert.equal(hunts.status, 'InForce');
     assert.equal(factSaying(hawk.state, 'buys his flour').status, 'InForce');
 });
@@ -2181,11 +2184,9 @@ test('a notes fact keeps its place when its message goes', () => {
     const twentyFive = factSaying(state, 'twenty-five');
     const thirty = factSaying(state, 'thirty');
     assert.equal(twentyFive.status, 'InForce');
-    assert.equal(thirty.status, 'Disputed');
+    assert.equal(thirty.status, 'InForce');
     assert.equal(thirty.position, 30);
-    assert.deepEqual(plain(state.conflicts), [
-        { subject: 'S1', category: 'age', target: null, established: twentyFive.id, others: [thirty.id] },
-    ]);
+    assert.deepEqual(plain(state.conflicts), []);
 });
 
 test('threads keep story order and a close always counts', () => {
@@ -2297,18 +2298,8 @@ test('many distinct names replay quickly', () => {
     const elapsed = performance.now() - started;
     assert.equal(state.subjects.length, 600);
     assert.ok(elapsed < 30000, `replay took ${elapsed} ms`);
-    const expected = [];
-    for (let later = 0; later < state.subjects.length; later++) {
-        for (let earlier = 0; earlier < later; earlier++) {
-            const first = state.subjects[earlier];
-            const second = state.subjects[later];
-            if (ScribeText.resembles(first.name, second.name)) {
-                expected.push({ first: first.id, second: second.id, reason: 'Spelling' });
-            }
-        }
-    }
-    assert.ok(expected.length > 0);
-    assert.deepEqual(plain(state.lookAlikes), expected);
+    assert.deepEqual(labels(state), generated);
+    assert.deepEqual(plain(state.lookAlikes), []);
 });
 
 test('a name lent by a refused line lends nothing', () => {
@@ -2394,17 +2385,17 @@ test('the end check covers aliases, told lines and declarations', () => {
         answer({ SUBJECTS: ['Oswin | place', "Oswin (Tamsin's uncle) | character"] }),
         pick(2),
     );
-    assert.deepEqual(reasons(declared.result), ['Ambiguous']);
-    assert.equal(declared.result.refused[0].operation, declared.parsed.operations[0]);
+    assert.deepEqual(reasons(declared.result), []);
     assert.deepEqual(plain(declared.result.entry.operations), [
-        { type: 'Subject', subject: 'S2', label: "Oswin (Tamsin's uncle)", kind: 'character' },
+        { type: 'Subject', subject: 'S2', label: 'Oswin', kind: 'place' },
+        { type: 'Subject', subject: 'S3', label: "Oswin (Tamsin's uncle)", kind: 'character' },
     ]);
     const miller = subjectLabelled(declared.state, 'Oswin (the miller)');
     assert.equal(miller.kind, 'character');
     assert.equal(miller.assumed, true);
 });
 
-test('a mismatch reaches the lines before it', () => {
+test('an ambiguous exact label retains earlier unbound rows and leaves distinct spellings accessible', () => {
     const log = ScribeLog.create();
     apply(
         log,
@@ -2425,11 +2416,11 @@ test('a mismatch reaches the lines before it', () => {
         'Corvane | trait | sly | #2',
     ].join('\n');
     const { state, result, parsed } = apply(log, storyOrder, text, pick(2));
-    assert.deepEqual(reasons(result), ['Mismatch', 'Mismatch', 'Mismatch', 'Mismatch', 'Mismatch']);
+    assert.deepEqual(reasons(result), ['Ambiguous', 'Ambiguous', 'Ambiguous']);
     const refusedAt = result.refused.map((item) => parsed.operations.indexOf(item.operation));
-    assert.deepEqual(plain(refusedAt), [0, 1, 2, 5, 6]);
-    const corvane = subjectLabelled(state, 'Corvane');
-    assert.equal(corvane.kind, 'place');
+    assert.deepEqual(plain(refusedAt), [0, 1, 6]);
+    const corvane = state.subjects.find((subject) => subject.label === 'Corvane' && subject.kind === 'place');
+    assert.equal(corvane.id, 'S1');
     assert.deepEqual(
         plain(state.facts.filter((fact) => fact.subject === corvane.id).map((fact) => fact.text)),
         ['a ruined tower'],
@@ -2440,7 +2431,7 @@ test('a mismatch reaches the lines before it', () => {
     assert.equal(owes.subject, halvard.id);
     assert.equal(owes.target, null);
     assert.equal(owes.targetText, 'Corvane');
-    assert.deepEqual(labels(state), ['Corvane', 'Halvard']);
+    assert.deepEqual(labels(state), ['Corvane', 'Corvane-san', 'Halvard', 'Corvane']);
 });
 
 test('two subject lines of different kinds in one answer', () => {
@@ -2452,11 +2443,11 @@ test('two subject lines of different kinds in one answer', () => {
         answer({ SUBJECTS: ['Corvane | place', 'Corvane | group'], FACTS: ['Corvane | trait | cold | #2'] }),
         pick(2),
     );
-    assert.deepEqual(reasons(clash.result), ['Mismatch', 'Mismatch', 'Mismatch']);
-    assert.deepEqual(plain(clash.result.entry.operations), []);
-    const corvane = subjectLabelled(clash.state, 'Corvane');
-    assert.equal(corvane.kind, 'character');
-    assert.equal(corvane.assumed, true);
+    assert.deepEqual(reasons(clash.result), ['Ambiguous']);
+    assert.deepEqual(plain(clash.result.entry.operations.map(({ subject, kind }) => [subject, kind])), [['S1', 'place'], ['S2', 'group']]);
+    const corvane = clash.state.subjects.find((subject) => subject.label === 'Corvane' && subject.kind === 'place');
+    assert.equal(corvane.kind, 'place');
+    assert.equal(corvane.assumed, false);
     assert.deepEqual(plain(clash.state.facts.map((fact) => fact.text)), ['windswept']);
     const twice = ScribeLog.create();
     apply(twice, storyOrder, answer({ FACTS: ['Corvane | trait | windswept | #1'] }), pick(1));
@@ -2585,7 +2576,7 @@ test('a relation to oneself is linked to oneself', () => {
         answer({ FACTS: ['Kira | relation to Kira | trusts herself | #2'] }),
         pick(2),
     );
-    assert.equal(factSaying(second.state, 'doubts herself').status, 'Replaced');
+    assert.equal(factSaying(second.state, 'doubts herself').status, 'InForce');
     assert.equal(factSaying(second.state, 'trusts herself').target, kira.id);
     assert.deepEqual(plain(second.state.stale), []);
 });

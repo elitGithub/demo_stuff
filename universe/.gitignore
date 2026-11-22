@@ -1,1 +1,8 @@
 /local/
+/node_modules/
+/runtime-data/
+/runtime-data.universe/
+/sillytavern/
+/.env
+/.env.*
+!/.env.example

@@ -1,6 +1,20 @@
 {
   "name": "universe",
   "private": true,
+  "engines": {
+    "node": ">=22"
+  },
+  "dependencies": {
+    "sillytavern": "1.19.1"
+  },
+  "overrides": {
+    "vectra": {
+      "openai": "^4.17.0"
+    },
+    "node-fetch": {
+      "whatwg-url": "^14.0.0"
+    }
+  },
   "scripts": {
     "start": "node server.mjs"
   }

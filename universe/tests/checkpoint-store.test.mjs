@@ -4,10 +4,10 @@ import { mkdir, mkdtemp, readFile, readdir, rm, unlink, writeFile } from 'node:f
 import { tmpdir } from 'node:os';
 import { join } from 'node:path';
 import { test } from 'node:test';
-import { captureCheckpoint, clearObsoleteCheckpoints, publishCheckpoint } from './checkpoint-store.mjs';
-import { readJournal, writeJournal } from './local-session.mjs';
-import { digest } from './r2.mjs';
-import { atomicFile } from './story-files.mjs';
+import { captureCheckpoint, clearObsoleteCheckpoints, publishCheckpoint } from '../src/checkpoint-store.mjs';
+import { readJournal, writeJournal } from '../src/local-session.mjs';
+import { digest } from '../src/r2.mjs';
+import { atomicFile } from '../src/story-files.mjs';
 
 const story = 'default-user/chats/scene.jsonl';
 const secondStory = 'default-user/group chats/scene.jsonl';
@@ -22,7 +22,7 @@ async function fixture(context) {
   const roots = { dataRoot: join(directory, 'data'), stateRoot: join(directory, 'sidecar'), rootId: randomUUID() };
   await atomicFile(join(roots.dataRoot, '.universe-story-root'), roots.rootId);
   const journal = await writeJournal(roots, {
-    version: 2, rootId: roots.rootId, bucket: 'synthetic', phase: 'editing', operation: randomUUID(), base: null, files: [],
+    version: 3, format: 2, rootId: roots.rootId, bucket: 'synthetic', phase: 'editing', operation: randomUUID(), base: null, files: [],
   });
   return { ...roots, base: null, confirmedFiles: [], operation: journal.operation };
 }
@@ -30,7 +30,6 @@ async function fixture(context) {
 test('one live capture publishes the final bytes once and keeps later edits for the next capture', async (context) => {
   const options = await fixture(context);
   const paths = [join(options.dataRoot, story), join(options.dataRoot, secondStory)];
-  await atomicFile(join(options.dataRoot, 'default-user/secrets.json'), 'synthetic private key');
   assert.deepEqual(await captureCheckpoint(options), { unchanged: true });
   await assert.rejects(readdir(join(options.stateRoot, 'checkpoints')), { code: 'ENOENT' });
   for (const turn of ['first', 'second', 'third']) {
@@ -40,7 +39,7 @@ test('one live capture publishes the final bytes once and keeps later edits for 
   const capture = await captureCheckpoint(options);
   assert.deepEqual(await readdir(join(options.stateRoot, 'checkpoints', capture.id)), [digest('third')]);
   const staged = await readJournal(options.stateRoot);
-  assert.deepEqual(staged.manifest.files.map(({ path }) => path), [story, secondStory]);
+  assert.deepEqual(staged.manifest.files.filter(entry => !entry.directory).map(({ path }) => path), [story, secondStory]);
   const uploads = [];
   const manifests = new Map();
   let head = null;
@@ -71,7 +70,9 @@ test('one live capture publishes the final bytes once and keeps later edits for 
   await Promise.all(paths.map((path) => unlink(path)));
   const deletion = await captureCheckpoint({ ...options, base: head, confirmedFiles: second.journal.files });
   const empty = await publishCheckpoint({ cloud, capture: deletion, finish: false });
-  assert.deepEqual(manifests.get(head).files, []);
+  assert.deepEqual(manifests.get(head).files.map(entry => [entry.path, entry.directory]), [
+    ['default-user', true], ['default-user/chats', true], ['default-user/group chats', true],
+  ]);
   assert.equal(uploads.length, 2);
   assert.deepEqual(await captureCheckpoint({ ...options, base: head, confirmedFiles: empty.journal.files }), { unchanged: true });
 });

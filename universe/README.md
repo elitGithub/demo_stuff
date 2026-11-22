@@ -4,35 +4,38 @@ Universe runs SillyTavern on your PC and can share its story data between PCs th
 
 ## Set up a Linux PC
 
-Use Node.js 22 or newer and npm. In the Universe directory, pull the repository and create your private `.env` from the example.
-
-```sh
-git pull
-(umask 077 && cp -n .env.example .env)
-```
+Use Node.js 22 or newer and npm. Open the Universe project directory. Create a private `.env` there from `.env.example` and restrict its permissions to your account.
 
 Edit `.env` in that directory. Enter the same `R2_ACCOUNT_ID`, `R2_ACCESS_KEY_ID`, `R2_SECRET_ACCESS_KEY` and `R2_BUCKET` on both PCs. For a new cloud story, use a dedicated empty bucket and credentials scoped to it. For a local-only story, leave all four blank.
 
-Install the dependencies and start Universe.
+Install the locked dependencies and start Universe from this directory.
 
 ```sh
-npm install
+npm ci
 npm start
 ```
 
-Leave the terminal open. SillyTavern builds its frontend on first start. When it reports that it is listening, open [the chat](http://127.0.0.1:8000/) and configure your model connection on this PC. On later runs, use `npm start`.
+`npm start` prepares a missing build and launches `dist/server.mjs`. Leave the terminal open. SillyTavern builds its frontend on first start. When it reports that it is listening, open [the chat](http://127.0.0.1:8000/) and configure your model connection on this PC. On later runs, use `npm start`.
 
-npm installs SillyTavern 1.19.1 under `node_modules/`. Its machine configuration stays in `local/config.yaml`, story data in `local/data/` and the recovery journal in `local/data.universe/`. On upgrade, Universe copies the previous install’s configuration to `local/config.yaml` if that file is missing. Git ignores `node_modules/`, `local/` and `.env`.
+After updating Universe, run `npm ci` and `npm run build` before starting it again. The build places the launcher, integration assets and SillyTavern 1.19.1 in `dist/`. npm installs SillyTavern and its dependencies under `dist/node_modules/sillytavern/` from the lockfile.
+
+`npm install` and `npm ci` include Tavern Scenario Builder 1.1.0. The build makes it available to every profile. Open **Character Management**, click the **wizard hat** beside Group Chats, and enter your premise under **Scenario**. [Upstream source](https://github.com/Copenblend/tavernScenarioBuilder/tree/e27b831f66240ac0c4c1d9acd7ba8c182d29f70b)
+
+The same commands install Aspect: Vocalia 1.0.4 for every profile. Vocalia manages which members of a group chat are present and who replies. Configure it in **Extensions → Aspect: Vocalia**. [Upstream source](https://github.com/Vectricity/st-aspect-vocalia/tree/a9c596130d4d00b8d157e50e3c0d2c2d65f921e6)
+
+Machine configuration stays in `local/config.yaml`, story data in `local/data/` and the recovery journal in `local/data.universe/`. On upgrade, Universe copies the previous install’s configuration to `local/config.yaml` if that file is missing. Git ignores `dist/`, `node_modules/`, `local/` and `.env`.
 
 The [status endpoint](http://127.0.0.1:8767/status) reports the phase, pending cloud work and the most recent confirmed save in this process. You can change its port with `UNIVERSE_PORT` in `.env`.
 
 ## Cloud handoff
 
-The other PC restores the most recent published revision. Automatic 15-minute checkpoints and an in-chat **Save now** action are pending. If the launcher reports a recovery error, preserve that PC’s data and journal.
+Open the [Universe wrapper home page](http://127.0.0.1:8767/) and click **Save now** to run the existing R2 checkpoint immediately. The result appears beside the button. If you set `UNIVERSE_PORT`, use that port in the address.
 
-The cloud snapshot includes per-profile chat transcripts, group chat transcripts and group definitions, character cards, and worlds. It copies JSONL chat files, JSON group and world files, and PNG, WebP or JSON character cards. Credentials, machine settings, logs and other directories stay in each machine's data root. An unsupported filename within this story scope blocks the save so the local copy can be corrected.
+The launcher checks the complete SillyTavern data directory every 15 minutes while the writer is running. An open chat tab is optional. It lets active turns and pending saves finish, captures the local files and releases editing before it uploads. Unchanged intervals retain the previous revision. The status endpoint reports the latest confirmed revision and any pending checkpoint or error.
 
-While SillyTavern runs, the launcher periodically stages story files. Staging alone does not publish a revision. A graceful launcher exit currently publishes the final inventory, including deletions, and releases the cloud lease. The next machine restores that published version before starting SillyTavern.
+The save includes every SillyTavern profile, account record, setting, saved API key, persona, portrait, chat, character, lorebook, gallery and extension file in the data directory, including hidden files and empty directories. Universe maintains its own root identity separately on each PC. Unsupported filesystem items or conflicting Windows filenames produce an error naming the path. Existing story-only R2 revisions remain readable. On your original PC, the first full capture also publishes everything the older format omitted.
+
+To hand off, stop the launcher normally on the first PC and let its final save finish. Start Universe on the second PC with the same R2 bucket and SillyTavern account mode. It restores files, renames, deletions and empty directories before starting SillyTavern. The cloud lease allows one writer at a time. If the launcher reports a recovery error, preserve that PC’s data and journal.
 
 ## Recovery
 
@@ -43,4 +46,6 @@ While SillyTavern runs, the launcher periodically stages story files. Staging al
 
 ## Verify
 
-Run `node --test launcher.test.mjs checkpoint-store.test.mjs` from the Universe directory. The suite uses synthetic local folders, a test child and an in-memory cloud transport.
+Run `npm test` from the Universe directory. The launcher, checkpoint store, chat integration and build tests live in `tests/`. They use isolated local folders, test children and an in-memory cloud transport. The sample character card is at `tests/fixtures/story-tests/mara-vale.json`.
+
+Application modules live in `src/`, the cloud save and capture gate classes in `src/classes/`, and the pinned SillyTavern integration in `src/integration/`.

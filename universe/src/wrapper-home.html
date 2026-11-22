@@ -1,0 +1,60 @@
+<!doctype html>
+<html lang="en">
+<head>
+  <meta charset="utf-8">
+  <meta name="viewport" content="width=device-width, initial-scale=1">
+  <meta name="universe-csrf" content="{{token}}">
+  <title>Universe</title>
+  <style nonce="{{nonce}}">
+    :root { color-scheme: light dark; font: 100%/1.5 "Inter", system-ui, sans-serif; }
+    body { max-width: 36rem; margin: 12vh auto; padding: 0 1.25rem; }
+    h1 { margin-bottom: 1rem; }
+    button { font: inherit; padding: .65rem 1.25rem; cursor: pointer; }
+    button:focus-visible { outline: .2rem solid Highlight; outline-offset: .2rem; }
+    button:disabled { cursor: default; }
+  </style>
+</head>
+<body>
+  <main>
+    <h1>Universe</h1>
+    <button type="button" id="save" {{disabled}}>Save now</button>
+    <p id="result" role="status" aria-live="polite">{{message}}</p>
+  </main>
+  <script nonce="{{nonce}}">
+    const button = document.getElementById('save');
+    const result = document.getElementById('result');
+    const messages = {
+      unchanged: 'Already up to date.',
+      pending: 'Checkpoint still pending. Try again shortly.',
+      unavailable: 'Cloud save is unavailable. Try again when the launcher is ready.',
+      'local-only': 'Cloud save is not configured.',
+      'rate-limited': 'Please wait a moment before saving again.',
+      failed: 'Save failed. Try again.',
+    };
+    button.addEventListener('click', async () => {
+      if (button.disabled) {
+        return;
+      }
+      button.disabled = true;
+      result.textContent = 'Saving… Waiting for the current turn if needed.';
+      try {
+        const response = await fetch('/save', {
+          method: 'POST', headers: { 'X-Universe-CSRF': document.querySelector('meta[name="universe-csrf"]').content },
+        });
+        if (response.status === 403) {
+          result.textContent = 'Reload this page to save.';
+          return;
+        }
+        const state = await response.json();
+        result.textContent = response.ok && state.checkpoint === 'saved'
+          ? 'Saved at ' + new Date(state.lastSyncAt).toLocaleString() + '.'
+          : messages[state.checkpoint] || messages.failed;
+      } catch {
+        result.textContent = 'Could not confirm the save. Try again.';
+      } finally {
+        button.disabled = false;
+      }
+    });
+  </script>
+</body>
+</html>

@@ -5,7 +5,9 @@
     "node": ">=22"
   },
   "dependencies": {
-    "sillytavern": "1.19.1"
+    "sillytavern": "1.19.1",
+    "st-aspect-vocalia": "file:packages/st-aspect-vocalia-1.0.4.tgz",
+    "tavern-scenario-builder": "file:packages/tavern-scenario-builder-1.1.0.tgz"
   },
   "overrides": {
     "vectra": {
@@ -16,6 +18,8 @@
     }
   },
   "scripts": {
-    "start": "node server.mjs"
+    "build": "node scripts/build.mjs",
+    "start": "node scripts/build.mjs --if-missing && node dist/server.mjs",
+    "test": "node --test tests/*.test.mjs"
   }
 }

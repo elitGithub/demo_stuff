@@ -1,7 +1,7 @@
 import { randomUUID } from 'node:crypto';
 import { readdir, rename, rmdir, unlink } from 'node:fs/promises';
 import { join } from 'node:path';
-import { isId, validateManifest } from './cloud-save.mjs';
+import { isId, validateManifest } from './classes/cloud-save.mjs';
 import { atomicFile, checkDirectory, inspect, readRegular, syncDirectory, validateEntries } from './story-files.mjs';
 
 /**
@@ -103,32 +103,33 @@ export async function readJournal(directory) {
     return null;
   }
   const journal = JSON.parse(bytes);
-  if (![1, 2].includes(journal?.version) || typeof journal.bucket !== 'string' || !isId(journal.rootId) ||
+  if (![1, 2, 3].includes(journal?.version) || typeof journal.bucket !== 'string' || !isId(journal.rootId) ||
+      (journal.version === 3 ? ![1, 2].includes(journal.format) : Object.hasOwn(journal, 'format')) ||
       (journal.base !== null && !isId(journal.base))) {
     throw new Error('Invalid local save journal. Preserve the story directory and its sidecar for recovery.');
   }
-  if (journal.version === 2) {
-    validateEntries(journal.files);
+  if (journal.version >= 2) {
+    validateEntries(journal.files, journal.format);
     if (journal.base === null && journal.files.length > 0) {
       throw new Error('Local journal has a confirmed inventory without a base.');
     }
   }
   if (journal.phase === 'publishing') {
     validateManifest(journal.manifest, journal.manifest?.id);
-    if (journal.manifest.parent !== journal.base) {
+    if (journal.manifest.parent !== journal.base || (journal.version === 3 ? journal.manifest.version !== 2 : journal.manifest.version !== 1)) {
       throw new Error('Local operation has an inconsistent base.');
     }
   } else if (journal.phase === 'restoring') {
     if (!isId(journal.target)) {
       throw new Error('Invalid pending restore target.');
     }
-    validateEntries(journal.files);
+    validateEntries(journal.files, journal.format);
   } else if (journal.phase === 'editing') {
     if (!isId(journal.operation)) {
       throw new Error('Invalid pending edit operation.');
     }
   } else if (journal.phase === 'clean') {
-    validateEntries(journal.files);
+    validateEntries(journal.files, journal.format);
   } else {
     throw new Error('Invalid local save journal phase.');
   }

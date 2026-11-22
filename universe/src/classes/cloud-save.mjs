@@ -1,6 +1,6 @@
 import { randomUUID } from 'node:crypto';
-import { digest } from './r2.mjs';
-import { validateEntries } from './story-files.mjs';
+import { digest } from '../r2.mjs';
+import { validateEntries } from '../story-files.mjs';
 
 const prefix = '_universe/v2';
 const controlKey = `${prefix}/control.json`;
@@ -21,11 +21,11 @@ export function isId(value) {
  * @returns {void}
  */
 export function validateManifest(manifest, id) {
-  if (manifest?.version !== 1 || manifest.id !== id || !isId(id) ||
+  if (![1, 2].includes(manifest?.version) || manifest.id !== id || !isId(id) ||
       (manifest.parent !== null && (!isId(manifest.parent) || manifest.parent === id))) {
     throw new Error('Invalid cloud manifest.');
   }
-  validateEntries(manifest.files);
+  validateEntries(manifest.files, manifest.version);
 }
 
 export class CloudSave {
@@ -255,7 +255,7 @@ export class CloudSave {
    */
   async includes(head, expected) {
     const manifest = await this.findAncestor(head, expected.id, expected.parent);
-    if (manifest && (manifest.parent !== expected.parent || JSON.stringify(manifest.files) !== JSON.stringify(expected.files))) {
+    if (manifest && (manifest.version !== expected.version || manifest.parent !== expected.parent || JSON.stringify(manifest.files) !== JSON.stringify(expected.files))) {
       throw new Error('A cloud operation ID matched different story content.');
     }
     return manifest !== null;

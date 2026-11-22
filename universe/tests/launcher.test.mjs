@@ -5,10 +5,11 @@ import { tmpdir } from 'node:os';
 import { dirname, join } from 'node:path';
 import { test } from 'node:test';
 import { setTimeout as pause } from 'node:timers/promises';
-import { CloudSave } from './cloud-save.mjs';
-import { configuration, projectConfiguration, runLauncher } from './launcher.mjs';
-import { createTransport, digest, readCredentials } from './r2.mjs';
-import { respond } from './server.mjs';
+import { runInNewContext } from 'node:vm';
+import { CloudSave } from '../src/classes/cloud-save.mjs';
+import { configuration, projectConfiguration, runLauncher } from '../src/launcher.mjs';
+import { createTransport, digest, readCredentials } from '../src/r2.mjs';
+import { createWrapperHandler } from '../src/server.mjs';
 
 const credentials = {
   R2_ACCOUNT_ID: 'testaccount',
@@ -65,7 +66,7 @@ test('project startup rejects a missing installation before touching a saved jou
   await write(config.stateRoot, 'journal.json', 'unread journal sentinel');
   await assert.rejects(runLauncher(config, new AbortController().signal, () => {}, {
     transport: () => assert.fail('cloud request before installation check'),
-  }), /Run npm install/);
+  }), /Run npm ci and npm run build/);
   assert.deepEqual(await readdir(config.stateRoot), ['journal.json']);
   assert.equal(await readFile(join(config.stateRoot, 'journal.json'), 'utf8'), 'unread journal sentinel');
 });
@@ -197,13 +198,12 @@ async function run(config, cloud, whileRunning = async () => {}, onChildExit = a
   assert.equal(states.at(-1).phase, 'saved');
 }
 
-test('transfers final exit writes and deletions across two launchers, preserves each machine’s credentials', async (context) => {
+test('transfers final exit writes, saved credentials and deletions across two launchers', async (context) => {
   const root = await fixture(context);
   const cloud = memoryCloud();
   const alpha = await PC(root, 'alpha');
   const beta = await PC(root, 'beta');
   await write(alpha.dataRoot, privateFile, 'alpha-private');
-  await write(beta.dataRoot, privateFile, 'beta-private');
   await run(alpha, cloud, async (data) => {
     const journal = JSON.parse(await readFile(join(alpha.stateRoot, 'journal.json')));
     assert.equal(journal.phase, 'editing');
@@ -214,7 +214,7 @@ test('transfers final exit writes and deletions across two launchers, preserves 
   await run(beta, cloud, async (data) => {
     assert.equal(await readFile(join(data, story), 'utf8'), 'exit turn');
     assert.equal(await readFile(join(data, sideStory), 'utf8'), 'another chat');
-    assert.equal(await readFile(join(data, privateFile), 'utf8'), 'beta-private');
+    assert.equal(await readFile(join(data, privateFile), 'utf8'), 'alpha-private');
     await unlink(join(data, sideStory));
   }, (data) => write(data, story, 'second exit'));
   await run(alpha, cloud, async (data) => {
@@ -222,7 +222,7 @@ test('transfers final exit writes and deletions across two launchers, preserves 
     await assert.rejects(readFile(join(data, sideStory)), { code: 'ENOENT' });
     assert.equal(await readFile(join(data, privateFile), 'utf8'), 'alpha-private');
   });
-  assert.ok([...cloud.objects.values()].every(({ body }) => !/alpha-private|beta-private|synthetic-cloud-secret/.test(body)));
+  assert.ok([...cloud.objects.values()].every(({ body }) => !/synthetic-cloud-secret/.test(body)));
 });
 
 test('recovers a failed publish before a new child starts', async (context) => {
@@ -308,7 +308,11 @@ test('confirms an acknowledged v1 manifest before reconciling its live files wit
   });
   const journalPath = join(alpha.stateRoot, 'journal.json');
   const { rootId, bucket, base } = JSON.parse(await readFile(journalPath));
-  const manifest = JSON.parse(cloud.objects.get(`_universe/v2/manifests/${base}.json`).body);
+  const manifestKey = `_universe/v2/manifests/${base}.json`;
+  const manifest = JSON.parse(cloud.objects.get(manifestKey).body);
+  manifest.version = 1;
+  manifest.files = manifest.files.filter(entry => !entry.directory);
+  cloud.objects.get(manifestKey).body = Buffer.from(JSON.stringify(manifest));
   const legacy = { version: 1, phase: 'publishing', rootId, bucket, base: manifest.parent, manifest };
   await run(beta, cloud, async (data) => {
     await write(data, sideStory, 'descendant transcript');
@@ -324,7 +328,7 @@ test('confirms an acknowledged v1 manifest before reconciling its live files wit
   await write(alpha.dataRoot, sideStory, 'descendant transcript');
   await assert.rejects(run(alpha, cloud, () => assert.fail('mixed group must block startup')), /reconcile manually/);
   const acknowledged = JSON.parse(await readFile(journalPath));
-  assert.equal(acknowledged.version, 2);
+  assert.equal(acknowledged.version, 3);
   assert.equal(acknowledged.base, manifest.id);
   assert.deepEqual(acknowledged.files, manifest.files);
   assert.equal(await readFile(join(alpha.dataRoot, sideStory), 'utf8'), 'descendant transcript');
@@ -500,7 +504,7 @@ test('rejects symlinked story directories without reading outside the effective 
     }
     throw error;
   }
-  await assert.rejects(run(beta, cloud, () => assert.fail('unsafe root must block child startup')), /Unsafe path component/);
+  await assert.rejects(run(beta, cloud, () => assert.fail('unsafe root must block child startup')), /Unsafe file/);
   assert.equal(cloud.control().head, null);
   assert.equal(await readFile(join(outside, 'world.json'), 'utf8'), 'external fixture');
 });
@@ -543,7 +547,7 @@ test('retries the completed capture after a blob failure and preserves subsequen
   await assert.rejects(run(alpha, cloud, (data) => write(data, story, 'staged')), /503/);
   const journalPath = join(alpha.stateRoot, 'journal.json');
   const marker = JSON.parse(await readFile(journalPath));
-  assert.equal(marker.version, 2);
+  assert.equal(marker.version, 3);
   assert.equal(marker.base, null);
   await write(alpha.dataRoot, story, 'newer local edit');
   cloud.hook = null;
@@ -556,40 +560,41 @@ test('retries the completed capture after a blob failure and preserves subsequen
   });
 });
 
-test('migrates v1 clean, restoring and verified publishing journals, and preserves a v1 editing tree', async (context) => {
+test('restores legacy scope including interrupted restores, then publishes the unchanged subset and complete local profile', async (context) => {
   const root = await fixture(context);
   const cloud = memoryCloud();
   const alpha = await PC(root, 'alpha');
-  await write(alpha.dataRoot, story, 'before first launch');
-  await run(alpha, cloud);
+  const owner = new CloudSave(cloud.transport);
+  await owner.acquire();
+  const first = { version: 1, id: randomUUID(), parent: null, files: [{ path: story, hash: digest('first') }] };
+  await owner.upload(digest('first'), Buffer.from('first'));
+  await owner.commit(first, false);
+  const second = { version: 1, id: randomUUID(), parent: first.id, files: [{ path: story, hash: digest('updated') }] };
+  await owner.upload(digest('updated'), Buffer.from('updated'));
+  await owner.commit(second, true);
   const path = join(alpha.stateRoot, 'journal.json');
+  const original = { version: 1, bucket: 'testaccount/test-bucket', rootId: randomUUID(), base: first.id };
+  await write(alpha.dataRoot, '.universe-story-root', original.rootId);
+  await write(alpha.dataRoot, story, 'first');
+  await write(alpha.dataRoot, privateFile, 'synthetic retained profile');
+  await write(alpha.stateRoot, 'journal.json', JSON.stringify({ ...original, phase: 'restoring', target: second.id, files: first.files }));
+  await run(alpha, cloud, async data => {
+    assert.equal(cloud.control().head, second.id);
+    assert.equal(await readFile(join(data, story), 'utf8'), 'updated');
+    assert.equal(await readFile(join(data, privateFile), 'utf8'), 'synthetic retained profile');
+  });
   const clean = JSON.parse(await readFile(path));
-  assert.ok(clean.base);
-  const legacy = { ...clean, version: 1 };
-  await writeFile(path, JSON.stringify(legacy));
-  await run(alpha, cloud);
-  assert.equal(JSON.parse(await readFile(path)).version, 2);
-  assert.equal(cloud.control().head, clean.base);
-  const beta = await PC(root, 'beta');
-  await run(beta, cloud, (data) => write(data, story, 'remote update'));
-  const target = cloud.control().head;
-  await writeFile(path, JSON.stringify({ ...legacy, phase: 'restoring', target }));
-  await run(alpha, cloud, async (data) => assert.equal(await readFile(join(data, story), 'utf8'), 'remote update'));
-  const manifest = { version: 1, id: randomUUID(), parent: target, files: [{ path: story, hash: digest('legacy capture') }] };
-  const original = { version: 1, bucket: legacy.bucket, rootId: legacy.rootId, base: target };
-  await writeFile(path, JSON.stringify({ ...original, phase: 'publishing', manifest }));
-  await assert.rejects(run(alpha, cloud), /changed after a legacy save/);
-  assert.equal(cloud.control().head, target);
-  assert.equal(JSON.parse(await readFile(path)).version, 1);
-  await write(alpha.dataRoot, story, 'legacy capture');
-  await run(alpha, cloud, async () => assert.equal(cloud.control().head, manifest.id));
-  const edit = { ...original, base: manifest.id, phase: 'editing', operation: randomUUID() };
+  assert.equal(clean.version, 3);
+  assert.equal(clean.format, 2);
+  assert.notEqual(clean.base, second.id);
+  assert.ok(clean.files.some(entry => entry.path === privateFile && entry.hash === digest('synthetic retained profile')));
+  const edit = { ...original, base: second.id, phase: 'editing', operation: randomUUID() };
   await writeFile(path, JSON.stringify(edit));
   await write(alpha.dataRoot, sideStory, 'partial group write');
   await assert.rejects(run(alpha, cloud, () => assert.fail('v1 edit must block startup')), /legacy editing.*reconcile/);
   assert.deepEqual(JSON.parse(await readFile(path)), edit);
   assert.equal(await readFile(join(alpha.dataRoot, sideStory), 'utf8'), 'partial group write');
-  assert.equal(cloud.control().head, manifest.id);
+  assert.equal(cloud.control().head, clean.base);
 });
 
 test('refuses pending save recovery when the original effective story root was moved or replaced', async (context) => {
@@ -616,6 +621,42 @@ test('refuses pending save recovery when the original effective story root was m
   assert.equal(await readFile(join(held, story), 'utf8'), 'original pending turn');
 });
 
+for (const version of [1, 2]) {
+  test(`replays an interrupted v${version} publication and then captures the rest of the profile`, async context => {
+    const root = await fixture(context);
+    const cloud = memoryCloud();
+    const alpha = await PC(root, 'alpha');
+    const identity = randomUUID();
+    const bytes = 'legacy working chat';
+    const hash = digest(bytes);
+    const manifest = { version: 1, parent: null, id: randomUUID(), files: [{ path: story, hash }] };
+    await write(alpha.dataRoot, '.universe-story-root', identity);
+    await write(alpha.dataRoot, story, bytes);
+    await write(alpha.dataRoot, 'other-profile/.custom/secret', 'synthetic personal state');
+    await write(alpha.stateRoot, 'journal.json', JSON.stringify({
+      version, rootId: identity, bucket: 'testaccount/test-bucket', phase: 'publishing',
+      base: null, manifest, ...(version === 2 ? { files: [] } : {}),
+    }));
+    if (version === 2) {
+      await write(alpha.stateRoot, `checkpoints/${manifest.id}/${hash}`, bytes);
+    } else {
+      await write(alpha.dataRoot, story, 'incomplete legacy write');
+      await assert.rejects(run(alpha, cloud), /changed after a legacy save/);
+      assert.equal(cloud.control().head, null);
+      await write(alpha.dataRoot, story, bytes);
+    }
+    await run(alpha, cloud, async () => {
+      assert.equal(cloud.control().head, manifest.id);
+      assert.equal(await readFile(join(alpha.dataRoot, 'other-profile/.custom/secret'), 'utf8'), 'synthetic personal state');
+    });
+    const complete = JSON.parse(await readFile(join(alpha.stateRoot, 'journal.json')));
+    assert.equal(complete.version, 3);
+    assert.equal(complete.format, 2);
+    assert.notEqual(complete.base, manifest.id);
+    assert.equal(complete.files.find(entry => entry.path === 'other-profile/.custom/secret').hash, digest('synthetic personal state'));
+  });
+}
+
 test('final save refuses a replaced root but publishes an intentional deletion of the last story', async (context) => {
   const root = await fixture(context);
   const cloud = memoryCloud();
@@ -632,10 +673,10 @@ test('final save refuses a replaced root but publishes an intentional deletion o
   await rename(held, alpha.dataRoot);
   await run(alpha, cloud, (data) => unlink(join(data, story)));
   const manifest = JSON.parse(cloud.objects.get(`_universe/v2/manifests/${cloud.control().head}.json`).body);
-  assert.deepEqual(manifest.files, []);
+  assert.deepEqual(manifest.files.filter(entry => !entry.directory), []);
 });
 
-test('restores a case-only directory and filename transition after interruption and preserves local-only files', async (context) => {
+test('restores a case-only directory and filename transition after interruption, including its other files', async (context) => {
   const root = await fixture(context);
   const cloud = memoryCloud();
   const alpha = await PC(root, 'alpha');
@@ -677,7 +718,8 @@ test('reuses the case variant of an empty leftover story directory and preserves
   await run(beta, cloud, async (data) => {
     assert.deepEqual(await readdir(join(data, originalDirectory)), []);
   });
-  await run(gamma, cloud, (data) => write(data, `${originalDirectory}/device.txt`, 'local-only'));
+  await run(gamma, cloud);
+  await write(gamma.dataRoot, `${originalDirectory}/device.txt`, 'local-only');
   await run(alpha, cloud, async (data) => {
     const temporary = join(data, 'default-user/chats/intermediate');
     await rename(join(data, originalDirectory), temporary);
@@ -689,41 +731,179 @@ test('reuses the case variant of an empty leftover story directory and preserves
     assert.equal(await readFile(join(data, pathAfterRename), 'utf8'), 'new chat');
   });
   const beforeConflict = cloud.control().head;
-  await assert.rejects(run(gamma, cloud, () => assert.fail('nonempty untracked directory must remain untouched')), /conflict with a cloud case-only rename/);
+  await assert.rejects(run(gamma, cloud, () => assert.fail('nonempty untracked directory must remain untouched')), /reconcile manually/);
   assert.equal(cloud.control().head, beforeConflict);
   assert.deepEqual(await readdir(join(gamma.dataRoot, 'default-user/chats')), ['Character']);
   assert.equal(await readFile(join(gamma.dataRoot, originalDirectory, 'device.txt'), 'utf8'), 'local-only');
 });
 
-test('background staging uploads immutable bytes while the cloud head stays unpublished', { timeout: 5000 }, async (context) => {
+/**
+ * @param {object} config
+ * @param {object} cloud
+ * @param {Function} barrier
+ * @returns {Promise<object>}
+ */
+async function timedWriter(config, cloud, barrier) {
+  const controller = new AbortController();
+  const timers = new Map();
+  const ready = Promise.withResolvers();
+  const states = [];
+  let time = 0;
+  let idle;
+  let save;
+  const task = runLauncher(config, controller.signal, state => {
+    states.push(state);
+    if (state.phase === 'running') {
+      ready.resolve();
+    }
+  }, {
+    transport: cloud.transport,
+    onSaveReady(handler) { save = handler; },
+    clock: {
+      setInterval(callback, period) {
+        assert.ok(!timers.has(period), 'one timer per period');
+        timers.set(period, { callback, due: time + period });
+        return period;
+      },
+      clearInterval(period) {
+        timers.delete(period);
+      },
+    },
+    startChild: () => ({
+      pid: 1, finished: new Promise(() => {}), allowEdits: async () => {}, stop: async () => ({ code: 0 }),
+      checkpointReady: Promise.resolve(true),
+      withCaptureBarrier: barrier,
+      onCheckpointIdle(listener) { idle = listener; return () => { idle = null; }; },
+    }),
+  });
+  await Promise.race([ready.promise, task]);
+  await Promise.resolve();
+  return {
+    timers, states, idle: () => idle?.(),
+    save: () => save ? save() : { checkpoint: 'unavailable' },
+    async advance(duration) {
+      const end = time + duration;
+      while (timers.size) {
+        const [period, timer] = [...timers].sort((left, right) => left[1].due - right[1].due)[0];
+        if (timer.due > end) break;
+        cloud.advance(timer.due - time);
+        time = timer.due;
+        timer.due += period;
+        await timer.callback();
+      }
+      cloud.advance(end - time);
+      time = end;
+    },
+    stop() { controller.abort(); return task; },
+  };
+}
+
+/**
+ * @param {string} root
+ * @param {string} parent
+ * @returns {Promise<Array>}
+ */
+async function independentTree(root, parent = '') {
+  const entries = [];
+  for (const item of (await readdir(join(root, parent), { withFileTypes: true })).sort((a, b) => a.name.localeCompare(b.name))) {
+    const path = parent ? `${parent}/${item.name}` : item.name;
+    if (path === '.universe-story-root') continue;
+    if (item.isDirectory()) {
+      entries.push([path, 'directory'], ...await independentTree(root, path));
+    } else {
+      entries.push([path, await readFile(join(root, path))]);
+    }
+  }
+  return entries;
+}
+
+test('the 15-minute checkpoint publishes and restores the complete profile on PC B', { timeout: 10_000 }, async (context) => {
   const root = await fixture(context);
   const cloud = memoryCloud();
   const alpha = await PC(root, 'alpha');
-  const controller = new AbortController();
-  const staged = digest('draft during play');
-  cloud.hook = ({ method, key, response }) => {
-    if (method === 'PUT' && key.endsWith(staged)) {
-      const result = response();
-      assert.equal(cloud.control().head, null);
-      controller.abort();
-      return result;
-    }
-  };
-  await runLauncher(alpha, controller.signal, () => {}, {
-    transport: cloud.transport,
-    stageEveryMs: 5,
-    startChild: () => ({
-      pid: 1,
-      finished: new Promise(() => {}),
-      allowEdits: () => write(alpha.dataRoot, story, 'draft during play'),
-      async stop() {
-        await write(alpha.dataRoot, story, 'durable exit turn');
-        return { code: 0 };
-      },
-    }),
+  const beta = await PC(root, 'beta');
+  let held = false;
+  let barriers = 0;
+  let requests = 0;
+  cloud.hook = () => { assert.equal(held, false); requests++; };
+  const writer = await timedWriter(alpha, cloud, async (id, capture) => {
+    barriers++;
+    held = true;
+    try {
+      return { state: 'captured', value: await capture() };
+    } finally { held = false; }
   });
+  for (const [path, value] of [
+    [story, 'opening turn'], [sideStory, 'tavern gathering'], [privateFile, 'synthetic saved key'],
+    ['default-user/settings.json', '{"persona":"Frost"}'], ['default-user/User Avatars/Frost.png', Buffer.from([0, 255, 128])],
+    ['_storage/account-record', '{"handle":"willowmere","password":"synthetic verifier"}'], ['_storage/avatar-record', 'synthetic avatar'],
+    ['willowmere/settings.json', '{"persona":"Frost"}'], ['willowmere/characters/Viola.png', Buffer.from([0, 1])],
+    ['willowmere/worlds/Willowmere.json', '{}'], ['willowmere/user/images/one.jpg', Buffer.from([5, 0])],
+    ['willowmere/extensions/new-module/.state/without-extension', Buffer.from([9, 0, 0, 255])], ['.opaque', 'future data'],
+  ]) await write(alpha.dataRoot, path, value);
+  await mkdir(join(alpha.dataRoot, 'willowmere/empty/nested'), { recursive: true });
+  await writer.advance(899_000);
+  assert.equal(barriers, 0);
+  assert.equal(cloud.control().head, null);
+  assert.equal(requests, 3 + 14 * 2);
+  await writer.advance(1000);
+  const first = cloud.control().head;
+  assert.ok(first);
+  assert.ok(cloud.control().lease);
+  assert.equal(barriers, 1);
+  await assert.rejects(run(beta, cloud), /another launcher holds/i);
+  const beforeIdle = requests;
+  await writer.advance(900_000);
+  assert.equal(requests - beforeIdle, 15 * 2);
+  assert.equal(cloud.control().head, first);
+  await unlink(join(alpha.dataRoot, story));
+  await rename(join(alpha.dataRoot, '.opaque'), join(alpha.dataRoot, '.new'));
+  await writer.advance(900_000);
+  const second = cloud.control().head;
+  assert.notEqual(second, first);
+  const expected = await independentTree(alpha.dataRoot);
+  await writer.stop();
+  assert.equal(cloud.control().head, second);
+  assert.equal(cloud.control().lease, null);
+  await run(beta, cloud, async data => {
+    assert.deepEqual(await independentTree(data), expected);
+    assert.notEqual(await readFile(join(data, '.universe-story-root'), 'utf8'), await readFile(join(alpha.dataRoot, '.universe-story-root'), 'utf8'));
+  });
+});
+
+test('a busy interval retries on idle and a failed upload drains before final shutdown captures newer edits', async context => {
+  const root = await fixture(context);
+  const cloud = memoryCloud();
+  const alpha = await PC(root, 'alpha');
+  let busy = true;
+  const writer = await timedWriter(alpha, cloud, async (id, capture) => busy ? { state: 'pending' } : { state: 'captured', value: await capture() });
+  await write(alpha.dataRoot, story, 'first turn');
+  await writer.advance(900_000);
+  assert.equal(cloud.control().head, null);
+  busy = false;
+  cloud.hook = ({ key }) => key.endsWith(digest('first turn')) ? new Response(null, { status: 503 }) : undefined;
+  await writer.idle();
+  assert.equal(writer.states.at(-1).checkpoint, 'failed');
+  assert.equal(cloud.control().head, null);
+  const uploading = Promise.withResolvers();
+  const resume = Promise.withResolvers();
+  cloud.hook = async ({ key, response }) => {
+    if (key.endsWith(digest('first turn'))) {
+      uploading.resolve();
+      await resume.promise;
+    }
+    return response();
+  };
+  const retry = writer.advance(900_000);
+  await uploading.promise;
+  await write(alpha.dataRoot, story, 'newer turn');
+  const stop = writer.stop();
+  resume.resolve();
+  await Promise.all([retry, stop]);
   const manifest = JSON.parse(cloud.objects.get(`_universe/v2/manifests/${cloud.control().head}.json`).body);
-  assert.equal(manifest.files[0].hash, digest('durable exit turn'));
+  assert.ok(manifest.parent);
+  assert.equal(manifest.files.find(entry => entry.path === story).hash, digest('newer turn'));
+  assert.equal(cloud.control().lease, null);
 });
 
 test('existing machine configuration is copied once outside node_modules', async (context) => {
@@ -806,7 +986,7 @@ test('the actual Ubuntu child writes its last turn on SIGTERM before publication
     })();
     await Promise.all([task, ready]);
     const manifest = JSON.parse(cloud.objects.get(`_universe/v2/manifests/${cloud.control().head}.json`).body);
-    assert.equal(manifest.files[0].hash, digest('written on SIGTERM'));
+    assert.equal(manifest.files.find(entry => entry.path === story).hash, digest('written on SIGTERM'));
   });
 
 for (const signal of ['SIGTERM', 'SIGINT']) {
@@ -884,27 +1064,176 @@ test('clean standalone and fail-loud credentials without touching the network', 
   await assert.rejects(readFile(join(config.stateRoot, 'journal.json')), { code: 'ENOENT' });
 });
 
-test('status and root retain exact fixed routes and expose launcher state only', () => {
-  const state = { phase: 'saving', pending: true };
-  const call = (url, method = 'GET') => {
-    const result = {};
-    respond(state, { url, method }, {
-      writeHead(code, headers) {
-        Object.assign(result, { code, headers });
-        return this;
-      },
-      end(body) {
-        result.body = body;
-      },
-    });
-    return result;
+/**
+ * @param {Function} handler
+ * @param {string} url
+ * @param {string} method
+ * @param {object} headers
+ * @returns {Promise<object>}
+ */
+async function wrapperRequest(handler, url, method = 'GET', headers = {}) {
+  const result = {};
+  await handler({ url, method, headers: { host: '127.0.0.1:8767', ...headers } }, {
+    writeHead(code, values) {
+      Object.assign(result, { code, headers: values });
+      return this;
+    },
+    end(body) { result.body = body; },
+  });
+  return result;
+}
+
+/**
+ * @param {Function} handler
+ * @returns {Promise<object>}
+ */
+async function wrapperBrowser(handler) {
+  const { body } = await wrapperRequest(handler, '/');
+  const token = /<meta name="universe-csrf" content="([^"]+)">/.exec(body)[1];
+  assert.match(body, /<button type="button" id="save"[^>]*>Save now<\/button>/);
+  assert.match(body, /id="result" role="status"/);
+  const button = {
+    disabled: /<button[^>]*\bdisabled\b/.test(body),
+    addEventListener(event, listener) { assert.equal(event, 'click'); this.click = listener; },
   };
-  assert.equal(call('/?check=1').body, 'Universe launcher is running.\n');
-  assert.equal(call('HTTPS://example.test').code, 200);
-  assert.equal(call('http://example.test/./').code, 404);
-  assert.equal(call('//status').code, 404);
-  assert.equal(call('/local/data/default-user/secrets.json').code, 404);
-  assert.equal(call('/', 'POST').headers.Allow, 'GET, HEAD');
-  assert.equal(call('/status', 'HEAD').body, undefined);
-  assert.deepEqual(JSON.parse(call('/status').body), { phase: 'saving', pending: true, ok: false });
+  const result = { textContent: '' };
+  const responses = [];
+  runInNewContext(/<script nonce="[^"]+">([\s\S]*?)<\/script>/.exec(body)[1], {
+    document: {
+      getElementById(id) { return { save: button, result }[id]; },
+      querySelector(selector) {
+        assert.equal(selector, 'meta[name="universe-csrf"]');
+        return { content: token };
+      },
+    },
+    async fetch(url, options) {
+      const headers = Object.fromEntries(new Headers(options.headers));
+      const response = await wrapperRequest(handler, url, options.method, { ...headers, origin: 'http://127.0.0.1:8767' });
+      responses.push(response);
+      return new Response(response.body, { status: response.code });
+    },
+  });
+  return { button, result, responses, token };
+}
+
+test('wrapper home button preserves the status route and validates save admission', async () => {
+  const state = { phase: 'saving', pending: true };
+  let calls = 0;
+  const handler = createWrapperHandler(state, 8767, () => { calls++; return { checkpoint: 'unavailable' }; });
+  const call = (url, method, headers) => wrapperRequest(handler, url, method, headers);
+  const { token } = await wrapperBrowser(handler);
+  assert.equal((await call('/?check=1')).code, 200);
+  assert.equal((await call('http://127.0.0.1:8767')).code, 200);
+  assert.equal((await call('https://example.test')).code, 403);
+  assert.equal((await call('http://example.test/./')).code, 404);
+  assert.equal((await call('//status')).code, 404);
+  assert.equal((await call('/local/data/default-user/secrets.json')).code, 404);
+  assert.equal((await call('/', 'POST')).headers.Allow, 'GET, HEAD');
+  assert.equal((await call('/status', 'HEAD')).body, undefined);
+  assert.deepEqual(JSON.parse((await call('/status')).body), { phase: 'saving', pending: true, ok: false });
+  assert.equal((await call('/', 'GET', { host: 'other.example' })).code, 403);
+  assert.equal((await call('/', 'GET', { origin: 'http://other.example' })).code, 403);
+  assert.equal((await call('/save')).code, 405);
+  const valid = { origin: 'http://127.0.0.1:8767', 'x-universe-csrf': token };
+  for (const extra of [{ origin: 'null' }, { origin: 'http://127.0.0.1:8000' }, { origin: undefined },
+    { 'x-universe-csrf': 'wrong' }, { host: 'other.example' }]) {
+    assert.equal((await call('/save', 'POST', { ...valid, ...extra })).code, 403);
+  }
+  assert.equal((await call('/save', 'POST', { ...valid, 'content-length': '12' })).code, 400);
+  assert.equal(calls, 0);
+  for (let index = 0; index < 12; index++) {
+    assert.equal(JSON.parse((await call('/save', 'POST', valid)).body).checkpoint, 'unavailable');
+  }
+  assert.equal((await call('/save', 'POST', valid)).code, 429);
+  assert.equal(calls, 12);
+  const local = createWrapperHandler({ syncBackend: 'local-only' }, 8767, () => assert.fail('local-only save'));
+  assert.match((await wrapperRequest(local, '/')).body, /Cloud save is not configured/);
+  const disabled = await wrapperBrowser(local);
+  assert.equal(disabled.button.disabled, true);
+  await disabled.button.click();
+  assert.equal(disabled.responses.length, 0);
+});
+
+test('wrapper home click publishes and restores the full profile before the timer', async context => {
+  const root = await fixture(context);
+  const cloud = memoryCloud();
+  const alpha = await PC(root, 'alpha');
+  const beta = await PC(root, 'beta');
+  const writer = await timedWriter(alpha, cloud, async (id, capture) => ({ state: 'captured', value: await capture() }));
+  try {
+    await write(alpha.dataRoot, story, 'Frost meets Viola');
+    await write(alpha.dataRoot, 'default-user/User Avatars/Frost.png', Buffer.from([255, 0, 37]));
+    await write(alpha.dataRoot, privateFile, 'synthetic model key');
+    const browser = await wrapperBrowser(createWrapperHandler({}, 8767, writer.save));
+    const click = browser.button.click();
+    assert.equal(browser.button.disabled, true);
+    assert.match(browser.result.textContent, /Saving/);
+    assert.equal(cloud.control().head, null);
+    await click;
+    assert.match(browser.result.textContent, /^Saved at /);
+    const first = JSON.parse(browser.responses.at(-1).body);
+    const revision = cloud.control().head;
+    assert.ok(revision);
+    assert.ok(cloud.control().lease);
+    await browser.button.click();
+    assert.equal(browser.result.textContent, 'Already up to date.');
+    assert.equal(JSON.parse(browser.responses.at(-1).body).lastSyncAt, first.lastSyncAt);
+    assert.equal(cloud.control().head, revision);
+    const expected = await independentTree(alpha.dataRoot);
+    await writer.stop();
+    assert.equal(cloud.control().head, revision);
+    await run(beta, cloud, async data => assert.deepEqual(await independentTree(data), expected));
+    await browser.button.click();
+    assert.match(browser.result.textContent, /unavailable/);
+  } finally {
+    await writer.stop();
+  }
+});
+
+test('wrapper click during a timed upload captures later edits and reports its own failure or retry', async context => {
+  const root = await fixture(context);
+  const cloud = memoryCloud();
+  const alpha = await PC(root, 'alpha');
+  let busy = false;
+  const writer = await timedWriter(alpha, cloud, async (id, capture) => busy
+    ? { state: 'pending' } : { state: 'captured', value: await capture() });
+  const handler = createWrapperHandler({}, 8767, writer.save);
+  const browser = await wrapperBrowser(handler);
+  const other = await wrapperBrowser(handler);
+  const uploading = Promise.withResolvers();
+  const release = Promise.withResolvers();
+  try {
+    await write(alpha.dataRoot, story, 'first');
+    cloud.hook = async ({ key, response }) => {
+      if (key.endsWith(digest('first'))) {
+        uploading.resolve();
+        await release.promise;
+      }
+      return key.endsWith(digest('second')) ? new Response(null, { status: 503 }) : response();
+    };
+    const timer = writer.advance(900_000);
+    await uploading.promise;
+    await write(alpha.dataRoot, story, 'second');
+    const click = browser.button.click();
+    const secondClick = other.button.click();
+    release.resolve();
+    await Promise.all([timer, click, secondClick]);
+    assert.equal(browser.result.textContent, 'Save failed. Try again.');
+    assert.equal(other.result.textContent, browser.result.textContent);
+    const first = cloud.control().head;
+    assert.ok(first);
+    cloud.hook = null;
+    await browser.button.click();
+    assert.match(browser.result.textContent, /^Saved at /);
+    const revision = JSON.parse(cloud.objects.get(`_universe/v2/manifests/${cloud.control().head}.json`).body);
+    assert.equal(revision.parent, first);
+    assert.equal(revision.files.find(entry => entry.path === story).hash, digest('second'));
+    busy = true;
+    await browser.button.click();
+    assert.match(browser.result.textContent, /still pending/);
+  } finally {
+    release.resolve();
+    cloud.hook = null;
+    await writer.stop();
+  }
 });

@@ -1,5 +1,7 @@
 /local/
 /node_modules/
+/dist/
+/.universe-build-*
 /runtime-data/
 /runtime-data.universe/
 /sillytavern/

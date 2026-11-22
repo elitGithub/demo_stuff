@@ -1,7 +1,7 @@
 import { randomUUID } from 'node:crypto';
 import { readdir, rmdir, unlink } from 'node:fs/promises';
 import { join } from 'node:path';
-import { isId } from './cloud-save.mjs';
+import { isId } from './classes/cloud-save.mjs';
 import { readJournal, verifyStoryRoot, writeJournal } from './local-session.mjs';
 import { digest } from './r2.mjs';
 import { atomicFile, checkDirectory, readRegular, snapshot, storyPath, syncDirectory, validateEntries } from './story-files.mjs';
@@ -13,7 +13,7 @@ import { atomicFile, checkDirectory, readRegular, snapshot, storyPath, syncDirec
  */
 export function sameFiles(left, right) {
   return left.length === right.length &&
-    left.every((entry, index) => entry.path === right[index].path && entry.hash === right[index].hash);
+    left.every((entry, index) => entry.path === right[index].path && entry.hash === right[index].hash && entry.directory === right[index].directory);
 }
 
 /**
@@ -54,35 +54,40 @@ export async function captureCheckpoint({ dataRoot, stateRoot, rootId, base, con
   await verifyStoryRoot(dataRoot, rootId);
   const journal = await readJournal(stateRoot);
   const legacy = journal?.version === 1 && journal.phase === 'publishing';
-  validateEntries(confirmedFiles);
+  const format = journal?.format ?? 1;
+  validateEntries(confirmedFiles, format);
   if (!journal || journal.rootId !== rootId || journal.base !== base || (base === null && confirmedFiles.length) ||
-      (!legacy && (journal.version !== 2 || journal.phase !== 'editing' || !sameFiles(journal.files, confirmedFiles)))) {
+      (!legacy && (journal.version < 2 || journal.phase !== 'editing' || !sameFiles(journal.files, confirmedFiles)))) {
     throw new Error('Checkpoint does not match the active local save journal.');
   }
-  const files = await snapshot(dataRoot);
+  const captureFormat = legacy ? 1 : 2;
+  const files = await snapshot(dataRoot, captureFormat);
   await verifyStoryRoot(dataRoot, rootId);
   if (legacy && !sameFiles(files, journal.manifest.files)) {
     throw new Error('Story files changed after a legacy save attempt. Preserve the data and journal for reconciliation.');
   }
-  if (!legacy && sameFiles(files, confirmedFiles)) {
+  if (!legacy && format === 2 && sameFiles(files, confirmedFiles)) {
     return { unchanged: true };
   }
-  const manifest = legacy ? journal.manifest : { version: 1, id: journal.operation, parent: base, files };
+  const manifest = legacy ? journal.manifest : { version: 2, id: journal.operation, parent: base, files };
   const directory = join(stateRoot, 'checkpoints', manifest.id);
   await checkDirectory(directory, true);
   const known = new Set(confirmedFiles.map(({ hash }) => hash));
   for (const { path, hash } of files) {
-    if (!known.has(hash)) {
-      const bytes = await readRegular(storyPath(dataRoot, path));
+    if (hash && !known.has(hash)) {
+      const bytes = await readRegular(storyPath(dataRoot, path, captureFormat));
       if (bytes === null || digest(bytes) !== hash) {
-        throw new Error('Story bytes changed during checkpoint capture.');
+        throw new Error(`Story bytes changed during checkpoint capture: ${path}.`);
       }
       await atomicFile(join(directory, hash), bytes);
       known.add(hash);
     }
   }
+  if (!sameFiles(files, await snapshot(dataRoot, captureFormat))) {
+    throw new Error('Profile changed during checkpoint capture.');
+  }
   await writeJournal({ dataRoot, stateRoot }, {
-    version: 2, bucket: journal.bucket, rootId, phase: 'publishing', base, files: confirmedFiles, manifest,
+    ...(legacy ? { version: 2 } : { version: 3, format }), bucket: journal.bucket, rootId, phase: 'publishing', base, files: confirmedFiles, manifest,
   });
   return { unchanged: false, dataRoot, stateRoot, rootId, id: manifest.id };
 }
@@ -91,7 +96,7 @@ export async function captureCheckpoint({ dataRoot, stateRoot, rootId, base, con
  * @param {object} options
  * @returns {Promise<object>}
  */
-export async function publishCheckpoint({ cloud, capture, finish, beforeCommit, uploadedHashes }) {
+export async function publishCheckpoint({ cloud, capture, finish, beforeCommit }) {
   const { dataRoot, stateRoot, rootId, id } = capture;
   await verifyStoryRoot(dataRoot, rootId);
   const journal = await readJournal(stateRoot);
@@ -110,22 +115,21 @@ export async function publishCheckpoint({ cloud, capture, finish, beforeCommit, 
       await cloud.release();
     }
   } else {
-    const parentFiles = base === null ? [] : (await cloud.manifest(base)).files;
+    const parent = base === null ? null : await cloud.manifest(base);
+    const parentFiles = parent?.files ?? [];
     if (journal.version === 1) {
       await captureCheckpoint({ dataRoot, stateRoot, rootId, base, confirmedFiles: parentFiles });
-    } else if (!sameFiles(parentFiles, journal.files)) {
+    } else if ((parent && parent.version !== (journal.format ?? 1)) || !sameFiles(parentFiles, journal.files)) {
       throw new Error('Cloud history differs from the last known local revision. Preserve both copies before recovery.');
     }
     const known = new Set(parentFiles.map(({ hash }) => hash));
     for (const { hash } of manifest.files) {
-      if (!known.has(hash)) {
+      if (hash && !known.has(hash)) {
         const bytes = await readRegular(join(stateRoot, 'checkpoints', id, hash));
         if (bytes === null || digest(bytes) !== hash) {
           throw new Error('Staged checkpoint bytes failed their integrity check.');
         }
-        if (!uploadedHashes?.has(hash)) {
-          await cloud.upload(hash, bytes);
-        }
+        await cloud.upload(hash, bytes);
         known.add(hash);
       }
     }
@@ -135,7 +139,7 @@ export async function publishCheckpoint({ cloud, capture, finish, beforeCommit, 
     head = manifest.id;
   }
   const next = await writeJournal({ dataRoot, stateRoot }, {
-    version: 2, bucket: journal.bucket, rootId, base: manifest.id, files: manifest.files,
+    version: 3, format: manifest.version, bucket: journal.bucket, rootId, base: manifest.id, files: manifest.files,
     ...(finish ? { phase: 'clean' } : { phase: 'editing', operation: randomUUID() }),
   });
   await clearObsoleteCheckpoints(stateRoot);

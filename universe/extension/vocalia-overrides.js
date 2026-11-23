@@ -14,12 +14,22 @@ let universePicking = false;
 let universeAnswering = false;
 
 /**
+ * @returns {?object}
+ * @throws {*}
+ */
+function universeGroupNarrator() {
+  if (!globalThis.universeNarrator) {
+    return null;
+  }
+  return getGroupMembers().find(member => !member.disabled && globalThis.universeNarrator.isNarrator(member.avatar)) ?? null;
+}
+
+/**
  * @returns {boolean}
  * @throws {*}
  */
 function universeNarratorInGroup() {
-  return Boolean(globalThis.universeNarrator)
-    && getGroupMembers().some(member => !member.disabled && globalThis.universeNarrator.isNarrator(member.avatar));
+  return universeGroupNarrator() !== null;
 }
 
 /**
@@ -66,14 +76,7 @@ function universeWithoutNarrator(members) {
  * @throws {*}
  */
 function universeFirstSpeaker(userMessageId) {
-  const chosen = getMemberByAvatar(globalThis.universeNarrator.firstSpeaker(userMessageId));
-  if (chosen && globalThis.universeNarrator.isNarrator(chosen.avatar) && !vocaliaBase_isMemberRouteEligibleCompat(chosen)) {
-    setPresence(chosen.avatar, MEMBER_STATUS_PRESENT);
-    updateExtensionPrompt();
-    updateDiagnosticsPanel();
-    saveMetadata();
-  }
-  return chosen;
+  return getMemberByAvatar(globalThis.universeNarrator.firstSpeaker(userMessageId));
 }
 
 /**
@@ -83,6 +86,23 @@ function universeFirstSpeaker(userMessageId) {
 function universeLoneNarrator() {
   const eligible = vocaliaBase_getRouteEligibleMembersCompat();
   return eligible.length === 1 && globalThis.universeNarrator.isNarrator(eligible[0].avatar) ? eligible[0] : null;
+}
+
+/**
+ * @returns {object}
+ * @throws {*}
+ */
+function ensureStateForCurrentGroup() {
+  const state = vocaliaBase_ensureStateForCurrentGroup();
+  const narrator = universeGroupNarrator();
+  if (narrator === null) {
+    return state;
+  }
+  if (!isAvatarActuallyPresent(narrator.avatar, state)) {
+    setPresence(narrator.avatar, MEMBER_STATUS_PRESENT);
+  }
+  state.members[narrator.avatar].omniscience = true;
+  return state;
 }
 
 /**

@@ -8,6 +8,7 @@ const ScribePanel = Object.freeze({
         NarrowWindow: 1100,
         RepeatMs: 1000,
         ClockMs: 1000,
+        StoryModelRoles: Object.freeze(['Story', 'Writer', 'Analyzer', 'Checker', 'Pedant', 'Scribe']),
         Hollow: Object.freeze(['Summary', 'Book', 'Timeline', 'Rulings']),
         RoomLength: 60,
         Replacement: '_',
@@ -141,6 +142,10 @@ const ScribePanel = Object.freeze({
             Adopt: 'scribe-adopt',
             Export: 'scribe-export',
             Pull: 'scribe-pull',
+            HistoryRange: 'scribe-history-range',
+            HistoryFrom: 'scribe-history-from',
+            HistoryTo: 'scribe-history-to',
+            CheckHistory: 'scribe-check-history',
             Pause: 'scribe-pause',
             Resume: 'scribe-resume',
             StoryRetry: 'scribe-story-retry',
@@ -2240,7 +2245,28 @@ const ScribePanel = Object.freeze({
                 }
             }, guards.Book, ids.InputRetry));
             inputRetry.hidden = true;
-            section.append(controls, ScribePanel.outlet(panel, 'ControlsOutcome', outlets.Controls), details, retry, inputRetry, checked, story, pulled);
+            const range = ScribePanel.own(panel, 'HistoryRange', ScribePanel.make(panel, tags.Block));
+            const from = ScribePanel.field(panel, 'number', 'From message', ids.HistoryFrom, true, false);
+            const to = ScribePanel.field(panel, 'number', 'To message', ids.HistoryTo, true, false);
+            ScribePanel.own(panel, 'HistoryFrom', from.input);
+            ScribePanel.own(panel, 'HistoryTo', to.input);
+            for (const field of [from.input, to.input]) {
+                field.setAttribute('min', '1');
+                field.setAttribute('step', '1');
+            }
+            const check = ScribePanel.own(panel, 'CheckHistory', ScribePanel.button(panel, 'Check history', command(() => {
+                const first = Number(from.input.value);
+                const last = Number(to.input.value);
+                const view = keeper.view();
+                if (!view.canCheckHistory || !Number.isSafeInteger(first) || !Number.isSafeInteger(last) ||
+                    first < 1 || last < first || last > view.historyCheckCount) {
+                    throw new Error('Enter a range from 1 to ' + view.historyCheckCount + ', with the first message at or before the last.');
+                }
+                return keeper.checkHistory(first, last);
+            }, true), guards.Book, ids.CheckHistory));
+            range.append(from.label, to.label, check);
+            range.hidden = true;
+            section.append(controls, range, ScribePanel.outlet(panel, 'ControlsOutcome', outlets.Controls), details, retry, inputRetry, checked, story, pulled);
             const filing = ScribePanel.own(panel, 'FilingGroup', ScribePanel.group(panel, section, 'Pending book entries, checker rows and operator input'));
             filing.hidden = true;
             ScribePanel.pager(panel, settings.Lists.Filing, filing);
@@ -2540,7 +2566,9 @@ const ScribePanel = Object.freeze({
         const words = settings.Words;
         const parts = panel.parts;
         ScribePanel.fold(panel);
-        ScribePanel.write(parts.Headline, PanelView.headline(view, live, cloud));
+        const missingOriginals = view.missingOriginals && view.phase === ScribeKeeper.Phase.Idle && !view.flight &&
+            cloud.phase !== ScribeCloud.Phase.Loading && cloud.phase !== ScribeCloud.Phase.Conflict;
+        ScribePanel.write(parts.Headline, missingOriginals ? ScribeKeeper.Settings.Messages.Unjoined : PanelView.headline(view, live, cloud));
         const problems = PanelView.problems(view, live, cloud);
         const paragraph = (text) => ScribePanel.make(panel, settings.Tags.Paragraph, text);
         const summaries = problems.map((problem) => problem.explanation);
@@ -2824,8 +2852,17 @@ const ScribePanel = Object.freeze({
                 control.disabled = true;
             }
         }
-        if (view.reader && view.phase === phases.Stopped && view.stop?.reason === ScribeAdoption.Stop.Paused) {
-            parts.Resume.disabled = false;
+        if (view.stop?.reason === ScribeAdoption.Stop.Paused) {
+            parts.Pull.disabled = true;
+            if (view.reader && view.phase === phases.Stopped) {
+                parts.Resume.disabled = false;
+            }
+        }
+        parts.HistoryRange.hidden = !(view.historyCheckCount > 0);
+        parts.CheckHistory.disabled ||= !view.canCheckHistory;
+        for (const field of [parts.HistoryFrom, parts.HistoryTo]) {
+            field.disabled = !view.canCheckHistory;
+            field.setAttribute('max', String(view.historyCheckCount ?? 0));
         }
     },
 
@@ -4217,23 +4254,14 @@ const ScribePanel = Object.freeze({
                 schedule = ' Zeta expired the links to older messages. The next background history check is due at ' + time + ' (local time).';
             }
             const pending = [...PanelView.listed(view.pendingFiling)];
-            const readings = [...PanelView.listed(view.modelReadings)];
-            const displayed = new Set(readings.filter((item) => item.role === 'Checker')
-                .map((item) => JSON.stringify([item.first, item.statement])));
             for (const item of PanelView.listed(view.checkerReview)) {
-                if (item.section === 'answer' && (item.reason === 'Checker response' ||
-                    item.reason === 'The Checker returned text outside its JSON format.')) {
-                    if (!displayed.has(JSON.stringify([item.position, item.statement]))) {
-                        readings.push({ role: 'Checker', first: item.position, last: item.position, statement: item.statement });
-                    }
-                } else {
-                    pending.push({ ...item, kind: 'checker' });
+                if (item.section === 'answer' && item.reason === 'Checker response') {
+                    continue;
                 }
+                pending.push({ ...item, kind: 'checker' });
             }
             for (const item of PanelView.listed(live.checkerRows)) {
-                if (item.modelReading) {
-                    readings.push({ role: 'Checker', first: item.position, last: item.position, statement: item.statement });
-                } else {
+                if (!item.modelReading) {
                     pending.push({ ...item, kind: 'checker', section: 'live answer',
                         reason: 'The model returned this statement without a matching link.' });
                 }
@@ -4246,7 +4274,9 @@ const ScribePanel = Object.freeze({
                     item.reason === 'answerPending' ? 'The model has not filed this answer.' :
                     item.reason === 'notePending' ? 'The model has not filed this operator note.' :
                     reasons[item.reason] ?? 'The model returned a row that still needs filing.';
-                const statements = item.statement ? [item.statement] : item.statements ?? [];
+                const raw = item.section === 'answer' || item.section === 'live answer' || item.reason === 'format' ||
+                    item.row?.startsWith('SCENES:');
+                const statements = raw ? [] : item.statement ? [item.statement] : item.statements ?? [];
                 const detail = [reason, ...statements.map((text) => ScribeStore.diagnostic(panel.storage, text))].join(' · ');
                 const row = ScribePanel.make(panel, settings.Tags.Item, '#' + item.position + (item.row ? ' · ' + item.row : '') + ' · ' + detail, settings.Classes.Row);
                 const first = item.kind === 'story' ? panel.storyRetry : panel.inputRetry;
@@ -4263,9 +4293,10 @@ const ScribePanel = Object.freeze({
                 }
                 return row;
             }, null);
+            const pendingChecks = view.pendingChecks ?? 0;
             const coverage = Number.isSafeInteger(view.linkedEntries) ?
                 ' ' + view.linkedEntries + ' book entries with linked quotes, ' + view.unlinkedEntries + ' without. ' +
-                Math.max(0, view.read - (view.processedChecks ?? view.checkedThrough)) + ' processed messages await the Checker.' : '';
+                pendingChecks + (pendingChecks === 1 ? ' processed message awaits the Checker.' : ' processed messages await the Checker.') : '';
             const checked = view.checkedCount ?? view.checkedThrough;
             const unjudged = (view.processedChecks ?? view.checkedThrough) - checked;
             ScribePanel.write(parts.Checked, parts.Checked.hidden ? settings.Nothing :
@@ -4302,14 +4333,12 @@ const ScribePanel = Object.freeze({
             ScribePanel.paged(
                 panel,
                 settings.Lists.Lines,
-                [...readings.reverse(), ...PanelView.each(view.lines, whole)],
+                PanelView.each(view.lines, whole),
                 /**
                  * @param {object} report
                  * @return {object}
                  */
-                (report) => report.statement === undefined ? ScribePanel.Rows.line(panel, report, mask) :
-                    ScribePanel.make(panel, settings.Tags.Item, report.role + (report.first == null ? '' : ' · #' + report.first +
-                        (report.first === report.last ? '' : '–#' + report.last)) + ' · ' + mask(report.statement), settings.Classes.Row),
+                (report) => ScribePanel.Rows.line(panel, report, mask),
                 null,
             );
             ScribePanel.paged(
@@ -5399,7 +5428,10 @@ const ScribePanel = Object.freeze({
                      * @param {{ line: string, reason: string }} entry
                      * @return {string[]}
                      */
-                    (entry) => [PanelView.said(entry.line) + words.Open + PanelView.said(entry.reason) + words.Close],
+                    (entry) => {
+                        const label = report.pass === ScribeAdoption.Pass.Story ? entry.block ?? report.pass : entry.line;
+                        return [PanelView.said(label) + words.Open + PanelView.said(entry.reason) + words.Close];
+                    },
                 ),
                 ...PanelView.each(
                     refusedOperations,
@@ -5415,7 +5447,7 @@ const ScribePanel = Object.freeze({
                             operation.label,
                             operation.name,
                             operation.category,
-                            operation.text,
+                            operation.category === 'appearance' || operation.type === ScribeAnswer.Type.Scene ? null : operation.text,
                             ...PanelView.sides(operation),
                         ];
                         const text = parts
@@ -5489,16 +5521,16 @@ const ScribePanel = Object.freeze({
                       words.Unreadable + words.Colon + PanelView.said(record.pass),
                       settings.Classes.Unreadable,
                   );
-            item.append(
-                heading,
-                ScribePanel.Rows.opening(
+            item.append(heading);
+            if (answer && !settings.StoryModelRoles.includes(pass)) {
+                item.append(ScribePanel.Rows.opening(
                     panel,
                     source,
                     words.AnswerText,
                     ScribePanel.key(settings.Sections.Calls, record.sequence, record.pass, answer.length),
                     ScribePanel.make(panel, tags.Preformatted, answer, settings.Classes.Message),
-                ),
-            );
+                ));
+            }
             return item;
         },
 
@@ -5527,7 +5559,7 @@ const ScribePanel = Object.freeze({
             if (typeof record.problem === settings.StringType) {
                 item.append(ScribePanel.make(panel, tags.Paragraph, ScribeStore.diagnostic(panel.storage, record.problem), settings.Classes.Meta));
             }
-            if (typeof record.answer === settings.StringType) {
+            if (typeof record.answer === settings.StringType && !settings.StoryModelRoles.includes(record.role)) {
                 item.append(
                     ScribePanel.Rows.opening(
                         panel,

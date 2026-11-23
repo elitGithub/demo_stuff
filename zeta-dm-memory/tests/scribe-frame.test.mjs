@@ -63,7 +63,7 @@ function load() {
         TextEncoder,
         ...Object.fromEntries(STAND_INS.map((name) => [name, tripwire(name)])),
     });
-    for (const path of ['../scribe/core/ScribeText.js', '../scribe/page/ScribeSender.js', '../scribe/page/ScribeFrame.js']) {
+    for (const path of ['../scribe/core/ScribeText.js', '../scribe/page/ZetaSource.js', '../scribe/page/ScribeSender.js', '../scribe/page/ScribeFrame.js']) {
         const url = new URL(path, import.meta.url);
         vm.runInContext(readFileSync(url, 'utf8'), context, { filename: url.pathname });
     }
@@ -352,7 +352,7 @@ test('the role is told by where it runs', () => {
             TagName: 'zetaScribe',
             Tag: 1,
             TokenName: 'scribe-bridge',
-            Kind: { Ready: 'ready', Arm: 'arm', Starting: 'starting', Reserved: 'reserved', Cancelled: 'cancelled', Rejected: 'rejected', Uncertain: 'uncertain', Sent: 'sent', Activity: 'activity' },
+            Kind: { Ready: 'ready', Arm: 'arm', Starting: 'starting', Reserved: 'reserved', Cancelled: 'cancelled', Rejected: 'rejected', Uncertain: 'uncertain', Sent: 'sent', Activity: 'activity', Messages: 'messages' },
             ReadyRepeatMs: 1000,
             MessageBytes: 4500,
             LongestLine: 6000,
@@ -1048,4 +1048,33 @@ test('the frame reads the token and nothing else', () => {
     assert.ok(seen.pages.reduce((total, page) => total + page.tokenReads, 0) > 0);
     assert.deepEqual([...seen.parent], ['postMessage']);
     assert.deepEqual(forbidden, []);
+});
+
+test('native observations wait for their room, use its frame grant and ignore late responses from an old room', () => {
+    const raw = new FakeFrameWindow();
+    const document = new FakeSendDocument(raw);
+    let observed;
+    const frame = ScribeFrame.start({ window: raw, document, token: () => TOKEN,
+        watch: () => ({ onMessages: (callback) => { observed = callback; }, onPost: () => {}, stop: () => {} }) });
+    const grant = 'observation-grant-for-one-room';
+    const source = { head: false, complete: false, observedAt: 1000,
+        messages: [{ id: 'edited', roomId: 'room', sender: { type: 'BOT' }, contents: [{ type: 'TEXT', text: 'Changed.' }],
+            messageTime: new Date(1000).toISOString() }] };
+    observed('room')(source);
+    observed('other')(source);
+    assert.equal(raw.posted.filter((entry) => entry.data.kind === 'messages').length, 0);
+    arm({ raw }, { room: 'room', observationToken: grant });
+    const notices = () => raw.posted.filter((entry) => entry.data.kind === 'messages');
+    assert.equal(notices().length, 1);
+    const message = ScribeFrame.report(notices()[0].data);
+    assert.equal(message.token, grant);
+    assert.equal(message.room, 'room');
+    assert.deepEqual(message.page, source);
+    assert.equal(ScribeFrame.report({ ...message, room: 'different' }), null);
+    assert.equal(ScribeFrame.report({ ...message, page: { ...source, complete: true } }), null);
+    const old = observed('room');
+    arm({ raw }, { seq: 2, room: 'elsewhere', observationToken: grant + 'elsewhere' });
+    old(source);
+    assert.equal(notices().length, 1);
+    frame.stop();
 });

@@ -1,0 +1,10 @@
+{
+  "display_name": "Universe: Narrator",
+  "loading_order": 2,
+  "requires": [],
+  "optional": [],
+  "dependencies": ["third-party/st-aspect-vocalia"],
+  "js": "index.js",
+  "author": "Universe",
+  "version": "1.0.0"
+}

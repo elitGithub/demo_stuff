@@ -179,6 +179,7 @@ const ScribeAnalyzer = Object.freeze({
         ]),
 
         EvidencePromptLines: Object.freeze([
+            'Use FACTS for descriptions the source establishes, including appearance and current clothing or physical state. Use appearance for lasting details and condition for what is temporary. Use SCENES for the surroundings and action. Write descriptions in your own words and cite the original block in EVIDENCE.',
             'For each book entry, including SUBJECTS and SCENES, supply one supporting source block from NEW MESSAGES. Empty sections and READ receipts take no EVIDENCE. Split assertions from different messages or speakers into separate rows. Separate an observation from an inference, an account from a witnessed event, and an offer or promise from actual possession.',
             '=== EVIDENCE',
             'Write one JSON object per line with section (uppercase heading), row (one-based within that section), messageNumber, blockNumber, quote, attribution, form and dimension. Use the original block number printed in the transcript, or 1 when none is printed. Copy an exact contiguous quote from that block without its speaker label.',

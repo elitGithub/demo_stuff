@@ -44,6 +44,66 @@ function checkInput(position, lines, extra = {}) {
     return { message: passage(position, lines), written: [], earlierClaims: [], rulings: [], ...extra };
 }
 
+test('one targeted comparison selects paraphrased evidence from the Writer batch and leaves ambiguous and foreign sources out', async () => {
+    const prior = passage(531, [['Narrator', 'Frost stands by the gate of the dragon stables.']]);
+    const current = passage(535, [['Frost', 'I kept the ferry ledger through the winter.']]);
+    const candidates = [{ id: 'ledger', section: 'FACTS', text: 'Frost handled the ferry accounts.' },
+        { id: 'job', section: 'FACTS', text: 'Frost works at the stables.' },
+        { id: 'unclear', section: 'FACTS', text: 'Frost handles the gate.' }];
+    let calls = 0;
+    const saved = [];
+    const work = { targeted: true, message: current, written: [], earlierClaims: [], rulings: [],
+        batchMessages: [prior, current], pendingEntries: candidates, pageBytes: 1024,
+        ask: async (system, input) => {
+            calls++;
+            assert.equal(system, ScribePedant.CheckPrompt);
+            const request = JSON.parse(input);
+            assert.deepEqual(request.pendingEntries, candidates);
+            assert.equal(request.writerBatch[0].quote, prior.blocks[0].text);
+            assert.equal(request.target[0].quote, current.blocks[0].text);
+            return { text: JSON.stringify({ page: request.page, complete: true, claims: [], findings: [],
+                links: [{ entry: 'ledger', source: 'm535b1' }, { entry: 'job', source: 'm537b2' },
+                    { entry: 'unclear', source: 'm531b1' }, { entry: 'unclear', source: 'm535b1' }],
+                alerts: { leaks: [], misspellings: [], situations: [] } }) };
+        },
+        savePage: (page) => { saved.push(page); } };
+    const result = await ScribePedant.checkPassage(work);
+    assert.equal(calls, 1);
+    assert.equal(saved.length, 1);
+    assert.equal(result.judged, true);
+    assert.deepEqual(JSON.parse(JSON.stringify(saved[0].sourceLinks)), [{ entry: 'ledger', evidence: {
+        messageId: current.id, fingerprint: current.fingerprint, position: 535, blockNumber: 1,
+        speaker: 'Frost', quote: current.blocks[0].text } }]);
+    assert.deepEqual(JSON.parse(JSON.stringify(result.findings)), []);
+    const again = await ScribePedant.checkPassage({ ...work, completedPages: saved });
+    assert.equal(calls, 1);
+    assert.equal(again.sourceLinks[0].evidence.messageId, current.id);
+});
+
+test('a malformed or unfinished incoming verdict produces one durable failure without filing or another application model call', async () => {
+    for (const response of ['plain prose', { finish: 'length' }, { page: 'wrong' }]) {
+        const target = passage(535, [['Frost', 'There is one ferry ledger.']]);
+        let calls = 0;
+        const work = { targeted: true, message: target, batchMessages: [target],
+            pendingEntries: [{ id: 'ledger', section: 'FACTS', text: 'There is a ledger.' }], written: [], earlierClaims: [], rulings: [],
+            ask: async (system, input) => {
+                calls++;
+                const page = JSON.parse(input).page;
+                return typeof response === 'string' ? { text: response } : { finish: response.finish, text: JSON.stringify({
+                    page: response.page ?? page, complete: true, claims: [], findings: [], links: [{ entry: 'ledger', source: 'm535b1' }],
+                }) };
+            } };
+        const result = await ScribePedant.checkPassage(work);
+        assert.equal(result.judged, false);
+        assert.equal(result.sourceLinks.length, 0);
+        assert.equal(result.pages.length, 1);
+        assert.equal(result.reviewRows[0].statement, '');
+        assert.ok(ScribeLog.validCheckPage(result.pages[0], target, Array(534).fill(null).concat(target)));
+        await ScribePedant.checkPassage({ ...work, completedPages: result.pages });
+        assert.equal(calls, 1);
+    }
+});
+
 test('two different disputes on the very same pair of quotes survive the paid page while a repeated question collapses', async () => {
     const before = 'Mirra wears the red crown.';
     const after = 'Orla wears the blue crown.';

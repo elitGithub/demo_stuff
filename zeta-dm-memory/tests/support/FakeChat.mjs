@@ -304,7 +304,8 @@ export default class FakeChat {
                 let chosen = this.raw;
                 let end = this.raw.length === 0 ? 'EmptyPage' : 'NoCursor';
                 let problem = null;
-                if (this.others.length > 0) {
+                const replacement = this.others.length > 0;
+                if (replacement) {
                     chosen = this.others.shift();
                 } else {
                     const cut = this.cuts.length > 0 ? this.cuts.shift() : this.cutEvery;
@@ -326,7 +327,7 @@ export default class FakeChat {
                     onPage(count);
                 }
                 onPage(copy.length);
-                return { messages: copy, end, problem, skipped, completeHistory: chosen === this.raw && !skipped,
+                return { messages: copy, end, problem, skipped, completeHistory: (chosen === this.raw || replacement) && !skipped,
                     emptyRoom: chosen === this.raw && this.raw.length === 0 };
             },
             /**

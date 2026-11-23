@@ -222,6 +222,105 @@ test('the room is read from the address', () => {
     }
 });
 
+test('Pause aborts a held history fetch, page delay and error retry before another request leaves', async () => {
+    for (const held of ['fetch', 'cursor', 'retry']) {
+        const controller = new AbortController();
+        const waiting = deferred();
+        const requests = [];
+        const fetch = async (url, init) => {
+            requests.push(url);
+            assert.equal(init.signal, controller.signal);
+            if (held === 'fetch') {
+                waiting.resolve();
+                return never();
+            }
+            return held === 'retry' ? FakeZeta.reply(429, '') : FakeZeta.page([said('new')], 'older');
+        };
+        const pause = (ms) => {
+            if (ms !== TIMEOUT) {
+                waiting.resolve();
+            }
+            return never();
+        };
+        const result = walk(fetch, { pause, signal: controller.signal });
+        await waiting.promise;
+        controller.abort();
+        await assert.rejects(result, { name: 'AbortError' });
+        assert.equal(requests.length, 1);
+        await assert.rejects(walk(fetch, { pause, signal: controller.signal }), { name: 'AbortError' });
+        assert.equal(requests.length, 1);
+    }
+});
+
+test('native fetch and XHR deliver room-scoped final rows, including a swiped message, without consuming the response', async () => {
+    const page = FakeZeta.window();
+    const watcher = ZetaSource.watch(page);
+    const reports = [];
+    const traffic = [];
+    watcher.onTraffic((event) => traffic.push(event));
+    const notice = deferred();
+    watcher.onMessages((room) => (received) => {
+        assert.equal(room, 'abc');
+        reports.push(received);
+        notice.resolve();
+    });
+    const row = (id, minute, text) => ({ ...said(id, minute), contents: [{ type: 'TEXT', text }], roomId: 'abc' });
+    const first = row('first', 1, 'They enter.');
+    const latest = row('last', 2, 'They wait.');
+    const body = JSON.stringify({ messages: [latest, first], nextCursor: null });
+    const response = new Response(body);
+    Object.defineProperty(response, 'url', { value: FIRST_PAGE });
+    page.answer = () => Promise.resolve(response);
+    assert.equal(await (await page.fetch(FIRST_PAGE)).text(), body);
+    await notice.promise;
+    assert.deepEqual(ids(reports[0].messages), ['first', 'last']);
+    assert.equal(reports[0].head, true);
+    assert.equal(reports[0].complete, true);
+    const deliver = (url, payload, status = 200, finalUrl = url, method = 'GET') => {
+        const xhr = new page.XMLHttpRequest();
+        xhr.open(method, url);
+        xhr.send();
+        Object.assign(xhr, { status, responseType: 'json', responseURL: finalUrl, response: payload });
+        xhr.finish();
+    };
+    const changed = row('last', 2, 'They fly.');
+    deliver(MESSAGES + '/last', changed);
+    assert.deepEqual(JSON.parse(JSON.stringify(reports[1].messages[0])), changed);
+    assert.equal(reports[1].head, false);
+    assert.equal(reports[1].complete, false);
+    deliver(FIRST_PAGE + '&cursor=older', { messages: [first], nextCursor: null });
+    assert.equal(reports[2].head, false);
+    assert.equal(reports[2].complete, false);
+    deliver(API + '/v1/rooms/abc', { id: 'abc', lastMessage: changed });
+    assert.equal(reports[3].messages[0].contents[0].text, 'They fly.');
+    deliver(API + '/v1/rooms/abc', { id: 'other', lastMessage: changed });
+    deliver(MESSAGES + '/last', { ...changed, roomId: 'other' });
+    deliver(MESSAGES + '/last', { ...changed, id: 'other' });
+    deliver(MESSAGES + '/last', { id: 'last', text: 'partial' });
+    deliver(FIRST_PAGE, { messages: [first, {}], nextCursor: null });
+    deliver(MESSAGES + '/last', changed, 504);
+    deliver(MESSAGES + '/last', changed, 200, 'https://example.org/sign-in');
+    assert.equal(reports.length, 4);
+    assert.deepEqual(traffic, []);
+    deliver(MESSAGES + '/last', changed, 200, MESSAGES + '/last', 'PATCH');
+    assert.equal(reports[4].messages[0].contents[0].text, 'They fly.');
+    assert.equal(reports[4].created, undefined);
+    deliver(MESSAGES, changed, 201, MESSAGES, 'POST');
+    assert.equal(reports[5].created, true);
+    deliver(MESSAGES + '/last', {}, 200, MESSAGES + '/last', 'PATCH');
+    assert.equal(reports.length, 6);
+    deliver(MESSAGES + '/last', { result: changed });
+    assert.equal(reports[6].messages[0].contents[0].text, 'They fly.');
+    deliver(MESSAGES + '/last', { first: latest, second: changed });
+    assert.equal(reports.length, 7);
+    deliver(FIRST_PAGE, { messages: [changed, first, first], nextCursor: null });
+    assert.equal(reports[7].head, true);
+    assert.equal(reports[7].complete, false);
+    assert.equal(reports[7].ambiguous, true);
+    assert.deepEqual(ids(reports[7].messages), ['first', 'last']);
+    watcher.stop();
+});
+
 test('saved history rejoins a fresh suffix and verifies distant evidence after a multi-page append', async () => {
     const api = new FakeZeta(FakeZeta.messages(1022));
     api.most = 100;

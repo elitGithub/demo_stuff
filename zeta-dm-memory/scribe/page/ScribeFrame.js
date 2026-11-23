@@ -16,6 +16,7 @@ const ScribeFrame = Object.freeze({
             Uncertain: 'uncertain',
             Sent: 'sent',
             Activity: 'activity',
+            Messages: 'messages',
         }),
         ReadyRepeatMs: 1000,
         MessageBytes: 4500,
@@ -156,6 +157,8 @@ const ScribeFrame = Object.freeze({
             kind,
             seq,
             ...(typeof data.room === 'string' && ScribeFrame.named(data.room) ? { room: data.room } : {}),
+            ...(typeof data.observationToken === 'string' && data.observationToken.length >= settings.ShortestToken &&
+                data.observationToken.length <= settings.LongestToken ? { observationToken: data.observationToken } : {}),
             token,
             ready,
             ...(data.onlyExisting === true ? { onlyExisting: true } : {}),
@@ -178,6 +181,15 @@ const ScribeFrame = Object.freeze({
         const settings = ScribeFrame.Settings;
         if (ScribeFrame.tagged(data, bridge.Kind.Ready)) {
             return Object.freeze({ [bridge.TagName]: bridge.Tag, kind: bridge.Kind.Ready });
+        }
+        if (ScribeFrame.tagged(data, bridge.Kind.Messages)) {
+            const { seq, room, token, page } = data;
+            if (!ScribeFrame.counted(seq) || typeof room !== 'string' || !ScribeFrame.named(room) ||
+                typeof token !== 'string' || token.length < settings.ShortestToken || token.length > settings.LongestToken ||
+                !ZetaSource.validPage(room, page)) {
+                return null;
+            }
+            return { [bridge.TagName]: bridge.Tag, kind: bridge.Kind.Messages, seq, room, token, page };
         }
         if (ScribeFrame.tagged(data, bridge.Kind.Activity)) {
             const { seq, index, room, message, outcome } = data;
@@ -257,6 +269,8 @@ const ScribeFrame = Object.freeze({
             repeat: null,
             index: settings.FirstIndex,
             activity: settings.FirstIndex,
+            firstArm: null,
+            pages: [],
         };
         /**
          * @param {object} message
@@ -270,6 +284,19 @@ const ScribeFrame = Object.freeze({
          */
         const ready = () => {
             post({ [bridge.TagName]: bridge.Tag, kind: bridge.Kind.Ready });
+        };
+        /**
+         * @param {string} room
+         * @param {object} page
+         * @param {object|null} arm
+         * @return {void}
+         */
+        const relay = (room, page, arm) => {
+            if (room === arm?.room && room === frame.offer.room && arm.observationToken &&
+                arm.observationToken === frame.offer.observationToken) {
+                post({ [bridge.TagName]: bridge.Tag, kind: bridge.Kind.Messages, seq: arm.seq,
+                    room, token: arm.observationToken, page });
+            }
         };
         /**
          * @param {MessageEvent} event
@@ -298,6 +325,7 @@ const ScribeFrame = Object.freeze({
             }
             frame.offer = Object.freeze({
                 room: arm.room,
+                observationToken: arm.observationToken,
                 ready: arm.ready,
                 manual: arm.manual === true,
                 onlyExisting: arm.onlyExisting === true,
@@ -308,6 +336,13 @@ const ScribeFrame = Object.freeze({
                 reminder: arm.reminder,
                 attempt: arm.attempt,
             });
+            if (!frame.firstArm && arm.room && arm.observationToken) {
+                frame.firstArm = { seq: arm.seq, room: arm.room, observationToken: arm.observationToken };
+                for (const received of frame.pages) {
+                    relay(received.room, received.page, frame.firstArm);
+                }
+                frame.pages = [];
+            }
             window.clearInterval(frame.repeat);
             frame.repeat = null;
         };
@@ -383,6 +418,7 @@ const ScribeFrame = Object.freeze({
             const kept = same ? null : offer.ready;
             frame.offer = Object.freeze({
                 room: offer.room,
+                observationToken: offer.observationToken,
                 ready: kept,
                 previous: offer.previous,
                 previousSuggestion: offer.previousSuggestion,
@@ -442,6 +478,22 @@ const ScribeFrame = Object.freeze({
             return announce;
         };
         watcher?.onStream?.(activity);
+        watcher?.onMessages?.((room) => {
+            if (!frame.firstArm) {
+                return (page) => {
+                    if (frame.firstArm) {
+                        relay(room, page, frame.firstArm);
+                    } else {
+                        frame.pages.push({ room, page });
+                    }
+                };
+            }
+            if (room !== frame.offer.room || !frame.offer.observationToken) {
+                return null;
+            }
+            const scope = { seq: frame.seq, room, observationToken: frame.offer.observationToken };
+            return (page) => relay(room, page, scope);
+        });
         watcher?.onPost((room) => {
             const receipt = hook.posting(room);
             return ScribeSender.observePost(receipt, activity(room, null));

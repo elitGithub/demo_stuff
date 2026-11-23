@@ -512,6 +512,12 @@ test('the headline says what is going on', (context) => {
     const panel = mounted(ScribeLog.create(), { keeper: { phase: Phase.NoBook, total: 1326 } });
     assert.equal(panel.text('scribe-headline'), 'No local book: 1,326 messages. Worker unchecked. No DM API key on this PC.');
     assert.equal(panel.text('scribe-spend'), '$0.1200 today');
+    const missing = { phase: Phase.Idle, booked: true, read: 0, total: 0, missingOriginals: true };
+    const cold = mounted(ScribeLog.create(), { keeper: missing });
+    assert.equal(cold.text('scribe-headline'), scripts.ScribeKeeper.Settings.Messages.Unjoined);
+    cold.keeper.current = { ...cold.keeper.current, phase: Phase.Stopped, stop: { reason: 'Paused' } };
+    cold.redraw();
+    assert.equal(cold.text('scribe-headline'), 'Stopped: Paused.');
 });
 
 test('the summary is written from the book', () => {
@@ -1738,7 +1744,7 @@ test('everything is locked while the keeper is busy', async () => {
         ],
         Book: [...Array(4).fill(['Remove', 'Make public', 'Edit']).flat(), 'Add the fact', 'Split'],
         Findings: ['They were told'],
-        Progress: ['Pull the chat again', 'Resume', 'Retry', 'Retry input', 'Start the book over'],
+        Progress: ['Check history', 'Pull the chat again', 'Resume', 'Retry', 'Retry input', 'Start the book over'],
         Settings: ['Save settings'],
     };
     const free = {
@@ -1786,7 +1792,7 @@ test('everything is locked while the keeper is busy', async () => {
     }
     assert.equal(panel.byId('scribe-toggle').disabled, false);
     assert.equal(panel.byId('scribe-tab-rulings').disabled, false);
-    panel.keeper.current = keeperView(log);
+    panel.keeper.current = keeperView(log, { historyCheckCount: 100, canCheckHistory: true });
     panel.redraw();
     for (const name of Object.keys(book)) {
         const state = await seen(name);
@@ -1852,6 +1858,7 @@ test('a watching tab can save the shared key while room changes stay locked', as
     await panel.tab('Progress');
     assert.deepEqual(panel.actionsWhere('Progress', false), ['Export']);
     assert.deepEqual(panel.actionsWhere('Progress', true).sort(), [
+        'Check history',
         'Pause',
         'Pull the chat again',
         'Resume',
@@ -1969,7 +1976,7 @@ test('hostile text is text', async () => {
     assert.equal(panel.byId('scribe-list-findings').textContent.includes(hostile(4)), true);
     assert.equal(panel.byId('scribe-reminder').value, hostile(9));
     await panel.tab('Progress');
-    assert.equal(panel.byId('scribe-list-calls').textContent.includes(hostile(5)), true);
+    assert.equal(panel.byId('scribe-list-calls').textContent.includes(hostile(5)), false);
     assert.equal(panel.byId('scribe-list-calls').textContent.includes('Unreadable answer: Story'), true);
     await panel.tab('Timeline');
     assert.equal(panel.byId('scribe-list-timeline').textContent.includes(hostile(3)), true);
@@ -2525,7 +2532,7 @@ test('a throw never locks the panel', async () => {
     }
     assert.deepEqual(panel.actionsWhere('Rulings', true), []);
     await panel.tab('Progress');
-    assert.deepEqual(panel.actionsWhere('Progress', true), []);
+    assert.deepEqual(panel.actionsWhere('Progress', true), ['Check history']);
     assert.equal(panel.keeper.called('rule').length, 2);
     assert.equal(panel.keeper.called('pull').length, 1);
 });
@@ -2616,7 +2623,7 @@ test('a broken tab or row is contained', async () => {
             'This entry could not be shown.',
             '#41 to #80: 3 stored, 0 refused, $0.0100 spent today, 40 of 100 read',
         ]);
-        assert.deepEqual(panel.rowTexts('calls'), ['Call 3: StoryThe answer']);
+        assert.deepEqual(panel.rowTexts('calls'), ['Call 3: Story']);
         panel.live.current = { ...bare, findings: 5 };
         await panel.tab('Findings');
         assert.equal(panel.byId('scribe-failure-findings').hidden, true);
@@ -4095,7 +4102,7 @@ test('the header button does what the Progress button does', async () => {
     assert.deepEqual(stopped.keeper.called('adopt'), []);
 });
 
-test('both Resume buttons work while a paused room is polling', async () => {
+test('both Resume buttons work while a paused room ignores history ticks and locks Pull', async () => {
     const cases = [
         { ...stoppedFailed, reader: false },
         { ...stoppedFailed, flight: 'Reading #41 to #80' },
@@ -4131,8 +4138,12 @@ test('both Resume buttons work while a paused room is polling', async () => {
     await paused.harness.flush();
     paused.keeper.pause();
     await paused.harness.flush();
-    const pausedPoll = await polling(paused);
-    assert.equal(paused.keeper.view().busy, 'Looking');
+    const previous = paused.chat.count('tab-1', 'history');
+    await paused.keeper.tick();
+    assert.equal(paused.keeper.view().busy, null);
+    assert.equal(paused.chat.count('tab-1', 'history'), previous);
+    assert.equal(paused.chat.count('tab-1', 'newest'), 0);
+    assert.equal(paused.harness.byId('scribe-pull').disabled, true);
     assert.equal(paused.harness.byId('scribe-next').hidden, false);
     assert.equal(paused.harness.byId('scribe-next').textContent, paused.harness.byId('scribe-resume').textContent);
     assert.equal(paused.harness.byId('scribe-next').disabled, false);
@@ -4141,8 +4152,6 @@ test('both Resume buttons work while a paused room is polling', async () => {
     await paused.harness.flush();
     assert.equal(paused.keeper.view().phase, Phase.Idle);
     assert.equal(paused.harness.text('scribe-next-outcome'), '');
-    pausedPoll.release();
-    await pausedPoll.ticking;
     await paused.harness.flush();
     assert.equal(paused.harness.byId('scribe-next').disabled, false);
     assert.equal(paused.harness.byId('scribe-resume').disabled, false);
@@ -4600,6 +4609,42 @@ test('Progress holds the controls, the last pull, the readings and the calls in 
     assert.deepEqual([...positions].sort((first, second) => first - second), positions);
 });
 
+test('Check history asks for an inclusive range from the manual pull and blocks duplicate or paused dispatch', async () => {
+    const panel = mounted(disputedBook());
+    await panel.tab('Progress');
+    assert.equal(panel.byId('scribe-history-range').hidden, true);
+    const calls = [];
+    let finish;
+    panel.keeper.checkHistory = (first, last) => {
+        calls.push([first, last]);
+        return new Promise((resolve) => { finish = resolve; });
+    };
+    panel.keeper.current = { ...panel.keeper.current, historyCheckCount: 7, canCheckHistory: true };
+    panel.redraw();
+    assert.equal(panel.byId('scribe-history-range').hidden, false);
+    const from = panel.byId('scribe-history-from');
+    const to = panel.byId('scribe-history-to');
+    for (const values of [['', '7'], ['3', '2'], ['1.5', '7'], ['1', '8']]) {
+        [from.value, to.value] = values;
+        panel.click('scribe-check-history');
+        await panel.flush();
+        assert.match(panel.text('scribe-controls-outcome'), /Enter a range from 1 to 7/);
+    }
+    from.value = '1';
+    to.value = '7';
+    panel.click('scribe-check-history');
+    panel.click('scribe-check-history');
+    assert.deepEqual(calls, [[1, 7]]);
+    finish();
+    await panel.flush();
+    panel.keeper.current = { ...panel.keeper.current, phase: Phase.Stopped, stop: { reason: 'Paused' }, canCheckHistory: false };
+    panel.redraw();
+    assert.equal(panel.byId('scribe-check-history').disabled, true);
+    assert.equal(from.disabled, true);
+    assert.equal(to.disabled, true);
+    assert.deepEqual(calls, [[1, 7]]);
+});
+
 test('seven tabs wrap at phone width', () => {
     const panel = mounted(disputedBook(), { width: 390 });
     const tabs = panel.byId('scribe-tab-summary').parent.children;
@@ -4654,10 +4699,10 @@ async function realKeeper(length, hold = null, wrap = (keeper) => keeper) {
  * @param {{ harness: PanelHarness, keeper: object, chat: FakeChat }} setup
  * @return {Promise<{ ticking: Promise<void>, release: Function }>}
  */
-async function polling(setup) {
-    const release = setup.chat.hold('newest');
+async function pullingAgain(setup) {
+    const release = setup.chat.hold('history');
     setup.harness.clock.time = setup.harness.clock.now() + 20000;
-    const ticking = setup.keeper.tick();
+    const ticking = setup.keeper.pull();
     await setup.harness.flush();
     return { ticking, release };
 }
@@ -4675,13 +4720,13 @@ test('the first pull hides Adopt under its headline, and a routine poll never do
     assert.equal(harness.byId('scribe-next').disabled, false);
     assert.equal(harness.text('scribe-next-outcome'), '');
     for (let turn = 0; turn < 3; turn++) {
-        const poll = await polling(first);
-        assert.equal(keeper.view().busy, 'Looking');
+        await keeper.tick();
+        assert.equal(keeper.view().busy, null);
         assert.equal(harness.byId('scribe-next').hidden, false);
         assert.equal(harness.byId('scribe-next').disabled, false);
         assert.equal(harness.text('scribe-next-outcome'), '');
-        poll.release();
-        await poll.ticking;
+        assert.equal(first.chat.count('tab-1', 'history'), 1);
+        assert.equal(first.chat.count('tab-1', 'newest'), 0);
         await harness.flush();
         assert.equal(harness.byId('scribe-next').hidden, false);
         assert.equal(harness.byId('scribe-next').disabled, false);
@@ -4689,34 +4734,30 @@ test('the first pull hides Adopt under its headline, and a routine poll never do
     }
 });
 
-test('a redraw during a routine poll keeps the header Adopt shown and enabled with no line', async () => {
+test('a redraw after an idle tick keeps the header Adopt shown and enabled with no line', async () => {
     const setup = await realKeeper(13);
     const { harness, keeper } = setup;
-    const poll = await polling(setup);
-    assert.equal(keeper.view().busy, 'Looking');
-    assert.equal(keeper.view().flight, 'Looking for new messages');
+    await keeper.tick();
+    assert.equal(keeper.view().busy, null);
+    assert.equal(keeper.view().flight, null);
     await harness.tab('Settings');
     await harness.flush();
     assert.equal(harness.byId('scribe-next').hidden, false);
     assert.equal(harness.byId('scribe-next').disabled, false);
     assert.equal(harness.byId('scribe-next-outcome').hidden, true);
-    poll.release();
-    await poll.ticking;
     await harness.flush();
     assert.equal(harness.byId('scribe-next').hidden, false);
     assert.equal(harness.byId('scribe-next').disabled, false);
     assert.equal(harness.byId('scribe-next-outcome').hidden, true);
 });
 
-test('a press on Adopt during a routine poll leaves no line when the poll ends', async () => {
+test('a press on Adopt after an idle tick starts adoption from saved history', async () => {
     const setup = await realKeeper(13);
     const { harness } = setup;
-    const poll = await polling(setup);
+    await setup.keeper.tick();
     harness.click('scribe-next');
     await harness.flush();
-    assert.equal(harness.text('scribe-next-outcome'), pulling);
-    poll.release();
-    await poll.ticking;
+    assert.equal(setup.chat.count('tab-1', 'history'), 1);
     await harness.flush();
     assert.equal(harness.byId('scribe-next').disabled, false);
     assert.equal(harness.text('scribe-next-outcome'), '');
@@ -4727,7 +4768,7 @@ test('a press on Adopt during a routine poll leaves no line when the poll ends',
     }
 });
 
-test('every Book-guarded control is locked during a poll, and a refusal said then is gone after it', async () => {
+test('every Book-guarded control is locked during a manual pull and a refusal clears after it', async () => {
     for (const withBook of [false, true]) {
         const gate = { release: null };
         const waiting = new Promise((resolve) => {
@@ -4749,7 +4790,7 @@ test('every Book-guarded control is locked during a poll, and a refusal said the
         assert.equal(harness.byId('scribe-save-settings').disabled, false);
         harness.click('scribe-save-settings');
         await harness.flush();
-        const poll = await polling(setup);
+        const poll = await pullingAgain(setup);
         assert.equal(harness.byId('scribe-save-settings').disabled, true);
         gate.release();
         await harness.flush();
@@ -4759,7 +4800,7 @@ test('every Book-guarded control is locked during a poll, and a refusal said the
         await harness.flush();
         assert.equal(harness.text('scribe-settings-outcome'), '');
         assert.equal(harness.byId('scribe-save-settings').disabled, false);
-        const quiet = await polling(setup);
+        const quiet = await pullingAgain(setup);
         assert.equal(harness.byId('scribe-save-settings').disabled, true);
         quiet.release();
         await quiet.ticking;
@@ -4780,10 +4821,8 @@ test('a refusal stored while settled survives a routine poll on any outlet', asy
     harness.click('scribe-save-settings');
     await harness.flush();
     assert.equal(harness.text('scribe-settings-outcome'), refused);
-    const poll = await polling(setup);
+    await setup.keeper.tick();
     assert.equal(harness.text('scribe-settings-outcome'), refused);
-    poll.release();
-    await poll.ticking;
     await harness.flush();
     assert.equal(harness.text('scribe-settings-outcome'), refused);
     for (let turn = 0; turn < 3; turn++) {
@@ -4825,6 +4864,7 @@ test('a controls refusal stored while settled survives a step that reads a stret
         for (let round = 0; round < 3; round++) {
             chat.add(20);
             harness.clock.time = harness.clock.now() + 20000;
+            keeper.observe({ messages: chat.raw, head: true, complete: true, observedAt: harness.clock.now() });
             await keeper.tick();
             await harness.flush();
             assert.equal(harness.text('scribe-controls-outcome'), line);
@@ -5341,7 +5381,7 @@ test('problem classification keeps service, provider reason, finish and retry st
     }
 });
 
-test('live calls are listed beside the keeper calls, a cut-off answer with its first characters', async () => {
+test('live calls show token counts and a cut-off error without the raw response', async () => {
     const log = readTo(ScribeLog.create(), 40);
     const calls = [
         Object.freeze({
@@ -5370,8 +5410,34 @@ test('live calls are listed beside the keeper calls, a cut-off answer with its f
     assert.equal(texts[0].startsWith('Pedant: in 900, out 4,000, reasoning 3,100, finish length'), false, texts[0]);
     assert.equal(texts[0].startsWith('Pedant: in 900, out 4000, reasoning 3100, finish length'), true, texts[0]);
     assert.equal(texts[0].includes('answer was cut off'), true);
-    assert.equal(texts[0].includes('w'.repeat(2000)), true);
+    assert.equal(texts[0].includes('w'.repeat(2000)), false);
     assert.equal(texts[1], 'Scribe: in 10, out 20, finish stop');
+});
+
+test('saved Checker appearance and Writer scene prose stay out of Progress while the verified leak and filing errors remain', async () => {
+    const look = 'A yellow coat embroidered with cranes.';
+    const mixed = '=== NOW\nMirelle | wearing | ' + look + '\n=== LEAKS\nF2 | Mirelle | you ran from the siege';
+    const scene = 'The lamplight ripples on the quay.';
+    const log = findingsBook();
+    const panel = mounted(log, { keeper: {
+        modelReadings: [{ role: 'Checker', statement: mixed }, { role: 'Scribe', statement: scene }],
+        checkerReview: [
+            { section: 'answer', reason: 'Checker response', position: 2, statement: mixed },
+            { section: 'answer', reason: 'The Checker did not identify this comparison page.', position: 2, statement: mixed },
+        ],
+        calls: [{ sequence: 2, pass: 'Story', readable: true, answer: scene }],
+        pendingFiling: [{ kind: 'story', reason: 'format', row: 'SCENES:1', position: 2, statements: [scene] }],
+    }, live: liveView([leak()], { checkerRows: [{ modelReading: true, position: 2, statement: mixed }],
+        calls: [{ role: 'Pedant', finish: 'stop', answer: mixed }, { role: 'Scribe', finish: 'stop', answer: scene }] }) });
+    await panel.tab('Progress');
+    const progress = ['lines', 'calls', 'liveCalls', 'filing'].map((key) => panel.text('scribe-list-' + key)).join('\n');
+    assert.ok(!progress.includes(look));
+    assert.ok(!progress.includes(scene));
+    assert.match(progress, /did not identify this comparison page/);
+    assert.match(progress, /SCENES:1/);
+    assert.equal(panel.keeper.current.modelReadings[0].statement, mixed);
+    await panel.tab('Findings');
+    assert.match(panel.text('scribe-list-findings'), /Mirelle uses that Halvard, background: deserted at the siege/);
 });
 
 test('legacy live-call fields are masked on display with either key or an unreadable key slot', async () => {

@@ -29,6 +29,21 @@ export class VocaliaSandbox {
     Object.freeze({ name: 'import.meta.url', pattern: /import\.meta\.url/g, replacement: `'${VocaliaSandbox.ModuleUrl}'` }),
   ]);
   static FragmentScript = new Script(`'use strict';${VocaliaSandbox.Fragment}`, { filename: 'vocalia-overrides.js' });
+  static EmptySelection = Object.freeze({
+    length: 0,
+    /**
+     * @returns {object}
+     */
+    find() {
+      return VocaliaSandbox.EmptySelection;
+    },
+    /**
+     * @returns {object}
+     */
+    first() {
+      return VocaliaSandbox.EmptySelection;
+    },
+  });
   static #vocaliaScripts = new Map();
 
   context;
@@ -364,10 +379,10 @@ export class VocaliaSandbox {
        */
       jQuery() {},
       /**
-       * @returns {{length: number}}
+       * @returns {object}
        */
       $() {
-        return { length: 0 };
+        return VocaliaSandbox.EmptySelection;
       },
       /**
        * @returns {void}

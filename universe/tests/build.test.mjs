@@ -9,14 +9,18 @@ import { setTimeout as delay } from 'node:timers/promises';
 import { pathToFileURL } from 'node:url';
 import { promisify } from 'node:util';
 import { SyncPhase } from '../src/sync/SyncPhase.mjs';
+import { VocaliaSandbox } from './support/VocaliaSandbox.mjs';
 
 const project = dirname(import.meta.dirname);
 const execute = promisify(execFile);
 const npmCli = process.env.npm_execpath ?? join(dirname(dirname(process.execPath)), 'lib/node_modules/npm/bin/npm-cli.js');
 const npmEnvironment = { ...process.env, npm_config_offline: 'true', npm_config_update_notifier: 'false' };
-const currentBuild = 'Universe local build v9\n';
+const currentBuild = 'Universe local build v10\n';
 const replyRetryOutput = 'node_modules/sillytavern/public/scripts/extensions/third-party/universe-retry';
 const replyRetryNames = ['ReplyRetry.js', 'ReplyRetrySettings.js', 'index.js', 'manifest.json'];
+const narratorOutput = 'node_modules/sillytavern/public/scripts/extensions/third-party/universe-narrator';
+const narratorNames = ['NarratorSettings.js', 'NarratorTurn.js', 'WalkOns.js', 'index.js', 'manifest.json'];
+const vocaliaOutput = 'node_modules/sillytavern/public/scripts/extensions/third-party/st-aspect-vocalia/index.js';
 const removedFiles = [
   'child-preload.mjs', 'checkpoint-store.mjs', 'local-session.mjs', 'story-files.mjs', 'classes/capture-gate.mjs',
   'classes/cloud-save.mjs', 'integration/browser-bridge.js', 'integration/pinned-hooks.mjs', 'integration/server-bridge.mjs',
@@ -114,19 +118,65 @@ test('locked extensions install in a fresh project and build into the global ext
   }
   await npm(directory, 'run', 'build');
   const globalExtensions = join(directory, 'dist/node_modules/sillytavern/public/scripts/extensions/third-party');
+  const fragment = await readFile(join(directory, 'extension/vocalia-overrides.js'), 'utf8');
+  const builtVocalia = VocaliaSandbox.built(await readFile(join(directory, 'ci-dependencies/st-aspect-vocalia/index.js'), 'utf8'), fragment);
   for (const extension of extensions) {
     const cleanInstall = join(directory, 'ci-dependencies', extension.name);
     for (const file of await readdir(cleanInstall, { recursive: true })) {
-      if ((await stat(join(cleanInstall, file))).isFile()) {
-        assert.deepEqual(await readFile(join(globalExtensions, extension.folder, file)), await readFile(join(cleanInstall, file)));
+      if (!(await stat(join(cleanInstall, file))).isFile()) {
+        continue;
+      }
+      const output = join(globalExtensions, extension.folder, file);
+      if (extension.folder === 'st-aspect-vocalia' && file === 'index.js') {
+        assert.equal(await readFile(output, 'utf8'), builtVocalia);
+      } else {
+        assert.deepEqual(await readFile(output), await readFile(join(cleanInstall, file)));
       }
     }
   }
-  for (const asset of ['tavernScenarioBuilder/templates/workspace.html', 'st-aspect-vocalia/index.js']) {
+  const vocalia = await readFile(join(directory, 'dist', vocaliaOutput), 'utf8');
+  const renamed = vocalia.slice(0, -fragment.length);
+  const overridden = VocaliaSandbox.overriddenNames(fragment);
+  assert.ok(overridden.includes('ensureStateForCurrentGroup'));
+  for (const name of overridden) {
+    assert.equal(vocalia.split(`function vocaliaBase_${name}(`).length - 1, 1, name);
+    assert.equal(renamed.split(`function ${name}(`).length - 1, 0, name);
+  }
+  assert.ok(vocalia.endsWith(`\n${fragment}`));
+  const moduleCopy = join(directory, 'vocalia-built.mjs');
+  await writeFile(moduleCopy, vocalia);
+  await execute(process.execPath, ['--check', moduleCopy]);
+  const narrator = join(directory, 'dist', narratorOutput);
+  assert.deepEqual((await readdir(narrator)).sort(), narratorNames);
+  for (const file of narratorNames) {
+    assert.deepEqual(await readFile(join(narrator, file)), await readFile(join(directory, 'extension/universe-narrator', file)));
+  }
+  for (const asset of ['tavernScenarioBuilder/templates/workspace.html', 'st-aspect-vocalia/index.js', 'universe-narrator/WalkOns.js']) {
     await rm(join(globalExtensions, asset));
     await npm(directory, 'run', 'build', '--', '--if-missing');
     assert.equal((await stat(join(globalExtensions, asset))).isFile(), true);
   }
+  assert.equal(await readFile(join(directory, 'dist', vocaliaOutput), 'utf8'), builtVocalia);
+});
+
+test('a fragment naming a function that Vocalia does not declare exactly once fails the build with its name and the Vocalia version, and keeps the previous build', async context => {
+  const directory = await fixture(context);
+  const fragment = join(directory, 'extension/vocalia-overrides.js');
+  const original = await readFile(fragment, 'utf8');
+  await npm(directory, 'run', 'build');
+  const published = await readFile(join(directory, 'dist', vocaliaOutput), 'utf8');
+  for (const name of ['notInVocalia', 'ensureStateForCurrentGroup']) {
+    await writeFile(fragment, `${original}\nfunction ${name}() {\n}\n`);
+    await assert.rejects(
+      npm(directory, 'run', 'build'),
+      error => error.stderr.includes(`[universe] Vocalia 1.0.4: function ${name}( occurs 0 times where its override needs exactly one.`),
+    );
+    assert.equal(await readFile(join(directory, 'dist', vocaliaOutput), 'utf8'), published, name);
+  }
+  assert.deepEqual((await readdir(directory)).filter(name => name.startsWith('.universe-build')), ['.universe-build-owners']);
+  await writeFile(fragment, `${original}\nfunction universeHelper() {\n}\n`);
+  await npm(directory, 'run', 'build');
+  assert.ok((await readFile(join(directory, 'dist', vocaliaOutput), 'utf8')).endsWith('\nfunction universeHelper() {\n}\n'));
 });
 
 test('a pre-extension backup survives missing sources and upgrades when its build inputs return', async context => {
@@ -204,7 +254,7 @@ test('wrapper startup build step recovers a v4 backup and upgrades its home page
   }
 });
 
-test('a v5 checkpoint build runs while sources are missing and is replaced by v9 without any removed file', async context => {
+test('a v5 checkpoint build runs while sources are missing and is replaced by v10 without any removed file', async context => {
   const directory = await fixture(context);
   const output = join(directory, 'dist');
   const backup = join(directory, '.universe-build-previous');
@@ -220,7 +270,7 @@ test('a v5 checkpoint build runs while sources are missing and is replaced by v9
   assert.equal(await readFile(join(output, '.universe-build'), 'utf8'), currentBuild);
   const names = await readdir(output, { recursive: true });
   for (const file of [...removedFiles, 'classes', 'integration']) {
-    assert.ok(!names.includes(file), `${file} must not survive in the v9 build`);
+    assert.ok(!names.includes(file), `${file} must not survive in the v10 build`);
   }
   for (const file of ['server.mjs', 'launcher.mjs', 'LauncherLog.mjs', 'child.mjs', 'child-watchdog.mjs', 'r2.mjs', 'sync/ProfileSync.mjs', 'sync/SyncSettings.mjs']) {
     assert.deepEqual(await readFile(join(output, file)), await readFile(join(directory, 'src', file)));
@@ -228,7 +278,7 @@ test('a v5 checkpoint build runs while sources are missing and is replaced by v9
   assert.deepEqual((await readdir(directory)).filter(name => name.startsWith('.universe-build')), ['.universe-build-owners']);
 });
 
-test('a v6 sync build runs while the retry extension is missing and is replaced by v9 holding its four files', async context => {
+test('a v6 sync build runs while the retry extension is missing and is replaced by v10 holding its four files', async context => {
   const directory = await fixture(context);
   const output = join(directory, 'dist');
   const backup = join(directory, '.universe-build-previous');
@@ -256,7 +306,7 @@ test('a v6 sync build runs while the retry extension is missing and is replaced 
   assert.deepEqual((await readdir(directory)).filter(name => name.startsWith('.universe-build')), ['.universe-build-owners']);
 });
 
-test('a v7 build without the pruner runs while sources are missing and is replaced by v9 holding it', async context => {
+test('a v7 build without the pruner runs while sources are missing and is replaced by v10 holding it', async context => {
   const directory = await fixture(context);
   const output = join(directory, 'dist');
   const backup = join(directory, '.universe-build-previous');
@@ -283,7 +333,7 @@ test('a v7 build without the pruner runs while sources are missing and is replac
   assert.deepEqual((await readdir(directory)).filter(name => name.startsWith('.universe-build')), ['.universe-build-owners']);
 });
 
-test('a v8 build with the old child watchdog runs while sources are missing and is replaced by v9 holding the new one', async context => {
+test('a v8 build with the old child watchdog runs while sources are missing and is replaced by v10 holding the new one', async context => {
   const directory = await fixture(context);
   const output = join(directory, 'dist');
   const backup = join(directory, '.universe-build-previous');
@@ -301,6 +351,39 @@ test('a v8 build with the old child watchdog runs while sources are missing and 
   assert.equal(await readFile(join(output, '.universe-build'), 'utf8'), currentBuild);
   assert.deepEqual(await readFile(join(output, watchdog)), await readFile(join(directory, 'src', watchdog)));
   assert.ok((await readFile(join(output, watchdog), 'utf8')).includes('SIGHUP'));
+  assert.deepEqual((await readdir(directory)).filter(name => name.startsWith('.universe-build')), ['.universe-build-owners']);
+});
+
+test('a v9 build runs while the narrator sources or the Vocalia overrides are missing and is replaced by v10 holding the narrator files and the renamed Vocalia', async context => {
+  const directory = await fixture(context);
+  const output = join(directory, 'dist');
+  const backup = join(directory, '.universe-build-previous');
+  const source = join(directory, 'extension/universe-narrator');
+  await npm(directory, 'run', 'build');
+  const renamedVocalia = await readFile(join(output, vocaliaOutput), 'utf8');
+  await rename(output, backup);
+  await writeFile(join(backup, '.universe-build'), 'Universe local build v9\n');
+  await rm(join(backup, narratorOutput), { recursive: true });
+  await writeFile(join(backup, vocaliaOutput), 'previous v9 Vocalia');
+  for (const input of ['extension/universe-narrator', 'extension/vocalia-overrides.js']) {
+    await rename(join(directory, input), join(directory, 'unavailable-input'));
+    await npm(directory, 'run', 'build', '--', '--if-missing');
+    assert.equal(await readFile(join(output, '.universe-build'), 'utf8'), 'Universe local build v9\n', input);
+    assert.equal(await readFile(join(output, vocaliaOutput), 'utf8'), 'previous v9 Vocalia', input);
+    await assert.rejects(stat(join(output, narratorOutput)), { code: 'ENOENT' });
+    await rename(join(directory, 'unavailable-input'), join(directory, input));
+  }
+  await npm(directory, 'run', 'build', '--', '--if-missing');
+  assert.equal(await readFile(join(output, '.universe-build'), 'utf8'), currentBuild);
+  assert.equal(await readFile(join(output, vocaliaOutput), 'utf8'), renamedVocalia);
+  assert.deepEqual((await readdir(join(output, narratorOutput))).sort(), narratorNames);
+  for (const file of narratorNames) {
+    assert.deepEqual(await readFile(join(output, narratorOutput, file)), await readFile(join(source, file)));
+  }
+  const removed = join(output, narratorOutput, 'manifest.json');
+  await rm(removed);
+  await npm(directory, 'run', 'build', '--', '--if-missing');
+  assert.deepEqual(await readFile(removed), await readFile(join(source, 'manifest.json')));
   assert.deepEqual((await readdir(directory)).filter(name => name.startsWith('.universe-build')), ['.universe-build-owners']);
 });
 

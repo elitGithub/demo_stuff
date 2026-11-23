@@ -878,7 +878,7 @@ const ScribeAnswer = Object.freeze({
             if (block === 'QUESTIONS') {
                 continue;
             }
-            if (structured && /^(?:none|\(none(?: new)?\))$/i.test(line)) {
+            if (/^\(no change\)$/i.test(line) || structured && /^(?:none|\(none(?: new)?\))$/i.test(line)) {
                 continue;
             }
             if ((block === 'READ' || block === 'EVIDENCE') && /^\p{L}/u.test(line) && !line.includes('|') &&

@@ -156,11 +156,11 @@ const ZetaSource = Object.freeze({
     /**
      * @param {{ pageWindow: object }} state
      * @param {string} address
-     * @return {string|null}
+     * @return {URL|null}
      */
-    apiPath(state, address) {
+    apiAddress(state, address) {
         const resolved = new URL(address, state.pageWindow.location.href);
-        return resolved.origin === ZetaSource.Settings.ApiOrigin ? resolved.pathname : null;
+        return resolved.origin === ZetaSource.Settings.ApiOrigin ? resolved : null;
     },
 
     /**
@@ -172,6 +172,105 @@ const ZetaSource = Object.freeze({
         const verb = String(method).toUpperCase();
         return ZetaSource.Settings.ReadMethods.includes(verb) && !(verb === 'GET' && ZetaSource.replyPath(path))
             ? null : Object.freeze({ method: verb, path });
+    },
+
+    /**
+     * @param {object} state
+     * @param {URL} url
+     * @param {string} method
+     * @return {object|null}
+     */
+    hostRequest(state, url, method) {
+        const path = url.pathname;
+        const verb = String(method).toUpperCase();
+        const route = /^\/v1\/rooms\/([^/]+)\/messages(?:\/([^/]+))?$/.exec(path);
+        const details = state.onMessages && verb === 'GET' && /^\/v1\/rooms\/([^/]+)$/.exec(path);
+        if (details) {
+            return { path, method: verb, room: decodeURIComponent(details[1]), details: true };
+        }
+        if (state.onMessages && route && route[2] !== 'stream' &&
+            (verb === 'GET' || verb === 'POST' || route[2] && ['PUT', 'PATCH'].includes(verb))) {
+            const room = decodeURIComponent(route[1]);
+            const single = route[2] ? decodeURIComponent(route[2]) : null;
+            const head = verb === 'GET' && single === null && [...url.searchParams.keys()].every((key) => key === 'limit');
+            return { path, method: verb, room, single, head };
+        }
+        return ZetaSource.traffic(path, verb);
+    },
+
+    /**
+     * @param {string} room
+     * @param {*} row
+     * @return {boolean}
+     */
+    canonical(room, row) {
+        return ZetaSource.isObject(row) && ZetaSource.filled(row.id) &&
+            (row.roomId === undefined || row.roomId === room) && ZetaSource.filled(row.sender?.type) &&
+            typeof row.messageTime === 'string' && Number.isFinite(Date.parse(row.messageTime)) &&
+            Array.isArray(row.contents) && row.contents.every((block) => ZetaSource.isObject(block) &&
+                ZetaSource.filled(block.type) && (block.type !== 'TEXT' || typeof block.text === 'string'));
+    },
+
+    /**
+     * @param {string} room
+     * @param {*} page
+     * @return {boolean}
+     */
+    validPage(room, page) {
+        return ZetaSource.isObject(page) && typeof page.head === 'boolean' && typeof page.complete === 'boolean' &&
+            (!page.complete || page.head) && Number.isFinite(page.observedAt) && page.observedAt > 0 &&
+            Array.isArray(page.messages) && (page.created === undefined || page.created === true && !page.head && page.messages.length === 1) &&
+            (page.ambiguous === undefined || page.ambiguous === true && !page.complete) &&
+            page.messages.every((row) => ZetaSource.canonical(room, row));
+    },
+
+    /**
+     * @param {object} state
+     * @param {object|null} traffic
+     * @return {Function|null}
+     */
+    observing(state, traffic) {
+        if (!traffic?.room) {
+            return null;
+        }
+        const deliver = state.onMessages(traffic.room);
+        if (typeof deliver !== 'function') {
+            return null;
+        }
+        const clock = state.pageWindow.performance;
+        const observedAt = Number.isFinite(clock?.timeOrigin) ? clock.timeOrigin + clock.now() : Date.now();
+        return (body) => {
+            if (state.stopped || !ZetaSource.isObject(body)) {
+                return;
+            }
+            if (traffic.details) {
+                if (body.id === traffic.room && ZetaSource.canonical(traffic.room, body.lastMessage)) {
+                    deliver({ messages: [body.lastMessage], head: false, complete: false, observedAt });
+                }
+                return;
+            }
+            if (traffic.method === 'POST' || traffic.single !== null) {
+                let row = body;
+                if (traffic.single && !ZetaSource.canonical(traffic.room, body)) {
+                    const matches = Object.values(body).filter((value) => value?.id === traffic.single && ZetaSource.canonical(traffic.room, value));
+                    row = matches.length === 1 ? matches[0] : null;
+                }
+                if (ZetaSource.canonical(traffic.room, row) && (!traffic.single || row.id === traffic.single)) {
+                    deliver({ messages: [row], head: false, complete: false, observedAt,
+                        ...(traffic.method === 'POST' && !traffic.single ? { created: true } : {}) });
+                }
+                return;
+            }
+            if (!Array.isArray(body.messages) || !body.messages.every((row) => ZetaSource.canonical(traffic.room, row))) {
+                return;
+            }
+            const messages = ZetaSource.ordered(body.messages);
+            const cursor = body.nextCursor;
+            const head = traffic.head && (cursor === null || ZetaSource.filled(cursor) || Number.isFinite(cursor));
+            const ambiguous = messages.length !== body.messages.length;
+            deliver({ messages, head, complete: head && cursor === null && !ambiguous, observedAt,
+                ...(ambiguous ? { ambiguous: true } : {}) });
+        };
     },
 
     /**
@@ -405,8 +504,8 @@ const ZetaSource = Object.freeze({
         }
         const carried =
             typeof input === settings.ObjectType && input !== null && Object.prototype.toString.call(input) === settings.RequestTag;
-        const path = ZetaSource.apiPath(state, carried ? input.url : String(input));
-        if (path === null) {
+        const address = ZetaSource.apiAddress(state, carried ? input.url : String(input));
+        if (address === null) {
             return null;
         }
         if (state.credentials) {
@@ -414,7 +513,7 @@ const ZetaSource = Object.freeze({
             const headers = given === undefined || given === null ? (carried ? input.headers : null) : given;
             ZetaSource.remember(state, ZetaSource.authorization(headers));
         }
-        return ZetaSource.traffic(path, init?.method ?? (carried ? input.method : settings.ReadMethod));
+        return ZetaSource.hostRequest(state, address, init?.method ?? (carried ? input.method : settings.ReadMethod));
     },
 
     /**
@@ -423,7 +522,7 @@ const ZetaSource = Object.freeze({
      * @return {void}
      */
     notify(state, traffic, replySucceeded = false) {
-        if (state.stopped || (ZetaSource.replyPath(traffic.path) && (traffic.method === 'GET' || !replySucceeded))) {
+        if (state.stopped || traffic.method === 'GET' || (ZetaSource.replyPath(traffic.path) && !replySucceeded)) {
             return;
         }
         for (const callback of state.callbacks) {
@@ -457,7 +556,7 @@ const ZetaSource = Object.freeze({
      * @param {Readonly<{ method: string, path: string }>|null} traffic
      * @return {void}
      */
-    settled(state, result, traffic, receipt, stream) {
+    settled(state, result, traffic, receipt, stream, observe) {
         if (traffic === null) {
             return;
         }
@@ -472,7 +571,13 @@ const ZetaSource = Object.freeze({
             ZetaSource.notify(state, traffic, !stream && status >= 200 && status < 300);
         };
         result.then((response) => {
-            const status = receipt || ZetaSource.replyPath(traffic.path) ? ZetaSource.quietly(null, ZetaSource.postStatus, traffic.path, response, 'url') : null;
+            const status = observe || receipt || ZetaSource.replyPath(traffic.path) ? ZetaSource.quietly(null, ZetaSource.postStatus, traffic.path, response, 'url') : null;
+            if (observe && !state.stopped && status >= 200 && status < 300 && typeof response.clone === 'function') {
+                const copy = ZetaSource.quietly(null, () => response.clone());
+                if (copy && typeof copy.text === 'function') {
+                    copy.text().then((raw) => observe(JSON.parse(raw))).catch(() => {});
+                }
+            }
             if (stream && stream === state.streamReceipt && !state.stopped) {
                 ZetaSource.readReply(state, response, status, (outcome) => {
                     stream(outcome);
@@ -526,9 +631,9 @@ const ZetaSource = Object.freeze({
             return;
         }
         ZetaSource.forget(request);
-        const path = ZetaSource.apiPath(state, String(address));
-        if (path !== null) {
-            ZetaSource.Requests.set(request, { traffic: ZetaSource.traffic(path, method), listener: null });
+        const url = ZetaSource.apiAddress(state, String(address));
+        if (url !== null) {
+            ZetaSource.Requests.set(request, { traffic: ZetaSource.hostRequest(state, url, method), listener: null });
         }
     },
 
@@ -607,6 +712,7 @@ const ZetaSource = Object.freeze({
          */
         const receipt = ZetaSource.posting(state, record.traffic);
         const stream = ZetaSource.quietly(null, ZetaSource.streaming, state, record.traffic);
+        const messages = ZetaSource.quietly(null, ZetaSource.observing, state, record.traffic);
         const observe = stream ? ZetaSource.xhrReply(state, request, record.traffic, stream) : null;
         const responseStatus = () => ZetaSource.quietly(null, ZetaSource.postStatus, record.traffic.path, request, 'responseURL');
         if (observe) {
@@ -617,7 +723,16 @@ const ZetaSource = Object.freeze({
             if (ZetaSource.Requests.get(request) === record) {
                 ZetaSource.forget(request);
             }
-            const status = !state.stopped && (receipt || ZetaSource.replyPath(record.traffic.path)) ? responseStatus() : null;
+            const status = !state.stopped && (messages || receipt || ZetaSource.replyPath(record.traffic.path)) ? responseStatus() : null;
+            if (messages && status >= 200 && status < 300) {
+                ZetaSource.quietly(null, () => {
+                    if (request.responseType === 'json') {
+                        messages(JSON.parse(JSON.stringify(request.response)));
+                    } else if (!request.responseType || request.responseType === 'text') {
+                        messages(JSON.parse(request.responseText));
+                    }
+                });
+            }
             if (!state.stopped && typeof receipt === 'function') {
                 ZetaSource.quietly(null, receipt, status);
             }
@@ -708,8 +823,9 @@ const ZetaSource = Object.freeze({
                 const traffic = ZetaSource.quietly(null, ZetaSource.fetched, state, input, init);
                 const receipt = ZetaSource.quietly(null, ZetaSource.posting, state, traffic);
                 const stream = ZetaSource.quietly(null, ZetaSource.streaming, state, traffic);
+                const observe = ZetaSource.quietly(null, ZetaSource.observing, state, traffic);
                 const result = originals.fetch.apply(this, arguments);
-                ZetaSource.quietly(null, ZetaSource.settled, state, result, traffic, receipt, stream);
+                ZetaSource.quietly(null, ZetaSource.settled, state, result, traffic, receipt, stream, observe);
                 return result;
             },
 
@@ -777,6 +893,12 @@ const ZetaSource = Object.freeze({
             onStream: (callback) => { state.onStream = callback; },
 
             /**
+             * @param {Function} callback
+             * @return {void}
+             */
+            onMessages: (callback) => { state.onMessages = callback; },
+
+            /**
              * @param {(traffic: Readonly<{ method: string, path: string }>) => void} callback
              * @return {void}
              */
@@ -816,6 +938,7 @@ const ZetaSource = Object.freeze({
      * @throws {Error}
      */
     ready(request) {
+        request.signal?.throwIfAborted();
         const settings = ZetaSource.Settings;
         const words = settings.Messages;
         if (!ZetaSource.filled(request.token)) {
@@ -830,6 +953,29 @@ const ZetaSource = Object.freeze({
     },
 
     /**
+     * @param {AbortSignal|undefined} signal
+     * @param {Function} run
+     * @return {Promise<*>}
+     * @throws {Error}
+     */
+    async abortable(signal, run) {
+        if (!signal) {
+            return run();
+        }
+        signal.throwIfAborted();
+        let cancel;
+        const stopped = new Promise((resolve, reject) => {
+            cancel = () => reject(signal.reason);
+            signal.addEventListener('abort', cancel, { once: true });
+        });
+        try {
+            return await Promise.race([stopped, run()]);
+        } finally {
+            signal.removeEventListener('abort', cancel);
+        }
+    },
+
+    /**
      * @param {{ pause: (milliseconds: number) => Promise<void> }} request
      * @param {number} milliseconds
      * @return {Promise<void>}
@@ -838,8 +984,9 @@ const ZetaSource = Object.freeze({
     async wait(request, milliseconds) {
         const pause = request.pause;
         try {
-            await pause(milliseconds);
+            await ZetaSource.abortable(request.signal, () => pause(milliseconds, request.signal));
         } catch {
+            request.signal?.throwIfAborted();
             throw ZetaSource.failure(ZetaSource.Settings.Messages.NoPause, null, false);
         }
     },
@@ -862,8 +1009,10 @@ const ZetaSource = Object.freeze({
         const reach = async () => {
             let response = null;
             try {
-                response = await send(address, { headers: { [settings.AuthorizationHeader]: request.token }, ...(fresh ? { cache: 'no-store' } : {}) });
+                response = await send(address, { headers: { [settings.AuthorizationHeader]: request.token },
+                    ...(request.signal ? { signal: request.signal } : {}), ...(fresh ? { cache: 'no-store' } : {}) });
             } catch {
+                request.signal?.throwIfAborted();
                 throw ZetaSource.failure(words.Unreachable, null, true);
             }
             let status = null;
@@ -883,18 +1032,19 @@ const ZetaSource = Object.freeze({
             try {
                 return { status, raw: await response.text() };
             } catch {
+                request.signal?.throwIfAborted();
                 throw ZetaSource.failure(words.Shape, status, false);
             }
         };
-        const answered = await Promise.race([
+        const answered = await ZetaSource.abortable(request.signal, () => Promise.race([
             reach(),
-            ZetaSource.wait(request, settings.TimeoutMs).then(
+            ZetaSource.wait({ pause: request.pause }, settings.TimeoutMs).then(
                 /**
                  * @return {null}
                  */
                 () => null,
             ),
-        ]);
+        ]));
         if (answered === null) {
             throw ZetaSource.failure(words.Timeout, null, true);
         }
@@ -966,12 +1116,14 @@ const ZetaSource = Object.freeze({
         const settings = ZetaSource.Settings;
         let failed = null;
         for (let number = settings.FirstTry; number <= settings.Tries; number++) {
+            request.signal?.throwIfAborted();
             if (failed !== null) {
                 await ZetaSource.wait(request, settings.RetryPauseMs * (number - settings.FirstTry));
             }
             try {
                 return await read();
             } catch (error) {
+                request.signal?.throwIfAborted();
                 if (error.retryable !== true) {
                     throw error;
                 }
@@ -1251,6 +1403,7 @@ const ZetaSource = Object.freeze({
                 }
                 page = cursor === null && request.firstPage ? request.firstPage : await ZetaSource.page(request, cursor);
             } catch (error) {
+                request.signal?.throwIfAborted();
                 if (received.length === 0) {
                     throw error;
                 }
@@ -1284,6 +1437,7 @@ const ZetaSource = Object.freeze({
                     () => null,
                 );
             }
+            request.signal?.throwIfAborted();
             const next = page.nextCursor;
             if (saved && next !== null && !skipped && page.messages.length && distinct.size > before && !used.has(next)) {
                 if (overlap < 0) {

@@ -13,7 +13,7 @@ const tailWindow = Object.freeze({ start: 10, end: 10, generationId: 10, count: 
 const castAbsent = Object.freeze(['Collette', 'Lize', 'Viola']);
 const withoutNarrator = Object.freeze([Object.freeze({ narrator: false }), Object.freeze({ muted: true })]);
 const overrides = Object.freeze([
-  'findMentionedPresentMembers', 'getRouteEligibleMembersCompat', 'isMemberRouteEligibleCompat', 'applyUserDepartureBootstrap',
+  'ensureStateForCurrentGroup', 'findMentionedPresentMembers', 'getRouteEligibleMembersCompat', 'isMemberRouteEligibleCompat', 'applyUserDepartureBootstrap',
   'detectUserSummonBootstrap', 'selectTargetsForLatestUnansweredUserMessageRecovery', 'selectTargetsForEmptySendContinuation',
   'selectFirstSpeakerForOpeningUserMessage', 'validTargetsFromBlock', 'applyOwnerBlockToState', 'getControlledActionFallbackTarget',
   'resolveContinueTarget', 'selectContinuationTargetsForUserMessage',
@@ -51,6 +51,15 @@ const selectors = Object.freeze([
  */
 function plain(value) {
   return JSON.parse(JSON.stringify(value));
+}
+
+/**
+ * @param {object} state
+ * @returns {object}
+ * @throws {TypeError}
+ */
+function omniscientNarrator(state) {
+  return { ...state, members: { ...state.members, [narratorAvatar]: { ...state.members[narratorAvatar], omniscience: true } } };
 }
 
 /**
@@ -225,6 +234,25 @@ function applyReply(sandbox, index) {
 }
 
 /**
+ * @param {object} options
+ * @returns {Promise<{state: object, roster: ?string, saves: Array<string[]>}>}
+ * @throws {*}
+ */
+async function chatOpened(options) {
+  const sandbox = VocaliaSandbox.vocalia(options);
+  const saves = [];
+  /**
+   * @returns {Promise<void>}
+   */
+  sandbox.tavern.saveMetadata = async () => {
+    saves.push(plain(sandbox.tavern.chatMetadata.aspect_vocalia.present));
+  };
+  await sandbox.context.handleChatChanged();
+  const roster = sandbox.prompts.filter(([key]) => key === 'aspect_vocalia').at(-1);
+  return { state: plain(sandbox.tavern.chatMetadata.aspect_vocalia), roster: roster ? roster[1] : null, saves };
+}
+
+/**
  * @param {number} userMessageId
  * @returns {function(VocaliaSandbox): Array<object>}
  */
@@ -360,28 +388,27 @@ test('firstSpeaker wins in the three selectors and the Continue fallback, and th
   assert.deepEqual(sandbox.called('setPresence'), []);
 });
 
-test('a narrator named by firstSpeaker while neither present nor remote is set present, and the prompt refreshed, before it is returned', () => {
-  for (const name of selectors) {
-    const picker = pickers[name];
-    const sandbox = VocaliaSandbox.stubbed({
-      ...picker.options,
-      speaker: narratorAvatar,
-      bases: { [name]: returns(baseResult(picker, [collette])), isMemberRouteEligibleCompat: returns(false) },
-    });
-    assert.deepEqual(names(picked(sandbox.context[name](...picker.args))), ['Narrator'], name);
-    assert.deepEqual(sandbox.called('setPresence'), [[narratorAvatar, present]], name);
-    assert.deepEqual(sandbox.called('vocaliaBase_isMemberRouteEligibleCompat'), [[narrator]], name);
-    const callees = sandbox.calls.map(([callee]) => callee);
-    const marked = callees.indexOf('setPresence');
-    assert.ok(marked > callees.indexOf('vocaliaBase_isMemberRouteEligibleCompat'), name);
-    assert.deepEqual(
-      callees.slice(marked, marked + 4), ['setPresence', 'updateExtensionPrompt', 'updateDiagnosticsPanel', 'saveMetadata'], name,
-    );
+test('real Vocalia: a narrator saved as absent and named by firstSpeaker comes back present in all four selectors, the queue accepts it, and Vocalia\'s prompt lists it present', () => {
+  const market = [said('Hello.'), spoke('Collette'), said('Narrator: they reach the market.')];
+  const cases = [
+    ['selectFirstSpeakerForOpeningUserMessage', [said('Narrator: dawn.')], opening(0)],
+    ['selectContinuationTargetsForUserMessage', market, continuation(2)],
+    ['selectTargetsForLatestUnansweredUserMessageRecovery', market, sandbox => sandbox.context.selectTargetsForLatestUnansweredUserMessageRecovery()],
+    ['getControlledActionFallbackTarget', market, continueTail],
+  ];
+  for (const [name, chat, run] of cases) {
+    const sandbox = VocaliaSandbox.vocalia({ universe: true, speaker: narratorAvatar, absent: ['Narrator'], chat });
+    const [target] = picked(run(sandbox));
+    assert.equal(target.name, 'Narrator', name);
+    assert.equal(sandbox.context.isRouteEligibleForQueue(target), true, name);
+    sandbox.context.updateExtensionPrompt();
+    const roster = sandbox.prompts.filter(([key]) => key === 'aspect_vocalia').at(-1)[1];
+    assert.match(roster, /^Present: Narrator, /m, name);
+    assert.match(roster, /^Absent\/unreachable: none$/m, name);
   }
-  const member = VocaliaSandbox.stubbed({ speaker: 'Collette.png', bases: { isMemberRouteEligibleCompat: returns(false) } });
+  const member = VocaliaSandbox.stubbed({ speaker: 'Collette.png' });
   assert.deepEqual(names(member.context.selectFirstSpeakerForOpeningUserMessage(messageId)), ['Collette']);
-  assert.deepEqual(member.called('setPresence'), []);
-  assert.deepEqual(member.called('updateExtensionPrompt'), []);
+  assert.deepEqual(member.calls.filter(([callee]) => callee !== 'getGroupMembers').map(([callee]) => callee), ['firstSpeaker', 'getMemberByAvatar']);
 });
 
 test('no avatar, or an avatar that is not a group member, from firstSpeaker counts as no decision', () => {
@@ -1405,31 +1432,44 @@ test('real Vocalia: the narrator is always present: a departing reply keeps it, 
   assert.deepEqual(names(continuation(2)(alone).targets), ['Narrator']);
 });
 
-test('real Vocalia: a departing narrator reply leaves the same state as an idle one, so an empty Send then picks the member it addressed', () => {
+test('real Vocalia: a departing narrator reply, also from a narrator saved as absent, or one naming the narrator in leaving=, leaves the same state as an idle one, so an empty Send then picks the member it addressed', () => {
   const content = '[narration]Night falls.[end narration]';
-  const left = VocaliaSandbox.vocalia({
-    universe: true, chat: [said('Hello.'), spoke('Narrator', 'speakingTo=Lize, participationNextTurn=leaving, arriving=none', content)],
-  });
   const stayed = VocaliaSandbox.vocalia({
-    universe: true, chat: [said('Hello.'), spoke('Narrator', 'speakingTo=Lize, participationNextTurn=idle, arriving=none', content)],
+    universe: true, chat: [said('Hello.'), spoke('Narrator', 'speakingTo=Lize, participationNextTurn=idle, arriving=none, leaving=Collette', content)],
   });
-  applyReply(left, 1);
   applyReply(stayed, 1);
-  const state = plain(left.state());
-  assert.ok(state.present.includes(narratorAvatar));
-  assert.equal(state.lastSpeakerAvatar, narratorAvatar);
-  assert.deepEqual(state.members[narratorAvatar].speakingTo, ['Lize']);
-  assert.deepEqual(state, plain(stayed.state()));
-  assert.equal(left.called('onReplyBlock')[0][0].participationNextTurn, 'departing');
-  assert.deepEqual(names(emptySend(left).targets), ['Lize']);
-  const untouched = [
-    ['the narrator absent', ['Narrator'], spoke('Narrator', 'speakingTo=Lize, participationNextTurn=leaving, arriving=none', content)],
-    ['malformed', [], spoke('Narrator', 'speakingTo=Lize, participationNextTurn=leaving', content)],
-    ['Collette', [], spoke('Collette', 'speakingTo=Lize, participationNextTurn=leaving, arriving=none')],
+  /**
+   * @param {object} state
+   * @returns {object}
+   * @throws {TypeError}
+   */
+  const sorted = state => ({ ...state, present: [...state.present].sort() });
+  const expected = sorted(plain(stayed.state()));
+  assert.ok(expected.present.includes(narratorAvatar));
+  assert.equal(expected.lastSpeakerAvatar, narratorAvatar);
+  assert.deepEqual(expected.members[narratorAvatar].speakingTo, ['Lize']);
+  assert.deepEqual(expected.absent, ['Collette.png']);
+  const departing = 'speakingTo=Lize, participationNextTurn=leaving, arriving=none, leaving=Collette';
+  const cases = [
+    ['departing', [], departing, 'departing'],
+    ['departing while saved absent', ['Narrator'], departing, 'departing'],
+    ['leaving=Narrator|Collette', [], 'speakingTo=Lize, participationNextTurn=idle, arriving=none, leaving=Narrator|Collette', 'idle'],
   ];
-  for (const [label, absentNames, message] of untouched) {
+  for (const [label, absentNames, parameters, participation] of cases) {
+    const left = VocaliaSandbox.vocalia({ universe: true, absent: absentNames, chat: [said('Hello.'), spoke('Narrator', parameters, content)] });
+    const block = applyReply(left, 1);
+    assert.deepEqual(sorted(plain(left.state())), expected, label);
+    assert.deepEqual(left.called('onReplyBlock'), [[block, narratorAvatar, 1]], label);
+    assert.equal(block.participationNextTurn, participation, label);
+    assert.deepEqual(names(emptySend(left).targets), ['Lize'], label);
+  }
+  const untouched = [
+    ['malformed', spoke('Narrator', 'speakingTo=Lize, participationNextTurn=leaving', content)],
+    ['Collette', spoke('Collette', 'speakingTo=Lize, participationNextTurn=leaving, arriving=none')],
+  ];
+  for (const [label, message] of untouched) {
     const run = variants(
-      { absent: absentNames, chat: [said('Hello.'), message] },
+      { chat: [said('Hello.'), message] },
       /**
        * @param {VocaliaSandbox} sandbox
        * @returns {object}
@@ -1440,22 +1480,103 @@ test('real Vocalia: a departing narrator reply leaves the same state as an idle 
         return plain(sandbox.state());
       },
     );
-    assert.deepEqual(run.result, run.original, label);
+    assert.deepEqual(run.result, omniscientNarrator(run.original), label);
   }
 });
 
-test('real Vocalia: when a Narrator: message brings the absent narrator back, Vocalia\'s prompt no longer lists it as absent', () => {
-  const sandbox = VocaliaSandbox.vocalia({
-    universe: true, speaker: narratorAvatar, absent: ['Narrator'],
-    chat: [said('Hello.'), spoke('Collette'), said('Narrator: they reach the market.')],
-  });
-  sandbox.context.updateExtensionPrompt();
-  const before = sandbox.prompts.filter(([key]) => key === 'aspect_vocalia').at(-1)[1];
-  assert.match(before, /^Absent\/unreachable: Narrator$/m);
-  assert.deepEqual(names(continuation(2)(sandbox).targets), ['Narrator']);
-  const after = sandbox.prompts.filter(([key]) => key === 'aspect_vocalia').at(-1)[1];
-  assert.match(after, /^Present: Narrator, /m);
-  assert.match(after, /^Absent\/unreachable: none$/m);
+test('real Vocalia: a chat saved with the narrator absent opens through Vocalia\'s own handler with it present and omniscient, and Vocalia\'s prompt lists it present', async () => {
+  const options = { speaker: narratorAvatar, absent: ['Narrator'], chat: [said('Hello.'), spoke('Collette'), said('Narrator: they reach the market.')] };
+  const original = await chatOpened({ ...options, built: false });
+  assert.ok(original.state.absent.includes(narratorAvatar));
+  assert.equal(original.state.members[narratorAvatar].omniscience, false);
+  assert.match(original.roster, /^Absent\/unreachable: Narrator$/m);
+  const opened = await chatOpened({ ...options, universe: true });
+  assert.ok(opened.state.present.includes(narratorAvatar));
+  assert.deepEqual([opened.state.absent, opened.state.remote, opened.state.pendingArrivals], [[], [], []]);
+  assert.equal(opened.state.members[narratorAvatar].presence, present);
+  assert.equal(opened.state.members[narratorAvatar].omniscience, true);
+  assert.match(opened.roster, /^Present: Narrator, /m);
+  assert.match(opened.roster, /^Absent\/unreachable: none$/m);
+  assert.deepEqual(opened.saves, [opened.state.present]);
+  const updated = VocaliaSandbox.vocalia({ ...options, universe: true });
+  await updated.context.handleGroupUpdated();
+  assert.ok(plain(updated.tavern.chatMetadata.aspect_vocalia.present).includes(narratorAvatar));
+  assert.equal(updated.tavern.chatMetadata.aspect_vocalia.members[narratorAvatar].omniscience, true);
+});
+
+test('real Vocalia: a reply with remote=Narrator, or arriving=Narrator while arrivals wait, leaves the narrator present on the next state read', () => {
+  const cases = [
+    ['speakingTo=user, participationNextTurn=idle, arriving=none, remote=Narrator', {}, 'remote'],
+    ['speakingTo=user, participationNextTurn=idle, arriving=Narrator', { arrivalApplyMode: 'deferred' }, 'pendingArrivals'],
+  ];
+  for (const [parameters, settings, moved] of cases) {
+    const options = { absent: ['Narrator'], settings, chat: [said('Hello.'), spoke('Collette', parameters)] };
+    const original = VocaliaSandbox.vocalia({ ...options, built: false });
+    applyReply(original, 1);
+    assert.deepEqual(plain(original.state()[moved]), [narratorAvatar], parameters);
+    const sandbox = VocaliaSandbox.vocalia({ ...options, universe: true });
+    applyReply(sandbox, 1);
+    const state = plain(sandbox.state());
+    assert.ok(state.present.includes(narratorAvatar), parameters);
+    assert.deepEqual([state.absent, state.remote, state.pendingArrivals], [[], [], []], parameters);
+    assert.equal(state.members[narratorAvatar].omniscience, true, parameters);
+  }
+});
+
+test('real Vocalia: after Vocalia\'s own reset of the presence lists and member records, the narrator is present and omniscient on the next state read', () => {
+  const options = { state: { present: [], members: {}, lastSpeakerAvatar: narratorAvatar } };
+  const original = plain(VocaliaSandbox.vocalia({ ...options, built: false }).state());
+  assert.equal(original.members[narratorAvatar].omniscience, false);
+  const sandbox = VocaliaSandbox.vocalia({ ...options, universe: true });
+  const state = plain(sandbox.state());
+  assert.deepEqual(state.present, ['Narrator.png', 'Collette.png', 'Lize.png', 'Viola.png']);
+  assert.equal(state.lastSpeakerAvatar, null);
+  assert.deepEqual(state, omniscientNarrator(original));
+});
+
+test('real Vocalia: a muted narrator stays absent, and without universeNarrator the state is Vocalia\'s own, through chat open, group update and every state read', async () => {
+  const cases = [
+    { label: 'muted', options: { universe: true, muted: true } },
+    { label: 'muted and saved absent', options: { universe: true, muted: true, absent: ['Narrator'] } },
+    { label: 'no universeNarrator', options: { universe: false, absent: ['Narrator'] } },
+    { label: 'no universeNarrator, reset', options: { universe: false, state: { present: [], members: {} } } },
+  ];
+  for (const { label, options } of cases) {
+    const chat = [said('Hello.'), spoke('Collette'), said('We walk on.')];
+    const original = await chatOpened({ ...options, chat, built: false });
+    const opened = await chatOpened({ ...options, chat });
+    assert.deepEqual(opened, original, label);
+    if (options.muted) {
+      assert.deepEqual(opened.state.absent, [narratorAvatar], label);
+      assert.equal(opened.state.members[narratorAvatar].omniscience, false, label);
+    }
+    for (const handler of ['handleGroupUpdated', 'ensureStateForCurrentGroup']) {
+      const before = VocaliaSandbox.vocalia({ ...options, chat, built: false });
+      const after = VocaliaSandbox.vocalia({ ...options, chat });
+      await before.context[handler]();
+      await after.context[handler]();
+      assert.deepEqual(plain(after.tavern.chatMetadata), plain(before.tavern.chatMetadata), `${label} ${handler}`);
+    }
+  }
+});
+
+test('real Vocalia: the state override sets an absent narrator present without entering itself again', () => {
+  const sandbox = VocaliaSandbox.vocalia({ universe: true, absent: ['Narrator'], chat: [said('Hello.')] });
+  const override = sandbox.context.ensureStateForCurrentGroup;
+  let entered = 0;
+  /**
+   * @returns {object}
+   * @throws {*}
+   */
+  sandbox.context.ensureStateForCurrentGroup = () => {
+    entered += 1;
+    return override();
+  };
+  const state = sandbox.context.ensureStateForCurrentGroup();
+  assert.equal(entered, 1);
+  assert.ok(plain(state.present).includes(narratorAvatar));
+  assert.equal(sandbox.context.isMemberRouteEligibleCompat(sandbox.member('Narrator')), true);
+  assert.equal(entered, 2);
 });
 
 test('real Vocalia: an empty Send after the reply to a Narrator: message was deleted asks firstSpeaker and the narrator answers', () => {
@@ -1480,7 +1601,7 @@ test('real Vocalia: leaving= through the real parser', () => {
     ['speakingTo=none, participationNextTurn=idle, arriving=none, leaving=Col', [], false, []],
     ['speakingTo=none, participationNextTurn=idle, arriving=none, leaving=Narrator|Lize', [], false, ['Lize.png']],
     ['speakingTo=none, participationNextTurn=idle, leaving=Collette', [], true, []],
-    ['speakingTo=none, participationNextTurn=idle, arriving=none, leaving=Collette', ['Narrator'], false, ['Narrator.png']],
+    ['speakingTo=none, participationNextTurn=idle, arriving=none, leaving=Collette', ['Narrator'], false, ['Collette.png']],
   ];
   for (const [parameters, absentNames, routingMalformed, expected] of cases) {
     const message = spoke('Narrator', parameters, '[narration]The street empties.[end narration]');
@@ -1524,6 +1645,7 @@ test('real Vocalia: with universeNarrator present but no narrator in the group, 
    */
   const departure = sandbox => sandbox.context.applyUserDepartureBootstrap(2, 'I leave Collette behind and walk out alone.');
   const calls = [
+    ['ensureStateForCurrentGroup', sandbox => sandbox.context.ensureStateForCurrentGroup()],
     ['findMentionedPresentMembers', sandbox => sandbox.context.findMentionedPresentMembers('Collette and Lize, come here.')],
     ['getRouteEligibleMembersCompat', sandbox => sandbox.context.getRouteEligibleMembersCompat()],
     ['isMemberRouteEligibleCompat', sandbox => sandbox.context.isMemberRouteEligibleCompat(sandbox.member('Collette'))],

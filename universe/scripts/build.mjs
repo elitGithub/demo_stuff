@@ -1,5 +1,5 @@
 import { spawnSync } from 'node:child_process';
-import { mkdir, mkdtemp, readdir, rename, rm, rmdir, writeFile } from 'node:fs/promises';
+import { mkdir, mkdtemp, readdir, readFile, rename, rm, rmdir, writeFile } from 'node:fs/promises';
 import { dirname, join } from 'node:path';
 import { setTimeout as delay } from 'node:timers/promises';
 import { checkDirectory, claimBuild, inspect, readRegular, releaseBuild } from './build-state.mjs';
@@ -17,7 +17,8 @@ const checkpointSignature = 'Universe local build v5\n';
 const syncSignature = 'Universe local build v6\n';
 const replyRetrySignature = 'Universe local build v7\n';
 const pruneSignature = 'Universe local build v8\n';
-const signature = 'Universe local build v9\n';
+const watchdogSignature = 'Universe local build v9\n';
+const signature = 'Universe local build v10\n';
 const checkpointSources = [
   'server.mjs', 'launcher.mjs', 'child.mjs', 'child-preload.mjs', 'checkpoint-store.mjs', 'local-session.mjs',
   'r2.mjs', 'story-files.mjs', 'classes/capture-gate.mjs', 'classes/cloud-save.mjs',
@@ -40,10 +41,15 @@ const vocalia = join(extensionDirectory, 'st-aspect-vocalia');
 const replyRetry = join(extensionDirectory, 'universe-retry');
 const replyRetrySource = 'extension/universe-retry';
 const replyRetryNames = ['manifest.json', 'index.js', 'ReplyRetry.js', 'ReplyRetrySettings.js'];
+const narrator = join(extensionDirectory, 'universe-narrator');
+const narratorSource = 'extension/universe-narrator';
+const narratorNames = ['manifest.json', 'index.js', 'NarratorSettings.js', 'NarratorTurn.js', 'WalkOns.js'];
+const vocaliaOverrides = 'extension/vocalia-overrides.js';
 const packageInputs = ['package.json', 'package-lock.json',
   'packages/tavern-scenario-builder-1.1.0.tgz', 'packages/st-aspect-vocalia-1.0.4.tgz'];
 const buildInputs = [
-  ...sources.map(file => join('src', file)), ...replyRetryNames.map(file => join(replyRetrySource, file)), ...packageInputs,
+  ...sources.map(file => join('src', file)), ...replyRetryNames.map(file => join(replyRetrySource, file)),
+  ...narratorNames.map(file => join(narratorSource, file)), vocaliaOverrides, ...packageInputs,
 ];
 const scenarioBuilderFiles = [
   'manifest.json', 'index.js', 'style.css', 'templates/workspace.html', 'modules/creation.js', 'modules/entries.js',
@@ -52,6 +58,7 @@ const scenarioBuilderFiles = [
 const vocaliaFiles = [join(vocalia, 'manifest.json'), join(vocalia, 'index.js')];
 const fullProfileFiles = [join(runtime, 'public/scripts/personas.js'), join(runtime, 'src/endpoints/thumbnails.js')];
 const replyRetryFiles = replyRetryNames.map(file => join(replyRetry, file));
+const narratorFiles = narratorNames.map(file => join(narrator, file));
 const legacyRequired = [...checkpointSources, ...runtimeFiles];
 const scenarioBuilderRequired = [...legacyRequired, ...scenarioBuilderFiles];
 const vocaliaRequired = [...scenarioBuilderRequired, ...vocaliaFiles];
@@ -59,11 +66,13 @@ const fullProfileRequired = [...vocaliaRequired, ...fullProfileFiles];
 const checkpointRequired = [...fullProfileRequired, 'wrapper-home.html'];
 const syncRequired = [...syncSources, ...runtimeFiles, ...scenarioBuilderFiles, ...vocaliaFiles, ...fullProfileFiles];
 const replyRetryRequired = [...syncRequired, ...replyRetryFiles];
-const required = [...replyRetryRequired, ...pruneSources];
+const pruneRequired = [...replyRetryRequired, ...pruneSources];
+const required = [...pruneRequired, ...narratorFiles];
 const requiredBySignature = new Map([
   [legacySignature, legacyRequired], [scenarioBuilderSignature, scenarioBuilderRequired], [vocaliaSignature, vocaliaRequired],
   [fullProfileSignature, fullProfileRequired], [checkpointSignature, checkpointRequired], [syncSignature, syncRequired],
-  [replyRetrySignature, replyRetryRequired], [pruneSignature, required], [signature, required],
+  [replyRetrySignature, replyRetryRequired], [pruneSignature, pruneRequired], [watchdogSignature, pruneRequired],
+  [signature, required],
 ]);
 
 /**
@@ -114,16 +123,25 @@ async function canReuse(directory) {
 
 /**
  * @param {string} source
+ * @returns {Promise<Buffer>}
+ * @throws {Error}
+ */
+async function readInput(source) {
+  const bytes = await readRegular(source);
+  if (bytes === null) {
+    throw new Error(`Missing build input: ${source}`);
+  }
+  return bytes;
+}
+
+/**
+ * @param {string} source
  * @param {string} destination
  * @returns {Promise<void>}
  * @throws {Error}
  */
 async function copyInput(source, destination) {
-  const bytes = await readRegular(source);
-  if (bytes === null) {
-    throw new Error(`Missing build input: ${source}`);
-  }
-  await writeFile(destination, bytes, { flag: 'wx' });
+  await writeFile(destination, await readInput(source), { flag: 'wx' });
 }
 
 /**
@@ -216,9 +234,29 @@ async function assemble() {
     await mkdir(join(next, extensionDirectory), { recursive: true });
     await rename(join(next, 'node_modules/tavern-scenario-builder'), join(next, scenarioBuilder));
     await rename(join(next, 'node_modules/st-aspect-vocalia'), join(next, vocalia));
+    const vocaliaIndex = join(next, vocalia, 'index.js');
+    const { version } = JSON.parse(await readFile(join(next, vocalia, 'manifest.json'), 'utf8'));
+    const fragment = (await readInput(join(project, vocaliaOverrides))).toString();
+    let renamed = await readFile(vocaliaIndex, 'utf8');
+    for (const [, name] of fragment.matchAll(/^function ([A-Za-z_$][\w$]*)\(/gm)) {
+      if (name.startsWith('universe')) {
+        continue;
+      }
+      const declaration = `function ${name}(`;
+      const count = renamed.split(declaration).length - 1;
+      if (count !== 1) {
+        throw new Error(`Vocalia ${version}: ${declaration} occurs ${count} times where its override needs exactly one.`);
+      }
+      renamed = renamed.replace(declaration, () => `function vocaliaBase_${name}(`);
+    }
+    await writeFile(vocaliaIndex, `${renamed}\n${fragment}`);
     await mkdir(join(next, replyRetry));
     for (const file of replyRetryNames) {
       await copyInput(join(project, replyRetrySource, file), join(next, replyRetry, file));
+    }
+    await mkdir(join(next, narrator));
+    for (const file of narratorNames) {
+      await copyInput(join(project, narratorSource, file), join(next, narrator, file));
     }
     if (!hasFiles(next, required)) {
       throw new Error('Incomplete Universe build. A required entry point is missing.');

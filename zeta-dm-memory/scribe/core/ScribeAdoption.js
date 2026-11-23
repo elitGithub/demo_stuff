@@ -289,7 +289,7 @@ const ScribeAdoption = Object.freeze({
      * @param {object} operation
      * @param {object} item
      * @param {Map<number, object>} shown
-     * @return {object|string}
+     * @return {{evidence: object, form: string|null, dimension: string|null, position?: number}|string}
      */
     bind(operation, item, shown) {
         const within = item && operation.sourceCitation && [...operation.sourceCitation.matchAll(/#(\d+)(?:\s*[-‐–—−]\s*#?(\d+))?/gu)]
@@ -394,23 +394,10 @@ const ScribeAdoption = Object.freeze({
             return ScribeAdoption.finish(job, stops.Budget, null);
         }
         const story = step.pass === ScribeAdoption.Pass.Story;
-        if (story) {
-            const before = job.room[step.first - 2];
-            const owner = before && job.log.read[before.id];
-            if (owner !== undefined) {
-                const entry = job.log.entries.find((candidate) => candidate.sequence === owner);
-                const earlier = entry?.modelReading;
-                if (earlier && entry.messageIds.at(-1) === before.id &&
-                    entry.sources?.every((source) => job.fingerprints.get(source.id) === source.fingerprint) &&
-                    entry.messageIds.every((id) => job.log.read[id] === owner) && !ScribeAnswer.parseStory(earlier).structured) {
-                    step.user = 'PREVIOUS SCRIBE READING:\n' + earlier + '\n\n' + step.user;
-                }
-            }
-        }
         job.calls++;
         let answer = null;
         try {
-            answer = await job.ask(step.system, step.user, step.questions);
+            answer = await job.ask(step.system, step.user, step.questions, step.messages);
         } catch (error) {
             await ScribeAdoption.stopped(job, step, error);
             throw error;
@@ -441,7 +428,7 @@ const ScribeAdoption = Object.freeze({
             lines.push(line);
         }
         const protocol = story ? ScribeAnswer.parseStory(answer.text) : null;
-        const narrative = story && answer.text.trim() && !protocol.structured ? answer.text : null;
+        const narrative = story && answer.text.trim() && !protocol.structured && !/^\(no change\)$/i.test(answer.text.trim()) ? answer.text : null;
         const parsed = story ? { operations: [], refused: narrative ? [] : protocol.refused } : ScribeAnswer.parse(lines.join('\n'));
         const shown = new Map(step.messages.map((message) => [message.position, message]));
         const copying = job.diagnostic ?? ((value) => value);
@@ -494,7 +481,8 @@ const ScribeAdoption = Object.freeze({
                 const bound = operation.type === ScribeAnswer.Type.Contradiction ? 'checkerOnly' :
                     ScribeAdoption.bind(operation, item, shown);
                 if (typeof bound === 'string') {
-                    unfiled.push({ operation: item ? { ...operation, modelEvidence: item } : operation, reason: bound });
+                    unfiled.push({ operation: item ? { ...operation, modelEvidence: item } : operation, reason: bound,
+                        ...(bound === ScribeLog.Reason.Citation ? { pendingSource: key } : {}) });
                     noteIssue(shown.has(number) ? number : operation.position ?? operation.last, bound, key);
                 } else {
                     if (bound.evidence.section === null) {
@@ -506,8 +494,10 @@ const ScribeAdoption = Object.freeze({
                     if (bound.evidence.issue) {
                         noteIssue(bound.evidence.messageNumber, bound.evidence.issue, key);
                         bound.evidence.modelQuote = copying(bound.evidence.modelQuote);
+                        unfiled.push({ operation: bound, reason: bound.evidence.issue, pendingSource: key });
+                    } else {
+                        parsed.operations.push(bound);
                     }
-                    parsed.operations.push(bound);
                 }
             }
         }
@@ -563,7 +553,8 @@ const ScribeAdoption = Object.freeze({
                 noteIssue(item.messageNumber, reason, item.section + ':' + item.row);
             }
             if (unfiled.length) {
-                result.entry.proposals = copying(unfiled.map(({ operation, reason }) => ({ operation, reason,
+                result.entry.proposals = copying(unfiled.map(({ operation, reason, pendingSource }) => ({ operation, reason,
+                    ...(pendingSource ? { pendingSource: result.entry.sequence + ':' + pendingSource } : {}),
                     sourceId: operation.evidence?.messageId ?? shown.get(operation.position ?? operation.last)?.id ?? step.messages.at(-1).id })));
             }
             if (parsed.refused.length) {
@@ -710,7 +701,7 @@ const ScribeAdoption = Object.freeze({
                 }
             }
         }
-        await job.save(job.log, step.questions);
+        await job.save(job.log, step.questions, step.messages);
         const readable = Boolean(answer.text.trim());
         await job.record(Object.freeze({ sequence: result.entry.sequence, pass: step.pass, system: step.system,
             input: step.user, answer: answer.text, readable }));
@@ -895,7 +886,7 @@ const ScribeAdoption = Object.freeze({
                     }));
                     const { entry } = ScribeLog.append(job.log, state, [], { messages: stretch, origin: origins.Story, results });
                     entry.sourceAuthority = true;
-                    await job.save(job.log, []);
+                    await job.save(job.log, [], stretch);
                     await ScribeAdoption.report(job, { pass: passes.Story, first, last }, 0, [], []);
                     continue;
                 }

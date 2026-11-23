@@ -379,7 +379,7 @@ function standIns(timers) {
          * @return {Promise<object>}
          */
         open(options) {
-            const record = { roomId: options.roomId, options, ticks: [], closes: 0, claimed: null, finish: null, handle: null, phase: 'Idle' };
+            const record = { roomId: options.roomId, options, ticks: [], observations: [], closes: 0, claimed: null, finish: null, handle: null, phase: 'Idle' };
             record.claimed = typeof options.claim === 'function' ? options.claim() : null;
             world.order.push(`keeper ${options.roomId}`);
             world.keepers.push(record);
@@ -390,6 +390,17 @@ function standIns(timers) {
                  */
                 view: () => ({ phase: record.phase, reader: record.reader, stop: record.stop }),
                 rekey: () => { record.rekeys = (record.rekeys ?? 0) + 1; },
+                /**
+                 * @param {object} page
+                 * @return {boolean}
+                 */
+                observe: (page) => {
+                    if (!record.reader || record.refuseObservation) {
+                        return false;
+                    }
+                    record.observations.push(page);
+                    return true;
+                },
 
                 /**
                  * @return {Promise<void>}
@@ -710,6 +721,7 @@ function frameIn(run, choices = {}) {
                 target.failing--;
                 throw new Error(`The object could not be cloned: ${message.token}`);
             }
+            target.observationToken = message.observationToken;
             target.posted.push({
                 kind: message.kind,
                 seq: message.seq,
@@ -1173,7 +1185,7 @@ test('the watcher is installed before anything else', async () => {
     assert.equal(reading.values[1].headers.Authorization, TOKEN);
     const renewed = 'Bearer RENEWEDRENEWEDRENEWED';
     await run.page.fetch(`${API}/v1/users/me`, { headers: { Authorization: renewed } });
-    await zeta.newest();
+    await zeta.history();
     assert.equal(exported, 2);
     assert.equal(run.page.fetchCalls.length, 4);
     assert.equal(run.page.fetchCalls[3].receiver === run.page, true);
@@ -1184,8 +1196,8 @@ test('the watcher is installed before anything else', async () => {
     await settle();
     await plain.page.fetch(`${API}/v1/users/me`, { headers: { Authorization: TOKEN } });
     plain.page.answer = () => Promise.resolve(FakeZeta.page([FakeZeta.message('m1', FakeZeta.time(1))], null));
-    const newest = await plain.world.keepers[0].options.zeta.newest();
-    assert.equal(newest.messages.length, 1);
+    const initial = await plain.world.keepers[0].options.zeta.history();
+    assert.equal(initial.messages.length, 1);
     assert.equal(plain.page.fetchCalls.length, 2);
     assert.equal(plain.page.fetchCalls[1].receiver === plain.page, true);
     assert.equal(plain.page.fetchCalls[1].values[1].headers.Authorization, TOKEN);
@@ -1425,7 +1437,7 @@ test('queued key notices reread once per value across navigation, sleep, and sto
     const storage = run.storage;
     const first = run.world.panels[0];
     const baseline = first.options.keyVersion();
-    assert.equal(storage.listeners.size, 1);
+    assert.deepEqual([...storage.listeners.values()].map((entry) => entry.name), ['scribe:key', 'scribe:observations:harbour']);
     storage.queued = [];
     ScribeStore.setKey(storage, 'test-first');
     ScribeStore.setKey(storage, 'test-second');
@@ -1444,7 +1456,7 @@ test('queued key notices reread once per value across navigation, sleep, and sto
     go(run, '/rooms/quay');
     await pass(run, 1000);
     const second = run.world.panels.at(-1);
-    assert.equal(storage.listeners.size, 1);
+    assert.deepEqual([...storage.listeners.values()].map((entry) => entry.name), ['scribe:key', 'scribe:observations:quay']);
     ScribeStore.setKey(storage, 'test-third');
     storage.queued[0]();
     assert.equal(second.keyChanges, 1);
@@ -1474,7 +1486,7 @@ test('queued key notices reread once per value across navigation, sleep, and sto
     assert.equal(second.keyChanges, 3);
     start(run);
     await settle();
-    assert.equal(storage.listeners.size, 1);
+    assert.equal([...storage.listeners.values()].filter((entry) => entry.name === 'scribe:key').length, 1);
     assert.equal(run.sent.calls.length, 1);
     run.boot.stop();
 });
@@ -1762,19 +1774,15 @@ test('ticks come on time and not too often', async () => {
     await pass(run, 3000);
     await traffic(run);
     await pass(run, 15000);
-    assert.deepEqual(keeper.ticks.slice(4), [83000, 88000, 98000]);
+    assert.deepEqual(keeper.ticks.slice(4), []);
     await pass(run, 6000);
-    assert.deepEqual(keeper.ticks.slice(7), [101000]);
-    const base = run.timers.now() - START;
+    assert.deepEqual(keeper.ticks.slice(4), [100000]);
     for (let count = 0; count < 3; count++) {
         await traffic(run);
         await pass(run, 400);
     }
     await pass(run, 20800);
-    assert.deepEqual(
-        keeper.ticks.slice(8).map((time) => time - base),
-        [0, 3000, 6000, 15000, 18000],
-    );
+    assert.deepEqual(keeper.ticks.slice(5), [120000]);
     run.world.tickFailure = 'The newest page could not be read';
     await pass(run, 15000);
     assert.equal(keeper.ticks.at(-1), 140000);
@@ -1782,7 +1790,7 @@ test('ticks come on time and not too often', async () => {
     run.world.tickFailure = null;
     await pass(run, 20000);
     assert.equal(keeper.ticks.at(-1), 160000);
-    assert.equal(keeper.ticks.length, 15);
+    assert.equal(keeper.ticks.length, 8);
     assert.equal(run.lines.length, 1);
     run.boot.stop();
 });
@@ -2493,7 +2501,7 @@ test('a hidden tab keeps its chat', async () => {
         assert.equal(locks.held(LOCK), true, `minute ${minute}`);
     }
     assert.equal(keeper.options.claim(), true);
-    assert.equal(keeper.ticks.length > 40, true, `${keeper.ticks.length} ticks`);
+    assert.equal(keeper.ticks.length, 30);
     assert.equal(locks.waiting(LOCK), 0);
     assert.deepEqual(locks.made, [`${LOCK} if available`]);
     run.boot.stop();
@@ -2669,7 +2677,7 @@ test('a waiting lock request is withdrawn', async () => {
     run.boot.stop();
 });
 
-test('only this chat\'s traffic asks for ticks', async () => {
+test('neither this room nor another room schedules history polling after native traffic', async () => {
     const run = harness();
     start(run);
     await settle();
@@ -2682,13 +2690,137 @@ test('only this chat\'s traffic asks for ticks', async () => {
     await pass(run, 4000);
     await traffic(run);
     await pass(run, 20000);
-    assert.deepEqual(keeper.ticks.slice(3), [64000, 69000, 79000, 82000]);
+    assert.deepEqual(keeper.ticks.slice(3), [80000]);
     await traffic(run, `${API}/v1/rooms/quay/messages`);
     await pass(run, 20000);
-    assert.deepEqual(keeper.ticks.slice(7), [100000]);
+    assert.deepEqual(keeper.ticks.slice(4), [100000]);
     await traffic(run, `${API}/v1/rooms/harbourside/messages`);
     await pass(run, 20000);
-    assert.deepEqual(keeper.ticks.slice(7), [100000, 120000]);
+    assert.deepEqual(keeper.ticks.slice(4), [100000, 120000]);
+    run.boot.stop();
+});
+
+test('native edited messages arriving before Keeper opens survive startup and a late old-room response is ignored', async () => {
+    const run = harness();
+    run.world.plans.push(HOLD);
+    start(run);
+    await settle();
+    const row = { id: 'same-id', roomId: 'harbour', sender: { type: 'CHARACTER' }, messageTime: FakeZeta.time(1),
+        contents: [{ type: 'TEXT', text: 'The revised reply.' }], edited: true };
+    const reply = () => {
+        const response = Response.json(row);
+        Object.defineProperty(response, 'url', { value: MESSAGES + '/same-id' });
+        return response;
+    };
+    run.page.answer = async () => reply();
+    const host = await run.page.fetch(MESSAGES + '/same-id');
+    assert.equal((await host.json()).contents[0].text, 'The revised reply.');
+    await settle();
+    const first = run.world.keepers[0];
+    first.finish();
+    await settle();
+    assert.deepEqual(Array.from(first.observations, (page) => page.messages[0].id), ['same-id']);
+    let release;
+    run.page.answer = () => new Promise((resolve) => { release = resolve; });
+    const old = run.page.fetch(MESSAGES + '/same-id');
+    go(run, '/rooms/ford');
+    await pass(run, 1000);
+    go(run, '/rooms/harbour');
+    await pass(run, 1000);
+    release(reply());
+    await old;
+    await settle();
+    assert.equal(first.observations.length, 1);
+    assert.equal(run.world.keepers.at(-1).observations.length, 0);
+    assert.equal(run.page.fetchCalls.length, 2);
+    run.boot.stop();
+});
+
+test('only the current chat frame observation reaches its keeper', async () => {
+    const { run, chat, keeper } = await bridged();
+    run.environment.random = () => 'observation-token-for-this-room';
+    await deliver(run, readyFrom(chat.window));
+    const page = { observedAt: START, head: false, complete: false, messages: [{ id: 'id', roomId: 'harbour',
+        messageTime: FakeZeta.time(1), sender: { type: 'CHARACTER' }, contents: [{ type: 'TEXT', text: 'New reply.' }] }] };
+    const event = { origin: PINGPONG, source: chat.window, data: { zetaScribe: 1, kind: ScribeFrame.Bridge.Kind.Messages,
+        seq: chat.window.posted.at(-1).seq, token: chat.window.observationToken, room: 'harbour', page } };
+    await deliver(run, { ...event, data: { ...event.data, token: BRIDGE } });
+    await deliver(run, { ...event, data: { ...event.data, room: 'ford' } });
+    await deliver(run, { ...event, isTrusted: false });
+    assert.equal(keeper.observations.length, 0);
+    await deliver(run, event);
+    assert.equal(keeper.observations.length, 1);
+    assert.equal(keeper.observations[0].messages[0].contents[0].text, 'New reply.');
+    go(run, '/rooms/ford');
+    await pass(run, 1000);
+    await deliver(run, event);
+    assert.equal(run.world.keepers.at(-1).observations.length, 0);
+    run.boot.stop();
+});
+
+test('a watching tab transfers canonical edits privately to its reader, including a change awaiting handoff', async () => {
+    const locks = new FakeLocks();
+    const first = harness({ locks });
+    const second = harness({ locks, storage: first.storage, timers: first.timers, world: first.world, tabId: 'tab-two' });
+    start(first);
+    await settle();
+    start(second);
+    await settle();
+    const [reader, watcher] = first.world.keepers;
+    assert.equal(reader.reader, true);
+    assert.equal(watcher.reader, false);
+    const route = MESSAGES + '/edited';
+    const edit = async (wording) => {
+        const message = { id: 'edited', roomId: 'harbour', sender: { type: 'CHARACTER' }, messageTime: FakeZeta.time(1),
+            contents: [{ type: 'TEXT', text: wording }], edited: true };
+        second.page.answer = () => {
+            const response = Response.json(message);
+            Object.defineProperty(response, 'url', { value: route });
+            return Promise.resolve(response);
+        };
+        await second.page.fetch(route);
+        await settle();
+    };
+    const pending = () => first.storage.list().filter((name) => name.startsWith('scribe:observations:harbour:'));
+    reader.stop = { reason: 'Paused' };
+    await edit('The corrected passage.');
+    assert.equal(reader.observations[0].messages[0].contents[0].text, 'The corrected passage.');
+    assert.equal(watcher.observations.length, 0);
+    assert.equal(pending().length, 0);
+    reader.refuseObservation = true;
+    await edit('The regenerated passage.');
+    assert.equal(pending().length, 1);
+    assert.equal(reader.observations.length, 1);
+    first.boot.stop();
+    watcher.reader = true;
+    watcher.options.notify({ kind: 'Changed' });
+    assert.equal(watcher.observations[0].messages[0].contents[0].text, 'The regenerated passage.');
+    assert.equal(pending().length, 0);
+    await pass(second, 40000);
+    assert.equal(watcher.observations.length, 1);
+    assert.equal(first.page.fetchCalls.length, 0);
+    assert.equal(second.page.fetchCalls.length, 2);
+    assert.equal(first.sent.calls.length + second.sent.calls.length, 0);
+    second.boot.stop();
+});
+
+test('an owned history request is aborted on its native fetch and paused dispatch remains blocked', async () => {
+    const run = harness({ clone: (value) => structuredClone(value) });
+    start(run);
+    await settle();
+    await run.page.fetch(API + '/v1/users/me', { headers: { Authorization: TOKEN } });
+    run.page.answer = () => new Promise(() => {});
+    const keeper = run.world.keepers[0];
+    const zeta = keeper.options.zeta;
+    const pending = failureOf(zeta.history());
+    await settle();
+    const signal = run.page.fetchCalls.at(-1).values[1].signal;
+    keeper.stop = { reason: 'Paused' };
+    zeta.abort();
+    assert.equal(signal.aborted, true);
+    assert.equal((await pending).name, 'AbortError');
+    assert.equal((await failureOf(zeta.history())).message, ScribeBoot.Settings.Messages.Paused);
+    assert.equal(run.page.fetchCalls.length, 2);
     run.boot.stop();
 });
 
@@ -2735,7 +2867,7 @@ test('a closed session\'s waits end', async () => {
     assert.equal(await stateOf(pending), 'settled');
     assert.equal(await stateOf(walk), 'settled');
     assert.equal((await pending).message, 'The chat has been left');
-    assert.equal((await walk).message, 'Could not pause between requests');
+    assert.equal((await walk).name, 'AbortError');
     assert.equal(run.sent.calls.length, 1);
     run.boot.stop();
 });
@@ -3193,7 +3325,7 @@ test('a sent under the last arm tells the live part', async () => {
     assert.equal(chat.window.posted.length, 2);
     assert.equal(chat.window.posted[1].seq, 2);
     await pass(run, 16000);
-    assert.deepEqual(keeper.ticks, [0, 5000, 15000]);
+    assert.deepEqual(keeper.ticks, []);
     await deliver(run, sentFrom(chat.window, 2, false, false));
     assert.deepEqual(live.went, ['Remember the mill. | null', 'null | null']);
     assert.equal(chat.window.posted.length, 3);
@@ -3215,8 +3347,8 @@ test('a sent under an earlier kept arm still tells the live part', async () => {
     const reportTo = async (target, event) => {
         const posted = target.window.posted.length;
         await deliver(run, event);
-        assert.equal(run.timers.delays.includes(5000), true);
-        assert.equal(run.timers.delays.includes(15000), true);
+        assert.equal(run.timers.delays.includes(5000), false);
+        assert.equal(run.timers.delays.includes(15000), false);
         assert.equal(target.window.posted.length, posted + 1);
         await pass(run, 20000);
     };
@@ -3617,8 +3749,8 @@ test('one room\'s sent never reaches another room', async () => {
     await deliver(run, sentFrom(chat.window, harbourSeq, true, false));
     assert.deepEqual(ford.went, []);
     assert.deepEqual(live.went, []);
-    assert.equal(run.timers.delays.includes(5000), true);
-    assert.equal(run.timers.delays.includes(15000), true);
+    assert.equal(run.timers.delays.includes(5000), false);
+    assert.equal(run.timers.delays.includes(15000), false);
     await pass(run, 1000);
     await deliver(run, sentFrom(chat.window, 2, false, false));
     assert.deepEqual(ford.went, []);
@@ -3719,7 +3851,7 @@ test('a flood is ignored', async () => {
     assert.equal(chat.window.posted.length, 11);
     assert.equal(run.timers.count <= 32, true, `${run.timers.count} timers`);
     await pass(run, 10000);
-    assert.deepEqual(keeper.ticks, [0, 3000, 6000]);
+    assert.deepEqual(keeper.ticks, []);
     await deliver(run, sentFrom(chat.window, chat.window.posted.at(-1).seq, true, false));
     assert.equal(live.went.length, 10);
     await pass(run, 1);

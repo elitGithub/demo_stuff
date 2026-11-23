@@ -14,6 +14,9 @@ export default class WholeWindow extends FakeSendWindow {
         this.label = options.label ?? 'window';
         this.clock = options.timers;
         this.site = site;
+        const elapsed = () => site.clock.now() + (site.clockAdjustment ?? 0);
+        const timeOrigin = elapsed();
+        this.performance = { timeOrigin, now: () => elapsed() - timeOrigin };
         this.innerWidth = options.width ?? WholeWindow.Width;
         this.AbortController = AbortController;
         const origin = options.origin ?? WholeWindow.Origin;

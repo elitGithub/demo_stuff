@@ -121,7 +121,21 @@ export default class WholeSite {
             }
             return FakeZeta.reply(200, '{}');
         }
-        return kept.zeta.respond(receiver, url, options);
+        const address = new URL(url);
+        const single = /^\/v1\/rooms\/[^/]+\/messages\/([^/]+)$/.exec(address.pathname);
+        if (single && options?.own && headers.Authorization === WholeSite.Token) {
+            const message = kept.builder.messages.find((row) => row.id === decodeURIComponent(single[1]));
+            const native = Response.json(message ?? {}, { status: message ? 200 : 404 });
+            Object.defineProperty(native, 'url', { value: String(url) });
+            return native;
+        }
+        const response = await kept.zeta.respond(receiver, url, options);
+        if (options?.own) {
+            const native = new Response(await response.text(), { status: response.status, headers: { 'Content-Type': 'application/json' } });
+            Object.defineProperty(native, 'url', { value: String(url) });
+            return native;
+        }
+        return response;
     }
 
     /**

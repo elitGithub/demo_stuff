@@ -7,7 +7,6 @@ const ScribeBoot = Object.freeze({
 
     Settings: Object.freeze({
         TickMs: 20000,
-        AfterTraffic: Object.freeze([0, 5000, 15000]),
         TickGapMs: 3000,
         RouteMs: 1000,
         RetryMs: 10000,
@@ -60,7 +59,6 @@ const ScribeBoot = Object.freeze({
         ResponseType: 'text',
         Redirect: 'error',
         PathStart: '/',
-        RoomsPath: '/v1/rooms/',
         Mark: 'data-zeta-scribe',
         Mask: '[hidden]',
         KeptTokens: 5,
@@ -984,29 +982,6 @@ const ScribeBoot = Object.freeze({
     },
 
     /**
-     * @param {object} session
-     * @return {void}
-     */
-    stir(session) {
-        if (!session.ticking) {
-            return;
-        }
-        for (const delay of ScribeBoot.Settings.AfterTraffic) {
-            ScribeBoot.later(
-                session,
-                delay,
-                /**
-                 * @return {void}
-                 */
-                () => {
-                    ScribeBoot.askTick(session);
-                },
-                null,
-            );
-        }
-    },
-
-    /**
      * @param {object} boot
      * @return {object[]}
      */
@@ -1170,11 +1145,14 @@ const ScribeBoot = Object.freeze({
         const settings = ScribeBoot.Settings;
         const bridge = ScribeFrame.Bridge;
         const seq = boot.seq + 1;
+        const session = boot.session && !boot.session.closed ? boot.session : null;
+        const observationToken = session === null ? null : entry.last?.session === session
+            ? entry.last.observationToken : boot.environment.random();
         const message = {
             [bridge.TagName]: bridge.Tag,
             kind: bridge.Kind.Arm,
             seq,
-            ...(boot.session ? { room: boot.session.roomId } : {}),
+            ...(session ? { room: session.roomId, observationToken } : {}),
             token: boot.bridge,
             ready: lines.ready,
             ...(lines.manual ? { manual: true } : {}),
@@ -1198,9 +1176,9 @@ const ScribeBoot = Object.freeze({
         }
         entry.failed = false;
         boot.seq = seq;
-        const session = boot.session !== null && !boot.session.closed ? boot.session : null;
         const arm = Object.freeze({
             seq,
+            observationToken,
             ready: lines.ready,
             manual: lines.manual === true,
             onlyExisting: lines.onlyExisting === true,
@@ -1359,11 +1337,95 @@ const ScribeBoot = Object.freeze({
                     }
                 } else {
                     ScribeBoot.attempt(boot, warning, () => live.went(attempted));
+                    if (attempted.crowded) {
+                        ScribeBoot.redraw(session);
+                    }
                 }
             }
         }
-        if (report.kind === kind.Sent) {
-            ScribeBoot.stir(session);
+    },
+
+    /**
+     * @param {object} boot
+     * @param {string} room
+     * @return {Function|null}
+     */
+    nativeMessages(boot, room) {
+        if (boot.stopped || ZetaSource.room(boot.environment.pageWindow.location.pathname) !== room) {
+            return null;
+        }
+        if (boot.intake?.room !== room) {
+            ScribeBoot.follow(boot);
+        }
+        const intake = boot.intake;
+        if (intake?.room !== room) {
+            return null;
+        }
+        return (page) => {
+            if (boot.stopped || intake !== boot.intake || ZetaSource.room(boot.environment.pageWindow.location.pathname) !== room) {
+                return;
+            }
+            const session = boot.session;
+            if (session?.keeper && ScribeBoot.currentRoom(session) && session.keeper.observe(page)) {
+                return;
+            }
+            const key = intake.signal + ':' + boot.environment.tabId + ':' + ++boot.relaySequence;
+            intake.pages.push({ key, page });
+            ScribeBoot.relay(boot, intake);
+        };
+    },
+
+    /**
+     * @param {object} boot
+     * @param {object} intake
+     * @return {void}
+     */
+    relay(boot, intake) {
+        if (!intake || boot.stopped || intake !== boot.intake || intake.relaying) {
+            return;
+        }
+        const storage = boot.environment.storage;
+        intake.relaying = true;
+        try {
+            while (intake.pages.length) {
+                const { key, page } = intake.pages[0];
+                const text = JSON.stringify(page);
+                storage.set(key, text);
+                if (storage.get(key, null) !== text) {
+                    throw new Error('The observed change could not be saved.');
+                }
+                storage.set(intake.signal, key);
+                intake.pages.shift();
+            }
+            const session = boot.session;
+            if (!session?.keeper || !ScribeBoot.currentRoom(session) || !session.keeper.view().reader) {
+                intake.reader = false;
+                return;
+            }
+            intake.reader = true;
+            const prefix = intake.signal + ':';
+            const records = [];
+            for (const key of storage.list()) {
+                if (key.startsWith(prefix)) {
+                    const text = storage.get(key, null);
+                    if (typeof text === 'string') {
+                        const page = ZetaSource.quietly(null, JSON.parse, text);
+                        if (ZetaSource.validPage(session.roomId, page)) {
+                            records.push({ key, page });
+                        }
+                    }
+                }
+            }
+            records.sort((left, right) => left.page.observedAt - right.page.observedAt);
+            for (const { key, page } of records) {
+                if (session.keeper.observe(page)) {
+                    storage.remove(key);
+                }
+            }
+        } catch {
+            ScribeBoot.say(boot, 'Scribe could not transfer an observed chat change between tabs.');
+        } finally {
+            intake.relaying = false;
         }
     },
 
@@ -1418,6 +1480,15 @@ const ScribeBoot = Object.freeze({
             }
             const entry = ScribeBoot.remember(boot, source);
             if (entry === null) {
+                return;
+            }
+            if (report.kind === bridge.Kind.Messages) {
+                const session = boot.session;
+                if (session && entry.last?.session === session && report.room === session.roomId &&
+                    entry.scope !== null && report.seq >= entry.scope && report.seq <= entry.last.seq &&
+                    report.token === entry.last.observationToken && ScribeBoot.usable(report.token)) {
+                    ScribeBoot.nativeMessages(boot, report.room)?.(report.page);
+                }
                 return;
             }
             if (report.kind === bridge.Kind.Activity) {
@@ -1517,30 +1588,11 @@ const ScribeBoot = Object.freeze({
 
     /**
      * @param {object} session
-     * @param {*} path
-     * @return {boolean}
-     */
-    ours(session, path) {
-        const settings = ScribeBoot.Settings;
-        if (typeof path !== settings.StringType || !path.startsWith(settings.RoomsPath)) {
-            return false;
-        }
-        const segment = path.slice(settings.RoomsPath.length).split(settings.PathStart)[settings.FirstEntry];
-        let roomId = null;
-        try {
-            roomId = decodeURIComponent(segment);
-        } catch {
-            roomId = null;
-        }
-        return roomId === session.roomId;
-    },
-
-    /**
-     * @param {object} session
      * @return {void}
      */
     tick(session) {
         const keeper = session.keeper;
+        ScribeBoot.relay(session.boot, session.boot.intake);
         session.gapping = true;
         session.owed = false;
         ScribeBoot.later(
@@ -1559,7 +1611,11 @@ const ScribeBoot = Object.freeze({
         );
         ScribeBoot.contest(session);
         ScribeBoot.arm(session.boot, []);
-        if (session.live?.refreshWatcher?.()) {
+        const keyRecoveryProblem = session.keyRecoveryProblem;
+        if (session.keyPending) {
+            ScribeBoot.recoverKey(session);
+        }
+        if (session.live?.refreshWatcher?.() || keyRecoveryProblem !== session.keyRecoveryProblem) {
             ScribeBoot.redraw(session);
         }
         const cloud = session.cloud;
@@ -1947,6 +2003,8 @@ const ScribeBoot = Object.freeze({
         const timers = boot.environment.timers;
         session.closed = true;
         session.ticking = false;
+        session.historyRequest?.abort();
+        session.stopRelay?.();
         if (session.interval !== null) {
             timers.clearInterval(session.interval);
             session.interval = null;
@@ -2012,8 +2070,17 @@ const ScribeBoot = Object.freeze({
              * @param {object} init
              * @return {Promise<object>}
              */
-            const fetch = (url, init) =>
-                boot.pageFetch.call(environment.pageWindow, url, environment.clone === null ? init : environment.clone(init));
+            const fetch = (url, init) => {
+                if (environment.clone === null) {
+                    return boot.pageFetch.call(environment.pageWindow, url, init);
+                }
+                const { signal, ...fields } = init;
+                const pageInit = environment.clone(fields);
+                if (signal) {
+                    pageInit.signal = signal;
+                }
+                return boot.pageFetch.call(environment.pageWindow, url, pageInit);
+            };
 
             /**
              * @param {number} milliseconds
@@ -2076,8 +2143,6 @@ const ScribeBoot = Object.freeze({
                     );
                 },
             });
-            const historyIndex = { locations: new Map(), boundaries: new Map() };
-            const pagesKey = ScribeStore.name(ScribeStore.Settings.Types.HistoryPages, ScribeStore.room(session.roomId));
             const options = {
                 storage: environment.storage,
                 roomId: session.roomId,
@@ -2085,42 +2150,34 @@ const ScribeBoot = Object.freeze({
                 zeta: Object.freeze({
                     /**
                      * @param {(count: number) => void} onPage
-                     * @param {Function|null} allowExpensive
-                     * @param {object[]|null} saved
-                     * @param {object|null} firstPage
                      * @return {Promise<object>}
+                     * @throws {Error}
                      */
-                    history: (onPage, allowExpensive = null, saved = null, firstPage = null) =>
-                        ZetaSource.history({ fetch, token: ScribeBoot.token(boot), roomId: session.roomId, pause, onPage,
-                            index: historyIndex, allowExpensive, saved, firstPage,
-                            hints: saved && ZetaSource.quietly(null, () => environment.storage.get(pagesKey, null)),
-                            remember: (hints) => environment.storage.set(pagesKey, hints) }),
+                    history: async (onPage) => {
+                        if (!ScribeBoot.currentRoom(session)) {
+                            throw new Error(messages.Left);
+                        }
+                        if (session.keeper?.view().stop?.reason === ScribeAdoption.Stop.Paused) {
+                            throw new Error(messages.Paused);
+                        }
+                        const controller = new environment.pageWindow.AbortController();
+                        session.historyRequest = controller;
+                        try {
+                            return await ZetaSource.history({
+                                fetch, token: ScribeBoot.token(boot), roomId: session.roomId, onPage,
+                                signal: controller.signal, pause: (ms) => ScribeBoot.pause(session, ms, controller.signal),
+                            });
+                        } finally {
+                            if (session.historyRequest === controller) {
+                                session.historyRequest = null;
+                            }
+                        }
+                    },
 
                     /**
-                     * @param {string|null} through
-                     * @param {readonly string[]} required
-                     * @param {readonly object[]} known
-                     * @param {object|null} check
-                     * @param {boolean} savedRoom
-                     * @return {Promise<object>}
+                     * @return {void}
                      */
-                    newest: (through = null, required = [], known = [], check = null, savedRoom = false) =>
-                        ZetaSource.newest({ fetch, token: ScribeBoot.token(boot), roomId: session.roomId, pause, through,
-                            required, known, index: historyIndex, check, savedRoom }),
-
-                    /**
-                     * @param {string} id
-                     * @return {boolean}
-                     */
-                    distant: (id) => !historyIndex.completeHead && !historyIndex.headIds?.has(id) &&
-                        historyIndex.transport?.length - historyIndex.order?.get(id) >
-                        (historyIndex.cheapDepth ?? ZetaSource.Settings.CheapCheckPages * ZetaSource.Settings.PageSize),
-
-                    /**
-                     * @param {readonly string[]} ids
-                     * @return {boolean}
-                     */
-                    onHead: (ids) => historyIndex.completeHead || ids.every((id) => historyIndex.headIds?.has(id)),
+                    abort: () => session.historyRequest?.abort(),
                 }),
 
                 /**
@@ -2172,6 +2229,9 @@ const ScribeBoot = Object.freeze({
                         }
                     }
                     ScribeBoot.redraw(session);
+                    if (session.keeper && !boot.intake?.reader && session.keeper.view().reader && ScribeBoot.currentRoom(session)) {
+                        ScribeBoot.relay(boot, boot.intake);
+                    }
                     ScribeBoot.arm(boot, []);
                     ScribeBoot.sync(session);
                     if (session.wanted) {
@@ -2239,6 +2299,11 @@ const ScribeBoot = Object.freeze({
                 },
             });
             session.live = live;
+            if (ScribeBoot.currentRoom(session) && boot.intake?.room === session.roomId) {
+                const intake = boot.intake;
+                session.stopRelay = environment.storage.watch(intake.signal, () => ScribeBoot.relay(boot, intake));
+                ScribeBoot.relay(boot, intake);
+            }
             if (session.held !== null) {
                 const message = session.held.message;
                 session.held = null;
@@ -2374,10 +2439,14 @@ const ScribeBoot = Object.freeze({
         const environment = boot.environment;
         try {
             ScribeBoot.token(boot);
+            const roomId = ZetaSource.room(environment.pageWindow.location.pathname);
+            if (boot.intake?.room !== roomId) {
+                boot.intake = roomId === null ? null : { room: roomId, pages: [], reader: false, relaying: false,
+                    signal: ScribeStore.name('observations', ScribeStore.room(roomId)) };
+            }
             if (environment.document.body === null) {
                 return;
             }
-            const roomId = ZetaSource.room(environment.pageWindow.location.pathname);
             const current = boot.session;
             if ((current === null ? null : current.roomId) === roomId) {
                 if (current !== null) {
@@ -2412,6 +2481,7 @@ const ScribeBoot = Object.freeze({
                     reservedDelivery: null,
                     panel: null,
                     running: new Set(),
+                    historyRequest: null,
                     pauseEpoch: 0,
                     sender: null,
                     held: null,
@@ -2466,6 +2536,8 @@ const ScribeBoot = Object.freeze({
             stopped: false,
             request: null,
             session: null,
+            intake: null,
+            relaySequence: 0,
             route: null,
             retry: null,
             tokens: [],
@@ -2572,24 +2644,13 @@ const ScribeBoot = Object.freeze({
         );
         boot.request = ScribeBoot.request(environment.xmlHttpRequest);
         if (boot.watcher !== null) {
+            boot.watcher.onMessages((room) => ScribeBoot.nativeMessages(boot, room));
             boot.watcher.onStream?.((room, message) => ScribeBoot.observe(boot, room, message));
             boot.watcher.onPost((room) => {
                 const finish = ScribeBoot.observe(boot, room, null);
                 const receipt = boot.session?.sender?.posting(room);
                 return ScribeSender.observePost(receipt, finish);
             });
-            boot.watcher.onTraffic(
-                /**
-                 * @param {{ method: string, path: string }} traffic
-                 * @return {void}
-                 */
-                (traffic) => {
-                    const session = boot.session;
-                    if (session !== null && ScribeBoot.ours(session, traffic.path)) {
-                        ScribeBoot.stir(session);
-                    }
-                },
-            );
         }
         ScribeBoot.follow(boot);
         boot.route = environment.timers.setInterval(

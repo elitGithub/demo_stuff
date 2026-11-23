@@ -629,6 +629,7 @@ const ScribeLive = Object.freeze({
      */
     load(live, saved = undefined) {
         const settings = ScribeLive.Settings;
+        live.appliedAlerts = null;
         live.record = {
             now: null,
             ready: null,
@@ -812,9 +813,9 @@ const ScribeLive = Object.freeze({
             };
         }
         record.edition = Number.isSafeInteger(saved.edition) ? saved.edition : null;
-        record.retries = ScribeLive.retries(saved.retries);
+        record.retries = ScribeLive.retries(saved.retries).filter((entry) => entry.role === settings.Retried.Scene);
         const failing = ScribeLive.isObject(saved.failing) ? saved.failing : {};
-        for (const role of Object.values(settings.Retried)) {
+        for (const role of [settings.Retried.Scene]) {
             const failure = failing[role];
             if (ScribeLive.isText(failure) || (ScribeStore.localSource(failure?.source) && ScribeLive.isText(failure.reason))) {
                 record.failing[role] = failure;
@@ -1102,10 +1103,28 @@ const ScribeLive = Object.freeze({
             ScribeLive.changed(live);
         }
         try {
-            const kept = ScribeLive.pruned(record.findings, view.messages);
+            let kept = ScribeLive.pruned(record.findings, view.messages);
+            if (view.checkerAlerts?.length && Array.isArray(view.messages) && live.appliedAlerts !== view.checkerAlerts) {
+                const byId = new Map(view.messages.map((message) => [message.id, message]));
+                const byMessage = new Map();
+                for (const alert of view.checkerAlerts) {
+                    const message = byId.get(alert.message);
+                    if (message && alert.fingerprint === message.fingerprint) {
+                        if (!byMessage.has(message)) {
+                            byMessage.set(message, []);
+                        }
+                        byMessage.get(message).push(alert);
+                    }
+                }
+                for (const [message, findings] of byMessage) {
+                    kept = ScribeLive.merged(kept, record.dismissed, findings, message, false);
+                }
+                live.appliedAlerts = view.checkerAlerts;
+            }
             const notes = ScribeLive.standing(record.notes, view);
             ScribeLive.applyRulings(live, view, kept);
-            if (kept.length !== record.findings.length || notes.length !== record.notes.length || live.repairRulings) {
+            if (kept.length !== record.findings.length || kept.some((finding, index) => finding !== record.findings[index]) ||
+                notes.length !== record.notes.length || live.repairRulings) {
                 record.findings = kept;
                 record.notes = notes;
                 ScribeLive.save(live);
@@ -2184,14 +2203,10 @@ const ScribeLive = Object.freeze({
                           entry.revision === revision,
                   );
         const kinds = settings.Retried;
-        const asking = {
-            scene: again === null || again.role === kinds.Scene,
-            check: again === null || again.role === kinds.Check,
-        };
+        const asking = { scene: again === null || again.role === kinds.Scene };
         const failed = { scene: null, check: null, sceneRetryable: false, checkRetryable: false };
         let found = null;
-        let raised = null;
-        let checkerRows = null;
+        let raised = [];
         let notes = null;
         if (remembered === undefined) {
             let profile = null;
@@ -2230,48 +2245,6 @@ const ScribeLive = Object.freeze({
                     failed.sceneSource = sceneNoted.source;
                     failed.sceneKeyChanged = sceneNoted.keyChanged;
                     failed.sceneRetryable = sceneNoted.retryable;
-                }
-            }
-            if (asking.check) {
-                const pedantNoted = { failure: null, retryable: false };
-                try {
-                    const credentials = ScribeStore.diagnosticKeys(live.storage);
-                    const ask = ScribeLive.asker(live, roles.Pedant, pedantNoted);
-                    const reviewed = await ScribePedant.review({
-                        state: view.state,
-                        player: view.player,
-                        message,
-                        unread: view.unread,
-                        messages: view.messages,
-                        ask: async (system, input) => {
-                            const response = await ask(system, input);
-                            return typeof response?.text === 'string' ?
-                                { ...response, text: ScribeStore.redactor(live.storage, credentials)(response.text) } : response;
-                        },
-                        profile,
-                    });
-                    raised = reviewed.findings;
-                    notes = reviewed.notes;
-                    checkerRows = (reviewed.unfiled ?? []).map((line) => ({ id: message.id, fingerprint: message.fingerprint,
-                        position: message.position, statement: ScribeStore.diagnostic(live.storage, line) }));
-                    if (reviewed.modelReading) {
-                        checkerRows.push({ id: message.id, fingerprint: message.fingerprint, position: message.position,
-                            modelReading: true, statement: ScribeStore.diagnostic(live.storage, reviewed.modelReading) });
-                    }
-                } catch (error) {
-                    if (live.epoch === epoch && !pedantNoted.keyChanged) {
-                        live.problem = ScribeLive.words(error);
-                    }
-                    failed.check = pedantNoted.failure ?? ScribeStore.diagnostic(live.storage, ScribeLive.words(error));
-                    failed.checkSource = pedantNoted.source;
-                    failed.checkKeyChanged = pedantNoted.keyChanged;
-                    failed.checkRetryable = pedantNoted.retryable;
-                }
-                if (!ScribeLive.current(live, epoch)) {
-                    return;
-                }
-                if (!pedantNoted.keyChanged) {
-                    ScribeLive.report(live, pedantNoted);
                 }
             }
             if (ScribeLive.refusal(live) !== null) {
@@ -2334,15 +2307,10 @@ const ScribeLive = Object.freeze({
             remembered !== undefined,
         );
         ScribeLive.applyRulings(live, latest, record.findings);
-        if (checkerRows !== null) {
-            const prints = new Map((latest.messages ?? []).map((item) => [item.id, item.fingerprint]));
-            record.checkerRows = [...record.checkerRows.filter((row) =>
-                row.id !== message.id && prints.get(row.id) === row.fingerprint), ...checkerRows];
-        }
         if (notes !== null) {
             record.notes = ScribeLive.noted(ScribeLive.standing(record.notes, latest), notes, message);
         }
-        if (remembered === undefined && found !== null && raised !== null) {
+        if (remembered === undefined && found !== null) {
             const entry = {
                 id: message.id,
                 fingerprint: message.fingerprint,
@@ -2361,7 +2329,7 @@ const ScribeLive = Object.freeze({
                         status: statuses.Open,
                     }),
                 ),
-                notes: ScribeLive.stamped(notes, message),
+                notes: ScribeLive.stamped(notes ?? [], message),
             };
             record.checked = [
                 entry,
@@ -2408,7 +2376,7 @@ const ScribeLive = Object.freeze({
      * @param {object} live
      * @param {object} message
      * @param {object|null} again
-     * @param {{ scene: boolean, check: boolean }} asking
+     * @param {{ scene: boolean }} asking
      * @param {{ scene: string|null, check: string|null, sceneRetryable: boolean, checkRetryable: boolean }} failed
      * @return {void}
      */
@@ -2419,7 +2387,6 @@ const ScribeLive = Object.freeze({
         const moment = live.clock.now();
         const roles = [
             { role: kinds.Scene, asked: asking.scene, reason: failed.scene, retryable: failed.sceneRetryable, source: failed.sceneSource },
-            { role: kinds.Check, asked: asking.check, reason: failed.check, retryable: failed.checkRetryable, source: failed.checkSource },
         ];
         const added = [];
         for (const { role, asked, reason, retryable, source } of roles) {

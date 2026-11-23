@@ -82,6 +82,7 @@ export default class WholeTab {
         this.refusing = false;
         this.keys = [];
         this.sent = [];
+        this.showSentHead = true;
         this.refused = 0;
         this.made = 0;
         this.presses = [];
@@ -492,16 +493,33 @@ export default class WholeTab {
     }
 
     /**
-     * @param {string} text
+     * @param {string} id
+     * @param {WholeWindow} window
      * @return {Promise<object>}
      */
-    pagePost(text) {
-        return this.chatWindow.fetch(WholeSite.messagesOf(this.room()), {
+    pageMessage(id, window = this.window) {
+        return window.fetch(`${WholeSite.messagesOf(this.room())}/${encodeURIComponent(id)}`, {
+            headers: { Authorization: WholeSite.Token },
+            own: true,
+        });
+    }
+
+    /**
+     * @param {string} text
+     * @param {boolean} loadHead
+     * @return {Promise<object>}
+     */
+    async pagePost(text, loadHead = true) {
+        const response = await this.chatWindow.fetch(WholeSite.messagesOf(this.room()), {
             method: 'POST',
             headers: { Authorization: WholeSite.Token, 'Content-Type': 'application/json' },
             body: JSON.stringify({ text }),
             own: true,
         });
+        if (response?.ok && loadHead) {
+            await this.pageGet();
+        }
+        return response;
     }
 
     /**
@@ -509,11 +527,14 @@ export default class WholeTab {
      * @return {Promise<object>}
      */
     pageRegenerate(id) {
-        return this.chatWindow.fetch(`${WholeSite.messagesOf(this.room())}/${id}/regenerate`, {
+        return this.chatWindow.fetch(`${WholeSite.messagesOf(this.room())}/${id}/candidates/stream`, {
             method: 'POST',
             headers: { Authorization: WholeSite.Token, 'Content-Type': 'application/json' },
             body: '{}',
             own: true,
+        }).then(async () => {
+            await this.pageMessage(id, this.chatWindow);
+            return this.pageGet();
         });
     }
 
@@ -530,7 +551,7 @@ export default class WholeTab {
         }
         const text = this.state;
         this.sent.push(text);
-        this.pagePost(text);
+        this.pagePost(text, this.showSentHead);
         this.state = '';
         this.box.value = '';
     }

@@ -42,9 +42,9 @@ function sign(key, value) {
  */
 export function createTransport(config) {
   const host = `${config.account}.r2.cloudflarestorage.com`;
-  return (method, key, { body = '', match, absent, list = false } = {}) => {
+  return async (method, key, { body = '', match, absent, list = false, folders = false, timeoutMs = 15_000, bodyTimeoutMs, signal } = {}) => {
     const path = `/${config.bucket}${key ? `/${key}` : ''}`;
-    const query = list ? 'list-type=2&max-keys=1' : '';
+    const query = !list ? '' : folders ? 'delimiter=%2F&list-type=2&max-keys=2' : 'list-type=2&max-keys=1';
     const amzDate = new Date().toISOString().replace(/[:-]|\.\d{3}/g, '');
     const date = amzDate.slice(0, 8);
     const payloadHash = digest(body);
@@ -63,12 +63,27 @@ export function createTransport(config) {
     const signingKey = sign(sign(sign(sign(`AWS4${config.secret}`, date), 'auto'), 's3'), 'aws4_request');
     const signature = sign(signingKey, `AWS4-HMAC-SHA256\n${amzDate}\n${scope}\n${digest(canonical)}`).toString('hex');
     headers.authorization = `AWS4-HMAC-SHA256 Credential=${config.accessKey}/${scope}, SignedHeaders=${signedHeaders}, Signature=${signature}`;
-    return fetch(`https://${host}${path}${query ? `?${query}` : ''}`, {
+    const url = `https://${host}${path}${query ? `?${query}` : ''}`;
+    const request = {
       method,
       headers: method === 'GET' ? { ...headers, 'accept-encoding': 'identity' } : headers,
       body: method === 'PUT' ? body : undefined,
       redirect: 'error',
-      signal: AbortSignal.timeout(15_000),
-    });
+    };
+    const timeout = AbortSignal.timeout(timeoutMs);
+    if (bodyTimeoutMs === undefined) {
+      return fetch(url, { ...request, signal: signal === undefined ? timeout : AbortSignal.any([signal, timeout]) });
+    }
+    const phase = new AbortController();
+    const stopWaiting = () => phase.abort(timeout.reason);
+    timeout.addEventListener('abort', stopWaiting, { once: true });
+    try {
+      const response = await fetch(url, { ...request, signal: signal === undefined ? phase.signal : AbortSignal.any([signal, phase.signal]) });
+      const bodyTimeout = AbortSignal.timeout(bodyTimeoutMs(response.headers.get('content-length')));
+      bodyTimeout.addEventListener('abort', () => phase.abort(bodyTimeout.reason), { once: true });
+      return response;
+    } finally {
+      timeout.removeEventListener('abort', stopWaiting);
+    }
   };
 }

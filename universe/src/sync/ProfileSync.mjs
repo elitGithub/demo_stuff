@@ -12,7 +12,8 @@ import { SyncState } from './SyncState.mjs';
 
 const unsettledHash = Symbol('unsettled');
 const foreignBucket = 'The bucket holds other objects but no Universe save, so cloud sync is off.';
-const stoppedEarly = 'Stopped before the save finished.';
+const stoppedEarly = 'Stopped before the save finished';
+const stoppedPull = 'Stopped before the pull finished. The next start continues it.';
 
 /**
  * @param {Array<{path: string, hash: string, size?: number}>} files
@@ -51,6 +52,7 @@ export class ProfileSync {
   #disabled = null;
   #aside = null;
   #cleanAt = null;
+  #lastFailure = null;
   #status = {
     phase: SyncPhase.Pulling, progress: null, lastSavedAt: null, unsavedSince: null, error: null, conflictAt: null, conflictsFolder: null, reloadTabs: false,
   };
@@ -68,10 +70,11 @@ export class ProfileSync {
   }
 
   /**
+   * @param {{signal?: AbortSignal}} options
    * @returns {Promise<{changedFiles: number, offline: boolean, disabled: ?string}>}
    * @throws {Error}
    */
-  async start() {
+  async start({ signal } = {}) {
     try {
       this.#report({ phase: SyncPhase.Pulling });
       await fs.mkdir(this.#stateRoot, { recursive: true });
@@ -92,7 +95,7 @@ export class ProfileSync {
       const pending = state?.pending ? { revision: state.pending.id, files: new Map(Object.entries(state.pending.files)) } : null;
       const local = await ProfileScan.scan(this.#dataRoot, state?.files ?? {}, this.#clock);
       const emptyLocal = local.blocked === null && local.files.size === 0 && local.unsettled.length === 0;
-      const contact = { failedAt: null, giveUpMs: SyncSettings.StartContactMs };
+      const contact = { failedAt: null, giveUpMs: SyncSettings.StartContactMs, signal };
       let control;
       try {
         control = await this.#call((attempt) => this.#cloud.readControl(attempt), contact);
@@ -100,6 +103,9 @@ export class ProfileSync {
           return this.#disable(foreignBucket);
         }
       } catch (error) {
+        if (signal?.aborted) {
+          throw error;
+        }
         if (!Retry.retryable(error)) {
           return this.#disable(error.message);
         }
@@ -109,7 +115,7 @@ export class ProfileSync {
         this.#report({ phase: SyncPhase.Offline, error: `Cloud unreachable: not pulled. ${error.message}` });
         return { changedFiles: 0, offline: true, disabled: null };
       }
-      const watch = { failedAt: null, giveUpMs: SyncSettings.TransferGiveUpMs };
+      const watch = { failedAt: null, giveUpMs: SyncSettings.TransferGiveUpMs, signal };
       const head = control.head;
       if (pending !== null && head !== null && (head === pending.revision ||
           await this.#at(`cloud manifest ${head}`, () => this.#hasAncestor(head, pending.revision, watch)))) {
@@ -167,7 +173,7 @@ export class ProfileSync {
           }
           await fs.mkdir(dirname(destination), { recursive: true });
           await this.#place(destination, bytes);
-        }));
+        }), signal);
         this.#status.reloadTabs = true;
       }
       const files = new Map([...target].map(([path, entry]) => {
@@ -179,6 +185,10 @@ export class ProfileSync {
       this.#report({ phase: SyncPhase.Running, error: null });
       return { changedFiles: changed.size, offline: false, disabled: null };
     } catch (error) {
+      if (signal?.aborted) {
+        this.#report({ phase: SyncPhase.Stopped, progress: null, error: stoppedPull });
+        throw new Error(stoppedPull, { cause: error });
+      }
       this.#report({ phase: SyncPhase.Failed, progress: null, error: error.message });
       throw error;
     }
@@ -287,7 +297,8 @@ export class ProfileSync {
       });
     } catch (error) {
       const unsavedSince = this.#status.unsavedSince ?? this.#cleanAt;
-      const message = halt.signal.aborted ? stoppedEarly : `Not saved since ${unsavedSince}: ${error.message}`;
+      const stopped = this.#lastFailure === null ? `${stoppedEarly}.` : `${stoppedEarly}: ${this.#lastFailure}`;
+      const message = halt.signal.aborted ? stopped : `Not saved since ${unsavedSince}: ${error.message}`;
       return this.#ended(reason, resting, { outcome: SaveOutcome.Failed, at: this.#now(), error: message }, { unsavedSince });
     } finally {
       this.#running = null;
@@ -359,14 +370,19 @@ export class ProfileSync {
    * @returns {Promise<*>}
    * @throws {Error}
    */
-  #call(operation, watch, signal = watch.signal) {
-    return Retry.run(operation, {
+  async #call(operation, watch, signal = watch.signal) {
+    const value = await Retry.run(operation, {
       giveUpMs: watch.giveUpMs,
       clock: this.#clock,
       signal,
       window: watch,
-      onWait: ({ error, nextMs }) => this.#report({ error: `${error.message} Retrying in ${Math.ceil(nextMs / 1000)} s.` }),
+      onWait: ({ error, nextMs }) => {
+        this.#lastFailure = error.message;
+        this.#report({ error: `${error.message} Retrying in ${Math.ceil(nextMs / 1000)} s.` });
+      },
     });
+    this.#lastFailure = null;
+    return value;
   }
 
   /**

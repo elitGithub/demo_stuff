@@ -11,6 +11,12 @@ import { promisify } from 'node:util';
 
 const project = dirname(import.meta.dirname);
 const execute = promisify(execFile);
+const npmCli = process.env.npm_execpath ?? join(dirname(dirname(process.execPath)), 'lib/node_modules/npm/bin/npm-cli.js');
+const npmEnvironment = { ...process.env, npm_config_offline: 'true', npm_config_update_notifier: 'false' };
+const removedFiles = [
+  'child-preload.mjs', 'checkpoint-store.mjs', 'local-session.mjs', 'story-files.mjs', 'classes/capture-gate.mjs',
+  'classes/cloud-save.mjs', 'integration/browser-bridge.js', 'integration/pinned-hooks.mjs', 'integration/server-bridge.mjs',
+];
 
 /**
  * @param {string} directory
@@ -18,10 +24,24 @@ const execute = promisify(execFile);
  * @returns {Promise<object>}
  */
 function npm(directory, ...args) {
-  return execute(process.execPath, [process.env.npm_execpath, '--offline', '--ignore-scripts',
+  return execute(process.execPath, [npmCli, '--offline', '--ignore-scripts',
     '--no-audit', '--no-fund', '--cache', join(directory, 'local', 'npm-cache'), ...args], {
-    cwd: directory, timeout: 30_000,
+    cwd: directory, timeout: 30_000, env: npmEnvironment,
   });
+}
+
+/**
+ * @param {string} directory
+ * @param {string} signature
+ * @returns {Promise<void>}
+ */
+async function asOlderBuild(directory, signature) {
+  await writeFile(join(directory, '.universe-build'), signature);
+  await rm(join(directory, 'sync'), { recursive: true });
+  for (const file of removedFiles) {
+    await mkdir(dirname(join(directory, file)), { recursive: true });
+    await writeFile(join(directory, file), 'previous build file');
+  }
 }
 
 /**
@@ -111,7 +131,7 @@ test('a pre-extension backup survives missing sources and upgrades when its buil
   await rename(output, backup);
   await rm(join(backup, extension), { recursive: true });
   await rm(join(backup, dirname(extension), 'st-aspect-vocalia'), { recursive: true });
-  await writeFile(join(backup, '.universe-build'), 'Universe local build v1\n');
+  await asOlderBuild(backup, 'Universe local build v1\n');
   await rename(join(directory, 'src'), join(directory, 'unavailable-src'));
   await npm(directory, 'run', 'build', '--', '--if-missing');
   assert.equal(await readFile(join(output, '.universe-build'), 'utf8'), 'Universe local build v1\n');
@@ -129,7 +149,7 @@ test('the previous scenario-builder layout recovers without the Vocalia package 
   await npm(directory, 'run', 'build');
   await rename(output, backup);
   await rm(join(backup, extension), { recursive: true });
-  await writeFile(join(backup, '.universe-build'), 'Universe local build v2\n');
+  await asOlderBuild(backup, 'Universe local build v2\n');
   await rename(archive, archive + '.unavailable');
   await npm(directory, 'run', 'build', '--', '--if-missing');
   assert.equal(await readFile(join(output, '.universe-build'), 'utf8'), 'Universe local build v2\n');
@@ -138,21 +158,21 @@ test('the previous scenario-builder layout recovers without the Vocalia package 
   assert.equal(JSON.parse(await readFile(join(output, extension, 'manifest.json'))).version, '1.0.4');
 });
 
-test('the npm startup build step recovers a v3 backup and installs full-profile checkpoints when sources return', async context => {
+test('the npm startup build step recovers a v3 backup and installs the profile sync when sources return', async context => {
   const directory = await fixture(context);
   const output = join(directory, 'dist');
   const backup = join(directory, '.universe-build-previous');
   await npm(directory, 'run', 'build');
   await rename(output, backup);
-  await writeFile(join(backup, '.universe-build'), 'Universe local build v3\n');
+  await asOlderBuild(backup, 'Universe local build v3\n');
   await writeFile(join(backup, 'launcher.mjs'), 'previous v3 launcher');
   await rename(join(directory, 'src'), join(directory, 'unavailable-src'));
   await npm(directory, 'run', 'build', '--', '--if-missing');
   assert.equal(await readFile(join(output, 'launcher.mjs'), 'utf8'), 'previous v3 launcher');
   await rename(join(directory, 'unavailable-src'), join(directory, 'src'));
   await npm(directory, 'run', 'build', '--', '--if-missing');
-  assert.equal(await readFile(join(output, '.universe-build'), 'utf8'), 'Universe local build v5\n');
-  for (const file of ['launcher.mjs', 'checkpoint-store.mjs', 'story-files.mjs', 'integration/pinned-hooks.mjs']) {
+  assert.equal(await readFile(join(output, '.universe-build'), 'utf8'), 'Universe local build v6\n');
+  for (const file of ['launcher.mjs', 'child.mjs', 'sync/ProfileSync.mjs', 'sync/CloudStore.mjs']) {
     assert.deepEqual(await readFile(join(output, file)), await readFile(join(directory, 'src', file)));
   }
 });
@@ -163,7 +183,7 @@ test('wrapper startup build step recovers a v4 backup and upgrades its home page
   const backup = join(directory, '.universe-build-previous');
   await npm(directory, 'run', 'build');
   await rename(output, backup);
-  await writeFile(join(backup, '.universe-build'), 'Universe local build v4\n');
+  await asOlderBuild(backup, 'Universe local build v4\n');
   await rm(join(backup, 'wrapper-home.html'));
   await writeFile(join(backup, 'server.mjs'), 'previous v4 server');
   await rename(join(directory, 'src'), join(directory, 'unavailable-src'));
@@ -171,10 +191,34 @@ test('wrapper startup build step recovers a v4 backup and upgrades its home page
   assert.equal(await readFile(join(output, 'server.mjs'), 'utf8'), 'previous v4 server');
   await rename(join(directory, 'unavailable-src'), join(directory, 'src'));
   await npm(directory, 'run', 'build', '--', '--if-missing');
-  assert.equal(await readFile(join(output, '.universe-build'), 'utf8'), 'Universe local build v5\n');
+  assert.equal(await readFile(join(output, '.universe-build'), 'utf8'), 'Universe local build v6\n');
   for (const name of ['server.mjs', 'launcher.mjs', 'wrapper-home.html']) {
     assert.deepEqual(await readFile(join(output, name)), await readFile(join(directory, 'src', name)));
   }
+});
+
+test('a v5 checkpoint build runs while sources are missing and is replaced by v6 without any removed file', async context => {
+  const directory = await fixture(context);
+  const output = join(directory, 'dist');
+  const backup = join(directory, '.universe-build-previous');
+  await npm(directory, 'run', 'build');
+  await rename(output, backup);
+  await asOlderBuild(backup, 'Universe local build v5\n');
+  await rename(join(directory, 'src'), join(directory, 'unavailable-src'));
+  await npm(directory, 'run', 'build', '--', '--if-missing');
+  assert.equal(await readFile(join(output, '.universe-build'), 'utf8'), 'Universe local build v5\n');
+  assert.equal(await readFile(join(output, 'checkpoint-store.mjs'), 'utf8'), 'previous build file');
+  await rename(join(directory, 'unavailable-src'), join(directory, 'src'));
+  await npm(directory, 'run', 'build', '--', '--if-missing');
+  assert.equal(await readFile(join(output, '.universe-build'), 'utf8'), 'Universe local build v6\n');
+  const names = await readdir(output, { recursive: true });
+  for (const file of [...removedFiles, 'classes', 'integration']) {
+    assert.ok(!names.includes(file), `${file} must not survive in the v6 build`);
+  }
+  for (const file of ['server.mjs', 'launcher.mjs', 'child.mjs', 'r2.mjs', 'sync/ProfileSync.mjs', 'sync/SyncSettings.mjs']) {
+    assert.deepEqual(await readFile(join(output, file)), await readFile(join(directory, 'src', file)));
+  }
+  assert.deepEqual((await readdir(directory)).filter(name => name.startsWith('.universe-build')), ['.universe-build-owners']);
 });
 
 test('npm start prepares a missing build and shuts down using the project settings and bundled child', async context => {
@@ -188,20 +232,24 @@ test('npm start prepares a missing build and shuts down using the project settin
   const config = join(local, 'config.yaml');
   const data = join(local, 'data');
   await writeFile(config, JSON.stringify({ port }));
+  await mkdir(data);
   await mkdir(join(directory, 'node_modules/sillytavern'), { recursive: true });
   await writeFile(join(directory, 'node_modules/sillytavern/server.js'), 'process.exit(21)');
   const { stdout } = await npm(directory, 'start');
   assert.ok(stdout.includes(`http://127.0.0.1:${port}/`));
+  assert.ok(stdout.includes('[universe] Cloud save is not configured.'));
   const observed = JSON.parse(await readFile(join(data, 'observed.json')));
   assert.equal(observed.cwd, join(directory, 'dist/node_modules/sillytavern'));
   assert.equal(observed.config, config);
   assert.equal(observed.data, data);
-  assert.equal(observed.status.phase, 'running');
-  assert.equal(observed.status.syncBackend, 'local-only');
-  assert.equal((await stat(join(local, 'data.universe/owner-1/released'))).size, 0);
+  assert.equal(observed.status.phase, 'disabled');
+  assert.equal(observed.status.error, 'Cloud save is not configured.');
+  assert.equal(observed.status.ok, false);
+  await rm(join(data, 'observed.json'));
   await rename(join(directory, 'src'), join(directory, 'unavailable-src'));
   assert.ok((await npm(directory, 'start')).stdout.includes(`http://127.0.0.1:${port}/`));
-  assert.equal((await stat(join(local, 'data.universe/owner-2/released'))).size, 0);
+  assert.equal(JSON.parse(await readFile(join(data, 'observed.json'))).status.phase, 'disabled');
+  await assert.rejects(stat(join(local, 'data.universe')), { code: 'ENOENT' });
 });
 
 test('rebuilds only publish completed application files from locked inputs', async context => {
@@ -216,10 +264,10 @@ test('rebuilds only publish completed application files from locked inputs', asy
   await npm(directory, 'run', 'build');
   const names = await readdir(output, { recursive: true });
   assert.ok(names.includes('server.mjs'));
-  assert.ok(names.includes('classes/capture-gate.mjs'));
-  assert.ok(names.includes('integration/browser-bridge.js'));
+  assert.ok(names.includes('sync/ProfileSync.mjs'));
   assert.ok(names.includes('node_modules/sillytavern/node_modules/express/package.json'));
   assert.ok(!names.some(name => name.endsWith(privateFile) || ['.env', 'tests', 'local'].includes(name)));
+  assert.ok(!names.some(name => [...removedFiles, 'classes', 'integration'].includes(name)));
   const entry = join(output, 'server.mjs');
   const original = await readFile(entry, 'utf8');
   const updated = original + '\n';
@@ -229,10 +277,10 @@ test('rebuilds only publish completed application files from locked inputs', asy
   await npm(directory, 'run', 'build');
   assert.equal(await readFile(entry, 'utf8'), updated);
 
-  const bridge = join(output, 'integration/browser-bridge.js');
-  await rm(bridge);
+  const syncModule = join(output, 'sync/ProfileSync.mjs');
+  await rm(syncModule);
   await npm(directory, 'run', 'build', '--', '--if-missing');
-  assert.ok((await stat(bridge)).isFile());
+  assert.ok((await stat(syncModule)).isFile());
 
   const lockfile = join(directory, 'package-lock.json');
   const validLock = await readFile(lockfile);
@@ -261,6 +309,7 @@ test('npm start restores the single complete legacy backup and preserves ambiguo
   const previous = join(interrupted, 'previous');
   const output = join(directory, 'dist');
   await rename(output, previous);
+  await asOlderBuild(previous, 'Universe local build v1\n');
   await mkdir(join(directory, '.universe-build-lock'));
   await writeFile(join(interrupted, 'keep'), 'unrelated contents');
   await rename(join(directory, 'src'), join(directory, 'unavailable-src'));
@@ -302,8 +351,8 @@ test('a live publisher retains ownership and npm start recovers its exact previo
     };
     syncBuiltinESMExports();
   `);
-  const publishing = execute(process.execPath, [process.env.npm_execpath, '--offline', 'run', 'build'], {
-    cwd: directory, env: { ...process.env, NODE_OPTIONS: '--import=' + pathToFileURL(pauseHook).href }, timeout: 30_000,
+  const publishing = execute(process.execPath, [npmCli, '--offline', 'run', 'build'], {
+    cwd: directory, env: { ...npmEnvironment, NODE_OPTIONS: '--import=' + pathToFileURL(pauseHook).href }, timeout: 30_000,
   }).then(() => 0, error => error.code);
   let pid;
   try {

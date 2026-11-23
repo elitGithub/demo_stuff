@@ -1,15 +1,17 @@
 import { createServer } from 'node:http';
 import { randomUUID } from 'node:crypto';
-import { readFileSync } from 'node:fs';
+import { lstatSync, readFileSync, statSync } from 'node:fs';
 import { fileURLToPath } from 'node:url';
 import { resolve } from 'node:path';
 import { projectConfiguration, runLauncher } from './launcher.mjs';
-import { readRegular } from './story-files.mjs';
+import { SyncPhase } from './sync/SyncPhase.mjs';
 
 const host = '127.0.0.1';
 const absoluteTarget = /^https?:\/\/[^/?#@\\\s]+(\/status|\/save|\/)?(?:\?(?:[a-z0-9._~!$&'()*+,;=:@/?-]|%[a-f0-9]{2})*)?$/i;
 const home = readFileSync(new URL('./wrapper-home.html', import.meta.url), 'utf8');
-const saveStatuses = { saved: 200, unchanged: 200, pending: 202, unavailable: 503, failed: 503 };
+const admissionWindowMs = 10_000;
+const admissionLimit = 12;
+const stopSignals = Object.freeze(['SIGINT', 'SIGTERM', 'SIGHUP']);
 
 /**
  * @param {object} state
@@ -19,17 +21,26 @@ const saveStatuses = { saved: 200, unchanged: 200, pending: 202, unavailable: 50
  */
 export function createWrapperHandler(state, port, save) {
   const token = randomUUID();
-  const authorities = new Set([host, 'localhost'].map(name => new URL(`http://${name}:${port}`).host));
+  const authorities = new Set([host, 'localhost'].map((name) => new URL(`http://${name}:${port}`).host));
   const admissions = [];
-  let outstanding = 0;
-  return async (request, response) => {
+  return (request, response) => {
     const target = request.url;
     const absolute = absoluteTarget.exec(target);
     const pathname = absolute && URL.canParse(target) ? (absolute[1] ?? '/') : target.split('?', 1)[0];
+    /**
+     * @param {number} code
+     * @param {string} body
+     * @param {object} headers
+     * @returns {void}
+     */
     const send = (code, body = '', headers = {}) => response.writeHead(code, {
       'Content-Type': 'application/json; charset=utf-8', 'Content-Length': Buffer.byteLength(body),
       'Cache-Control': 'no-store', 'X-Content-Type-Options': 'nosniff', ...headers,
     }).end(request.method === 'HEAD' ? undefined : body);
+    /**
+     * @returns {string}
+     */
+    const status = () => JSON.stringify({ ...state, ok: state.phase === SyncPhase.Running });
     if (!['/', '/status', '/save'].includes(pathname)) {
       return send(404);
     }
@@ -37,22 +48,23 @@ export function createWrapperHandler(state, port, save) {
       return send(405, '', { Allow: pathname === '/save' ? 'POST' : 'GET, HEAD' });
     }
     const authority = request.headers.host;
-    const origin = 'http://' + authority;
+    const origin = `http://${authority}`;
     if (!authorities.has(authority) || (absolute && new URL(target).origin !== origin)) {
       return send(403);
     }
     if (pathname === '/status') {
-      return send(200, JSON.stringify({ ...state, ok: state.phase === 'running' || state.phase === 'standalone' }));
+      return send(200, status());
     }
     if (pathname === '/') {
       if (request.headers.origin !== undefined && request.headers.origin !== origin) {
         return send(403);
       }
       const nonce = randomUUID();
-      const localOnly = state.syncBackend === 'local-only';
+      const disabled = state.phase === SyncPhase.Disabled;
+      const message = disabled ? state.error.replace(/[&<>"']/g, (character) => `&#${character.codePointAt(0)};`) : '';
       const page = home.replaceAll('{{nonce}}', nonce).replace('{{token}}', token)
-        .replace('{{disabled}}', localOnly ? 'disabled' : '')
-        .replace('{{message}}', localOnly ? 'Cloud save is not configured.' : '');
+        .replace('{{disabled}}', disabled ? 'disabled' : '')
+        .replace('{{message}}', () => message);
       return send(200, page, {
         'Content-Type': 'text/html; charset=utf-8',
         'Content-Security-Policy': `default-src 'none'; script-src 'nonce-${nonce}'; style-src 'nonce-${nonce}'; connect-src 'self'; base-uri 'none'; form-action 'none'; frame-ancestors 'none'`,
@@ -66,71 +78,66 @@ export function createWrapperHandler(state, port, save) {
       return send(400);
     }
     const now = Date.now();
-    while (admissions.length && admissions[0] <= now - 10_000) {
+    while (admissions.length && admissions[0] <= now - admissionWindowMs) {
       admissions.shift();
     }
-    if (outstanding >= 8 || admissions.length >= 12) {
-      return send(429, JSON.stringify({ checkpoint: 'rate-limited' }), { 'Retry-After': '10' });
+    if (admissions.length >= admissionLimit) {
+      return send(429, status(), { 'Retry-After': String(admissionWindowMs / 1000) });
     }
     admissions.push(now);
-    if (state.syncBackend === 'local-only') {
-      return send(503, JSON.stringify({ checkpoint: 'local-only' }));
-    }
-    outstanding++;
-    let timeout;
-    try {
-      const deadline = new Promise(resolve => {
-        timeout = setTimeout(() => resolve({ checkpoint: 'pending' }), 60_000);
-      });
-      const outcome = await Promise.race([save(), deadline]);
-      return send(saveStatuses[outcome.checkpoint], JSON.stringify(outcome));
-    } catch {
-      return send(503, JSON.stringify({ checkpoint: 'failed' }));
-    } finally {
-      clearTimeout(timeout);
-      outstanding--;
-    }
+    const started = save();
+    return send(started === null ? 503 : 202, status());
   };
 }
 
 /**
  * @returns {Promise<void>}
+ * @throws {Error}
  */
 async function main() {
-  const settings = await readRegular(fileURLToPath(new URL('../.env', import.meta.url)));
-  const config = projectConfiguration(settings?.toString('utf8') ?? '', process.env);
-  const state = {
-    phase: 'starting',
-    syncBackend: config.credentials ? 'cloudflare-r2' : 'local-only',
-    pending: false,
-    lastSyncAt: null,
-    childPid: null,
-  };
+  const settingsPath = fileURLToPath(new URL('../.env', import.meta.url));
+  const unusable = `The Universe settings file ${settingsPath} must be a readable regular file.`;
+  let settings = '';
+  if (lstatSync(settingsPath, { throwIfNoEntry: false }) !== undefined) {
+    if (!statSync(settingsPath, { throwIfNoEntry: false })?.isFile()) {
+      throw new Error(unusable);
+    }
+    try {
+      settings = readFileSync(settingsPath, 'utf8');
+    } catch (error) {
+      throw new Error(`${unusable} ${error.message}`, { cause: error });
+    }
+  }
+  const config = projectConfiguration(settings, process.env);
+  const state = { phase: SyncPhase.Pulling };
   const stop = new AbortController();
+  /**
+   * @returns {void}
+   */
   const abort = () => stop.abort();
-  process.on('SIGINT', abort);
-  process.on('SIGTERM', abort);
-  let requestSave;
-  const server = createServer(createWrapperHandler(state, config.port,
-    () => requestSave ? requestSave() : { checkpoint: 'unavailable' }));
+  stopSignals.forEach((name) => process.on(name, abort));
+  let requestSave = null;
+  const server = createServer(createWrapperHandler(state, config.port, () => (requestSave === null ? null : requestSave())));
   try {
     await new Promise((listening, reject) => {
       server.once('error', reject);
       server.listen(config.port, host, listening);
     });
     console.log(`http://${host}:${config.port}/`);
-    await runLauncher(config, stop.signal, (next) => {
-      Object.assign(state, next);
-      if (next.phase === 'saved') {
-        console.log('[universe] Cloud story save confirmed.');
-      }
-    }, { onSaveReady(handler) { requestSave = handler; } });
+    await runLauncher(config, stop.signal, (next) => Object.assign(state, next), {
+      /**
+       * @param {?Function} handler
+       * @returns {void}
+       */
+      onSaveReady(handler) {
+        requestSave = handler;
+      },
+    });
   } finally {
     if (server.listening) {
       await new Promise((done) => server.close(done));
     }
-    process.off('SIGINT', abort);
-    process.off('SIGTERM', abort);
+    stopSignals.forEach((name) => process.off(name, abort));
   }
 }
 

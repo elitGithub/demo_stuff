@@ -13,34 +13,43 @@ const legacySignature = 'Universe local build v1\n';
 const scenarioBuilderSignature = 'Universe local build v2\n';
 const vocaliaSignature = 'Universe local build v3\n';
 const fullProfileSignature = 'Universe local build v4\n';
-const signature = 'Universe local build v5\n';
-const previousSources = [
+const checkpointSignature = 'Universe local build v5\n';
+const signature = 'Universe local build v6\n';
+const checkpointSources = [
   'server.mjs', 'launcher.mjs', 'child.mjs', 'child-preload.mjs', 'checkpoint-store.mjs', 'local-session.mjs',
   'r2.mjs', 'story-files.mjs', 'classes/capture-gate.mjs', 'classes/cloud-save.mjs',
   'integration/browser-bridge.js', 'integration/pinned-hooks.mjs', 'integration/server-bridge.mjs',
 ];
-const sources = [...previousSources, 'wrapper-home.html'];
+const sources = ['server.mjs', 'launcher.mjs', 'child.mjs', 'child-watchdog.mjs', 'r2.mjs', 'wrapper-home.html', ...[
+  'CloudStore.mjs', 'FileErrors.mjs', 'ProfileScan.mjs', 'ProfileSync.mjs', 'Retry.mjs', 'SaveOutcome.mjs', 'SaveReason.mjs',
+  'SyncPhase.mjs', 'SyncScope.mjs', 'SyncSettings.mjs', 'SyncState.mjs',
+].map(file => `sync/${file}`)];
 const runtime = 'node_modules/sillytavern';
-const legacyRequired = [...previousSources, ...[
+const runtimeFiles = [
   'package.json', 'server.js', 'src/server-main.js', 'public/index.html', 'public/script.js',
   'public/scripts/group-chats.js', 'public/scripts/world-info.js', 'node_modules/express/package.json',
-].map(file => join(runtime, file))];
+].map(file => join(runtime, file));
 const extensionDirectory = join(runtime, 'public/scripts/extensions/third-party');
 const scenarioBuilder = join(extensionDirectory, 'tavernScenarioBuilder');
 const vocalia = join(extensionDirectory, 'st-aspect-vocalia');
 const packageInputs = ['package.json', 'package-lock.json',
   'packages/tavern-scenario-builder-1.1.0.tgz', 'packages/st-aspect-vocalia-1.0.4.tgz'];
 const buildInputs = [...sources.map(file => join('src', file)), ...packageInputs];
-const scenarioBuilderRequired = [...legacyRequired, ...[
+const scenarioBuilderFiles = [
   'manifest.json', 'index.js', 'style.css', 'templates/workspace.html', 'modules/creation.js', 'modules/entries.js',
   'modules/generation.js', 'modules/state.js', 'modules/utils.js', 'modules/workspace.js',
-].map(file => join(scenarioBuilder, file))];
-const vocaliaRequired = [...scenarioBuilderRequired, join(vocalia, 'manifest.json'), join(vocalia, 'index.js')];
-const fullProfileRequired = [...vocaliaRequired, join(runtime, 'public/scripts/personas.js'), join(runtime, 'src/endpoints/thumbnails.js')];
-const required = [...fullProfileRequired, 'wrapper-home.html'];
+].map(file => join(scenarioBuilder, file));
+const vocaliaFiles = [join(vocalia, 'manifest.json'), join(vocalia, 'index.js')];
+const fullProfileFiles = [join(runtime, 'public/scripts/personas.js'), join(runtime, 'src/endpoints/thumbnails.js')];
+const legacyRequired = [...checkpointSources, ...runtimeFiles];
+const scenarioBuilderRequired = [...legacyRequired, ...scenarioBuilderFiles];
+const vocaliaRequired = [...scenarioBuilderRequired, ...vocaliaFiles];
+const fullProfileRequired = [...vocaliaRequired, ...fullProfileFiles];
+const checkpointRequired = [...fullProfileRequired, 'wrapper-home.html'];
+const required = [...sources, ...runtimeFiles, ...scenarioBuilderFiles, ...vocaliaFiles, ...fullProfileFiles];
 const requiredBySignature = new Map([
   [legacySignature, legacyRequired], [scenarioBuilderSignature, scenarioBuilderRequired], [vocaliaSignature, vocaliaRequired],
-  [fullProfileSignature, fullProfileRequired], [signature, required],
+  [fullProfileSignature, fullProfileRequired], [checkpointSignature, checkpointRequired], [signature, required],
 ]);
 
 /**
@@ -167,8 +176,7 @@ async function assemble() {
   const temporary = await mkdtemp(join(project, '.universe-build-'));
   const next = join(temporary, 'next');
   try {
-    await mkdir(join(next, 'classes'), { recursive: true });
-    await mkdir(join(next, 'integration'));
+    await mkdir(join(next, 'sync'), { recursive: true });
     for (const file of sources) {
       await copyInput(join(project, 'src', file), join(next, file));
     }

@@ -152,7 +152,7 @@ Nothing deletes old blobs or manifests. Every save that changes `settings.json` 
 
 ## Size
 
-The launcher, scan, pull, save and cloud store together target under 800 lines of source, down from about 2,900 today. The plan names each file and its budget.
+The scan, pull, save and cloud store came to about 1,350 lines of source after review (`src/sync/` plus `r2.mjs`), against an original target of 800; the operator accepted this on 2026-11-23. The launcher, child and server are rewritten small on top of them, replacing about 2,900 lines of the old sync.
 
 ## Tests
 

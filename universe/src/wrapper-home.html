@@ -23,20 +23,13 @@
   <script nonce="{{nonce}}">
     const button = document.getElementById('save');
     const result = document.getElementById('result');
-    const messages = {
-      unchanged: 'Already up to date.',
-      pending: 'Checkpoint still pending. Try again shortly.',
-      unavailable: 'Cloud save is unavailable. Try again when the launcher is ready.',
-      'local-only': 'Cloud save is not configured.',
-      'rate-limited': 'Please wait a moment before saving again.',
-      failed: 'Save failed. Try again.',
-    };
+    const pollMs = 2000;
     button.addEventListener('click', async () => {
       if (button.disabled) {
         return;
       }
       button.disabled = true;
-      result.textContent = 'Saving… Waiting for the current turn if needed.';
+      result.textContent = 'Saving...';
       try {
         const response = await fetch('/save', {
           method: 'POST', headers: { 'X-Universe-CSRF': document.querySelector('meta[name="universe-csrf"]').content },
@@ -45,10 +38,22 @@
           result.textContent = 'Reload this page to save.';
           return;
         }
-        const state = await response.json();
-        result.textContent = response.ok && state.checkpoint === 'saved'
-          ? 'Saved at ' + new Date(state.lastSyncAt).toLocaleString() + '.'
-          : messages[state.checkpoint] || messages.failed;
+        if (response.status === 429) {
+          result.textContent = 'Please wait a moment before saving again.';
+          return;
+        }
+        let state = await response.json();
+        while (response.status === 202 && state.phase === 'saving') {
+          await new Promise((wake) => setTimeout(wake, pollMs));
+          state = await (await fetch('/status')).json();
+        }
+        if (state.error !== null) {
+          result.textContent = state.error;
+        } else if (response.status !== 202) {
+          result.textContent = 'Cloud save is not ready yet. Try again shortly.';
+        } else {
+          result.textContent = state.lastSavedAt === null ? 'Up to date.' : 'Saved to cloud at ' + new Date(state.lastSavedAt).toLocaleString() + '.';
+        }
       } catch {
         result.textContent = 'Could not confirm the save. Try again.';
       } finally {

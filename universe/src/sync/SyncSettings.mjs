@@ -14,6 +14,7 @@ export const SyncSettings = Object.freeze({
   AncestorLimit: 100,
   KeepSaves: 100,
   BlobMinAgeMs: 86_400_000,
+  PruneIntervalMs: 86_400_000,
   SettleAttempts: 3,
   ConsoleProgressMs: 5_000,
   RootExcluded: Object.freeze([

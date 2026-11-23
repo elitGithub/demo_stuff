@@ -22,6 +22,8 @@ const originalLstat = fs.lstat;
 const originalRename = fs.rename;
 const originalRmdir = fs.rmdir;
 const foreignMessage = 'The bucket holds other objects but no Universe save, so cloud sync is off.';
+const longAgo = new Date(Date.now() - SyncSettings.BlobMinAgeMs - 3_600_000);
+const cleanupFailure = 'Old cloud saves were not cleaned up: ';
 const starter = {
   'default-user/settings.json': '{"theme":"dark"}',
   'default-user/chats/Ann/one.jsonl': '{"m":1}\n{"m":2}\n',
@@ -231,6 +233,79 @@ async function syncState(stateRoot) {
 }
 
 /**
+ * @param {Function} check
+ * @param {string} label
+ * @returns {Promise<*>}
+ * @throws {Error}
+ */
+async function eventually(check, label) {
+  const deadline = Date.now() + 2_000;
+  let value = await check();
+  while (!value) {
+    assert.ok(Date.now() < deadline, label);
+    await new Promise((resolve) => setImmediate(resolve));
+    value = await check();
+  }
+  return value;
+}
+
+/**
+ * @param {string} stateRoot
+ * @param {?string} previous
+ * @returns {Promise<string>}
+ * @throws {Error}
+ */
+function cleanedUp(stateRoot, previous = null) {
+  return eventually(async () => {
+    const { prunedAt } = await syncState(stateRoot);
+    return prunedAt !== previous && prunedAt;
+  }, 'the cleanup never finished');
+}
+
+/**
+ * @param {MemoryBucket} bucket
+ * @param {number} count
+ * @returns {Array<{id: string, hashes: string[]}>}
+ * @throws {TypeError}
+ */
+function seedOldChain(bucket, count) {
+  const saves = [];
+  for (let index = 0; index < count; index += 1) {
+    const entries = Object.entries({ ...starter, 'default-user/chats/Ann/one.jsonl': `{"m":${index}}\n` }).map(([path, content]) => {
+      const hash = digest(Buffer.from(content));
+      bucket.seed(`${prefix}/blobs/${hash}`, content, longAgo);
+      return { path, hash, size: Buffer.byteLength(content) };
+    });
+    const id = randomUUID();
+    bucket.seed(`${prefix}/manifests/${id}.json`, JSON.stringify({ version: 2, id, parent: saves.at(-1)?.id ?? null, files: entries }), longAgo);
+    saves.push({ id, hashes: entries.map((entry) => entry.hash) });
+  }
+  bucket.seed(controlKey, JSON.stringify({ version: 1, change: randomUUID(), head: saves.at(-1).id, lease: null }));
+  return saves;
+}
+
+/**
+ * @param {MemoryBucket} bucket
+ * @param {string} content
+ * @param {Date} at
+ * @returns {string}
+ */
+function seedStray(bucket, content, at = longAgo) {
+  const key = `${prefix}/blobs/${digest(Buffer.from(content))}`;
+  bucket.seed(key, content, at);
+  return key;
+}
+
+/**
+ * @param {MemoryBucket} bucket
+ * @param {number} from
+ * @returns {number}
+ */
+function controlReadsSince(bucket, from) {
+  return bucket.requests.slice(from).filter((request) => request.method === 'GET' && request.key === controlKey).length;
+}
+
+/**
  * @param {{time: number}} clock
  * @param {number} size
  * @param {number} bytesPerSecond
@@ -283,6 +358,7 @@ async function savedMachine(root, transport, files = starter) {
   await put(first.data, files);
   assert.deepEqual(await first.sync.start(), { changedFiles: 0, offline: false, disabled: null });
   assert.equal((await first.sync.save(SaveReason.Manual)).outcome, SaveOutcome.Saved);
+  await cleanedUp(first.state);
   return first;
 }
 
@@ -362,6 +438,91 @@ test('[2] the 2026-11-22 situation: an old five-folder journal pulls a full-prof
   assert.equal((await syncState(pcOld.state)).revision, head);
 });
 
+test('an old format-1 journal whose base save was cleaned up from the cloud starts as a fresh PC: it pulls the head and moves every differing file aside', async (context) => {
+  const root = await workspace(context);
+  const bucket = new MemoryBucket();
+  const oldFiles = { 'default-user/chats/Ann/one.jsonl': '{"m":1}\n', 'default-user/characters/Ann.png': 'png' };
+  const cloudFiles = { ...oldFiles, 'default-user/chats/Ann/one.jsonl': '{"m":1}\n{"m":2}\n', 'default-user/settings.json': '{"cloud":true}' };
+  const head = seedManifest(bucket, seedFiles(bucket, cloudFiles), randomUUID());
+  seedHead(bucket, head);
+  const gone = randomUUID();
+  const local = { ...oldFiles, 'default-user/settings.json': '{"local":true}' };
+  const pcOld = machine(root, 'a', bucket.transport);
+  await put(pcOld.data, local);
+  await mkdir(pcOld.state, { recursive: true });
+  await writeFile(join(pcOld.state, 'journal.json'), JSON.stringify({
+    version: 3, bucket: bucketName, phase: 'clean', rootId: randomUUID(), base: gone, files: seedFiles(bucket, oldFiles, false), format: 1,
+  }));
+  assert.deepEqual(await pcOld.sync.start(), { changedFiles: 2, offline: false, disabled: null });
+  const pulled = await tree(pcOld.data);
+  delete pulled['cookie-secret.txt'];
+  assert.deepEqual(pulled, cloudFiles);
+  const [folder] = await readdir(pcOld.conflicts);
+  assert.deepEqual(await tree(join(pcOld.conflicts, folder)), {
+    'default-user/chats/Ann/one.jsonl': local['default-user/chats/Ann/one.jsonl'],
+    'default-user/settings.json': local['default-user/settings.json'],
+  });
+  assert.equal(pcOld.statuses.at(-1).phase, SyncPhase.Running);
+  assert.equal(pcOld.statuses.at(-1).error, null);
+  assert.equal((await syncState(pcOld.state)).revision, head);
+  assert.equal(bucket.requests.filter((request) => request.key === `${prefix}/manifests/${gone}.json`).length, 1);
+});
+
+test('an old format-1 journal whose base manifest keeps answering 503 still stops start-up after the retry window and touches nothing', async (context) => {
+  const root = await workspace(context);
+  const bucket = new MemoryBucket();
+  const oldFiles = { 'default-user/chats/Ann/one.jsonl': '{"m":1}\n', 'default-user/characters/Ann.png': 'png' };
+  const oldEntries = seedFiles(bucket, oldFiles, false);
+  const base = seedManifest(bucket, oldEntries, null, 1);
+  const cloudFiles = { ...oldFiles, 'default-user/chats/Ann/one.jsonl': '{"m":1}\n{"m":2}\n', 'default-user/settings.json': '{"cloud":true}' };
+  seedHead(bucket, seedManifest(bucket, seedFiles(bucket, cloudFiles), base));
+  const baseKey = `${prefix}/manifests/${base}.json`;
+  for (let answer = 0; answer < 40; answer += 1) {
+    bucket.status(baseKey, 503);
+  }
+  const local = { ...oldFiles, 'default-user/settings.json': '{"local":true}' };
+  const pcOld = machine(root, 'a', bucket.transport);
+  await put(pcOld.data, local);
+  await mkdir(pcOld.state, { recursive: true });
+  await writeFile(join(pcOld.state, 'journal.json'), JSON.stringify({
+    version: 3, bucket: bucketName, phase: 'clean', rootId: randomUUID(), base, files: oldEntries, format: 1,
+  }));
+  const startedAt = pcOld.clock.now();
+  await assert.rejects(pcOld.sync.start(), { message: `Pull stopped at cloud manifest ${base}: Cloud read of ${baseKey} failed (HTTP 503).` });
+  assert.ok(pcOld.clock.now() - startedAt >= SyncSettings.TransferGiveUpMs);
+  assert.ok(bucket.requests.filter((request) => request.key === baseKey).length > 1);
+  assert.deepEqual(await tree(pcOld.data), local);
+  await assert.rejects(readdir(pcOld.conflicts), { code: 'ENOENT' });
+  await assert.rejects(readFile(join(pcOld.state, 'sync.json')), { code: 'ENOENT' });
+  assert.equal(pcOld.statuses.at(-1).phase, SyncPhase.Failed);
+});
+
+test('an old format-1 journal whose base manifest answers 403 stops start-up at once and touches nothing', async (context) => {
+  const root = await workspace(context);
+  const bucket = new MemoryBucket();
+  const oldFiles = { 'default-user/chats/Ann/one.jsonl': '{"m":1}\n', 'default-user/characters/Ann.png': 'png' };
+  const oldEntries = seedFiles(bucket, oldFiles, false);
+  const base = seedManifest(bucket, oldEntries, null, 1);
+  const cloudFiles = { ...oldFiles, 'default-user/chats/Ann/one.jsonl': '{"m":1}\n{"m":2}\n', 'default-user/settings.json': '{"cloud":true}' };
+  seedHead(bucket, seedManifest(bucket, seedFiles(bucket, cloudFiles), base));
+  const baseKey = `${prefix}/manifests/${base}.json`;
+  for (let answer = 0; answer < 40; answer += 1) {
+    bucket.status(baseKey, 403);
+  }
+  const local = { ...oldFiles, 'default-user/settings.json': '{"local":true}' };
+  const pcOld = machine(root, 'a', bucket.transport);
+  await put(pcOld.data, local);
+  await mkdir(pcOld.state, { recursive: true });
+  await writeFile(join(pcOld.state, 'journal.json'), JSON.stringify({
+    version: 3, bucket: bucketName, phase: 'clean', rootId: randomUUID(), base, files: oldEntries, format: 1,
+  }));
+  await assert.rejects(pcOld.sync.start(), { message: `Pull stopped at cloud manifest ${base}: Cloud read of ${baseKey} failed (HTTP 403).` });
+  assert.deepEqual(await tree(pcOld.data), local);
+  await assert.rejects(readdir(pcOld.conflicts), { code: 'ENOENT' });
+  await assert.rejects(readFile(join(pcOld.state, 'sync.json')), { code: 'ENOENT' });
+  assert.equal(pcOld.statuses.at(-1).phase, SyncPhase.Failed);
+});
+
 test('[5] when the other PC saves first the next save reports a conflict without touching anything, and a restart moves changed files aside', async (context) => {
   const root = await workspace(context);
   const bucket = new MemoryBucket();
@@ -371,6 +532,7 @@ test('[5] when the other PC saves first the next save reports a conflict without
   assert.equal((await second.sync.start()).changedFiles, Object.keys(starter).length);
   await put(second.data, { 'default-user/chats/Ann/one.jsonl': '{"m":1}\n{"m":2}\n{"m":"from b"}\n', 'default-user/worlds/w.json': '{"w":1}' });
   assert.equal((await second.sync.save(SaveReason.Manual)).outcome, SaveOutcome.Saved);
+  await cleanedUp(second.state);
   bucket.objects.get(controlKey).lastModified = 'Tue, 01 Jan 2030 10:00:00 GMT';
   const head = headOf(bucket);
   const firstBefore = await tree(first.data);
@@ -428,6 +590,7 @@ test('[6] an offline start keeps the local files and the first save after the cl
   assert.equal(offline.statuses.at(-1).unsavedSince, startFinished);
   await put(other.data, { 'default-user/chats/Ann/two.jsonl': '{"m":"other pc"}\n' });
   assert.equal((await other.sync.save(SaveReason.Manual)).outcome, SaveOutcome.Saved);
+  await cleanedUp(other.state);
   const head = headOf(bucket);
   line.down = false;
   const reconnect = await offline.sync.save(SaveReason.Reconnect);
@@ -639,6 +802,7 @@ test('[9] deletions, renames, a folder replaced by a file and a file replaced by
   await unlink(join(secondAgain.data, 'default-user/y'));
   await put(secondAgain.data, { 'default-user/y/z.json': '{"y is a folder":true}' });
   assert.equal((await secondAgain.sync.save(SaveReason.Manual)).outcome, SaveOutcome.Saved);
+  await cleanedUp(secondAgain.state);
   const firstAgain = machine(root, 'a', bucket.transport);
   await firstAgain.sync.start();
   const back = await tree(firstAgain.data);
@@ -766,6 +930,7 @@ test('[12] a local file still being written at start is moved aside, never overw
   await other.sync.start();
   await put(other.data, { 'default-user/settings.json': '{"theme":"other pc"}' });
   assert.equal((await other.sync.save(SaveReason.Manual)).outcome, SaveOutcome.Saved);
+  await cleanedUp(other.state);
   const restarted = machine(root, 'a', bucket.transport);
   await put(restarted.data, { 'default-user/settings.json': '{"theme":"typed a moment ago"}' });
   const justNow = new Date(restarted.clock.now() - 500);
@@ -830,6 +995,7 @@ test('[13] two pulls in the same second get separate conflicts folders', async (
   for (const round of [1, 2]) {
     await put(other.data, { 'default-user/settings.json': `{"other":"${'o'.repeat(round)}"}` });
     assert.equal((await other.sync.save(SaveReason.Manual)).outcome, SaveOutcome.Saved);
+    await cleanedUp(other.state);
     const restarted = machine(root, 'a', bucket.transport, clock);
     await put(restarted.data, { 'default-user/settings.json': `{"mine":"${'m'.repeat(round)}"}` });
     await restarted.sync.start();
@@ -869,6 +1035,7 @@ test('[14] an offline migration from a format-2 journal uses journal.files, so t
   await put(migrated.data, { 'default-user/settings.json': '{"theme":"after migration"}' });
   before = bucket.requests.length;
   assert.equal((await migrated.sync.save(SaveReason.Manual)).outcome, SaveOutcome.Saved);
+  await cleanedUp(migrated.state);
   const changedHash = digest(Buffer.from('{"theme":"after migration"}'));
   assert.deepEqual(bucket.requests.slice(before).filter((request) => request.method === 'PUT').map((request) => request.key), [
     `${prefix}/blobs/${changedHash}`, `${prefix}/manifests/${headOf(bucket)}.json`, controlKey,
@@ -999,6 +1166,7 @@ test('a file deleted between the scan and its upload read stays deleted on both 
   await assert.rejects(readFile(join(second.data, 'default-user/chats/Ann/one.jsonl')), { code: 'ENOENT' });
   await put(second.data, { 'default-user/settings.json': '{"theme":"b"}' });
   assert.equal((await second.sync.save(SaveReason.Manual)).outcome, SaveOutcome.Saved);
+  await cleanedUp(second.state);
   const again = machine(root, 'a', bucket.transport);
   await again.sync.start();
   await assert.rejects(readFile(target), { code: 'ENOENT' });
@@ -1059,6 +1227,7 @@ test('an interrupted first save leaves only Universe objects, so the restart sta
   const restarted = machine(root, 'a', line.transport);
   assert.deepEqual(await restarted.sync.start(), { changedFiles: 0, offline: false, disabled: null });
   assert.equal((await restarted.sync.save(SaveReason.Manual)).outcome, SaveOutcome.Saved);
+  await cleanedUp(restarted.state);
   assert.deepEqual(await cloudTree(bucket), starter);
 });
 
@@ -1182,18 +1351,25 @@ test('a save that keeps making progress is not cut, and it gives up 600 s after 
   let steadyFailures = 10;
   let lastSuccess = null;
   let firstFailure = null;
+  const steadyTried = Promise.withResolvers();
   /**
    * @param {string} method
    * @param {string} key
-   * @returns {void}
+   * @returns {Promise<void>}
+   * @throws {TypeError}
    */
-  line.before = (method, key) => {
-    line.down = key === deadKey || (key === steadyKey && steadyFailures > 0);
+  line.before = async (method, key) => {
+    if (key === deadKey) {
+      await steadyTried.promise;
+    }
+    const failing = key === deadKey || (key === steadyKey && steadyFailures > 0);
     if (key === steadyKey) {
+      steadyTried.resolve();
       steadyFailures -= 1;
     }
-    if (line.down) {
+    if (failing) {
       firstFailure ??= first.clock.now();
+      throw new TypeError('fetch failed', { cause: new Error('ENETUNREACH') });
     }
   };
   /**
@@ -1272,6 +1448,7 @@ test('a status listener that throws never wedges later saves', async (context) =
   assert.equal(first.outcome, SaveOutcome.Failed);
   assert.match(first.error, /: status sink failed$/);
   assert.equal((await settledSoon(sync.save(SaveReason.Manual))).outcome, SaveOutcome.Saved);
+  await cleanedUp(join(local, 'data.universe'));
 });
 
 test('a start that fails before contacting the cloud reports failed', async (context) => {
@@ -1317,6 +1494,7 @@ test('[12] an unsettled local file whose cloud entry still equals B stays in pla
   await other.sync.start();
   await put(other.data, { 'default-user/worlds/new.json': '{"new":1}' });
   assert.equal((await other.sync.save(SaveReason.Manual)).outcome, SaveOutcome.Saved);
+  await cleanedUp(other.state);
   const restarted = machine(root, 'a', bucket.transport);
   await put(restarted.data, { 'default-user/settings.json': '{"theme":"typed a moment ago"}' });
   const justNow = new Date(restarted.clock.now() - 500);
@@ -1350,6 +1528,7 @@ test('a stop joining a queued save makes the follow-up a stop that ends in phase
   await other.sync.start();
   await put(other.data, { 'default-user/worlds/w.json': '{"w":1}' });
   assert.equal((await other.sync.save(SaveReason.Manual)).outcome, SaveOutcome.Saved);
+  await cleanedUp(other.state);
   assert.equal((await first.sync.save(SaveReason.Timer)).outcome, SaveOutcome.Conflict);
   const before = bucket.requests.length;
   const conflict = await first.sync.save(SaveReason.Stop);
@@ -1837,6 +2016,7 @@ test('a long pause before the uploads never spends the window: the first upload 
     }
   };
   assert.equal((await sync.save(SaveReason.Manual)).outcome, SaveOutcome.Saved);
+  await cleanedUp(join(local, 'data.universe'));
   assert.ok(jumped);
   assert.equal(uploads.length, Object.keys(starter).length + 1);
   assert.deepEqual(uploads, uploads.map(() => SyncSettings.ObjectTimeoutMs + 1_000));
@@ -2032,4 +2212,370 @@ test('a size-less 20 MB entry from an old manifest pulls over a 25 KB/s link by 
       assert.ok((await readFile(join(fresh.data, 'default-user/backgrounds/big.png'))).equals(big));
     }
   }
+});
+
+test('the cleanup runs after the first saved outcome and not after an unchanged, blocked, conflict or stop save', async (context) => {
+  const root = await workspace(context);
+  const bucket = new MemoryBucket();
+  seedOldChain(bucket, 3);
+  const stray = seedStray(bucket, '{"stray":"older than a day"}');
+  const first = machine(root, 'a', bucket.transport);
+  const late = machine(root, 'c', bucket.transport);
+  assert.equal((await first.sync.start()).changedFiles, Object.keys(starter).length);
+  await late.sync.start();
+  let before = bucket.requests.length;
+  assert.equal((await first.sync.save(SaveReason.Timer)).outcome, SaveOutcome.Unchanged);
+  assert.equal(controlReadsSince(bucket, before), 1);
+  await symlink(join(first.data, 'default-user/settings.json'), join(first.data, 'default-user/linked'));
+  before = bucket.requests.length;
+  assert.equal((await first.sync.save(SaveReason.Manual)).outcome, SaveOutcome.Blocked);
+  assert.equal(controlReadsSince(bucket, before), 1);
+  await unlink(join(first.data, 'default-user/linked'));
+  await put(first.data, { 'default-user/settings.json': '{"theme":"saved at stop"}' });
+  before = bucket.requests.length;
+  assert.equal((await first.sync.save(SaveReason.Stop)).outcome, SaveOutcome.Saved);
+  assert.equal(controlReadsSince(bucket, before), 1);
+  before = bucket.requests.length;
+  assert.equal((await late.sync.save(SaveReason.Manual)).outcome, SaveOutcome.Conflict);
+  assert.equal(controlReadsSince(bucket, before), 1);
+  assert.equal((await syncState(first.state)).prunedAt, null);
+  assert.ok(bucket.objects.has(stray));
+  assert.ok(bucket.requests.every((request) => request.method !== 'DELETE' && request.options.prefix === undefined));
+  await put(first.data, { 'default-user/settings.json': '{"theme":"saved by hand"}' });
+  before = bucket.requests.length;
+  assert.equal((await first.sync.save(SaveReason.Manual)).outcome, SaveOutcome.Saved);
+  assert.equal(controlReadsSince(bucket, before), 2);
+  assert.equal(await cleanedUp(first.state), new Date(first.clock.now()).toISOString());
+  assert.equal(bucket.objects.has(stray), false);
+});
+
+test('a save already queued when a save lands starts at once, and no cleanup runs in between', async (context) => {
+  const root = await workspace(context);
+  const bucket = new MemoryBucket();
+  const first = machine(root, 'a', bucket.transport);
+  await put(first.data, starter);
+  await first.sync.start();
+  const before = bucket.requests.length;
+  const outcomes = await Promise.all([first.sync.save(SaveReason.Manual), first.sync.save(SaveReason.Stop)]);
+  assert.deepEqual(outcomes.map((outcome) => outcome.outcome), [SaveOutcome.Saved, SaveOutcome.Unchanged]);
+  assert.equal(controlReadsSince(bucket, before), 2);
+  assert.ok(bucket.requests.every((request) => request.options.prefix === undefined));
+  assert.equal((await syncState(first.state)).prunedAt, null);
+});
+
+test('prunedAt is written, survives later saves and a restart, blocks a second cleanup inside 24 hours and allows one after', async (context) => {
+  const root = await workspace(context);
+  const bucket = new MemoryBucket();
+  const first = await savedMachine(root, bucket.transport);
+  const prunedAt = (await syncState(first.state)).prunedAt;
+  assert.equal(prunedAt, new Date(first.clock.now()).toISOString());
+  const stray = seedStray(bucket, '{"stray":"waits for the next day"}');
+  first.clock.time = Date.parse(prunedAt) + SyncSettings.PruneIntervalMs - 1;
+  await put(first.data, { 'default-user/settings.json': '{"theme":"later the same day"}' });
+  let before = bucket.requests.length;
+  assert.equal((await first.sync.save(SaveReason.Manual)).outcome, SaveOutcome.Saved);
+  assert.equal(controlReadsSince(bucket, before), 1);
+  assert.equal((await syncState(first.state)).prunedAt, prunedAt);
+  const restarted = machine(root, 'a', bucket.transport, first.clock);
+  assert.equal((await restarted.sync.start()).changedFiles, 0);
+  assert.equal((await syncState(restarted.state)).prunedAt, prunedAt);
+  await put(restarted.data, { 'default-user/settings.json': '{"theme":"after a restart"}' });
+  before = bucket.requests.length;
+  assert.equal((await restarted.sync.save(SaveReason.Timer)).outcome, SaveOutcome.Saved);
+  assert.equal(controlReadsSince(bucket, before), 1);
+  assert.equal((await syncState(restarted.state)).prunedAt, prunedAt);
+  assert.ok(bucket.objects.has(stray));
+  first.clock.time = Date.parse(prunedAt) + SyncSettings.PruneIntervalMs;
+  await put(restarted.data, { 'default-user/settings.json': '{"theme":"a day later"}' });
+  before = bucket.requests.length;
+  assert.equal((await restarted.sync.save(SaveReason.Timer)).outcome, SaveOutcome.Saved);
+  assert.equal(controlReadsSince(bucket, before), 2);
+  assert.equal(await cleanedUp(restarted.state, prunedAt), new Date(first.clock.now()).toISOString());
+  assert.equal(bucket.objects.has(stray), false);
+});
+
+test('a failed cleanup leaves the save saved, reports only its error, keeps prunedAt, and runs again after the next save', async (context) => {
+  const root = await workspace(context);
+  const bucket = new MemoryBucket();
+  const line = wire(bucket);
+  const stray = seedStray(bucket, '{"stray":"refused"}');
+  bucket.status(stray, 403);
+  const first = machine(root, 'a', line.transport);
+  await put(first.data, starter);
+  await first.sync.start();
+  const saved = await first.sync.save(SaveReason.Manual);
+  assert.deepEqual([saved.outcome, saved.error], [SaveOutcome.Saved, null]);
+  const refused = `${cleanupFailure}Cloud delete of ${stray} failed (HTTP 403). This runs again after the next save.`;
+  await eventually(() => first.statuses.at(-1).error === refused, 'the failed delete was never reported');
+  const savedStatus = first.statuses.at(-2);
+  assert.deepEqual([savedStatus.phase, savedStatus.error, savedStatus.lastSavedAt, savedStatus.progress], [SyncPhase.Running, null, saved.at, null]);
+  assert.deepEqual(first.statuses.at(-1), { ...savedStatus, error: refused });
+  assert.equal((await syncState(first.state)).prunedAt, null);
+  assert.ok(bucket.objects.has(stray));
+  /**
+   * @param {string} method
+   * @param {string} key
+   * @param {{prefix?: string}} options
+   * @returns {void}
+   * @throws {TypeError}
+   */
+  line.before = (method, key, options) => {
+    if (options.prefix !== undefined) {
+      throw new TypeError('fetch failed', { cause: new Error('ECONNRESET') });
+    }
+  };
+  await put(first.data, { 'default-user/settings.json': '{"theme":"second try"}' });
+  assert.equal((await first.sync.save(SaveReason.Manual)).outcome, SaveOutcome.Saved);
+  const dropped = `${cleanupFailure}fetch failed. This runs again after the next save.`;
+  await eventually(() => first.statuses.at(-1).error === dropped, 'the dropped listing was never reported');
+  assert.equal(first.statuses.at(-2).error, null);
+  assert.equal((await syncState(first.state)).prunedAt, null);
+  line.before = null;
+  await put(first.data, { 'default-user/settings.json': '{"theme":"third try"}' });
+  assert.equal((await first.sync.save(SaveReason.Manual)).outcome, SaveOutcome.Saved);
+  await cleanedUp(first.state);
+  assert.equal(bucket.objects.has(stray), false);
+  assert.equal(first.statuses.at(-1).error, null);
+});
+
+test('a cleanup that finds no control object or a null head reports the failure, deletes nothing and keeps prunedAt', async (context) => {
+  const root = await workspace(context);
+  const nullHead = JSON.stringify({ version: 1, change: randomUUID(), head: null, lease: null });
+  for (const [name, controlAtCleanup] of [['a', null], ['b', nullHead]]) {
+    const bucket = new MemoryBucket();
+    const line = wire(bucket);
+    const stray = seedStray(bucket, '{"stray":"older than a day"}');
+    const first = machine(root, name, line.transport);
+    await put(first.data, starter);
+    await first.sync.start();
+    let controlReads = 0;
+    /**
+     * @param {string} method
+     * @param {string} key
+     * @returns {void}
+     */
+    line.before = (method, key) => {
+      if (method !== 'GET' || key !== controlKey) {
+        return;
+      }
+      controlReads += 1;
+      if (controlReads === 2 && controlAtCleanup === null) {
+        bucket.objects.delete(controlKey);
+      } else if (controlReads === 2) {
+        bucket.seed(controlKey, controlAtCleanup);
+      }
+    };
+    const before = bucket.requests.length;
+    const saved = await first.sync.save(SaveReason.Manual);
+    assert.deepEqual([saved.outcome, saved.error], [SaveOutcome.Saved, null], name);
+    const failed = `${cleanupFailure}The cloud holds no current save. This runs again after the next save.`;
+    await eventually(() => first.statuses.at(-1).error === failed, `${name}: the failure was never reported`);
+    assert.equal(controlReads, 2, name);
+    assert.deepEqual([first.statuses.at(-1).phase, first.statuses.at(-1).lastSavedAt], [SyncPhase.Running, saved.at], name);
+    assert.ok(bucket.requests.slice(before).every((request) => request.method !== 'DELETE' && request.options.prefix === undefined), name);
+    assert.ok(bucket.objects.has(stray), name);
+    assert.equal((await syncState(first.state)).prunedAt, null, name);
+  }
+});
+
+test('a prunedAt later than this PC\'s clock counts as due, so the next save that lands runs the cleanup', async (context) => {
+  const root = await workspace(context);
+  const bucket = new MemoryBucket();
+  const first = await savedMachine(root, bucket.transport);
+  const prunedAt = (await syncState(first.state)).prunedAt;
+  const stray = seedStray(bucket, '{"stray":"waits for a clock that went back"}');
+  first.clock.time = Date.parse(prunedAt) - 3_600_000;
+  await put(first.data, { 'default-user/settings.json': '{"theme":"after the clock went back an hour"}' });
+  const before = bucket.requests.length;
+  assert.equal((await first.sync.save(SaveReason.Manual)).outcome, SaveOutcome.Saved);
+  assert.equal(controlReadsSince(bucket, before), 2);
+  assert.equal(await cleanedUp(first.state, prunedAt), new Date(first.clock.now()).toISOString());
+  assert.equal(bucket.objects.has(stray), false);
+});
+
+test('a save requested during the cleanup aborts it at once, no delete goes out after the request, and the save then runs and lands', async (context) => {
+  const root = await workspace(context);
+  const bucket = new MemoryBucket();
+  const line = wire(bucket);
+  const strays = [];
+  for (let index = 0; index < 20; index += 1) {
+    strays.push(seedStray(bucket, `{"stray":${index}}`));
+  }
+  const first = machine(root, 'a', line.transport);
+  await put(first.data, starter);
+  await first.sync.start();
+  const held = Promise.withResolvers();
+  const release = Promise.withResolvers();
+  let lateDeletes = 0;
+  /**
+   * @param {string} method
+   * @param {string} key
+   * @param {{signal: AbortSignal}} options
+   * @returns {Promise<void>}
+   */
+  line.before = async (method, key, options) => {
+    if (method === 'DELETE') {
+      if (options.signal.aborted) {
+        lateDeletes += 1;
+      }
+      held.resolve(options.signal);
+      await release.promise;
+    }
+  };
+  assert.equal((await first.sync.save(SaveReason.Manual)).outcome, SaveOutcome.Saved);
+  const cleanupSignal = await held.promise;
+  const edited = '{"theme":"saved during the cleanup"}';
+  await put(first.data, { 'default-user/settings.json': edited });
+  const requested = bucket.requests.length;
+  const manual = first.sync.save(SaveReason.Manual);
+  assert.equal(cleanupSignal.aborted, true);
+  assert.equal(first.statuses.at(-1).phase, SyncPhase.Saving);
+  release.resolve();
+  const result = await settledSoon(manual);
+  assert.deepEqual([result.outcome, result.error], [SaveOutcome.Saved, null]);
+  assert.equal(lateDeletes, 0);
+  assert.equal((await cloudTree(bucket))['default-user/settings.json'], edited);
+  const landed = bucket.requests.slice(requested).findIndex((request) => request.method === 'PUT' && request.key === controlKey);
+  assert.ok(landed > 0);
+  assert.ok(bucket.requests.slice(requested, requested + landed).every((request) => request.method !== 'DELETE' || request.options.signal.aborted));
+  assert.ok(first.statuses.every((status) => !status.error?.startsWith(cleanupFailure)));
+  await cleanedUp(first.state);
+  assert.ok(strays.every((key) => !bucket.objects.has(key)));
+});
+
+test('a stop during the cleanup aborts it at once, stays inside the stop budget, and its save lands', async (context) => {
+  const root = await workspace(context);
+  const bucket = new MemoryBucket();
+  const line = wire(bucket);
+  const listing = Promise.withResolvers();
+  let listings = 0;
+  /**
+   * @param {string} method
+   * @param {string} key
+   * @param {{prefix?: string, signal: AbortSignal}} options
+   * @returns {?Promise<never>}
+   * @throws {Error}
+   */
+  line.before = (method, key, options) => {
+    if (options.prefix === undefined) {
+      return null;
+    }
+    listings += 1;
+    listing.resolve(options.signal);
+    return hang(options.signal);
+  };
+  const first = machine(root, 'a', line.transport);
+  await put(first.data, starter);
+  await first.sync.start();
+  assert.equal((await first.sync.save(SaveReason.Manual)).outcome, SaveOutcome.Saved);
+  const cleanupSignal = await listing.promise;
+  const edited = '{"theme":"saved at stop"}';
+  await put(first.data, { 'default-user/settings.json': edited });
+  const budget = new AbortController();
+  const startedAt = first.clock.now();
+  const stopping = first.sync.save(SaveReason.Stop, { signal: budget.signal });
+  assert.equal(cleanupSignal.aborted, true);
+  assert.equal(first.statuses.at(-1).phase, SyncPhase.Stopping);
+  const result = await settledSoon(stopping);
+  assert.notEqual(result, 'still pending after 2 s');
+  assert.deepEqual([result.outcome, result.error], [SaveOutcome.Saved, null]);
+  assert.ok(first.clock.now() - startedAt < SyncSettings.StopBudgetMs);
+  assert.equal(budget.signal.aborted, false);
+  assert.equal(first.statuses.at(-1).phase, SyncPhase.Stopped);
+  assert.ok(first.statuses.every((status) => !status.error?.startsWith(cleanupFailure)));
+  assert.equal((await cloudTree(bucket))['default-user/settings.json'], edited);
+  assert.equal((await syncState(first.state)).prunedAt, null);
+  assert.equal(listings, 1);
+});
+
+test('when the other PC saves between this PC\'s save and its cleanup, the newest 100 are counted from the new head', async (context) => {
+  const root = await workspace(context);
+  const bucket = new MemoryBucket();
+  const saves = seedOldChain(bucket, 105);
+  const line = wire(bucket);
+  const first = machine(root, 'a', line.transport);
+  const other = machine(root, 'b', bucket.transport);
+  await first.sync.start();
+  let controlReads = 0;
+  /**
+   * @param {string} method
+   * @param {string} key
+   * @returns {Promise<void>}
+   * @throws {Error}
+   */
+  line.before = async (method, key) => {
+    if (method === 'GET' && key === controlKey) {
+      controlReads += 1;
+      if (controlReads === 2) {
+        await other.sync.start();
+        await put(other.data, { 'default-user/worlds/b.json': '{"b":1}' });
+        assert.equal((await other.sync.save(SaveReason.Stop)).outcome, SaveOutcome.Saved);
+      }
+    }
+  };
+  await put(first.data, { 'default-user/worlds/a.json': '{"a":1}' });
+  assert.equal((await first.sync.save(SaveReason.Manual)).outcome, SaveOutcome.Saved);
+  await cleanedUp(first.state);
+  assert.equal(controlReads, 2);
+  const otherHead = headOf(bucket);
+  const firstHead = JSON.parse(bucket.objects.get(`${prefix}/manifests/${otherHead}.json`).body.toString()).parent;
+  assert.equal(firstHead, (await syncState(first.state)).revision);
+  const kept = [otherHead, firstHead, ...saves.slice(-(SyncSettings.KeepSaves - 2)).map((save) => save.id)];
+  assert.deepEqual(manifestKeys(bucket), kept.map((id) => `${prefix}/manifests/${id}.json`).sort());
+  assert.equal(bucket.objects.has(`${prefix}/manifests/${saves[6].id}.json`), false);
+  assert.equal(bucket.objects.has(`${prefix}/blobs/${saves[6].hashes[1]}`), false);
+  assert.equal(bucket.objects.has(`${prefix}/blobs/${saves[7].hashes[1]}`), true);
+});
+
+test('[16] the newest 100 saves and every blob younger than a day survive pruning, and a fresh PC still pulls the head', async (context) => {
+  const root = await workspace(context);
+  const bucket = new MemoryBucket();
+  const saves = seedOldChain(bucket, 130);
+  const youngStray = seedStray(bucket, '{"stray":"uploaded a moment ago"}', new Date());
+  const oldStray = seedStray(bucket, '{"stray":"uploaded long ago"}');
+  const branchBlob = seedStray(bucket, '{"theme":"the other PC, still uploading"}', new Date());
+  const branch = randomUUID();
+  bucket.seed(`${prefix}/manifests/${branch}.json`, JSON.stringify({
+    version: 2, id: branch, parent: saves.at(-1).id, files: [{ path: 'default-user/settings.json', hash: branchBlob.slice(-64) }],
+  }));
+  const first = machine(root, 'a', bucket.transport);
+  assert.equal((await first.sync.start()).changedFiles, Object.keys(starter).length);
+  await put(first.data, { 'default-user/chats/Ann/two.jsonl': '{"m":"new"}\n' });
+  assert.equal((await first.sync.save(SaveReason.Manual)).outcome, SaveOutcome.Saved);
+  await cleanedUp(first.state);
+  const head = headOf(bucket);
+  const keptSaves = saves.slice(-(SyncSettings.KeepSaves - 1));
+  assert.deepEqual(manifestKeys(bucket), [head, branch, ...keptSaves.map((save) => save.id)].map((id) => `${prefix}/manifests/${id}.json`).sort());
+  const headBlobs = JSON.parse(bucket.objects.get(`${prefix}/manifests/${head}.json`).body.toString()).files.map((entry) => `${prefix}/blobs/${entry.hash}`);
+  const expected = new Set([...keptSaves.flatMap((save) => save.hashes).map((hash) => `${prefix}/blobs/${hash}`), ...headBlobs, youngStray, branchBlob]);
+  assert.deepEqual([...bucket.objects.keys()].filter((key) => key.includes('/blobs/')).sort(), [...expected].sort());
+  assert.equal(bucket.objects.has(oldStray), false);
+  const fresh = machine(root, 'c', bucket.transport);
+  assert.equal((await fresh.sync.start()).changedFiles, Object.keys(starter).length + 1);
+  const pulled = await tree(fresh.data);
+  delete pulled['cookie-secret.txt'];
+  assert.deepEqual(pulled, await cloudTree(bucket));
+});
+
+test('a sync.json without prunedAt reads as never cleaned up, and a prunedAt that is not a date string is invalid local state', async (context) => {
+  const root = await workspace(context);
+  const bucket = new MemoryBucket();
+  const first = await savedMachine(root, bucket.transport);
+  const state = await syncState(first.state);
+  assert.equal(typeof state.prunedAt, 'string');
+  const target = join(first.state, 'sync.json');
+  for (const prunedAt of [5, true, '', 'not a date', {}, ['2026-11-23T10:00:00.000Z']]) {
+    await writeFile(target, JSON.stringify({ ...state, prunedAt }));
+    await assert.rejects(machine(root, 'a', bucket.transport).sync.start(), { message: `Invalid local sync state: ${target}` }, JSON.stringify(prunedAt));
+  }
+  await writeFile(target, JSON.stringify({ ...state, prunedAt: null }));
+  assert.equal((await machine(root, 'a', bucket.transport).sync.start()).changedFiles, 0);
+  await writeFile(target, JSON.stringify(Object.fromEntries(Object.entries(state).filter(([name]) => name !== 'prunedAt'))));
+  const restarted = machine(root, 'a', bucket.transport);
+  assert.equal((await restarted.sync.start()).changedFiles, 0);
+  await put(restarted.data, { 'default-user/settings.json': '{"theme":"after the field went missing"}' });
+  const before = bucket.requests.length;
+  assert.equal((await restarted.sync.save(SaveReason.Manual)).outcome, SaveOutcome.Saved);
+  assert.equal(controlReadsSince(bucket, before), 2);
+  await cleanedUp(restarted.state);
 });

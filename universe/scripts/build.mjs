@@ -15,16 +15,19 @@ const vocaliaSignature = 'Universe local build v3\n';
 const fullProfileSignature = 'Universe local build v4\n';
 const checkpointSignature = 'Universe local build v5\n';
 const syncSignature = 'Universe local build v6\n';
-const signature = 'Universe local build v7\n';
+const replyRetrySignature = 'Universe local build v7\n';
+const signature = 'Universe local build v8\n';
 const checkpointSources = [
   'server.mjs', 'launcher.mjs', 'child.mjs', 'child-preload.mjs', 'checkpoint-store.mjs', 'local-session.mjs',
   'r2.mjs', 'story-files.mjs', 'classes/capture-gate.mjs', 'classes/cloud-save.mjs',
   'integration/browser-bridge.js', 'integration/pinned-hooks.mjs', 'integration/server-bridge.mjs',
 ];
-const sources = ['server.mjs', 'launcher.mjs', 'LauncherLog.mjs', 'child.mjs', 'child-watchdog.mjs', 'r2.mjs', 'wrapper-home.html', ...[
+const syncSources = ['server.mjs', 'launcher.mjs', 'LauncherLog.mjs', 'child.mjs', 'child-watchdog.mjs', 'r2.mjs', 'wrapper-home.html', ...[
   'CloudStore.mjs', 'FileErrors.mjs', 'ProfileScan.mjs', 'ProfileSync.mjs', 'Retry.mjs', 'SaveOutcome.mjs', 'SaveReason.mjs',
   'SyncPhase.mjs', 'SyncScope.mjs', 'SyncSettings.mjs', 'SyncState.mjs',
 ].map(file => `sync/${file}`)];
+const pruneSources = ['sync/Pruner.mjs'];
+const sources = [...syncSources, ...pruneSources];
 const runtime = 'node_modules/sillytavern';
 const runtimeFiles = [
   'package.json', 'server.js', 'src/server-main.js', 'public/index.html', 'public/script.js',
@@ -53,12 +56,13 @@ const scenarioBuilderRequired = [...legacyRequired, ...scenarioBuilderFiles];
 const vocaliaRequired = [...scenarioBuilderRequired, ...vocaliaFiles];
 const fullProfileRequired = [...vocaliaRequired, ...fullProfileFiles];
 const checkpointRequired = [...fullProfileRequired, 'wrapper-home.html'];
-const syncRequired = [...sources, ...runtimeFiles, ...scenarioBuilderFiles, ...vocaliaFiles, ...fullProfileFiles];
-const required = [...syncRequired, ...replyRetryFiles];
+const syncRequired = [...syncSources, ...runtimeFiles, ...scenarioBuilderFiles, ...vocaliaFiles, ...fullProfileFiles];
+const replyRetryRequired = [...syncRequired, ...replyRetryFiles];
+const required = [...replyRetryRequired, ...pruneSources];
 const requiredBySignature = new Map([
   [legacySignature, legacyRequired], [scenarioBuilderSignature, scenarioBuilderRequired], [vocaliaSignature, vocaliaRequired],
   [fullProfileSignature, fullProfileRequired], [checkpointSignature, checkpointRequired], [syncSignature, syncRequired],
-  [signature, required],
+  [replyRetrySignature, replyRetryRequired], [signature, required],
 ]);
 
 /**

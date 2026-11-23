@@ -3,6 +3,7 @@ import fs from 'node:fs/promises';
 import { basename, dirname, join } from 'node:path';
 import { FileErrors } from './FileErrors.mjs';
 import { ProfileScan } from './ProfileScan.mjs';
+import { Pruner } from './Pruner.mjs';
 import { Retry } from './Retry.mjs';
 import { SaveOutcome } from './SaveOutcome.mjs';
 import { SaveReason } from './SaveReason.mjs';
@@ -53,6 +54,8 @@ export class ProfileSync {
   #aside = null;
   #cleanAt = null;
   #carriedFailure = null;
+  #prunedAt = null;
+  #pruning = null;
   #status = {
     phase: SyncPhase.Pulling, progress: null, lastSavedAt: null, unsavedSince: null, error: null, conflictAt: null, conflictsFolder: null, reloadTabs: false,
   };
@@ -89,6 +92,7 @@ export class ProfileSync {
       if (state !== null && Object.hasOwn(state, 'mismatch')) {
         return this.#disable(`This PC last synced with bucket ${state.mismatch}, not the configured ${this.#bucket}, so cloud sync is off.`);
       }
+      this.#prunedAt = state?.prunedAt ?? null;
       const unknown = { revision: null, files: new Map() };
       let base = state === null ? unknown :
         { revision: state.revision, files: state.files === null ? null : new Map(Object.entries(state.files)) };
@@ -123,8 +127,17 @@ export class ProfileSync {
       }
       if (base.files === null) {
         const revision = base.revision;
-        const manifest = await this.#at(`cloud manifest ${revision}`, () => this.#call((attempt) => this.#cloud.manifest(revision, attempt), watch));
-        base = { revision, files: entryMap(manifest.files) };
+        const manifest = await this.#at(`cloud manifest ${revision}`, async () => {
+          try {
+            return await this.#call((attempt) => this.#cloud.manifest(revision, attempt), watch);
+          } catch (error) {
+            if (error.status === 404) {
+              return null;
+            }
+            throw error;
+          }
+        });
+        base = manifest === null ? unknown : { revision, files: entryMap(manifest.files) };
       }
       if (emptyLocal && base.files.size > 0) {
         base = unknown;
@@ -202,6 +215,10 @@ export class ProfileSync {
    */
   async save(reason, { signal } = {}) {
     if (this.#running !== null) {
+      if (this.#pruning !== null) {
+        this.#pruning.abort();
+        this.#report({ phase: reason === SaveReason.Stop ? SyncPhase.Stopping : SyncPhase.Saving });
+      }
       this.#link(this.#halt, signal);
       if (this.#queued === null || reason === SaveReason.Stop) {
         this.#queuedRequest = { reason, signal };
@@ -233,6 +250,15 @@ export class ProfileSync {
     const watch = { failedAt: null, giveUpMs: SyncSettings.TransferGiveUpMs, signal: halt.signal, lastFailure: this.#carriedFailure };
     this.#carriedFailure = null;
     let handOn = null;
+    let pruning = false;
+    /**
+     * @returns {void}
+     */
+    const release = () => {
+      this.#running = null;
+      this.#carriedFailure = this.#queued === null ? null : handOn;
+      finish();
+    };
     try {
       this.#report({ phase: reason === SaveReason.Stop ? SyncPhase.Stopping : SyncPhase.Saving });
       const control = await this.#call((attempt) => this.#cloud.readControl(attempt), watch);
@@ -294,9 +320,35 @@ export class ProfileSync {
       }
       await this.#commit({ revision: id, files }, null);
       this.#cleanAt = this.#now();
-      return this.#ended(reason, SyncPhase.Running, { outcome: SaveOutcome.Saved, at: this.#cleanAt, error: null }, {
+      const saved = this.#ended(reason, SyncPhase.Running, { outcome: SaveOutcome.Saved, at: this.#cleanAt, error: null }, {
         lastSavedAt: this.#cleanAt, unsavedSince: null,
       });
+      const sincePruneMs = this.#prunedAt === null ? Number.POSITIVE_INFINITY : this.#clock.now() - Date.parse(this.#prunedAt);
+      pruning = reason !== SaveReason.Stop && this.#queued === null && (sincePruneMs < 0 || sincePruneMs >= SyncSettings.PruneIntervalMs);
+      if (pruning) {
+        const cleanup = new AbortController();
+        this.#pruning = cleanup;
+        /**
+         * @returns {Promise<void>}
+         * @throws {Error}
+         */
+        (async () => {
+          try {
+            const fresh = await this.#cloud.readControl({ signal: cleanup.signal });
+            await Pruner.prune(this.#cloud, fresh.head, fresh.now, { signal: cleanup.signal });
+            cleanup.signal.throwIfAborted();
+            await this.#commit(this.#base, this.#pending, this.#now());
+          } catch (error) {
+            if (!cleanup.signal.aborted) {
+              this.#report({ error: `Old cloud saves were not cleaned up: ${error.message.replace(/\.$/, '')}. This runs again after the next save.` });
+            }
+          } finally {
+            this.#pruning = null;
+            release();
+          }
+        })();
+      }
+      return saved;
     } catch (error) {
       const unsavedSince = this.#status.unsavedSince ?? this.#cleanAt;
       const stopped = watch.lastFailure === null ? `${stoppedEarly}.` : `${stoppedEarly}: ${watch.lastFailure}`;
@@ -304,9 +356,9 @@ export class ProfileSync {
       handOn = halt.signal.aborted ? watch.lastFailure : null;
       return this.#ended(reason, resting, { outcome: SaveOutcome.Failed, at: this.#now(), error: message }, { unsavedSince });
     } finally {
-      this.#running = null;
-      this.#carriedFailure = this.#queued === null ? null : handOn;
-      finish();
+      if (!pruning) {
+        release();
+      }
     }
   }
 
@@ -513,18 +565,21 @@ export class ProfileSync {
   /**
    * @param {{revision: ?string, files: Map}} base
    * @param {?{revision: string, files: Map}} pending
+   * @param {?string} [prunedAt]
    * @returns {Promise<void>}
    * @throws {Error}
    */
-  async #commit(base, pending) {
+  async #commit(base, pending, prunedAt = this.#prunedAt) {
     await SyncState.write(this.#stateRoot, {
       bucket: this.#bucket,
       revision: base.revision,
       pending: pending === null ? null : { id: pending.revision, files: Object.fromEntries(pending.files) },
+      prunedAt,
       files: Object.fromEntries(base.files),
     });
     this.#base = base;
     this.#pending = pending;
+    this.#prunedAt = prunedAt;
   }
 
   /**

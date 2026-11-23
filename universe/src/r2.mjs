@@ -5,6 +5,7 @@ export const credentialNames = ['R2_ACCOUNT_ID', 'R2_ACCESS_KEY_ID', 'R2_SECRET_
 /**
  * @param {NodeJS.ProcessEnv} env
  * @returns {{account: string, accessKey: string, secret: string, bucket: string} | null}
+ * @throws {Error}
  */
 export function readCredentials(env) {
   const values = credentialNames.map((name) => env[name]);
@@ -39,12 +40,27 @@ function sign(key, value) {
 /**
  * @param {ReturnType<typeof readCredentials>} config
  * @returns {Function}
+ * @throws {TypeError}
  */
 export function createTransport(config) {
   const host = `${config.account}.r2.cloudflarestorage.com`;
-  return async (method, key, { body = '', match, absent, list = false, folders = false, timeoutMs = 15_000, bodyTimeoutMs, signal } = {}) => {
+  /**
+   * @param {string} method
+   * @param {string} key
+   * @param {{body?: Buffer | string, match?: string, absent?: boolean, list?: boolean, folders?: boolean, prefix?: string, token?: string, timeoutMs?: number, bodyTimeoutMs?: Function, signal?: AbortSignal}} options
+   * @returns {Promise<Response>}
+   * @throws {Error}
+   */
+  return async (method, key, {
+    body = '', match, absent, list = false, folders = false, prefix, token, timeoutMs = 15_000, bodyTimeoutMs, signal,
+  } = {}) => {
     const path = `/${config.bucket}${key ? `/${key}` : ''}`;
-    const query = !list ? '' : folders ? 'delimiter=%2F&list-type=2&max-keys=2' : 'list-type=2&max-keys=1';
+    const parameters = !list ? {} : folders ? { delimiter: '/', 'list-type': '2', 'max-keys': '2' } :
+      prefix === undefined ? { 'list-type': '2', 'max-keys': '1' } : { 'continuation-token': token, 'list-type': '2', prefix };
+    const query = Object.keys(parameters).filter((name) => parameters[name] !== undefined).sort()
+      .map((name) => `${name}=${encodeURIComponent(parameters[name]).replace(/[!'()*]/g,
+        (character) => `%${character.charCodeAt(0).toString(16).toUpperCase()}`)}`)
+      .join('&');
     const amzDate = new Date().toISOString().replace(/[:-]|\.\d{3}/g, '');
     const date = amzDate.slice(0, 8);
     const payloadHash = digest(body);
@@ -75,6 +91,9 @@ export function createTransport(config) {
       return fetch(url, { ...request, signal: signal === undefined ? timeout : AbortSignal.any([signal, timeout]) });
     }
     const phase = new AbortController();
+    /**
+     * @returns {void}
+     */
     const stopWaiting = () => phase.abort(timeout.reason);
     timeout.addEventListener('abort', stopWaiting, { once: true });
     try {

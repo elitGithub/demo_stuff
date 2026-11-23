@@ -8,6 +8,7 @@ export class MemoryBucket {
   forced = new Map();
   contentsOnlyKeyCount = false;
   omitContentLength = false;
+  pageSize = 1_000;
   transport = this.request.bind(this);
 
   /**
@@ -37,17 +38,18 @@ export class MemoryBucket {
   /**
    * @param {string} key
    * @param {Buffer | string} body
+   * @param {Date} lastModified
    * @returns {void}
    */
-  seed(key, body) {
+  seed(key, body, lastModified = new Date()) {
     const bytes = Buffer.from(body);
-    this.objects.set(key, { body: bytes, etag: `"${digest(bytes)}"`, lastModified: new Date().toUTCString() });
+    this.objects.set(key, { body: bytes, etag: `"${digest(bytes)}"`, lastModified: lastModified.toUTCString() });
   }
 
   /**
    * @param {string} method
    * @param {string} key
-   * @param {{body?: Buffer | string, match?: string, absent?: boolean, list?: boolean, timeoutMs: number, bodyTimeoutMs?: Function, signal?: AbortSignal}} options
+   * @param {{body?: Buffer | string, match?: string, absent?: boolean, list?: boolean, folders?: boolean, prefix?: string, token?: string, timeoutMs: number, bodyTimeoutMs?: Function, signal?: AbortSignal}} options
    * @returns {Promise<Response>}
    * @throws {Error}
    */
@@ -65,6 +67,29 @@ export class MemoryBucket {
     const forced = this.forced.get(key) ?? [];
     if (forced.length > 0) {
       return new Response(null, { status: forced.shift(), headers });
+    }
+    if (method === 'DELETE') {
+      if (options.body !== undefined || options.match !== undefined || options.absent !== undefined) {
+        throw new Error(`DELETE with a body or a condition: ${key}`);
+      }
+      this.objects.delete(key);
+      return new Response(null, { status: 204, headers });
+    }
+    if (options.list === true && options.prefix !== undefined) {
+      const entities = { '&': '&amp;', '<': '&lt;', '>': '&gt;', '"': '&quot;', "'": '&apos;' };
+      const names = [...this.objects.keys()].filter((name) => name.startsWith(options.prefix)).sort();
+      const after = options.token === undefined ? '' : Buffer.from(options.token, 'base64').toString();
+      const remaining = names.filter((name) => name >= after);
+      const page = remaining.slice(0, this.pageSize);
+      const truncated = remaining.length > page.length;
+      const contents = page.map((name) => `<Contents><Key>${name.replace(/[&<>"']/g, (character) => entities[character])}</Key>` +
+        `<LastModified>${new Date(this.objects.get(name).lastModified).toISOString()}</LastModified>` +
+        `<Size>${this.objects.get(name).body.length}</Size><StorageClass>STANDARD</StorageClass></Contents>`);
+      const next = truncated ? `<NextContinuationToken>${Buffer.from(remaining[page.length]).toString('base64')}</NextContinuationToken>` : '';
+      return new Response('<?xml version="1.0" encoding="UTF-8"?><ListBucketResult xmlns="http://s3.amazonaws.com/doc/2006-03-01/">' +
+        `<Name>bucket</Name><Prefix>${options.prefix.replace(/[&<>"']/g, (character) => entities[character])}</Prefix>` +
+        `<KeyCount>${page.length}</KeyCount><MaxKeys>${this.pageSize}</MaxKeys><IsTruncated>${truncated}</IsTruncated>` +
+        `${contents.join('')}${next}</ListBucketResult>`, { headers });
     }
     if (options.list === true) {
       const names = [...this.objects.keys()].sort();

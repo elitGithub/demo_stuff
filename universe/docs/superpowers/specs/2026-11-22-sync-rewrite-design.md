@@ -136,12 +136,16 @@ With all four R2 values blank, Universe starts SillyTavern and does no sync; `sy
 
 `/status` returns `phase` (`pulling`, `running`, `saving`, `stopping`, `stopped`, `offline`, `conflict`, `disabled`, `failed`), `progress` (`filesDone`, `filesTotal`, `bytesDone`, `bytesTotal`) during transfers, `lastSavedAt`, `unsavedSince`, `error`, `conflictAt` and `conflictsFolder`. `bytesTotal` counts entries that carry `size`; older entries count towards files only. The wrapper home page polls `/status` every 2 seconds and shows a progress bar during transfers and the latest message beside **Save now**. During transfers the console prints a progress line every 5 seconds.
 
-## Open ruling: cloud storage growth
+## Ruling: cloud storage growth
 
-Nothing deletes old blobs or manifests. Every save that changes `settings.json` uploads it again, and Scenario Builder makes it 9.3 MB. At one changed save every 15 minutes that is about 37 MB per hour of play, so R2's 10 GB free storage lasts roughly 270 hours of play. Options:
+Operator ruling, 2026-11-22: option 1, keep the newest 100 saves.
 
-1. **Keep the last 100 saves (recommended).** After each successful save, delete manifests older than the newest 100 and blobs that no kept manifest uses. A blob uploaded less than a day ago is never deleted, so a save the other PC is still uploading is safe. At most about 1 GB with today's settings file.
+Without a cleanup nothing deletes old blobs or manifests. Every save that changes `settings.json` uploads it again, and Scenario Builder makes it 9.3 MB. At one changed save every 15 minutes that is about 37 MB per hour of play, so R2's 10 GB free storage would last roughly 270 hours of play. The options were:
+
+1. **Keep the last 100 saves (chosen).** After each successful save, delete manifests older than the newest 100 and blobs that no kept manifest uses. A blob uploaded less than a day ago is never deleted, so a save the other PC is still uploading is safe. At most about 1 GB with today's settings file.
 2. Keep everything and show bucket size on the wrapper page; decide later.
+
+As built (plan Task 5): the cleanup runs while Universe is running, after a save whose outcome is saved and whose reason is not stop, when no other save is waiting, and at most once every 24 hours by this PC's clock (`prunedAt` in `sync.json`; a `prunedAt` later than the clock counts as due). It never runs after the final save at stop. It reads `control.json` once; with no control object or a null head it fails and deletes nothing. It keeps up to 100 manifests on the parent chain from that head and every blob they list, whatever the entry's path, so the `_webpack/`, `backups/` and `cookie-secret.txt` entries of pre-rewrite saves keep their blobs; an entry whose hash is not 64 lowercase hex makes the cleanup fail before anything is deleted. It deletes another manifest or blob only when its `LastModified` is at least a day before the server date. It runs while this PC's save slot is held, and any save request, the stop included, aborts it at once. A failure shows in the status and the cleanup runs again after the next save; it never changes the save's outcome. A PC whose old format-1 journal names a base save that has since been cleaned up (the base manifest answers 404) treats B as unknown, as a fresh PC does: it pulls the head, and every local file that differs from the head's copy goes to `local/conflicts/` first.
 
 ## Other code the rewrite changes
 

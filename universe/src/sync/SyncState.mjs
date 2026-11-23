@@ -34,17 +34,20 @@ export const SyncState = Object.freeze({
   /**
    * @param {string} stateRoot
    * @param {string} bucket
-   * @returns {Promise<{bucket: string, revision: ?string, pending: ?{id: string, files: object}, files: ?object}|{mismatch: string}|null>}
+   * @returns {Promise<{bucket: string, revision: ?string, pending: ?{id: string, files: object}, prunedAt: ?string, files: ?object}|{mismatch: string}|null>}
    * @throws {Error}
    */
   async read(stateRoot, bucket) {
     const state = await readJson(join(stateRoot, 'sync.json'));
     if (state !== null) {
+      const prunedAt = state.prunedAt ?? null;
       if (typeof state.bucket !== 'string' || (state.revision !== null && !idPattern.test(state.revision)) ||
-          !validFiles(state.files) || (state.pending !== null && (!idPattern.test(state.pending?.id) || !validFiles(state.pending.files)))) {
+          !validFiles(state.files) || (state.pending !== null && (!idPattern.test(state.pending?.id) || !validFiles(state.pending.files))) ||
+          (prunedAt !== null && (typeof prunedAt !== 'string' || !Number.isFinite(Date.parse(prunedAt))))) {
         throw new Error(`Invalid local sync state: ${join(stateRoot, 'sync.json')}`);
       }
-      return state.bucket === bucket ? { bucket, revision: state.revision, pending: state.pending, files: state.files } : { mismatch: state.bucket };
+      return state.bucket === bucket ?
+        { bucket, revision: state.revision, pending: state.pending, prunedAt, files: state.files } : { mismatch: state.bucket };
     }
     const journal = await readJson(join(stateRoot, 'journal.json'));
     if (typeof journal?.base !== 'string' || !idPattern.test(journal.base)) {
@@ -55,12 +58,12 @@ export const SyncState = Object.freeze({
     }
     const files = journal.format === 2 ?
       Object.fromEntries(SyncScope.entries(journal.files).map((entry) => [entry.path, { hash: entry.hash }])) : null;
-    return { bucket, revision: journal.base, pending: null, files };
+    return { bucket, revision: journal.base, pending: null, prunedAt: null, files };
   },
 
   /**
    * @param {string} stateRoot
-   * @param {{bucket: string, revision: ?string, pending: ?{id: string, files: object}, files: object}} state
+   * @param {{bucket: string, revision: ?string, pending: ?{id: string, files: object}, prunedAt: ?string, files: object}} state
    * @returns {Promise<void>}
    * @throws {Error}
    */
@@ -70,7 +73,9 @@ export const SyncState = Object.freeze({
     const temporary = `${target}.${randomUUID()}.tmp`;
     const handle = await fs.open(temporary, 'wx', 0o600);
     try {
-      await handle.writeFile(JSON.stringify({ bucket: state.bucket, revision: state.revision, pending: state.pending, files: state.files }));
+      await handle.writeFile(JSON.stringify({
+        bucket: state.bucket, revision: state.revision, pending: state.pending, prunedAt: state.prunedAt, files: state.files,
+      }));
       await handle.sync();
     } finally {
       await handle.close();

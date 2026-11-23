@@ -3,6 +3,7 @@ import { randomUUID } from 'node:crypto';
 import { lstatSync, readFileSync, statSync } from 'node:fs';
 import { fileURLToPath } from 'node:url';
 import { resolve } from 'node:path';
+import { LauncherLog } from './LauncherLog.mjs';
 import { projectConfiguration, runLauncher } from './launcher.mjs';
 import { SyncPhase } from './sync/SyncPhase.mjs';
 
@@ -12,17 +13,25 @@ const home = readFileSync(new URL('./wrapper-home.html', import.meta.url), 'utf8
 const admissionWindowMs = 10_000;
 const admissionLimit = 12;
 const stopSignals = Object.freeze(['SIGINT', 'SIGTERM', 'SIGHUP']);
+const consoleGoneCodes = Object.freeze(['EPIPE', 'EIO']);
 
 /**
  * @param {object} state
  * @param {number} port
  * @param {Function} save
  * @returns {Function}
+ * @throws {TypeError}
  */
 export function createWrapperHandler(state, port, save) {
   const token = randomUUID();
   const authorities = new Set([host, 'localhost'].map((name) => new URL(`http://${name}:${port}`).host));
   const admissions = [];
+  /**
+   * @param {import('node:http').IncomingMessage} request
+   * @param {import('node:http').ServerResponse} response
+   * @returns {void}
+   * @throws {Error}
+   */
   return (request, response) => {
     const target = request.url;
     const absolute = absoluteTarget.exec(target);
@@ -32,6 +41,7 @@ export function createWrapperHandler(state, port, save) {
      * @param {string} body
      * @param {object} headers
      * @returns {void}
+     * @throws {Error}
      */
     const send = (code, body = '', headers = {}) => response.writeHead(code, {
       'Content-Type': 'application/json; charset=utf-8', 'Content-Length': Buffer.byteLength(body),
@@ -39,6 +49,7 @@ export function createWrapperHandler(state, port, save) {
     }).end(request.method === 'HEAD' ? undefined : body);
     /**
      * @returns {string}
+     * @throws {TypeError}
      */
     const status = () => JSON.stringify({ ...state, ok: state.phase === SyncPhase.Running });
     if (!['/', '/status', '/save'].includes(pathname)) {
@@ -91,22 +102,28 @@ export function createWrapperHandler(state, port, save) {
 }
 
 /**
+ * @param {LauncherLog} log
  * @returns {Promise<void>}
  * @throws {Error}
  */
-async function main() {
+async function main(log) {
+  process.stdout.on('error', (error) => {
+    if (!consoleGoneCodes.includes(error.code)) {
+      throw error;
+    }
+  });
   const settingsPath = fileURLToPath(new URL('../.env', import.meta.url));
   const unusable = `The Universe settings file ${settingsPath} must be a readable regular file.`;
   let settings = '';
-  if (lstatSync(settingsPath, { throwIfNoEntry: false }) !== undefined) {
-    if (!statSync(settingsPath, { throwIfNoEntry: false })?.isFile()) {
-      throw new Error(unusable);
+  try {
+    if (lstatSync(settingsPath, { throwIfNoEntry: false }) !== undefined) {
+      settings = statSync(settingsPath, { throwIfNoEntry: false })?.isFile() ? readFileSync(settingsPath, 'utf8') : null;
     }
-    try {
-      settings = readFileSync(settingsPath, 'utf8');
-    } catch (error) {
-      throw new Error(`${unusable} ${error.message}`, { cause: error });
-    }
+  } catch (error) {
+    throw new Error(`${unusable} ${error.message}`, { cause: error });
+  }
+  if (settings === null) {
+    throw new Error(unusable);
   }
   const config = projectConfiguration(settings, process.env);
   const state = { phase: SyncPhase.Pulling };
@@ -117,22 +134,34 @@ async function main() {
   const abort = () => stop.abort();
   stopSignals.forEach((name) => process.on(name, abort));
   let requestSave = null;
-  const server = createServer(createWrapperHandler(state, config.port, () => (requestSave === null ? null : requestSave())));
+  const server = createServer(createWrapperHandler(state, config.port,
+    /**
+     * @returns {?Promise<object|void>}
+     * @throws {Error}
+     */
+    () => (requestSave === null ? null : requestSave())));
   try {
     await new Promise((listening, reject) => {
       server.once('error', reject);
       server.listen(config.port, host, listening);
     });
-    console.log(`http://${host}:${config.port}/`);
-    await runLauncher(config, stop.signal, (next) => Object.assign(state, next), {
+    log.write(`http://${host}:${config.port}/`);
+    await runLauncher(config, stop.signal,
       /**
-       * @param {?Function} handler
-       * @returns {void}
+       * @param {object} next
+       * @returns {object}
        */
-      onSaveReady(handler) {
-        requestSave = handler;
-      },
-    });
+      (next) => Object.assign(state, next),
+      {
+        log,
+        /**
+         * @param {?Function} handler
+         * @returns {void}
+         */
+        onSaveReady(handler) {
+          requestSave = handler;
+        },
+      });
   } finally {
     if (server.listening) {
       await new Promise((done) => server.close(done));
@@ -142,11 +171,12 @@ async function main() {
 }
 
 if (process.argv[1] && resolve(process.argv[1]) === fileURLToPath(import.meta.url)) {
-  main().catch((error) => {
+  const log = new LauncherLog(fileURLToPath(new URL('../local/logs/launcher.log', import.meta.url)));
+  main(log).catch((error) => {
     if (error.syscall === 'listen') {
-      console.error(`Universe launcher failed to listen on ${error.address}:${error.port} (${error.code}).`);
+      log.write(`Universe launcher failed to listen on ${error.address}:${error.port} (${error.code}).`, console.error);
     } else {
-      console.error(`[universe] ${error.message}`);
+      log.say(error.message, console.error);
     }
     process.exitCode = 1;
   });

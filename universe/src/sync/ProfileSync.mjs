@@ -52,7 +52,7 @@ export class ProfileSync {
   #disabled = null;
   #aside = null;
   #cleanAt = null;
-  #lastFailure = null;
+  #carriedFailure = null;
   #status = {
     phase: SyncPhase.Pulling, progress: null, lastSavedAt: null, unsavedSince: null, error: null, conflictAt: null, conflictsFolder: null, reloadTabs: false,
   };
@@ -230,7 +230,9 @@ export class ProfileSync {
     this.#halt = halt;
     this.#link(halt, signal);
     const resting = this.#status.phase === SyncPhase.Offline ? SyncPhase.Offline : SyncPhase.Running;
-    const watch = { failedAt: null, giveUpMs: SyncSettings.TransferGiveUpMs, signal: halt.signal };
+    const watch = { failedAt: null, giveUpMs: SyncSettings.TransferGiveUpMs, signal: halt.signal, lastFailure: this.#carriedFailure };
+    this.#carriedFailure = null;
+    let handOn = null;
     try {
       this.#report({ phase: reason === SaveReason.Stop ? SyncPhase.Stopping : SyncPhase.Saving });
       const control = await this.#call((attempt) => this.#cloud.readControl(attempt), watch);
@@ -297,17 +299,20 @@ export class ProfileSync {
       });
     } catch (error) {
       const unsavedSince = this.#status.unsavedSince ?? this.#cleanAt;
-      const stopped = this.#lastFailure === null ? `${stoppedEarly}.` : `${stoppedEarly}: ${this.#lastFailure}`;
+      const stopped = watch.lastFailure === null ? `${stoppedEarly}.` : `${stoppedEarly}: ${watch.lastFailure}`;
       const message = halt.signal.aborted ? stopped : `Not saved since ${unsavedSince}: ${error.message}`;
+      handOn = halt.signal.aborted ? watch.lastFailure : null;
       return this.#ended(reason, resting, { outcome: SaveOutcome.Failed, at: this.#now(), error: message }, { unsavedSince });
     } finally {
       this.#running = null;
+      this.#carriedFailure = this.#queued === null ? null : handOn;
       finish();
     }
   }
 
   /**
    * @returns {string}
+   * @throws {Error}
    */
   #now() {
     return new Date(this.#clock.now()).toISOString();
@@ -316,6 +321,7 @@ export class ProfileSync {
   /**
    * @param {object} changes
    * @returns {void}
+   * @throws {Error}
    */
   #report(changes) {
     Object.assign(this.#status, changes);
@@ -325,6 +331,7 @@ export class ProfileSync {
   /**
    * @param {string} reason
    * @returns {{changedFiles: number, offline: boolean, disabled: string}}
+   * @throws {Error}
    */
   #disable(reason) {
     this.#disabled = reason;
@@ -335,6 +342,7 @@ export class ProfileSync {
   /**
    * @param {number} savedAt
    * @returns {{outcome: string, at: string, error: string}}
+   * @throws {RangeError}
    */
   #conflicted(savedAt) {
     const at = new Date(savedAt).toISOString();
@@ -351,6 +359,7 @@ export class ProfileSync {
    * @param {{outcome: string, at: string, error: ?string}} result
    * @param {object} changes
    * @returns {{outcome: string, at: string, error: ?string}}
+   * @throws {Error}
    */
   #ended(reason, phase, result, changes = {}) {
     this.#report({
@@ -365,24 +374,27 @@ export class ProfileSync {
 
   /**
    * @param {Function} operation
-   * @param {{failedAt: ?number, giveUpMs: number, signal?: AbortSignal}} watch
+   * @param {{failedAt: ?number, giveUpMs: number, signal?: AbortSignal, lastFailure?: ?string}} watch
    * @param {AbortSignal} [signal]
    * @returns {Promise<*>}
    * @throws {Error}
    */
-  async #call(operation, watch, signal = watch.signal) {
-    const value = await Retry.run(operation, {
+  #call(operation, watch, signal = watch.signal) {
+    return Retry.run(operation, {
       giveUpMs: watch.giveUpMs,
       clock: this.#clock,
       signal,
       window: watch,
-      onWait: ({ error, nextMs }) => {
-        this.#lastFailure = error.message;
-        this.#report({ error: `${error.message} Retrying in ${Math.ceil(nextMs / 1000)} s.` });
+      /**
+       * @param {{attempt: number, error: Error, nextMs: number}} wait
+       * @returns {void}
+       * @throws {Error}
+       */
+      onWait: (wait) => {
+        watch.lastFailure = wait.error.message;
+        this.#report({ error: `${wait.error.message} Retrying in ${Math.ceil(wait.nextMs / 1000)} s.` });
       },
     });
-    this.#lastFailure = null;
-    return value;
   }
 
   /**
@@ -393,7 +405,14 @@ export class ProfileSync {
    * @throws {Error}
    */
   #hasAncestor(head, id, watch) {
-    return this.#cloud.hasAncestor(head, id, { read: (current) => this.#call((attempt) => this.#cloud.manifest(current, attempt), watch) });
+    return this.#cloud.hasAncestor(head, id, {
+      /**
+       * @param {string} current
+       * @returns {Promise<{id: string, parent: ?string, files: Array<{path: string, hash: string, size?: number}>}>}
+       * @throws {Error}
+       */
+      read: (current) => this.#call((attempt) => this.#cloud.manifest(current, attempt), watch),
+    });
   }
 
   /**

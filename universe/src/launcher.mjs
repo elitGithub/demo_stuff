@@ -2,6 +2,7 @@ import fs from 'node:fs/promises';
 import { dirname, isAbsolute, join, relative, resolve, sep } from 'node:path';
 import { setTimeout as delay } from 'node:timers/promises';
 import { startChild } from './child.mjs';
+import { LauncherLog } from './LauncherLog.mjs';
 import { createTransport, credentialNames, readCredentials } from './r2.mjs';
 import { CloudStore } from './sync/CloudStore.mjs';
 import { FileErrors } from './sync/FileErrors.mjs';
@@ -39,14 +40,6 @@ const systemClock = Object.freeze({
     }
   },
 });
-
-/**
- * @param {string} text
- * @returns {void}
- */
-function say(text) {
-  console.log(`[universe] ${text}`);
-}
 
 /**
  * @param {string} contents
@@ -120,43 +113,47 @@ export function configuration(env) {
  * @param {object} config
  * @param {AbortSignal} signal
  * @param {Function} onState
- * @param {{startChild?: Function, transport?: Function, clock?: {now: Function, sleep: Function}, onSaveReady?: Function}} [dependencies]
+ * @param {{startChild?: Function, transport?: Function, clock?: {now: Function, sleep: Function}, onSaveReady?: Function, log?: LauncherLog}} [dependencies]
  * @returns {Promise<void>}
  * @throws {Error}
  */
 export async function runLauncher(config, signal, onState, dependencies = {}) {
   const clock = dependencies.clock ?? systemClock;
+  const log = dependencies.log ?? new LauncherLog(null);
   let latest = { phase: SyncPhase.Pulling, progress: null, lastSavedAt: null, unsavedSince: null, error: null, conflictAt: null,
     conflictsFolder: null, reloadTabs: false };
   let transfer = null;
-  let stopping = false;
+  let stopPhase = null;
+  const background = [];
   /**
    * @param {object} changes
    * @returns {void}
+   * @throws {Error}
    */
-  const report = (changes) => {
+  const report =(changes) => {
     const next = { ...latest, ...changes };
-    if (stopping && next.phase !== SyncPhase.Stopped) {
-      next.phase = SyncPhase.Stopping;
+    if (stopPhase !== null) {
+      next.phase = stopPhase;
     }
     if (next.phase !== latest.phase && announcedPhases.includes(next.phase)) {
-      say(next.error);
+      log.say(next.error);
     }
     if (next.progress !== null && transfer === null) {
       transfer = new AbortController();
       /**
        * @param {AbortSignal} watching
        * @returns {Promise<void>}
+       * @throws {Error}
        */
       (async (watching) => {
         await clock.sleep(SyncSettings.ConsoleProgressMs, watching);
         while (!watching.aborted) {
           const { filesDone, filesTotal, bytesDone, bytesTotal } = latest.progress;
-          say(`${latest.phase === SyncPhase.Pulling ? 'Pulling' : 'Saving'}: ${filesDone} of ${filesTotal} files, ` +
+          log.say(`${latest.phase === SyncPhase.Pulling ? 'Pulling' : 'Saving'}: ${filesDone} of ${filesTotal} files, ` +
             `${(bytesDone / 1_000_000).toFixed(1)} of ${(bytesTotal / 1_000_000).toFixed(1)} MB.`);
           await clock.sleep(SyncSettings.ConsoleProgressMs, watching);
         }
-      })(transfer.signal);
+      })(transfer.signal).catch(fault);
     } else if (next.progress === null && transfer !== null) {
       transfer.abort();
       transfer = null;
@@ -164,7 +161,46 @@ export async function runLauncher(config, signal, onState, dependencies = {}) {
     latest = next;
     onState(next);
   };
+  /**
+   * @param {Error} error
+   * @returns {void}
+   * @throws {Error}
+   */
+  const fault = (error) => {
+    report({ error: error.message });
+    log.say(error.message);
+  };
+  /**
+   * @param {Promise<void>} task
+   * @returns {void}
+   */
+  const track = (task) => {
+    task.catch(fault);
+    background.push(task);
+  };
+  /**
+   * @returns {void}
+   * @throws {Error}
+   */
+  const beginStop = () => {
+    if (stopPhase === null) {
+      stopPhase = SyncPhase.Stopping;
+      report({});
+    }
+  };
+  /**
+   * @returns {void}
+   * @throws {Error}
+   */
+  const endStop = () => {
+    stopPhase = SyncPhase.Stopped;
+    report({});
+  };
   report({});
+  signal.addEventListener('abort', beginStop, { once: true });
+  if (signal.aborted) {
+    beginStop();
+  }
   if (!(await FileErrors.missing(fs.stat(join(config.sillyTavern, 'server.js'))))?.isFile()) {
     throw new Error('SillyTavern is missing. Run npm ci and npm run build in the Universe directory.');
   }
@@ -181,24 +217,25 @@ export async function runLauncher(config, signal, onState, dependencies = {}) {
       if (!signal.aborted) {
         throw error;
       }
-      say(error.message);
+      log.say(error.message);
+      endStop();
       return;
     }
   }
   if (latest.reloadTabs) {
-    say('Pulled newer files from the cloud. Reload any open SillyTavern tabs.');
+    log.say('Pulled newer files from the cloud. Reload any open SillyTavern tabs.');
   }
   if (signal.aborted) {
-    report({ phase: SyncPhase.Stopped });
+    endStop();
     return;
   }
   const child = (dependencies.startChild ?? startChild)(config);
   const running = new AbortController();
-  const background = [];
   if (started.disabled === null) {
-    background.push(
+    track(
       /**
        * @returns {Promise<void>}
+       * @throws {Error}
        */
       (async () => {
         if (!started.offline) {
@@ -208,12 +245,16 @@ export async function runLauncher(config, signal, onState, dependencies = {}) {
         try {
           await Retry.run((attempt) => cloud.readControl(attempt), {
             giveUpMs: Number.MAX_SAFE_INTEGER, clock, signal: running.signal,
-            onWait: ({ error, nextMs }) => report({ error: `${unreachable} ${error.message} Retrying in ${Math.ceil(nextMs / 1000)} s.` }),
+            /**
+             * @param {{attempt: number, error: Error, nextMs: number}} wait
+             * @returns {void}
+             * @throws {Error}
+             */
+            onWait: (wait) => report({ error: `${unreachable} ${wait.error.message} Retrying in ${Math.ceil(wait.nextMs / 1000)} s.` }),
           });
         } catch (error) {
           if (!running.signal.aborted) {
-            report({ error: error.message });
-            say(error.message);
+            fault(error);
           }
           return;
         }
@@ -221,43 +262,51 @@ export async function runLauncher(config, signal, onState, dependencies = {}) {
           await sync.save(SaveReason.Reconnect);
         }
       })(),
+    );
+    track(
       /**
        * @returns {Promise<void>}
+       * @throws {Error}
        */
       (async () => {
         await clock.sleep(SyncSettings.SaveIntervalMs, running.signal);
         while (!running.signal.aborted) {
-          await sync.save(SaveReason.Timer);
+          await sync.save(SaveReason.Timer).catch(fault);
           await clock.sleep(SyncSettings.SaveIntervalMs, running.signal);
         }
       })(),
     );
-    dependencies.onSaveReady?.(() => sync.save(SaveReason.Manual));
+    dependencies.onSaveReady?.(
+      /**
+       * @returns {Promise<object|void>}
+       * @throws {Error}
+       */
+      () => sync.save(SaveReason.Manual).catch(fault),
+    );
   }
   await Promise.race([child.finished, new Promise((stopRequested) => signal.addEventListener('abort', stopRequested, { once: true }))]);
-  stopping = true;
+  beginStop();
   running.abort();
   dependencies.onSaveReady?.(null);
   const budget = new AbortController();
-  clock.sleep(SyncSettings.StopBudgetMs, budget.signal).then(() => budget.abort());
-  report({ phase: SyncPhase.Stopping });
+  track(clock.sleep(SyncSettings.StopBudgetMs, budget.signal).then(() => budget.abort()));
   const ended = await child.stop();
   if (started.disabled === null) {
     await clock.sleep(SyncSettings.QuietMs, budget.signal);
     const result = await sync.save(SaveReason.Stop, { signal: budget.signal });
     if (savedOutcomes.includes(result.outcome)) {
-      say(`Saved to cloud at ${result.at}.`);
+      log.say(`Saved to cloud at ${result.at}.`);
     } else if (result.outcome === SaveOutcome.Failed) {
-      say(`NOT SAVED TO CLOUD: ${result.error.replace(/\.$/, '')}. ${keptLocally}`);
+      log.say(`NOT SAVED TO CLOUD: ${result.error.replace(/\.$/, '')}. ${keptLocally}`);
     } else {
-      say(`NOT SAVED TO CLOUD: ${result.error}`);
+      log.say(`NOT SAVED TO CLOUD: ${result.error}`);
     }
   } else if (sync !== null) {
-    say(`NOT SAVED TO CLOUD: ${started.disabled}`);
+    log.say(`NOT SAVED TO CLOUD: ${started.disabled}`);
   }
   budget.abort();
-  await Promise.all(background);
-  report({ phase: SyncPhase.Stopped });
+  await Promise.allSettled(background);
+  endStop();
   if (ended.launchError !== null) {
     throw ended.launchError;
   }

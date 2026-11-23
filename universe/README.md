@@ -43,6 +43,11 @@ To hand off, stop the launcher normally on the first PC and let its final save f
 - A case-only rename preserves local-only files inside the renamed directory. If both spellings already exist locally, or the filesystem rejects the case-only rename, back up the local root and sidecar before resolving the conflicting paths or restoring to a fresh root on a filesystem that supports the rename.
 - If the launcher reports that the cloud advanced beyond a pending local save, preserve the data root and sidecar together. Use a fresh Universe checkout and its empty local/data directory to restore the cloud copy. Reconcile the preserved local story through SillyTavern while that new session is running, then stop it and confirm the save. Keep the original until the reconciled copy is verified.
 - For a legacy installation under `sillytavern/` or `runtime-data/`, preserve the original checkout and bucket. Set up a fresh Universe checkout, copy your verified legacy story data into `local/data/` before first start, and configure a new empty bucket. If the legacy bucket has newer files, recover and verify those first. A populated legacy bucket is rejected.
+- The launcher's own console lines are also written to `local/logs/launcher.log`, so after a closed or crashed terminal its last line shows whether the final save happened.
+
+## Limits
+
+- Closing the terminal window also sends SIGHUP to SillyTavern. SillyTavern then ends at once without its clean exit, so a file it is writing in place at that moment can be cut short. Stop Universe with Ctrl+C before closing the window.
 
 ## Verify
 

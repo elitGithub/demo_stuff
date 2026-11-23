@@ -7,10 +7,13 @@ import { test } from 'node:test';
 import { digest } from '../src/r2.mjs';
 import { CloudStore } from '../src/sync/CloudStore.mjs';
 import { ProfileSync } from '../src/sync/ProfileSync.mjs';
+import { SaveOutcome } from '../src/sync/SaveOutcome.mjs';
 import { SaveReason } from '../src/sync/SaveReason.mjs';
+import { SyncPhase } from '../src/sync/SyncPhase.mjs';
 import { SyncSettings } from '../src/sync/SyncSettings.mjs';
 import { MemoryBucket } from './support/MemoryBucket.mjs';
 
+const stoppedPull = 'Stopped before the pull finished. The next start continues it.';
 const bucketName = 'account/bucket';
 const prefix = '_universe/v2';
 const controlKey = `${prefix}/control.json`;
@@ -82,6 +85,7 @@ function wire(bucket) {
 /**
  * @param {import('node:test').TestContext} context
  * @returns {Promise<string>}
+ * @throws {Error}
  */
 async function workspace(context) {
   const root = await mkdtemp(join(tmpdir(), 'universe-sync-'));
@@ -105,6 +109,10 @@ function machine(root, name, transport, clock = fakeClock()) {
     bucket: bucketName,
     cloud: new CloudStore(transport),
     clock,
+    /**
+     * @param {object} status
+     * @returns {number}
+     */
     onStatus: (status) => statuses.push(status),
   });
   return { sync, statuses, clock, data: join(local, 'data'), state: join(local, 'data.universe'), conflicts: join(local, 'conflicts') };
@@ -114,6 +122,7 @@ function machine(root, name, transport, clock = fakeClock()) {
  * @param {string} root
  * @param {Record<string, string>} files
  * @returns {Promise<void>}
+ * @throws {Error}
  */
 async function put(root, files) {
   for (const [path, content] of Object.entries(files)) {
@@ -125,6 +134,7 @@ async function put(root, files) {
 /**
  * @param {string} root
  * @returns {Promise<Record<string, string>>}
+ * @throws {Error}
  */
 async function tree(root) {
   const found = {};
@@ -140,6 +150,7 @@ async function tree(root) {
 /**
  * @param {string} root
  * @returns {Promise<string[]>}
+ * @throws {Error}
  */
 async function folders(root) {
   return (await readdir(root, { recursive: true, withFileTypes: true })).filter((entry) => entry.isDirectory())
@@ -186,6 +197,7 @@ function seedHead(bucket, head) {
 /**
  * @param {MemoryBucket} bucket
  * @returns {?string}
+ * @throws {Error}
  */
 function headOf(bucket) {
   return JSON.parse(bucket.objects.get(controlKey).body.toString()).head;
@@ -194,6 +206,7 @@ function headOf(bucket) {
 /**
  * @param {MemoryBucket} bucket
  * @returns {Promise<Record<string, string>>}
+ * @throws {Error}
  */
 async function cloudTree(bucket) {
   const manifest = JSON.parse(bucket.objects.get(`${prefix}/manifests/${headOf(bucket)}.json`).body.toString());
@@ -211,6 +224,7 @@ function manifestKeys(bucket) {
 /**
  * @param {string} stateRoot
  * @returns {Promise<object>}
+ * @throws {Error}
  */
 async function syncState(stateRoot) {
   return JSON.parse(await readFile(join(stateRoot, 'sync.json'), 'utf8'));
@@ -236,6 +250,7 @@ function slowLink(clock, size, bytesPerSecond, options) {
 /**
  * @param {Promise} pending
  * @returns {Promise}
+ * @throws {Error}
  */
 function settledSoon(pending) {
   let timer;
@@ -246,16 +261,28 @@ function settledSoon(pending) {
 }
 
 /**
+ * @param {AbortSignal} signal
+ * @returns {Promise<never>}
+ * @throws {Error}
+ */
+function hang(signal) {
+  const hung = Promise.withResolvers();
+  signal.addEventListener('abort', () => hung.reject(signal.reason), { once: true });
+  return hung.promise;
+}
+
+/**
  * @param {string} root
  * @param {Function} transport
  * @param {Record<string, string>} files
  * @returns {Promise<object>}
+ * @throws {Error}
  */
 async function savedMachine(root, transport, files = starter) {
   const first = machine(root, 'a', transport);
   await put(first.data, files);
   assert.deepEqual(await first.sync.start(), { changedFiles: 0, offline: false, disabled: null });
-  assert.equal((await first.sync.save('manual')).outcome, 'saved');
+  assert.equal((await first.sync.save(SaveReason.Manual)).outcome, SaveOutcome.Saved);
   return first;
 }
 
@@ -291,7 +318,7 @@ test('[1] a fresh PC pulls the in-scope cloud files byte for byte, ignores out-o
     .reduce((sum, [, content]) => sum + Buffer.byteLength(content), 0);
   assert.deepEqual(progress.at(-1), { filesDone: 6, filesTotal: 6, bytesDone: sizedBytes, bytesTotal: sizedBytes });
   assert.deepEqual(progress[0], { filesDone: 0, filesTotal: 6, bytesDone: 0, bytesTotal: sizedBytes });
-  assert.equal(fresh.statuses.at(-1).phase, 'running');
+  assert.equal(fresh.statuses.at(-1).phase, SyncPhase.Running);
   assert.equal(fresh.statuses.at(-1).progress, null);
   assert.equal(fresh.statuses.at(-1).reloadTabs, true);
   const state = await syncState(fresh.state);
@@ -300,7 +327,7 @@ test('[1] a fresh PC pulls the in-scope cloud files byte for byte, ignores out-o
   assert.deepEqual(Object.keys(state.files).sort(), Object.keys(inScope).sort());
   await assert.rejects(readdir(fresh.conflicts), { code: 'ENOENT' });
   const before = bucket.requests.length;
-  assert.equal((await fresh.sync.save('timer')).outcome, 'unchanged');
+  assert.equal((await fresh.sync.save(SaveReason.Timer)).outcome, SaveOutcome.Unchanged);
   assert.deepEqual(bucket.requests.slice(before).map((request) => `${request.method} ${request.key}`), [`GET ${controlKey}`]);
 });
 
@@ -343,22 +370,22 @@ test('[5] when the other PC saves first the next save reports a conflict without
   const second = machine(root, 'b', bucket.transport);
   assert.equal((await second.sync.start()).changedFiles, Object.keys(starter).length);
   await put(second.data, { 'default-user/chats/Ann/one.jsonl': '{"m":1}\n{"m":2}\n{"m":"from b"}\n', 'default-user/worlds/w.json': '{"w":1}' });
-  assert.equal((await second.sync.save('manual')).outcome, 'saved');
+  assert.equal((await second.sync.save(SaveReason.Manual)).outcome, SaveOutcome.Saved);
   bucket.objects.get(controlKey).lastModified = 'Tue, 01 Jan 2030 10:00:00 GMT';
   const head = headOf(bucket);
   const firstBefore = await tree(first.data);
-  const conflict = await first.sync.save('timer');
-  assert.equal(conflict.outcome, 'conflict');
+  const conflict = await first.sync.save(SaveReason.Timer);
+  assert.equal(conflict.outcome, SaveOutcome.Conflict);
   assert.equal(conflict.at, '2030-01-01T10:00:00.000Z');
   assert.equal(conflict.error, "The other PC saved newer changes at 2030-01-01T10:00:00.000Z. This PC's changes stay here. " +
     'Restart Universe to pull; files changed on both PCs go to local/conflicts.');
-  assert.equal(first.statuses.at(-1).phase, 'conflict');
+  assert.equal(first.statuses.at(-1).phase, SyncPhase.Conflict);
   assert.equal(first.statuses.at(-1).conflictAt, conflict.at);
   assert.equal(headOf(bucket), head);
   assert.deepEqual(await tree(first.data), firstBefore);
   await put(first.data, { 'default-user/chats/Ann/one.jsonl': '{"m":"from a"}\n', 'default-user/settings.json': '{"theme":"light!"}' });
   const before = bucket.requests.length;
-  assert.deepEqual(await first.sync.save('manual'), conflict);
+  assert.deepEqual(await first.sync.save(SaveReason.Manual), conflict);
   assert.equal(bucket.requests.length, before);
   const restarted = machine(root, 'a', bucket.transport);
   const result = await restarted.sync.start();
@@ -391,20 +418,20 @@ test('[6] an offline start keeps the local files and the first save after the cl
   assert.deepEqual(await offline.sync.start(), { changedFiles: 0, offline: true, disabled: null });
   const startFinished = new Date(offline.clock.now()).toISOString();
   assert.ok(offline.clock.now() - startedAt >= SyncSettings.StartContactMs);
-  assert.equal(offline.statuses.at(-1).phase, 'offline');
+  assert.equal(offline.statuses.at(-1).phase, SyncPhase.Offline);
   assert.match(offline.statuses.at(-1).error, /^Cloud unreachable: not pulled\. fetch failed$/);
   assert.equal(await readFile(join(offline.state, 'sync.json'), 'utf8'), stateBefore);
-  const failed = await offline.sync.save('timer');
-  assert.equal(failed.outcome, 'failed');
+  const failed = await offline.sync.save(SaveReason.Timer);
+  assert.equal(failed.outcome, SaveOutcome.Failed);
   assert.equal(failed.error, `Not saved since ${startFinished}: fetch failed`);
-  assert.equal(offline.statuses.at(-1).phase, 'offline');
+  assert.equal(offline.statuses.at(-1).phase, SyncPhase.Offline);
   assert.equal(offline.statuses.at(-1).unsavedSince, startFinished);
   await put(other.data, { 'default-user/chats/Ann/two.jsonl': '{"m":"other pc"}\n' });
-  assert.equal((await other.sync.save('manual')).outcome, 'saved');
+  assert.equal((await other.sync.save(SaveReason.Manual)).outcome, SaveOutcome.Saved);
   const head = headOf(bucket);
   line.down = false;
-  const reconnect = await offline.sync.save('reconnect');
-  assert.equal(reconnect.outcome, 'conflict');
+  const reconnect = await offline.sync.save(SaveReason.Reconnect);
+  assert.equal(reconnect.outcome, SaveOutcome.Conflict);
   assert.equal(headOf(bucket), head);
   assert.equal((await tree(offline.data))['default-user/settings.json'], '{"theme":"offline edit"}');
 });
@@ -412,11 +439,16 @@ test('[6] an offline start keeps the local files and the first save after the cl
 test('[7] a pull that loses the cloud half-way stops start-up, and the rerun converges with nothing lost or moved twice', async (context) => {
   const root = await workspace(context);
   const bucket = new MemoryBucket();
-  const cloudFiles = Object.fromEntries(Array.from({ length: 14 }, (unused, index) => [`default-user/chats/Ann/c${index}.jsonl`, `{"n":${index}}\n`]));
+  const cloudFiles = Object.fromEntries([...Array(14).keys()].map((index) => [`default-user/chats/Ann/c${index}.jsonl`, `{"n":${index}}\n`]));
   const head = seedManifest(bucket, seedFiles(bucket, cloudFiles));
   seedHead(bucket, head);
   const line = wire(bucket);
   let blobReads = 0;
+  /**
+   * @param {string} method
+   * @param {string} key
+   * @returns {void}
+   */
   line.after = (method, key) => {
     if (key.includes('/blobs/')) {
       blobReads += 1;
@@ -428,7 +460,7 @@ test('[7] a pull that loses the cloud half-way stops start-up, and the rerun con
   const startedAt = fresh.clock.now();
   await assert.rejects(fresh.sync.start(), /^Error: Pull stopped at default-user\/chats\/Ann\/c\d+\.jsonl: fetch failed$/);
   assert.ok(fresh.clock.now() - startedAt >= SyncSettings.TransferGiveUpMs);
-  assert.equal(fresh.statuses.at(-1).phase, 'failed');
+  assert.equal(fresh.statuses.at(-1).phase, SyncPhase.Failed);
   assert.equal(fresh.statuses.at(-1).progress, null);
   await assert.rejects(readFile(join(fresh.state, 'sync.json')), { code: 'ENOENT' });
   const partial = Object.keys(await tree(fresh.data)).filter((path) => path.startsWith('default-user/'));
@@ -452,6 +484,12 @@ test('[8] a lost reply to the head update still counts as saved, and a crash aft
   const bucket = new MemoryBucket();
   const line = wire(bucket);
   const first = await savedMachine(root, line.transport);
+  /**
+   * @param {string} method
+   * @param {string} key
+   * @returns {void}
+   * @throws {TypeError}
+   */
   line.after = (method, key) => {
     if (method === 'PUT' && key === controlKey) {
       line.after = null;
@@ -459,10 +497,16 @@ test('[8] a lost reply to the head update still counts as saved, and a crash aft
     }
   };
   await put(first.data, { 'default-user/settings.json': '{"theme":"lost reply"}' });
-  const saved = await first.sync.save('manual');
-  assert.equal(saved.outcome, 'saved');
+  const saved = await first.sync.save(SaveReason.Manual);
+  assert.equal(saved.outcome, SaveOutcome.Saved);
   assert.equal((await syncState(first.state)).revision, headOf(bucket));
   assert.equal((await syncState(first.state)).pending, null);
+  /**
+   * @param {string} method
+   * @param {string} key
+   * @returns {void}
+   * @throws {TypeError}
+   */
   line.after = (method, key) => {
     if (method === 'PUT' && key === controlKey) {
       line.down = true;
@@ -470,7 +514,7 @@ test('[8] a lost reply to the head update still counts as saved, and a crash aft
     }
   };
   await put(first.data, { 'default-user/settings.json': '{"theme":"crash after the head moved"}' });
-  assert.equal((await first.sync.save('manual')).outcome, 'failed');
+  assert.equal((await first.sync.save(SaveReason.Manual)).outcome, SaveOutcome.Failed);
   const crashed = await syncState(first.state);
   assert.equal(crashed.pending.id, headOf(bucket));
   assert.notEqual(crashed.revision, headOf(bucket));
@@ -484,7 +528,7 @@ test('[8] a lost reply to the head update still counts as saved, and a crash aft
   const state = await syncState(restarted.state);
   assert.equal(state.revision, headOf(bucket));
   assert.equal(state.pending, null);
-  assert.equal((await restarted.sync.save('timer')).outcome, 'unchanged');
+  assert.equal((await restarted.sync.save(SaveReason.Timer)).outcome, SaveOutcome.Unchanged);
   assert.equal(restarted.statuses.at(-1).conflictAt, null);
 });
 
@@ -493,6 +537,12 @@ test('[8] a pending save whose head update landed is recognised by the next save
   const bucket = new MemoryBucket();
   const line = wire(bucket);
   const first = await savedMachine(root, line.transport);
+  /**
+   * @param {string} method
+   * @param {string} key
+   * @returns {void}
+   * @throws {TypeError}
+   */
   line.after = (method, key) => {
     if (method === 'PUT' && key === controlKey) {
       line.down = true;
@@ -500,10 +550,10 @@ test('[8] a pending save whose head update landed is recognised by the next save
     }
   };
   await put(first.data, { 'default-user/settings.json': '{"theme":"landed while offline"}' });
-  assert.equal((await first.sync.save('manual')).outcome, 'failed');
+  assert.equal((await first.sync.save(SaveReason.Manual)).outcome, SaveOutcome.Failed);
   line.down = false;
   line.after = null;
-  assert.equal((await first.sync.save('timer')).outcome, 'unchanged');
+  assert.equal((await first.sync.save(SaveReason.Timer)).outcome, SaveOutcome.Unchanged);
   const state = await syncState(first.state);
   assert.equal(state.revision, headOf(bucket));
   assert.equal(state.pending, null);
@@ -516,6 +566,12 @@ test('[8] a save that landed before the other PC saved on top records itself as 
   const first = await savedMachine(root, line.transport);
   const otherFiles = seedFiles(bucket, { ...starter, 'default-user/worlds/other.json': '{"other":1}' });
   let ours = null;
+  /**
+   * @param {string} method
+   * @param {string} key
+   * @returns {void}
+   * @throws {Error}
+   */
   line.after = (method, key) => {
     if (method === 'PUT' && key === controlKey) {
       line.after = null;
@@ -525,13 +581,19 @@ test('[8] a save that landed before the other PC saved on top records itself as 
     }
   };
   await put(first.data, { 'default-user/settings.json': '{"theme":"landed then overtaken"}' });
-  assert.equal((await first.sync.save('manual')).outcome, 'conflict');
+  assert.equal((await first.sync.save(SaveReason.Manual)).outcome, SaveOutcome.Conflict);
   let state = await syncState(first.state);
   assert.equal(state.revision, ours);
   assert.equal(state.pending, null);
   const restarted = machine(root, 'a', line.transport);
   assert.equal((await restarted.sync.start()).changedFiles, 2);
   await assert.rejects(readdir(restarted.conflicts), { code: 'ENOENT' });
+  /**
+   * @param {string} method
+   * @param {string} key
+   * @returns {void}
+   * @throws {Error}
+   */
   line.after = (method, key) => {
     if (method === 'PUT' && key.includes('/manifests/')) {
       line.after = null;
@@ -540,7 +602,7 @@ test('[8] a save that landed before the other PC saved on top records itself as 
   };
   const before = headOf(bucket);
   await put(restarted.data, { 'default-user/settings.json': '{"theme":"lost the race"}' });
-  assert.equal((await restarted.sync.save('manual')).outcome, 'conflict');
+  assert.equal((await restarted.sync.save(SaveReason.Manual)).outcome, SaveOutcome.Conflict);
   state = await syncState(restarted.state);
   assert.equal(state.revision, before);
   assert.notEqual(state.pending.id, headOf(bucket));
@@ -563,7 +625,7 @@ test('[9] deletions, renames, a folder replaced by a file and a file replaced by
   await unlink(join(first.data, 'default-user/worlds/w.json'));
   await rm(join(first.data, 'default-user/x'), { recursive: true });
   await put(first.data, { 'default-user/x': 'x is a file now' });
-  assert.equal((await first.sync.save('manual')).outcome, 'saved');
+  assert.equal((await first.sync.save(SaveReason.Manual)).outcome, SaveOutcome.Saved);
   await put(second.data, { 'default-user/notes.json': '{"local only":true}' });
   const secondAgain = machine(root, 'b', bucket.transport);
   await secondAgain.sync.start();
@@ -576,7 +638,7 @@ test('[9] deletions, renames, a folder replaced by a file and a file replaced by
   await rename(join(secondAgain.data, 'default-user/chats/Ann/renamed.jsonl'), join(secondAgain.data, 'default-user/chats/Ann/again.jsonl'));
   await unlink(join(secondAgain.data, 'default-user/y'));
   await put(secondAgain.data, { 'default-user/y/z.json': '{"y is a folder":true}' });
-  assert.equal((await secondAgain.sync.save('manual')).outcome, 'saved');
+  assert.equal((await secondAgain.sync.save(SaveReason.Manual)).outcome, SaveOutcome.Saved);
   const firstAgain = machine(root, 'a', bucket.transport);
   await firstAgain.sync.start();
   const back = await tree(firstAgain.data);
@@ -621,7 +683,7 @@ test('[10] a head manifest with a traversal, backslash or empty-segment path is 
     assert.equal(await readFile(join(first.state, 'sync.json'), 'utf8'), stateBefore, badPath);
     await assert.rejects(readdir(restarted.conflicts), { code: 'ENOENT' }, badPath);
     await assert.rejects(readFile(join(root, 'escape.json')), { code: 'ENOENT' }, badPath);
-    assert.equal(restarted.statuses.at(-1).phase, 'failed');
+    assert.equal(restarted.statuses.at(-1).phase, SyncPhase.Failed);
   }
 });
 
@@ -634,21 +696,21 @@ test('[11] an emptied data folder with an intact sync.json pulls the cloud copy 
   const manifests = manifestKeys(bucket);
   await rm(first.data, { recursive: true });
   await mkdir(first.data);
-  const blocked = await first.sync.save('timer');
-  assert.equal(blocked.outcome, 'blocked');
+  const blocked = await first.sync.save(SaveReason.Timer);
+  assert.equal(blocked.outcome, SaveOutcome.Blocked);
   assert.equal(blocked.error, 'Not saved: the data folder holds no files.');
   await rm(first.data, { recursive: true });
   line.down = true;
   const offline = machine(root, 'a', line.transport);
   assert.equal((await offline.sync.start()).offline, true);
   line.down = false;
-  assert.equal((await offline.sync.save('reconnect')).outcome, 'conflict');
+  assert.equal((await offline.sync.save(SaveReason.Reconnect)).outcome, SaveOutcome.Conflict);
   const restarted = machine(root, 'a', line.transport);
   assert.equal((await restarted.sync.start()).changedFiles, Object.keys(starter).length);
   const local = await tree(restarted.data);
   delete local['cookie-secret.txt'];
   assert.deepEqual(local, starter);
-  assert.equal((await restarted.sync.save('timer')).outcome, 'unchanged');
+  assert.equal((await restarted.sync.save(SaveReason.Timer)).outcome, SaveOutcome.Unchanged);
   assert.equal(headOf(bucket), head);
   assert.deepEqual(manifestKeys(bucket), manifests);
 });
@@ -659,13 +721,20 @@ test('[12] a file rewritten during the scan, a half-written json, a broken jsonl
   const first = await savedMachine(root, bucket.transport);
   const restless = join(first.data, 'default-user/settings.json');
   let rewrites = 0;
-  context.mock.method(fs, 'open', async (path, ...rest) => {
-    if (path === restless) {
-      rewrites += 1;
-      await writeFile(restless, `{"theme":"${'x'.repeat(rewrites)}"}`);
-    }
-    return originalOpen(path, ...rest);
-  });
+  context.mock.method(fs, 'open',
+    /**
+     * @param {string} path
+     * @param {...*} rest
+     * @returns {Promise<import('node:fs/promises').FileHandle>}
+     * @throws {Error}
+     */
+    async (path, ...rest) => {
+      if (path === restless) {
+        rewrites += 1;
+        await writeFile(restless, `{"theme":"${'x'.repeat(rewrites)}"}`);
+      }
+      return originalOpen(path, ...rest);
+    });
   const bad = {
     'default-user/worlds/half.json': '{"name":',
     'default-user/chats/Ann/broken.jsonl': '{"m":1}\n{"m":\n',
@@ -676,8 +745,8 @@ test('[12] a file rewritten during the scan, a half-written json, a broken jsonl
   const justNow = new Date(first.clock.now() - 500);
   await utimes(join(first.data, 'default-user/chats/Ann/fresh.jsonl'), justNow, justNow);
   await writeFile(restless, '{"theme":"edited before the scan"}');
-  const saved = await first.sync.save('manual');
-  assert.equal(saved.outcome, 'saved');
+  const saved = await first.sync.save(SaveReason.Manual);
+  assert.equal(saved.outcome, SaveOutcome.Saved);
   context.mock.restoreAll();
   assert.ok(rewrites >= SyncSettings.SettleAttempts);
   const cloud = await cloudTree(bucket);
@@ -696,7 +765,7 @@ test('[12] a local file still being written at start is moved aside, never overw
   const other = machine(root, 'b', bucket.transport);
   await other.sync.start();
   await put(other.data, { 'default-user/settings.json': '{"theme":"other pc"}' });
-  assert.equal((await other.sync.save('manual')).outcome, 'saved');
+  assert.equal((await other.sync.save(SaveReason.Manual)).outcome, SaveOutcome.Saved);
   const restarted = machine(root, 'a', bucket.transport);
   await put(restarted.data, { 'default-user/settings.json': '{"theme":"typed a moment ago"}' });
   const justNow = new Date(restarted.clock.now() - 500);
@@ -714,6 +783,11 @@ test('a save whose uploads fail for ten minutes leaves the cloud untouched and t
   const first = await savedMachine(root, line.transport);
   const head = headOf(bucket);
   const manifests = manifestKeys(bucket);
+  /**
+   * @param {string} method
+   * @param {string} key
+   * @returns {void}
+   */
   line.after = (method, key) => {
     if (method === 'GET' && key === controlKey) {
       line.down = true;
@@ -723,13 +797,13 @@ test('a save whose uploads fail for ten minutes leaves the cloud untouched and t
   const lastSaved = first.statuses.at(-1).lastSavedAt;
   first.clock.time += 5_000;
   const startedAt = first.clock.now();
-  const failed = await first.sync.save('timer');
-  assert.equal(failed.outcome, 'failed');
+  const failed = await first.sync.save(SaveReason.Timer);
+  assert.equal(failed.outcome, SaveOutcome.Failed);
   assert.equal(failed.error, `Not saved since ${lastSaved}: fetch failed`);
   assert.equal(first.statuses.at(-1).unsavedSince, lastSaved);
   line.down = false;
   first.clock.time += 5_000;
-  assert.equal((await first.sync.save('timer')).error, `Not saved since ${lastSaved}: fetch failed`);
+  assert.equal((await first.sync.save(SaveReason.Timer)).error, `Not saved since ${lastSaved}: fetch failed`);
   assert.equal(first.statuses.at(-1).unsavedSince, lastSaved);
   assert.ok(first.clock.now() - startedAt >= SyncSettings.TransferGiveUpMs);
   assert.equal(first.statuses.at(-1).progress, null);
@@ -738,8 +812,8 @@ test('a save whose uploads fail for ten minutes leaves the cloud untouched and t
   assert.equal((await syncState(first.state)).pending, null);
   line.down = false;
   line.after = null;
-  const again = await first.sync.save('timer');
-  assert.equal(again.outcome, 'saved');
+  const again = await first.sync.save(SaveReason.Timer);
+  assert.equal(again.outcome, SaveOutcome.Saved);
   assert.equal(first.statuses.at(-1).unsavedSince, null);
   assert.equal(first.statuses.at(-1).lastSavedAt, again.at);
   assert.deepEqual(await cloudTree(bucket), { ...starter, 'default-user/settings.json': '{"theme":"upload fails"}', 'default-user/worlds/w.json': '{"w":"also new"}' });
@@ -755,7 +829,7 @@ test('[13] two pulls in the same second get separate conflicts folders', async (
   const stamps = [];
   for (const round of [1, 2]) {
     await put(other.data, { 'default-user/settings.json': `{"other":"${'o'.repeat(round)}"}` });
-    assert.equal((await other.sync.save('manual')).outcome, 'saved');
+    assert.equal((await other.sync.save(SaveReason.Manual)).outcome, SaveOutcome.Saved);
     const restarted = machine(root, 'a', bucket.transport, clock);
     await put(restarted.data, { 'default-user/settings.json': `{"mine":"${'m'.repeat(round)}"}` });
     await restarted.sync.start();
@@ -790,11 +864,11 @@ test('[14] an offline migration from a format-2 journal uses journal.files, so t
   assert.equal((await migrated.sync.start()).offline, true);
   line.down = false;
   let before = bucket.requests.length;
-  assert.equal((await migrated.sync.save('reconnect')).outcome, 'unchanged');
+  assert.equal((await migrated.sync.save(SaveReason.Reconnect)).outcome, SaveOutcome.Unchanged);
   assert.deepEqual(bucket.requests.slice(before).map((request) => `${request.method} ${request.key}`), [`GET ${controlKey}`]);
   await put(migrated.data, { 'default-user/settings.json': '{"theme":"after migration"}' });
   before = bucket.requests.length;
-  assert.equal((await migrated.sync.save('manual')).outcome, 'saved');
+  assert.equal((await migrated.sync.save(SaveReason.Manual)).outcome, SaveOutcome.Saved);
   const changedHash = digest(Buffer.from('{"theme":"after migration"}'));
   assert.deepEqual(bucket.requests.slice(before).filter((request) => request.method === 'PUT').map((request) => request.key), [
     `${prefix}/blobs/${changedHash}`, `${prefix}/manifests/${headOf(bucket)}.json`, controlKey,
@@ -816,7 +890,7 @@ test('[14] an offline start from a format-1 journal treats B as unknown, so the 
   line.down = true;
   assert.equal((await migrated.sync.start()).offline, true);
   line.down = false;
-  assert.equal((await migrated.sync.save('reconnect')).outcome, 'conflict');
+  assert.equal((await migrated.sync.save(SaveReason.Reconnect)).outcome, SaveOutcome.Conflict);
   const online = machine(root, 'a', line.transport);
   assert.deepEqual(await online.sync.start(), { changedFiles: 0, offline: false, disabled: null });
   assert.equal((await syncState(online.state)).revision, base);
@@ -827,12 +901,12 @@ test('an unchanged save makes exactly one control read, and saves requested duri
   const bucket = new MemoryBucket();
   const first = await savedMachine(root, bucket.transport);
   let before = bucket.requests.length;
-  assert.deepEqual(await first.sync.save('timer'), { outcome: 'unchanged', at: new Date(first.clock.now()).toISOString(), error: null });
+  assert.deepEqual(await first.sync.save(SaveReason.Timer), { outcome: SaveOutcome.Unchanged, at: new Date(first.clock.now()).toISOString(), error: null });
   assert.deepEqual(bucket.requests.slice(before).map((request) => `${request.method} ${request.key}`), [`GET ${controlKey}`]);
   await put(first.data, { 'default-user/settings.json': '{"theme":"queued change"}' });
   before = bucket.requests.length;
-  const outcomes = await Promise.all([first.sync.save('timer'), first.sync.save('manual'), first.sync.save('manual'), first.sync.save('stop')]);
-  assert.deepEqual(outcomes.map((outcome) => outcome.outcome), ['saved', 'unchanged', 'unchanged', 'unchanged']);
+  const outcomes = await Promise.all([first.sync.save(SaveReason.Timer), first.sync.save(SaveReason.Manual), first.sync.save(SaveReason.Manual), first.sync.save(SaveReason.Stop)]);
+  assert.deepEqual(outcomes.map((outcome) => outcome.outcome), [SaveOutcome.Saved, SaveOutcome.Unchanged, SaveOutcome.Unchanged, SaveOutcome.Unchanged]);
   assert.equal(bucket.requests.slice(before).filter((request) => request.key === controlKey && request.method === 'GET').length, 2);
 });
 
@@ -845,10 +919,10 @@ test('a bucket mismatch, a case-insensitive probe and a foreign bucket disable s
   await writeFile(join(mismatched.state, 'sync.json'), JSON.stringify({ bucket: 'other/bucket', revision: null, pending: null, files: {} }));
   const result = await mismatched.sync.start();
   assert.equal(result.disabled, `This PC last synced with bucket other/bucket, not the configured ${bucketName}, so cloud sync is off.`);
-  assert.equal(mismatched.statuses.at(-1).phase, 'disabled');
+  assert.equal(mismatched.statuses.at(-1).phase, SyncPhase.Disabled);
   assert.equal(bucket.requests.length, 0);
-  const refused = await mismatched.sync.save('manual');
-  assert.deepEqual(refused, { outcome: 'blocked', at: refused.at, error: result.disabled });
+  const refused = await mismatched.sync.save(SaveReason.Manual);
+  assert.deepEqual(refused, { outcome: SaveOutcome.Blocked, at: refused.at, error: result.disabled });
   assert.equal(bucket.requests.length, 0);
   const folded = machine(root, 'b', bucket.transport);
   await mkdir(folded.state, { recursive: true });
@@ -877,14 +951,14 @@ test('a symbolic link in scope blocks a save and stops a pull, but not a start t
   const bucket = new MemoryBucket();
   const first = await savedMachine(root, bucket.transport);
   await symlink(join(first.data, 'default-user/chats'), join(first.data, 'default-user/linked'));
-  const blocked = await first.sync.save('manual');
-  assert.deepEqual(blocked, { outcome: 'blocked', at: blocked.at, error: 'Save stopped at default-user/linked: not a regular file or folder.' });
+  const blocked = await first.sync.save(SaveReason.Manual);
+  assert.deepEqual(blocked, { outcome: SaveOutcome.Blocked, at: blocked.at, error: 'Save stopped at default-user/linked: not a regular file or folder.' });
   const quiet = machine(root, 'a', bucket.transport);
   assert.deepEqual(await quiet.sync.start(), { changedFiles: 0, offline: false, disabled: null });
   const other = machine(root, 'b', bucket.transport);
   await other.sync.start();
   await put(other.data, { 'default-user/settings.json': '{"theme":"other pc"}' });
-  assert.equal((await other.sync.save('manual')).outcome, 'saved');
+  assert.equal((await other.sync.save(SaveReason.Manual)).outcome, SaveOutcome.Saved);
   const before = await tree(first.data);
   await assert.rejects(machine(root, 'a', bucket.transport).sync.start(), /^Error: Pull stopped at default-user\/linked: not a regular file or folder\.$/);
   assert.deepEqual(await tree(first.data), before);
@@ -898,16 +972,23 @@ test('a file deleted between the scan and its upload read stays deleted on both 
   await writeFile(target, '{"m":"changed then deleted"}\n');
   await put(first.data, { 'default-user/worlds/w.json': '{"w":1}' });
   let calls = 0;
-  context.mock.method(fs, 'lstat', async (path, ...rest) => {
-    if (path === target) {
-      calls += 1;
-      if (calls === 3) {
-        await rm(target);
+  context.mock.method(fs, 'lstat',
+    /**
+     * @param {string} path
+     * @param {...*} rest
+     * @returns {Promise<import('node:fs').Stats>}
+     * @throws {Error}
+     */
+    async (path, ...rest) => {
+      if (path === target) {
+        calls += 1;
+        if (calls === 3) {
+          await rm(target);
+        }
       }
-    }
-    return originalLstat(path, ...rest);
-  });
-  assert.equal((await first.sync.save('manual')).outcome, 'saved');
+      return originalLstat(path, ...rest);
+    });
+  assert.equal((await first.sync.save(SaveReason.Manual)).outcome, SaveOutcome.Saved);
   context.mock.restoreAll();
   assert.ok(calls >= 3);
   const expected = { ...starter, 'default-user/worlds/w.json': '{"w":1}' };
@@ -917,7 +998,7 @@ test('a file deleted between the scan and its upload read stays deleted on both 
   await second.sync.start();
   await assert.rejects(readFile(join(second.data, 'default-user/chats/Ann/one.jsonl')), { code: 'ENOENT' });
   await put(second.data, { 'default-user/settings.json': '{"theme":"b"}' });
-  assert.equal((await second.sync.save('manual')).outcome, 'saved');
+  assert.equal((await second.sync.save(SaveReason.Manual)).outcome, SaveOutcome.Saved);
   const again = machine(root, 'a', bucket.transport);
   await again.sync.start();
   await assert.rejects(readFile(target), { code: 'ENOENT' });
@@ -930,17 +1011,24 @@ test('a file still being written when its upload is read keeps the version B has
   const target = join(first.data, 'default-user/settings.json');
   await writeFile(target, '{"theme":"scanned version"}');
   let reads = 0;
-  context.mock.method(fs, 'open', async (path, ...rest) => {
-    if (path === target) {
-      reads += 1;
-      if (reads > 1) {
-        await writeFile(target, `{"theme":"${'w'.repeat(reads)}"}`);
+  context.mock.method(fs, 'open',
+    /**
+     * @param {string} path
+     * @param {...*} rest
+     * @returns {Promise<import('node:fs/promises').FileHandle>}
+     * @throws {Error}
+     */
+    async (path, ...rest) => {
+      if (path === target) {
+        reads += 1;
+        if (reads > 1) {
+          await writeFile(target, `{"theme":"${'w'.repeat(reads)}"}`);
+        }
       }
-    }
-    return originalOpen(path, ...rest);
-  });
+      return originalOpen(path, ...rest);
+    });
   await put(first.data, { 'default-user/worlds/w.json': '{"w":1}' });
-  assert.equal((await first.sync.save('manual')).outcome, 'saved');
+  assert.equal((await first.sync.save(SaveReason.Manual)).outcome, SaveOutcome.Saved);
   context.mock.restoreAll();
   assert.equal((await cloudTree(bucket))['default-user/settings.json'], starter['default-user/settings.json']);
   assert.equal((await cloudTree(bucket))['default-user/worlds/w.json'], '{"w":1}');
@@ -953,19 +1041,24 @@ test('an interrupted first save leaves only Universe objects, so the restart sta
   const first = machine(root, 'a', line.transport);
   await put(first.data, starter);
   await first.sync.start();
+  /**
+   * @param {string} method
+   * @param {string} key
+   * @returns {void}
+   */
   line.after = (method, key) => {
     if (method === 'PUT' && key.includes('/blobs/')) {
       line.down = true;
     }
   };
-  assert.equal((await first.sync.save('stop')).outcome, 'failed');
+  assert.equal((await first.sync.save(SaveReason.Stop)).outcome, SaveOutcome.Failed);
   assert.ok([...bucket.objects.keys()].some((key) => key.includes('/blobs/')));
   assert.equal(bucket.objects.has(controlKey), false);
   line.down = false;
   line.after = null;
   const restarted = machine(root, 'a', line.transport);
   assert.deepEqual(await restarted.sync.start(), { changedFiles: 0, offline: false, disabled: null });
-  assert.equal((await restarted.sync.save('manual')).outcome, 'saved');
+  assert.equal((await restarted.sync.save(SaveReason.Manual)).outcome, SaveOutcome.Saved);
   assert.deepEqual(await cloudTree(bucket), starter);
 });
 
@@ -979,11 +1072,11 @@ test('a foreign bucket found by a save blocks it for the session, and only netwo
   line.down = true;
   assert.equal((await offline.sync.start()).offline, true);
   line.down = false;
-  const blocked = await offline.sync.save('reconnect');
-  assert.deepEqual(blocked, { outcome: 'blocked', at: blocked.at, error: foreignMessage });
-  assert.equal(offline.statuses.at(-1).phase, 'disabled');
+  const blocked = await offline.sync.save(SaveReason.Reconnect);
+  assert.deepEqual(blocked, { outcome: SaveOutcome.Blocked, at: blocked.at, error: foreignMessage });
+  assert.equal(offline.statuses.at(-1).phase, SyncPhase.Disabled);
   const before = foreign.requests.length;
-  assert.equal((await offline.sync.save('timer')).outcome, 'blocked');
+  assert.equal((await offline.sync.save(SaveReason.Timer)).outcome, SaveOutcome.Blocked);
   assert.equal(foreign.requests.length, before);
   assert.ok(![...foreign.objects.keys()].some((key) => key.startsWith(prefix)));
   const listing = new MemoryBucket();
@@ -993,7 +1086,7 @@ test('a foreign bucket found by a save blocks it for the session, and only netwo
   await put(refused.data, starter);
   assert.deepEqual(await refused.sync.start(), { changedFiles: 0, offline: false, disabled: 'Cloud bucket listing failed (HTTP 403).' });
   assert.ok(!refused.statuses.some((status) => String(status.error).startsWith('Cloud unreachable')));
-  assert.equal((await refused.sync.save('manual')).outcome, 'blocked');
+  assert.equal((await refused.sync.save(SaveReason.Manual)).outcome, SaveOutcome.Blocked);
   assert.ok(![...listing.objects.keys()].some((key) => key.startsWith(prefix)));
   const corrupt = new MemoryBucket();
   corrupt.seed(controlKey, '{"version":1,');
@@ -1017,12 +1110,20 @@ test('[9] a local folder where the cloud has a file is moved aside, and a failed
   assert.deepEqual(await folders(join(fresh.conflicts, folder)), ['default-user', 'default-user/x', 'default-user/x/sub']);
   const failing = machine(root, 'b', bucket.transport);
   const blockedTarget = join(failing.data, 'default-user/x');
-  context.mock.method(fs, 'rename', async (from, to, ...rest) => {
-    if (to === blockedTarget) {
-      throw Object.assign(new Error('EACCES: permission denied'), { code: 'EACCES' });
-    }
-    return originalRename(from, to, ...rest);
-  });
+  context.mock.method(fs, 'rename',
+    /**
+     * @param {string} from
+     * @param {string} to
+     * @param {...*} rest
+     * @returns {Promise<void>}
+     * @throws {Error}
+     */
+    async (from, to, ...rest) => {
+      if (to === blockedTarget) {
+        throw Object.assign(new Error('EACCES: permission denied'), { code: 'EACCES' });
+      }
+      return originalRename(from, to, ...rest);
+    });
   for (const run of [1, 2, 3]) {
     await assert.rejects(machine(root, 'b', bucket.transport).sync.start(), /^Error: Pull stopped at default-user\/x: EACCES/, String(run));
   }
@@ -1040,7 +1141,7 @@ test('[9] the cloud replacing a folder by a file moves the local folder aside wh
   await mkdir(join(second.data, 'default-user/x/sub'));
   await rm(join(first.data, 'default-user/x'), { recursive: true });
   await put(first.data, { 'default-user/x': 'x is a file now' });
-  assert.equal((await first.sync.save('manual')).outcome, 'saved');
+  assert.equal((await first.sync.save(SaveReason.Manual)).outcome, SaveOutcome.Saved);
   const restarted = machine(root, 'b', bucket.transport);
   assert.equal((await restarted.sync.start()).changedFiles, 2);
   assert.equal((await tree(restarted.data))['default-user/x'], 'x is a file now');
@@ -1057,6 +1158,11 @@ test('a save that keeps making progress is not cut, and it gives up 600 s after 
   await put(first.data, { 'default-user/settings.json': '{"theme":"slow"}' });
   let failsLeft = 0;
   let lastKey = null;
+  /**
+   * @param {string} method
+   * @param {string} key
+   * @returns {void}
+   */
   line.before = (method, key) => {
     if (`${method} ${key}` !== lastKey) {
       lastKey = `${method} ${key}`;
@@ -1066,7 +1172,7 @@ test('a save that keeps making progress is not cut, and it gives up 600 s after 
     failsLeft -= 1;
   };
   let startedAt = first.clock.now();
-  assert.equal((await first.sync.save('timer')).outcome, 'saved');
+  assert.equal((await first.sync.save(SaveReason.Timer)).outcome, SaveOutcome.Saved);
   assert.ok(first.clock.now() - startedAt > 3 * SyncSettings.TransferGiveUpMs);
   const steady = '{"theme":"slow but steady"}';
   const dead = '{"w":"never uploads"}';
@@ -1076,6 +1182,11 @@ test('a save that keeps making progress is not cut, and it gives up 600 s after 
   let steadyFailures = 10;
   let lastSuccess = null;
   let firstFailure = null;
+  /**
+   * @param {string} method
+   * @param {string} key
+   * @returns {void}
+   */
   line.before = (method, key) => {
     line.down = key === deadKey || (key === steadyKey && steadyFailures > 0);
     if (key === steadyKey) {
@@ -1085,13 +1196,16 @@ test('a save that keeps making progress is not cut, and it gives up 600 s after 
       firstFailure ??= first.clock.now();
     }
   };
+  /**
+   * @returns {void}
+   */
   line.after = () => {
     lastSuccess = first.clock.now();
     firstFailure = null;
   };
   startedAt = first.clock.now();
-  const failed = await first.sync.save('timer');
-  assert.equal(failed.outcome, 'failed');
+  const failed = await first.sync.save(SaveReason.Timer);
+  assert.equal(failed.outcome, SaveOutcome.Failed);
   assert.match(failed.error, /: fetch failed$/);
   assert.ok(lastSuccess > startedAt);
   assert.ok(firstFailure >= lastSuccess);
@@ -1108,18 +1222,24 @@ test('an abort during a retry wait ends the save at once with no further request
   await put(first.data, { 'default-user/settings.json': '{"theme":"stopping"}' });
   const controller = new AbortController();
   let calls = 0;
+  /**
+   * @returns {void}
+   */
   line.before = () => {
     calls += 1;
   };
   line.down = true;
+  /**
+   * @returns {Promise<never>}
+   */
   first.clock.sleep = () => {
     controller.abort();
     return new Promise(() => {});
   };
-  const result = await settledSoon(first.sync.save('stop', { signal: controller.signal }));
-  assert.deepEqual(result, { outcome: 'failed', at: result.at, error: 'Stopped before the save finished.' });
+  const result = await settledSoon(first.sync.save(SaveReason.Stop, { signal: controller.signal }));
+  assert.deepEqual(result, { outcome: SaveOutcome.Failed, at: result.at, error: 'Stopped before the save finished: fetch failed' });
   assert.equal(calls, 1);
-  assert.equal(first.statuses.at(-1).phase, 'stopped');
+  assert.equal(first.statuses.at(-1).phase, SyncPhase.Stopped);
   assert.equal((await syncState(first.state)).pending, null);
 });
 
@@ -1135,18 +1255,23 @@ test('a status listener that throws never wedges later saves', async (context) =
     bucket: bucketName,
     cloud: new CloudStore(bucket.transport),
     clock: fakeClock(),
+    /**
+     * @param {object} status
+     * @returns {void}
+     * @throws {Error}
+     */
     onStatus: (status) => {
-      if (status.phase === 'saving' && throwOnce) {
+      if (status.phase === SyncPhase.Saving && throwOnce) {
         throwOnce = false;
         throw new Error('status sink failed');
       }
     },
   });
   await sync.start();
-  const first = await settledSoon(sync.save('timer'));
-  assert.equal(first.outcome, 'failed');
+  const first = await settledSoon(sync.save(SaveReason.Timer));
+  assert.equal(first.outcome, SaveOutcome.Failed);
   assert.match(first.error, /: status sink failed$/);
-  assert.equal((await settledSoon(sync.save('manual'))).outcome, 'saved');
+  assert.equal((await settledSoon(sync.save(SaveReason.Manual))).outcome, SaveOutcome.Saved);
 });
 
 test('a start that fails before contacting the cloud reports failed', async (context) => {
@@ -1156,7 +1281,7 @@ test('a start that fails before contacting the cloud reports failed', async (con
   await mkdir(broken.state, { recursive: true });
   await writeFile(join(broken.state, 'sync.json'), '{"bucket":"account/bucket","revis');
   await assert.rejects(broken.sync.start(), SyntaxError);
-  assert.equal(broken.statuses.at(-1).phase, 'failed');
+  assert.equal(broken.statuses.at(-1).phase, SyncPhase.Failed);
   assert.match(broken.statuses.at(-1).error, /JSON/);
   assert.equal(bucket.requests.length, 0);
 });
@@ -1168,11 +1293,17 @@ test('unchanged saves record the hash time of pulled files, so later scans and r
   const second = machine(root, 'b', bucket.transport);
   await second.sync.start();
   assert.ok(Object.values((await syncState(second.state)).files).every((entry) => entry.mtimeMs === undefined));
-  assert.equal((await second.sync.save('timer')).outcome, 'unchanged');
+  assert.equal((await second.sync.save(SaveReason.Timer)).outcome, SaveOutcome.Unchanged);
   assert.ok(Object.values((await syncState(second.state)).files).every((entry) => Number.isFinite(entry.mtimeMs) && Number.isFinite(entry.hashedAtMs)));
-  const opened = context.mock.method(fs, 'open', (...args) => originalOpen(...args));
-  assert.equal((await second.sync.save('timer')).outcome, 'unchanged');
-  assert.equal((await second.sync.save('timer')).outcome, 'unchanged');
+  const opened = context.mock.method(fs, 'open',
+    /**
+     * @param {...*} args
+     * @returns {Promise<import('node:fs/promises').FileHandle>}
+     * @throws {Error}
+     */
+    (...args) => originalOpen(...args));
+  assert.equal((await second.sync.save(SaveReason.Timer)).outcome, SaveOutcome.Unchanged);
+  assert.equal((await second.sync.save(SaveReason.Timer)).outcome, SaveOutcome.Unchanged);
   await machine(root, 'b', bucket.transport).sync.start();
   assert.deepEqual(opened.mock.calls.map((call) => String(call.arguments[0])).filter((path) => path.startsWith(`${second.data}/`)), []);
   assert.ok(opened.mock.calls.length > 0);
@@ -1185,7 +1316,7 @@ test('[12] an unsettled local file whose cloud entry still equals B stays in pla
   const other = machine(root, 'b', bucket.transport);
   await other.sync.start();
   await put(other.data, { 'default-user/worlds/new.json': '{"new":1}' });
-  assert.equal((await other.sync.save('manual')).outcome, 'saved');
+  assert.equal((await other.sync.save(SaveReason.Manual)).outcome, SaveOutcome.Saved);
   const restarted = machine(root, 'a', bucket.transport);
   await put(restarted.data, { 'default-user/settings.json': '{"theme":"typed a moment ago"}' });
   const justNow = new Date(restarted.clock.now() - 500);
@@ -1194,7 +1325,7 @@ test('[12] an unsettled local file whose cloud entry still equals B stays in pla
   assert.equal((await tree(restarted.data))['default-user/settings.json'], '{"theme":"typed a moment ago"}');
   await assert.rejects(readdir(restarted.conflicts), { code: 'ENOENT' });
   restarted.clock.time += 5_000;
-  assert.equal((await restarted.sync.save('manual')).outcome, 'saved');
+  assert.equal((await restarted.sync.save(SaveReason.Manual)).outcome, SaveOutcome.Saved);
   assert.equal((await cloudTree(bucket))['default-user/settings.json'], '{"theme":"typed a moment ago"}');
 });
 
@@ -1204,27 +1335,27 @@ test('a stop joining a queued save makes the follow-up a stop that ends in phase
   const line = wire(bucket);
   const first = await savedMachine(root, line.transport);
   await put(first.data, { 'default-user/settings.json': '{"theme":"before stopping"}' });
-  const outcomes = await Promise.all([first.sync.save('timer'), first.sync.save('timer'), first.sync.save('stop')]);
-  assert.deepEqual(outcomes.map((outcome) => outcome.outcome), ['saved', 'unchanged', 'unchanged']);
-  assert.ok(first.statuses.some((status) => status.phase === 'stopping'));
-  assert.equal(first.statuses.at(-1).phase, 'stopped');
+  const outcomes = await Promise.all([first.sync.save(SaveReason.Timer), first.sync.save(SaveReason.Timer), first.sync.save(SaveReason.Stop)]);
+  assert.deepEqual(outcomes.map((outcome) => outcome.outcome), [SaveOutcome.Saved, SaveOutcome.Unchanged, SaveOutcome.Unchanged]);
+  assert.ok(first.statuses.some((status) => status.phase === SyncPhase.Stopping));
+  assert.equal(first.statuses.at(-1).phase, SyncPhase.Stopped);
   line.down = true;
   await put(first.data, { 'default-user/settings.json': '{"theme":"network down at stop"}' });
-  const failed = await first.sync.save('stop');
-  assert.equal(failed.outcome, 'failed');
-  assert.equal(first.statuses.at(-1).phase, 'stopped');
+  const failed = await first.sync.save(SaveReason.Stop);
+  assert.equal(failed.outcome, SaveOutcome.Failed);
+  assert.equal(first.statuses.at(-1).phase, SyncPhase.Stopped);
   assert.equal(first.statuses.at(-1).error, failed.error);
   line.down = false;
   const other = machine(root, 'b', line.transport);
   await other.sync.start();
   await put(other.data, { 'default-user/worlds/w.json': '{"w":1}' });
-  assert.equal((await other.sync.save('manual')).outcome, 'saved');
-  assert.equal((await first.sync.save('timer')).outcome, 'conflict');
+  assert.equal((await other.sync.save(SaveReason.Manual)).outcome, SaveOutcome.Saved);
+  assert.equal((await first.sync.save(SaveReason.Timer)).outcome, SaveOutcome.Conflict);
   const before = bucket.requests.length;
-  const conflict = await first.sync.save('stop');
-  assert.equal(conflict.outcome, 'conflict');
+  const conflict = await first.sync.save(SaveReason.Stop);
+  assert.equal(conflict.outcome, SaveOutcome.Conflict);
   assert.equal(bucket.requests.length, before);
-  assert.equal(first.statuses.at(-1).phase, 'stopped');
+  assert.equal(first.statuses.at(-1).phase, SyncPhase.Stopped);
   assert.equal(first.statuses.at(-1).error, conflict.error);
 });
 
@@ -1235,6 +1366,13 @@ test('a stop signal given while a save runs aborts its in-flight request at once
   const first = await savedMachine(root, line.transport);
   await put(first.data, { 'default-user/settings.json': '{"theme":"in flight"}' });
   let calls = 0;
+  /**
+   * @param {string} method
+   * @param {string} key
+   * @param {{signal: AbortSignal}} options
+   * @returns {Promise<never>}
+   * @throws {Error}
+   */
   line.before = (method, key, options) => {
     calls += 1;
     return new Promise((resolve, reject) => {
@@ -1250,10 +1388,10 @@ test('a stop signal given while a save runs aborts its in-flight request at once
   const results = await settledSoon(Promise.all([timer, stop]));
   assert.notEqual(results, 'still pending after 2 s');
   assert.deepEqual(results.map((result) => [result.outcome, result.error]), [
-    ['failed', 'Stopped before the save finished.'], ['failed', 'Stopped before the save finished.'],
+    [SaveOutcome.Failed, 'Stopped before the save finished.'], [SaveOutcome.Failed, 'Stopped before the save finished.'],
   ]);
   assert.equal(calls, 1);
-  assert.equal(first.statuses.at(-1).phase, 'stopped');
+  assert.equal(first.statuses.at(-1).phase, SyncPhase.Stopped);
 });
 
 test('a stop signal given while a save waits between retries ends that wait at once with no further request', async (context) => {
@@ -1264,12 +1402,18 @@ test('a stop signal given while a save waits between retries ends that wait at o
   await put(first.data, { 'default-user/settings.json': '{"theme":"waiting"}' });
   let afterAbort = 0;
   const controller = new AbortController();
+  /**
+   * @returns {void}
+   */
   line.before = () => {
     if (controller.signal.aborted) {
       afterAbort += 1;
     }
   };
   line.down = true;
+  /**
+   * @returns {Promise<never>}
+   */
   first.clock.sleep = () => new Promise(() => {});
   const timer = first.sync.save(SaveReason.Timer);
   const stop = first.sync.save(SaveReason.Stop, { signal: controller.signal });
@@ -1277,8 +1421,341 @@ test('a stop signal given while a save waits between retries ends that wait at o
   controller.abort();
   const results = await settledSoon(Promise.all([timer, stop]));
   assert.notEqual(results, 'still pending after 2 s');
-  assert.deepEqual(results.map((result) => result.error), ['Stopped before the save finished.', 'Stopped before the save finished.']);
+  assert.deepEqual(results.map((result) => result.error), [
+    'Stopped before the save finished: fetch failed', 'Stopped before the save finished: fetch failed',
+  ]);
   assert.equal(afterAbort, 0);
+});
+
+test('a stop that runs out of budget while its own request hangs names no failure left over from start or an earlier save', async (context) => {
+  const root = await workspace(context);
+  const bucket = new MemoryBucket();
+  const line = wire(bucket);
+  await savedMachine(root, line.transport);
+  line.down = true;
+  const restarted = machine(root, 'a', line.transport);
+  await put(restarted.data, { 'default-user/settings.json': '{"theme":"edited offline"}' });
+  assert.equal((await restarted.sync.start()).offline, true);
+  line.down = false;
+  /**
+   * @returns {Promise<object>}
+   * @throws {Error}
+   */
+  const stopWhileRequestHangs = async () => {
+    const inFlight = Promise.withResolvers();
+    /**
+     * @param {string} method
+     * @param {string} key
+     * @param {{signal: AbortSignal}} options
+     * @returns {Promise<never>}
+     * @throws {Error}
+     */
+    line.before = (method, key, options) => {
+      inFlight.resolve(`${method} ${key}`);
+      return hang(options.signal);
+    };
+    const controller = new AbortController();
+    const stopping = restarted.sync.save(SaveReason.Stop, { signal: controller.signal });
+    assert.equal(await inFlight.promise, `GET ${controlKey}`);
+    controller.abort();
+    const result = await settledSoon(stopping);
+    line.before = null;
+    return result;
+  };
+  const afterStart = await stopWhileRequestHangs();
+  assert.deepEqual([afterStart.outcome, afterStart.error], [SaveOutcome.Failed, 'Stopped before the save finished.']);
+  line.down = true;
+  const failed = await restarted.sync.save(SaveReason.Timer);
+  assert.equal(failed.outcome, SaveOutcome.Failed);
+  assert.match(failed.error, /^Not saved since .+: fetch failed$/);
+  line.down = false;
+  const afterFailedSave = await stopWhileRequestHangs();
+  assert.deepEqual([afterFailedSave.outcome, afterFailedSave.error], [SaveOutcome.Failed, 'Stopped before the save finished.']);
+  assert.equal(restarted.statuses.at(-1).phase, SyncPhase.Stopped);
+  assert.equal(restarted.statuses.at(-1).error, 'Stopped before the save finished.');
+});
+
+test('a timer save that gives up hands no failure to its queued follow-ups, so a manual save and a stop stopped while its request hangs name no cause', async (context) => {
+  const root = await workspace(context);
+  const bucket = new MemoryBucket();
+  const line = wire(bucket);
+  const first = await savedMachine(root, line.transport);
+  await put(first.data, { 'default-user/settings.json': '{"theme":"edited while the network is down"}' });
+  const manualInFlight = Promise.withResolvers();
+  /**
+   * @param {string} method
+   * @param {string} key
+   * @param {{signal: AbortSignal}} options
+   * @returns {?Promise<never>}
+   * @throws {Error}
+   */
+  line.before = (method, key, options) => {
+    if (!first.statuses.some((status) => status.error?.startsWith('Not saved since '))) {
+      return null;
+    }
+    line.down = false;
+    manualInFlight.resolve(`${method} ${key}`);
+    return hang(options.signal);
+  };
+  line.down = true;
+  const timer = first.sync.save(SaveReason.Timer);
+  const manual = first.sync.save(SaveReason.Manual);
+  const gaveUp = await timer;
+  assert.equal(gaveUp.outcome, SaveOutcome.Failed);
+  assert.match(gaveUp.error, /^Not saved since .+: fetch failed$/);
+  assert.equal(await manualInFlight.promise, `GET ${controlKey}`);
+  const controller = new AbortController();
+  const stop = first.sync.save(SaveReason.Stop, { signal: controller.signal });
+  controller.abort();
+  const results = await settledSoon(Promise.all([manual, stop]));
+  assert.notEqual(results, 'still pending after 2 s');
+  assert.deepEqual(results.map((result) => [result.outcome, result.error]), [
+    [SaveOutcome.Failed, 'Stopped before the save finished.'], [SaveOutcome.Failed, 'Stopped before the save finished.'],
+  ]);
+  assert.equal(first.statuses.at(-1).phase, SyncPhase.Stopped);
+  assert.equal(first.statuses.at(-1).error, 'Stopped before the save finished.');
+});
+
+test('a stopped save with nothing queued behind it hands its failure to no later save, so a later stop stopped while its request hangs names no cause', async (context) => {
+  const root = await workspace(context);
+  const bucket = new MemoryBucket();
+  const line = wire(bucket);
+  const first = await savedMachine(root, line.transport);
+  await put(first.data, { 'default-user/settings.json': '{"theme":"edited while the network is down"}' });
+  const retryWait = Promise.withResolvers();
+  /**
+   * @returns {Promise<never>}
+   */
+  first.clock.sleep = () => {
+    retryWait.resolve();
+    return new Promise(() => {});
+  };
+  line.down = true;
+  const firstController = new AbortController();
+  const firstStop = first.sync.save(SaveReason.Stop, { signal: firstController.signal });
+  await retryWait.promise;
+  firstController.abort();
+  const firstResult = await settledSoon(firstStop);
+  assert.notEqual(firstResult, 'still pending after 2 s');
+  assert.deepEqual([firstResult.outcome, firstResult.error], [SaveOutcome.Failed, 'Stopped before the save finished: fetch failed']);
+  line.down = false;
+  const readInFlight = Promise.withResolvers();
+  /**
+   * @param {string} method
+   * @param {string} key
+   * @param {{signal: AbortSignal}} options
+   * @returns {Promise<never>}
+   * @throws {Error}
+   */
+  line.before = (method, key, options) => {
+    readInFlight.resolve(`${method} ${key}`);
+    return hang(options.signal);
+  };
+  const secondController = new AbortController();
+  const secondStop = first.sync.save(SaveReason.Stop, { signal: secondController.signal });
+  assert.equal(await readInFlight.promise, `GET ${controlKey}`);
+  secondController.abort();
+  const secondResult = await settledSoon(secondStop);
+  assert.notEqual(secondResult, 'still pending after 2 s');
+  assert.deepEqual([secondResult.outcome, secondResult.error], [SaveOutcome.Failed, 'Stopped before the save finished.']);
+  assert.equal(first.statuses.at(-1).phase, SyncPhase.Stopped);
+  assert.equal(first.statuses.at(-1).error, 'Stopped before the save finished.');
+});
+
+test('a stop with one upload waiting to retry names that failure even after a parallel upload succeeds', async (context) => {
+  const root = await workspace(context);
+  const bucket = new MemoryBucket();
+  const line = wire(bucket);
+  const first = await savedMachine(root, line.transport);
+  const failing = '{"theme":"upload that fails"}';
+  const succeeding = '{"m":"upload that succeeds"}\n';
+  await put(first.data, { 'default-user/settings.json': failing, 'default-user/chats/Ann/one.jsonl': succeeding });
+  const retryWait = Promise.withResolvers();
+  /**
+   * @returns {Promise<never>}
+   */
+  first.clock.sleep = () => {
+    retryWait.resolve();
+    return new Promise(() => {});
+  };
+  let failures = 0;
+  /**
+   * @param {string} method
+   * @param {string} key
+   * @returns {Promise<void>}
+   * @throws {TypeError}
+   */
+  line.before = async (method, key) => {
+    if (method === 'PUT' && key === `${prefix}/blobs/${digest(failing)}`) {
+      failures += 1;
+      throw new TypeError('fetch failed', { cause: new Error('ENETUNREACH') });
+    }
+    if (method === 'PUT' && key === `${prefix}/blobs/${digest(succeeding)}`) {
+      await retryWait.promise;
+    }
+  };
+  const controller = new AbortController();
+  const marker = first.statuses.length;
+  const stopping = first.sync.save(SaveReason.Stop, { signal: controller.signal });
+  const deadline = Date.now() + 2_000;
+  while (!first.statuses.slice(marker).some((status) => status.progress?.filesDone === 1)) {
+    assert.ok(Date.now() < deadline, 'the second upload never finished');
+    await new Promise((resolve) => setImmediate(resolve));
+  }
+  assert.equal(failures, 1);
+  assert.ok(bucket.objects.has(`${prefix}/blobs/${digest(succeeding)}`));
+  controller.abort();
+  const result = await settledSoon(stopping);
+  assert.deepEqual([result.outcome, result.error], [SaveOutcome.Failed, 'Stopped before the save finished: fetch failed']);
+  assert.equal(failures, 1);
+  assert.equal(bucket.objects.has(`${prefix}/blobs/${digest(failing)}`), false);
+  assert.equal(first.statuses.at(-1).phase, SyncPhase.Stopped);
+  assert.equal(first.statuses.at(-1).error, 'Stopped before the save finished: fetch failed');
+});
+
+test('a save that still ends saved when the stop signal comes after its head update hands no failure to the queued stop', async (context) => {
+  const root = await workspace(context);
+  const bucket = new MemoryBucket();
+  const line = wire(bucket);
+  const first = await savedMachine(root, line.transport);
+  const edited = '{"theme":"saved just before the stop"}';
+  await put(first.data, { 'default-user/settings.json': edited });
+  const controller = new AbortController();
+  let controlReads = 0;
+  /**
+   * @param {string} method
+   * @param {string} key
+   * @returns {void}
+   * @throws {TypeError}
+   */
+  line.before = (method, key) => {
+    if (method === 'GET' && key === controlKey) {
+      controlReads += 1;
+      if (controlReads === 1) {
+        throw new TypeError('fetch failed', { cause: new Error('ENETUNREACH') });
+      }
+    }
+  };
+  /**
+   * @param {string} method
+   * @param {string} key
+   * @returns {void}
+   */
+  line.after = (method, key) => {
+    if (method === 'PUT' && key === controlKey) {
+      controller.abort();
+    }
+  };
+  const manual = first.sync.save(SaveReason.Manual);
+  const stop = first.sync.save(SaveReason.Stop, { signal: controller.signal });
+  const results = await settledSoon(Promise.all([manual, stop]));
+  assert.notEqual(results, 'still pending after 2 s');
+  assert.deepEqual(results.map((result) => [result.outcome, result.error]), [
+    [SaveOutcome.Saved, null], [SaveOutcome.Failed, 'Stopped before the save finished.'],
+  ]);
+  assert.equal(controlReads, 2);
+  assert.ok(first.statuses.some((status) => status.error === `fetch failed Retrying in ${SyncSettings.RetryDelaysMs[0] / 1000} s.`));
+  assert.equal((await cloudTree(bucket))['default-user/settings.json'], edited);
+  assert.equal(first.statuses.at(-1).phase, SyncPhase.Stopped);
+  assert.equal(first.statuses.at(-1).error, 'Stopped before the save finished.');
+});
+
+test('a stop signal given while start waits between contact retries rejects at once with the pull message and makes no further request', async (context) => {
+  const root = await workspace(context);
+  const bucket = new MemoryBucket();
+  const line = wire(bucket);
+  const fresh = machine(root, 'b', line.transport);
+  await put(fresh.data, starter);
+  const controller = new AbortController();
+  let requests = 0;
+  let afterAbort = 0;
+  /**
+   * @returns {void}
+   */
+  line.before = () => {
+    requests += 1;
+    if (controller.signal.aborted) {
+      afterAbort += 1;
+    }
+  };
+  line.down = true;
+  /**
+   * @returns {Promise<never>}
+   */
+  fresh.clock.sleep = () => {
+    controller.abort();
+    return new Promise(() => {});
+  };
+  await assert.rejects(settledSoon(fresh.sync.start({ signal: controller.signal })), { message: stoppedPull });
+  assert.equal(requests, 1);
+  assert.equal(afterAbort, 0);
+  assert.equal(fresh.statuses.at(-1).phase, SyncPhase.Stopped);
+  assert.equal(fresh.statuses.at(-1).error, stoppedPull);
+  await assert.rejects(readFile(join(fresh.state, 'sync.json')), { code: 'ENOENT' });
+  assert.deepEqual(await tree(fresh.data), starter);
+});
+
+test('a stop signal given while a download is in flight aborts that request, and the next start converges with nothing lost or moved twice', async (context) => {
+  const root = await workspace(context);
+  const bucket = new MemoryBucket();
+  const cloudFiles = Object.fromEntries([...Array(10).keys()].map((index) => [`default-user/chats/Ann/c${index}.jsonl`, `{"n":${index}}\n`]));
+  const head = seedManifest(bucket, seedFiles(bucket, cloudFiles));
+  seedHead(bucket, head);
+  const line = wire(bucket);
+  const controller = new AbortController();
+  const hung = [];
+  const firstHang = Promise.withResolvers();
+  let blobReads = 0;
+  let afterAbort = 0;
+  /**
+   * @param {string} method
+   * @param {string} key
+   * @param {{signal: AbortSignal}} options
+   * @returns {?Promise<never>}
+   * @throws {Error}
+   */
+  line.before = (method, key, options) => {
+    if (controller.signal.aborted) {
+      afterAbort += 1;
+    }
+    if (!key.includes('/blobs/')) {
+      return null;
+    }
+    blobReads += 1;
+    if (blobReads <= 2) {
+      return null;
+    }
+    hung.push(options.signal);
+    firstHang.resolve(key);
+    return hang(options.signal);
+  };
+  const fresh = machine(root, 'b', line.transport);
+  const mine = { 'default-user/chats/Ann/c3.jsonl': '{"mine":"edited here"}\n' };
+  const localOnly = { 'default-user/chats/Ann/local.jsonl': '{"only":"here"}\n' };
+  await put(fresh.data, { ...mine, ...localOnly });
+  const starting = fresh.sync.start({ signal: controller.signal });
+  assert.match(await firstHang.promise, /^_universe\/v2\/blobs\/[0-9a-f]{64}$/);
+  controller.abort();
+  await assert.rejects(settledSoon(starting), { message: stoppedPull });
+  assert.ok(hung.length > 0);
+  assert.ok(hung.every((signal) => signal.aborted));
+  assert.equal(afterAbort, 0);
+  assert.equal(fresh.statuses.at(-1).phase, SyncPhase.Stopped);
+  assert.equal(fresh.statuses.at(-1).progress, null);
+  await assert.rejects(readFile(join(fresh.state, 'sync.json')), { code: 'ENOENT' });
+  const partial = Object.keys(await tree(fresh.data)).filter((path) => path.startsWith('default-user/chats/Ann/c'));
+  assert.equal(partial.length, 2, `the stopped pull wrote ${partial.join(', ')}`);
+  line.before = null;
+  const rerun = machine(root, 'b', line.transport);
+  assert.equal((await rerun.sync.start()).changedFiles, 10 - partial.length);
+  const local = await tree(rerun.data);
+  delete local['cookie-secret.txt'];
+  assert.deepEqual(local, { ...cloudFiles, ...localOnly });
+  const conflictFolders = await readdir(rerun.conflicts);
+  assert.equal(conflictFolders.length, 1);
+  assert.deepEqual(await tree(join(rerun.conflicts, conflictFolders[0])), mine);
+  assert.equal((await syncState(rerun.state)).revision, head);
+  assert.deepEqual((await readdir(join(rerun.data, 'default-user/chats/Ann'))).filter((name) => /\.\d+$/.test(name)), []);
 });
 
 test('when every upload times out, the save gives up between 600 s and 600 s plus one attempt timeout after the first failure', async (context) => {
@@ -1289,6 +1766,13 @@ test('when every upload times out, the save gives up between 600 s and 600 s plu
   await writeFile(join(first.data, 'default-user/backgrounds-big.png'), Buffer.alloc(10_000_000, 7));
   let firstFailure = null;
   const timeouts = [];
+  /**
+   * @param {string} method
+   * @param {string} key
+   * @param {{timeoutMs: number}} options
+   * @returns {void}
+   * @throws {Error}
+   */
   line.before = (method, key, options) => {
     if (method === 'GET' && key === controlKey) {
       return;
@@ -1299,7 +1783,7 @@ test('when every upload times out, the save gives up between 600 s and 600 s plu
     throw Object.assign(new Error('The operation was aborted due to timeout'), { name: 'TimeoutError' });
   };
   const failed = await first.sync.save(SaveReason.Timer);
-  assert.equal(failed.outcome, 'failed');
+  assert.equal(failed.outcome, SaveOutcome.Failed);
   assert.match(failed.error, /: The operation was aborted due to timeout$/);
   const attemptMs = SyncSettings.ObjectTimeoutMs + 10_000_000 / SyncSettings.ObjectBytesPerSecond * 1000;
   assert.ok(timeouts.length > 1);
@@ -1323,6 +1807,10 @@ test('a long pause before the uploads never spends the window: the first upload 
     bucket: bucketName,
     cloud: new CloudStore(line.transport),
     clock,
+    /**
+     * @param {object} status
+     * @returns {void}
+     */
     onStatus: (status) => {
       if (status.progress !== null && !jumped) {
         jumped = true;
@@ -1333,6 +1821,13 @@ test('a long pause before the uploads never spends the window: the first upload 
   await put(join(local, 'data'), starter);
   await sync.start();
   const uploads = [];
+  /**
+   * @param {string} method
+   * @param {string} key
+   * @param {{timeoutMs: number}} options
+   * @returns {void}
+   * @throws {TypeError}
+   */
   line.before = (method, key, options) => {
     if (method === 'PUT' && key.includes('/blobs/')) {
       uploads.push(options.timeoutMs);
@@ -1341,7 +1836,7 @@ test('a long pause before the uploads never spends the window: the first upload 
       }
     }
   };
-  assert.equal((await sync.save(SaveReason.Manual)).outcome, 'saved');
+  assert.equal((await sync.save(SaveReason.Manual)).outcome, SaveOutcome.Saved);
   assert.ok(jumped);
   assert.equal(uploads.length, Object.keys(starter).length + 1);
   assert.deepEqual(uploads, uploads.map(() => SyncSettings.ObjectTimeoutMs + 1_000));
@@ -1356,15 +1851,29 @@ test('large files on slow links upload within their size-scaled timeout and the 
     const first = await savedMachine(root, line.transport);
     const video = Buffer.alloc(size, 3);
     await put(first.data, { 'default-user/backgrounds/video.mp4': video });
+    /**
+     * @param {string} method
+     * @param {string} key
+     * @param {{body: Buffer, timeoutMs: number}} options
+     * @returns {void}
+     * @throws {Error}
+     */
     line.before = (method, key, options) => {
       if (method === 'PUT' && key.includes('/blobs/')) {
         slowLink(first.clock, options.body.length, bytesPerSecond, options);
       }
     };
     const upload = await first.sync.save(SaveReason.Manual);
-    assert.equal(upload.outcome, 'saved', `${size} at ${bytesPerSecond}: ${upload.error}`);
+    assert.equal(upload.outcome, SaveOutcome.Saved, `${size} at ${bytesPerSecond}: ${upload.error}`);
     line.before = null;
     const second = machine(root, 'b', line.transport);
+    /**
+     * @param {string} method
+     * @param {string} key
+     * @param {{timeoutMs: number}} options
+     * @returns {void}
+     * @throws {Error}
+     */
     line.after = (method, key, options) => {
       if (method === 'GET' && key.includes('/blobs/')) {
         slowLink(second.clock, bucket.objects.get(key).body.length, bytesPerSecond, options);
@@ -1390,6 +1899,12 @@ test('an ancestry walk retries each manifest read on its own, so a walk where mo
   seedHead(bucket, head);
   await writeFile(join(first.state, 'sync.json'), JSON.stringify({ ...state, pending: { id: pendingId, files: state.files } }));
   let manifestReads = 0;
+  /**
+   * @param {string} method
+   * @param {string} key
+   * @returns {void}
+   * @throws {TypeError}
+   */
   line.before = (method, key) => {
     if (key.includes('/manifests/')) {
       manifestReads += 1;
@@ -1418,7 +1933,7 @@ test('[9] a folder moved aside into a conflicts path already in use merges into 
   await mkdir(join(second.data, 'default-user/x/sub'));
   await rm(join(first.data, 'default-user/x'), { recursive: true });
   await put(first.data, { 'default-user/x': 'x is a file now' });
-  assert.equal((await first.sync.save('manual')).outcome, 'saved');
+  assert.equal((await first.sync.save(SaveReason.Manual)).outcome, SaveOutcome.Saved);
   const restarted = machine(root, 'b', bucket.transport);
   assert.equal((await restarted.sync.start()).changedFiles, 2);
   assert.equal((await tree(restarted.data))['default-user/x'], 'x is a file now');
@@ -1437,18 +1952,25 @@ test('[9] a clashing name inside a merged folder gets a numeric suffix instead o
   await mkdir(join(second.data, 'default-user/x/sub'));
   await rm(join(first.data, 'default-user/x'), { recursive: true });
   await put(first.data, { 'default-user/x': 'x is a file now' });
-  assert.equal((await first.sync.save('manual')).outcome, 'saved');
+  assert.equal((await first.sync.save(SaveReason.Manual)).outcome, SaveOutcome.Saved);
   const restarted = machine(root, 'b', bucket.transport);
   const blocker = join(restarted.data, 'default-user/x');
   let rewrite = true;
-  context.mock.method(fs, 'rmdir', async (path, ...rest) => {
-    if (path === blocker && rewrite) {
-      rewrite = false;
-      await writeFile(join(blocker, 'inner.json'), '{"inner":"written during the pull"}');
-      await writeFile(join(blocker, 'plain'), 'plain written during the pull');
-    }
-    return originalRmdir(path, ...rest);
-  });
+  context.mock.method(fs, 'rmdir',
+    /**
+     * @param {string} path
+     * @param {...*} rest
+     * @returns {Promise<void>}
+     * @throws {Error}
+     */
+    async (path, ...rest) => {
+      if (path === blocker && rewrite) {
+        rewrite = false;
+        await writeFile(join(blocker, 'inner.json'), '{"inner":"written during the pull"}');
+        await writeFile(join(blocker, 'plain'), 'plain written during the pull');
+      }
+      return originalRmdir(path, ...rest);
+    });
   await restarted.sync.start();
   context.mock.restoreAll();
   const [folder] = await readdir(restarted.conflicts);
@@ -1486,6 +2008,13 @@ test('a size-less 20 MB entry from an old manifest pulls over a 25 KB/s link by 
     const line = wire(bucket);
     const fresh = machine(root, 'b', line.transport);
     const bodyTimeouts = [];
+    /**
+     * @param {string} method
+     * @param {string} key
+     * @param {{timeoutMs: number, bodyTimeoutMs: Function}} options
+     * @returns {void}
+     * @throws {Error}
+     */
     line.after = (method, key, options) => {
       if (method === 'GET' && key.includes('/blobs/')) {
         assert.equal(options.timeoutMs, SyncSettings.ObjectTimeoutMs);

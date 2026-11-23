@@ -20,7 +20,7 @@ const checkpointSources = [
   'r2.mjs', 'story-files.mjs', 'classes/capture-gate.mjs', 'classes/cloud-save.mjs',
   'integration/browser-bridge.js', 'integration/pinned-hooks.mjs', 'integration/server-bridge.mjs',
 ];
-const sources = ['server.mjs', 'launcher.mjs', 'child.mjs', 'child-watchdog.mjs', 'r2.mjs', 'wrapper-home.html', ...[
+const sources = ['server.mjs', 'launcher.mjs', 'LauncherLog.mjs', 'child.mjs', 'child-watchdog.mjs', 'r2.mjs', 'wrapper-home.html', ...[
   'CloudStore.mjs', 'FileErrors.mjs', 'ProfileScan.mjs', 'ProfileSync.mjs', 'Retry.mjs', 'SaveOutcome.mjs', 'SaveReason.mjs',
   'SyncPhase.mjs', 'SyncScope.mjs', 'SyncSettings.mjs', 'SyncState.mjs',
 ].map(file => `sync/${file}`)];
@@ -55,6 +55,7 @@ const requiredBySignature = new Map([
 /**
  * @param {string} directory
  * @returns {Promise<string|null>}
+ * @throws {Error}
  */
 async function buildSignature(directory) {
   const entry = inspect(directory);
@@ -72,6 +73,7 @@ async function buildSignature(directory) {
  * @param {string} directory
  * @param {string[]} files
  * @returns {boolean}
+ * @throws {Error}
  */
 function hasFiles(directory, files) {
   for (const file of files) {
@@ -86,6 +88,7 @@ function hasFiles(directory, files) {
 /**
  * @param {string} directory
  * @returns {Promise<boolean>}
+ * @throws {Error}
  */
 async function canReuse(directory) {
   const value = await buildSignature(directory);
@@ -99,6 +102,7 @@ async function canReuse(directory) {
  * @param {string} source
  * @param {string} destination
  * @returns {Promise<void>}
+ * @throws {Error}
  */
 async function copyInput(source, destination) {
   const bytes = await readRegular(source);
@@ -110,6 +114,7 @@ async function copyInput(source, destination) {
 
 /**
  * @returns {Promise<void>}
+ * @throws {Error}
  */
 async function recoverLegacyBuild() {
   for (let attempt = 0; attempt < 10; attempt++) {
@@ -143,6 +148,7 @@ async function recoverLegacyBuild() {
 
 /**
  * @returns {Promise<void>}
+ * @throws {Error}
  */
 async function build() {
   const reuse = process.argv.includes('--if-missing');
@@ -171,6 +177,7 @@ async function build() {
 
 /**
  * @returns {Promise<void>}
+ * @throws {Error}
  */
 async function assemble() {
   const temporary = await mkdtemp(join(project, '.universe-build-'));

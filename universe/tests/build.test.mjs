@@ -8,6 +8,7 @@ import { test } from 'node:test';
 import { setTimeout as delay } from 'node:timers/promises';
 import { pathToFileURL } from 'node:url';
 import { promisify } from 'node:util';
+import { SyncPhase } from '../src/sync/SyncPhase.mjs';
 
 const project = dirname(import.meta.dirname);
 const execute = promisify(execFile);
@@ -22,6 +23,7 @@ const removedFiles = [
  * @param {string} directory
  * @param {...string} args
  * @returns {Promise<object>}
+ * @throws {Error}
  */
 function npm(directory, ...args) {
   return execute(process.execPath, [npmCli, '--offline', '--ignore-scripts',
@@ -34,6 +36,7 @@ function npm(directory, ...args) {
  * @param {string} directory
  * @param {string} signature
  * @returns {Promise<void>}
+ * @throws {Error}
  */
 async function asOlderBuild(directory, signature) {
   await writeFile(join(directory, '.universe-build'), signature);
@@ -47,6 +50,7 @@ async function asOlderBuild(directory, signature) {
 /**
  * @param {import('node:test').TestContext} context
  * @returns {Promise<string>}
+ * @throws {Error}
  */
 async function fixture(context) {
   const directory = await mkdtemp(join(tmpdir(), 'universe-build-test-'));
@@ -215,7 +219,7 @@ test('a v5 checkpoint build runs while sources are missing and is replaced by v6
   for (const file of [...removedFiles, 'classes', 'integration']) {
     assert.ok(!names.includes(file), `${file} must not survive in the v6 build`);
   }
-  for (const file of ['server.mjs', 'launcher.mjs', 'child.mjs', 'r2.mjs', 'sync/ProfileSync.mjs', 'sync/SyncSettings.mjs']) {
+  for (const file of ['server.mjs', 'launcher.mjs', 'LauncherLog.mjs', 'child.mjs', 'child-watchdog.mjs', 'r2.mjs', 'sync/ProfileSync.mjs', 'sync/SyncSettings.mjs']) {
     assert.deepEqual(await readFile(join(output, file)), await readFile(join(directory, 'src', file)));
   }
   assert.deepEqual((await readdir(directory)).filter(name => name.startsWith('.universe-build')), ['.universe-build-owners']);
@@ -242,13 +246,15 @@ test('npm start prepares a missing build and shuts down using the project settin
   assert.equal(observed.cwd, join(directory, 'dist/node_modules/sillytavern'));
   assert.equal(observed.config, config);
   assert.equal(observed.data, data);
-  assert.equal(observed.status.phase, 'disabled');
+  assert.equal(observed.status.phase, SyncPhase.Disabled);
   assert.equal(observed.status.error, 'Cloud save is not configured.');
   assert.equal(observed.status.ok, false);
+  const logged = (await readFile(join(local, 'logs', 'launcher.log'), 'utf8')).trimEnd().split('\n');
+  assert.deepEqual(logged.map(entry => entry.slice(entry.indexOf(' ') + 1)), [`http://127.0.0.1:${port}/`, '[universe] Cloud save is not configured.']);
   await rm(join(data, 'observed.json'));
   await rename(join(directory, 'src'), join(directory, 'unavailable-src'));
   assert.ok((await npm(directory, 'start')).stdout.includes(`http://127.0.0.1:${port}/`));
-  assert.equal(JSON.parse(await readFile(join(data, 'observed.json'))).status.phase, 'disabled');
+  assert.equal(JSON.parse(await readFile(join(data, 'observed.json'))).status.phase, SyncPhase.Disabled);
   await assert.rejects(stat(join(local, 'data.universe')), { code: 'ENOENT' });
 });
 

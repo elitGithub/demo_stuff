@@ -7,6 +7,7 @@ const watchdog = new URL('./child-watchdog.mjs', import.meta.url).href;
 /**
  * @param {{env: object, dataRoot: string, sillyTavern: string, configPath?: string}} config
  * @returns {{pid: ?number, finished: Promise<{code: ?number, signal: ?string, launchError: ?Error}>, stop: Function}}
+ * @throws {TypeError}
  */
 export function startChild(config) {
   const args = ['--import', watchdog, 'server.js', '--dataRoot', config.dataRoot];

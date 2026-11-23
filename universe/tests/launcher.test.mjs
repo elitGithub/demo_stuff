@@ -1,8 +1,5 @@
 import assert from 'node:assert/strict';
-import { spawn } from 'node:child_process';
-import { once } from 'node:events';
-import { chmod, cp, link, mkdir, mkdtemp, readFile, rm, stat, symlink, writeFile } from 'node:fs/promises';
-import { createServer } from 'node:net';
+import { link, mkdir, mkdtemp, readFile, rm, stat, symlink, writeFile } from 'node:fs/promises';
 import { tmpdir } from 'node:os';
 import { dirname, join } from 'node:path';
 import { test } from 'node:test';
@@ -14,6 +11,7 @@ import { configuration, projectConfiguration, runLauncher } from '../src/launche
 import { digest, readCredentials } from '../src/r2.mjs';
 import { createWrapperHandler } from '../src/server.mjs';
 import { ProfileSync } from '../src/sync/ProfileSync.mjs';
+import { SaveReason } from '../src/sync/SaveReason.mjs';
 import { SyncPhase } from '../src/sync/SyncPhase.mjs';
 import { SyncSettings } from '../src/sync/SyncSettings.mjs';
 import { MemoryBucket } from './support/MemoryBucket.mjs';
@@ -86,6 +84,7 @@ function testClock() {
     /**
      * @param {number} milliseconds
      * @returns {void}
+     * @throws {Error}
      */
     fire(milliseconds) {
       const due = clock.parked.filter((entry) => entry.milliseconds === milliseconds);
@@ -129,6 +128,7 @@ function wire(bucket) {
 /**
  * @param {import('node:test').TestContext} context
  * @returns {Promise<string>}
+ * @throws {Error}
  */
 async function workspace(context) {
   const root = await mkdtemp(join(tmpdir(), 'universe-launcher-'));
@@ -140,6 +140,7 @@ async function workspace(context) {
  * @param {string} root
  * @param {Record<string, string>} files
  * @returns {Promise<void>}
+ * @throws {Error}
  */
 async function put(root, files) {
   for (const [path, content] of Object.entries(files)) {
@@ -169,6 +170,7 @@ async function exists(path) {
  * @param {string} root
  * @param {string} name
  * @returns {Promise<object>}
+ * @throws {Error}
  */
 async function machine(root, name) {
   const application = join(root, name, 'SillyTavern');
@@ -182,9 +184,14 @@ async function machine(root, name) {
  */
 function capture(context) {
   const lines = [];
-  context.mock.method(console, 'log', (text) => {
-    lines.push(text);
-  });
+  context.mock.method(console, 'log',
+    /**
+     * @param {string} text
+     * @returns {void}
+     */
+    (text) => {
+      lines.push(text);
+    });
   return lines;
 }
 
@@ -192,6 +199,7 @@ function capture(context) {
  * @param {Function} predicate
  * @param {string} what
  * @returns {Promise<void>}
+ * @throws {Error}
  */
 async function until(predicate, what) {
   const deadline = Date.now() + 20_000;
@@ -214,46 +222,54 @@ function launch(config, transport, options = {}) {
   const controller = new AbortController();
   const exit = Promise.withResolvers();
   const session = { clock, controller, states: [], latest: null, saveNow: null, starts: 0, stops: 0 };
-  session.task = runLauncher(config, controller.signal, (state) => {
-    session.states.push(state);
-    session.latest = state;
-    options.onState?.(state);
-  }, {
-    transport,
-    clock,
+  session.task = runLauncher(config, controller.signal,
     /**
-     * @returns {{pid: number, finished: Promise<object>, stop: Function}}
-     */
-    startChild: () => {
-      session.starts += 1;
-      options.lines?.push(`[test] ${options.name ?? 'alpha'} child started`);
-      return {
-        pid: 4242,
-        finished: exit.promise,
-        /**
-         * @returns {Promise<object>}
-         */
-        async stop() {
-          session.stops += 1;
-          exit.resolve({ code: null, signal: 'SIGTERM', launchError: null });
-          return exit.promise;
-        },
-      };
-    },
-    /**
-     * @param {?Function} handler
+     * @param {object} state
      * @returns {void}
+     * @throws {Error}
      */
-    onSaveReady: (handler) => {
-      session.saveNow = handler;
+    (state) => {
+      session.states.push(state);
+      session.latest = state;
+      options.onState?.(state);
     },
-  });
+    {
+      transport,
+      clock,
+      /**
+       * @returns {{pid: number, finished: Promise<object>, stop: Function}}
+       */
+      startChild: () => {
+        session.starts += 1;
+        options.lines?.push(`[test] ${options.name ?? 'alpha'} child started`);
+        return {
+          pid: 4242,
+          finished: exit.promise,
+          /**
+           * @returns {Promise<object>}
+           */
+          async stop() {
+            session.stops += 1;
+            exit.resolve({ code: null, signal: 'SIGTERM', launchError: null });
+            return exit.promise;
+          },
+        };
+      },
+      /**
+       * @param {?Function} handler
+       * @returns {void}
+       */
+      onSaveReady: (handler) => {
+        session.saveNow = handler;
+      },
+    });
   return session;
 }
 
 /**
  * @param {object} session
  * @returns {Promise<void>}
+ * @throws {Error}
  */
 function idle(session) {
   return until(() => session.starts === 1 && session.latest.phase === SyncPhase.Running, 'the start save');
@@ -276,8 +292,24 @@ function watchSettled(task) {
 }
 
 /**
+ * @param {import('node:test').TestContext} context
+ * @param {{pid: ?number, finished: Promise<object>, stop: Function}} child
+ * @returns {{pid: ?number, finished: Promise<object>, stop: Function}}
+ */
+function reap(context, child) {
+  const exit = watchSettled(child.finished);
+  context.after(() => {
+    if (!exit.settled && child.pid !== null) {
+      process.kill(child.pid, 'SIGKILL');
+    }
+  });
+  return child;
+}
+
+/**
  * @param {AbortSignal} signal
  * @returns {Promise<never>}
+ * @throws {Error}
  */
 function hang(signal) {
   return new Promise((resolve, reject) => {
@@ -288,6 +320,7 @@ function hang(signal) {
 /**
  * @param {object} session
  * @returns {Promise<void>}
+ * @throws {Error}
  */
 async function stop(session) {
   session.controller.abort();
@@ -297,6 +330,7 @@ async function stop(session) {
 /**
  * @param {MemoryBucket} bucket
  * @returns {{head: string, files: Record<string, string>}}
+ * @throws {Error}
  */
 function cloudFiles(bucket) {
   const head = JSON.parse(bucket.objects.get(controlKey).body).head;
@@ -310,6 +344,7 @@ function cloudFiles(bucket) {
  * @param {string} method
  * @param {object} headers
  * @returns {Promise<{code: number, headers: object, body: ?string}>}
+ * @throws {Error}
  */
 async function wrapperRequest(handler, url, method = 'GET', headers = {}) {
   const result = {};
@@ -337,9 +372,96 @@ async function wrapperRequest(handler, url, method = 'GET', headers = {}) {
 /**
  * @param {Function} handler
  * @returns {Promise<string>}
+ * @throws {Error}
  */
 async function csrfToken(handler) {
   return /<meta name="universe-csrf" content="([^"]+)">/.exec((await wrapperRequest(handler, '/')).body)[1];
+}
+
+/**
+ * @param {Array<{status: number, body?: object}|Error>} answers
+ * @returns {Promise<{token: string, texts: string[], requests: object[], delays: number[], disabledAfter: boolean}>}
+ * @throws {Error}
+ */
+async function pressSaveNow(answers) {
+  const page = (await wrapperRequest(createWrapperHandler({ phase: SyncPhase.Running, error: null }, 8767,
+    /**
+     * @returns {null}
+     */
+    () => null), '/')).body;
+  const press = {
+    token: /<meta name="universe-csrf" content="([^"]+)">/.exec(page)[1],
+    texts: [],
+    requests: [],
+    delays: [],
+  };
+  const listeners = new Map();
+  const button = {
+    disabled: false,
+    /**
+     * @param {string} type
+     * @param {Function} listener
+     * @returns {void}
+     */
+    addEventListener(type, listener) {
+      listeners.set(type, listener);
+    },
+  };
+  const result = {
+    /**
+     * @param {string} text
+     * @returns {void}
+     */
+    set textContent(text) {
+      press.texts.push(text);
+    },
+  };
+  runInNewContext(/<script nonce="[^"]+">([\s\S]*?)<\/script>/.exec(page)[1], {
+    document: {
+      /**
+       * @param {string} id
+       * @returns {object}
+       */
+      getElementById: (id) => ({ save: button, result })[id],
+      /**
+       * @param {string} selector
+       * @returns {?{content: string}}
+       */
+      querySelector: (selector) => (selector === 'meta[name="universe-csrf"]' ? { content: press.token } : null),
+    },
+    /**
+     * @param {string} url
+     * @param {{method?: string, headers?: object}} [options]
+     * @returns {Promise<{status: number, json: Function}>}
+     * @throws {Error}
+     */
+    fetch: async (url, options = {}) => {
+      press.requests.push({ url, method: options.method ?? 'GET', csrf: options.headers?.['X-Universe-CSRF'] ?? null, disabled: button.disabled });
+      const answer = answers.shift();
+      if (answer instanceof Error) {
+        throw answer;
+      }
+      return {
+        status: answer.status,
+        /**
+         * @returns {Promise<object>}
+         */
+        json: async () => answer.body,
+      };
+    },
+    /**
+     * @param {Function} wake
+     * @param {number} milliseconds
+     * @returns {void}
+     * @throws {Error}
+     */
+    setTimeout: (wake, milliseconds) => {
+      press.delays.push(milliseconds);
+      wake();
+    },
+  });
+  await listeners.get('click')();
+  return { ...press, disabledAfter: button.disabled };
 }
 
 test('project configuration uses local paths and settings even when the shell has overrides', () => {
@@ -380,10 +502,23 @@ test('a missing SillyTavern installation stops before any cloud request or local
   const root = await workspace(context);
   const alpha = await machine(root, 'alpha');
   await rm(join(alpha.sillyTavern, 'server.js'));
-  await assert.rejects(runLauncher(alpha, new AbortController().signal, () => {}, {
-    transport: () => assert.fail('cloud request before the installation check'),
-    startChild: () => assert.fail('child started without an installation'),
-  }), /SillyTavern is missing/);
+  await assert.rejects(runLauncher(alpha, new AbortController().signal,
+    /**
+     * @returns {void}
+     */
+    () => {},
+    {
+      /**
+       * @returns {never}
+       * @throws {Error}
+       */
+      transport: () => assert.fail('cloud request before the installation check'),
+      /**
+       * @returns {never}
+       * @throws {Error}
+       */
+      startChild: () => assert.fail('child started without an installation'),
+    }), /SillyTavern is missing/);
   assert.equal(await exists(alpha.stateRoot), false);
 });
 
@@ -500,6 +635,7 @@ test('Ctrl+C during a running save stays inside the stop budget', async (context
    * @param {string} key
    * @param {object} options
    * @returns {?Promise<never>}
+   * @throws {Error}
    */
   line.before = (method, key, options) => {
     if (method !== 'PUT' || key !== `${prefix}/blobs/${digest(stuck)}`) {
@@ -512,12 +648,14 @@ test('Ctrl+C during a running save stays inside the stop budget', async (context
   await until(() => hung !== null && session.clock.waiting(SyncSettings.ConsoleProgressMs), 'the stuck upload');
   session.clock.fire(SyncSettings.ConsoleProgressMs);
   await until(() => lines.includes('[universe] Saving: 0 of 1 files, 0.0 of 0.0 MB.'), 'the progress line');
+  const saves = context.mock.method(ProfileSync.prototype, 'save');
   const stopping = watchSettled(session.task);
   session.controller.abort();
-  await until(() => session.clock.waiting(SyncSettings.StopBudgetMs) && session.stops === 1, 'the stop budget');
-  await pause(50);
-  assert.equal(stopping.settled, false);
+  await until(() => saves.mock.calls.some((call) => call.arguments[0] === SaveReason.Stop), 'the final save to join the running one');
+  assert.equal(session.stops, 1);
+  assert.ok(session.clock.waiting(SyncSettings.StopBudgetMs));
   assert.equal(hung.aborted, false);
+  assert.equal(stopping.settled, false);
   session.clock.fire(SyncSettings.StopBudgetMs);
   await session.task;
   assert.equal(hung.aborted, true);
@@ -535,8 +673,18 @@ test('once a stop begins, the status says stopping until the final save ends, ev
   const alpha = await machine(root, 'alpha');
   await put(alpha.dataRoot, starter);
   const state = {};
-  const session = launch(alpha, line.transport, { onState: (next) => Object.assign(state, next) });
-  const handler = createWrapperHandler(state, 8767, () => null);
+  const session = launch(alpha, line.transport, {
+    /**
+     * @param {object} next
+     * @returns {object}
+     */
+    onState: (next) => Object.assign(state, next),
+  });
+  const handler = createWrapperHandler(state, 8767,
+    /**
+     * @returns {null}
+     */
+    () => null);
   await idle(session);
   const held = '{"m":"held"}\n';
   await put(alpha.dataRoot, { [story]: held });
@@ -570,7 +718,91 @@ test('once a stop begins, the status says stopping until the final save ends, ev
   const firstStopped = phases.indexOf(SyncPhase.Stopped);
   assert.ok(firstStopped > 0);
   assert.ok(phases.slice(0, firstStopped).every((phase) => phase === SyncPhase.Stopping), phases.join(','));
-  assert.ok(phases.slice(firstStopped).every((phase) => phase === SyncPhase.Stopped), phases.join(','));
+  assert.equal(firstStopped, phases.length - 1, phases.join(','));
+});
+
+test('a cloud stop reports stopping until one final stopped, its last state, after the final save line', async (context) => {
+  const lines = capture(context);
+  const root = await workspace(context);
+  const bucket = new MemoryBucket();
+  const alpha = await machine(root, 'alpha');
+  await put(alpha.dataRoot, starter);
+  const stoppedAfter = [];
+  const session = launch(alpha, bucket.transport, {
+    /**
+     * @param {object} state
+     * @returns {void}
+     */
+    onState: (state) => {
+      if (state.phase === SyncPhase.Stopped) {
+        stoppedAfter.push(lines.at(-1));
+      }
+    },
+  });
+  await idle(session);
+  const marker = session.states.length;
+  await stop(session);
+  const phases = session.states.slice(marker).map((state) => state.phase);
+  assert.ok(phases.length >= 2, phases.join(','));
+  assert.deepEqual(phases, [...Array(phases.length - 1).fill(SyncPhase.Stopping), SyncPhase.Stopped]);
+  assert.equal(stoppedAfter.length, 1);
+  assert.match(stoppedAfter[0], /^\[universe\] Saved to cloud at /);
+  assert.deepEqual(session.clock.parked, []);
+});
+
+test('Ctrl+C during the pull never starts SillyTavern, says the pull stopped, and reports stopping until the one final stopped', async (context) => {
+  const lines = capture(context);
+  const root = await workspace(context);
+  const bucket = new MemoryBucket();
+  const line = wire(bucket);
+  const alpha = await machine(root, 'alpha');
+  await put(alpha.dataRoot, starter);
+  const first = launch(alpha, line.transport);
+  await idle(first);
+  await stop(first);
+  const beta = await machine(root, 'beta');
+  const hung = [];
+  /**
+   * @param {string} method
+   * @param {string} key
+   * @param {{signal: AbortSignal}} options
+   * @returns {?Promise<never>}
+   * @throws {Error}
+   */
+  line.before = (method, key, options) => {
+    if (!key.startsWith(`${prefix}/blobs/`)) {
+      return null;
+    }
+    hung.push(options.signal);
+    return hang(options.signal);
+  };
+  const stoppedAfter = [];
+  const session = launch(beta, line.transport, {
+    /**
+     * @param {object} state
+     * @returns {void}
+     */
+    onState: (state) => {
+      if (state.phase === SyncPhase.Stopped) {
+        stoppedAfter.push(lines.at(-1));
+      }
+    },
+  });
+  await until(() => hung.length === Object.keys(starter).length && session.clock.waiting(SyncSettings.ConsoleProgressMs), 'the hung downloads');
+  assert.equal(session.latest.phase, SyncPhase.Pulling);
+  const marker = session.states.length;
+  session.controller.abort();
+  await session.task;
+  assert.equal(session.starts, 0);
+  assert.equal(lines.at(-1), '[universe] Stopped before the pull finished. The next start continues it.');
+  assert.ok(hung.every((signal) => signal.aborted));
+  const phases = session.states.slice(marker).map((state) => state.phase);
+  assert.ok(phases.length >= 2, phases.join(','));
+  assert.ok(phases.slice(0, -1).every((phase) => phase === SyncPhase.Stopping), phases.join(','));
+  assert.equal(phases.at(-1), SyncPhase.Stopped);
+  assert.deepEqual(stoppedAfter, ['[universe] Stopped before the pull finished. The next start continues it.']);
+  assert.equal(session.latest.error, 'Stopped before the pull finished. The next start continues it.');
+  assert.deepEqual(session.clock.parked, []);
 });
 
 test('a pull asks to reload open tabs before SillyTavern starts, and a conflict at the timer is announced but never stops it', async (context) => {
@@ -630,6 +862,56 @@ test('an offline start runs SillyTavern, keeps contacting the cloud and saves on
   assert.match(lines.at(-1), /^\[universe\] Saved to cloud at /);
 });
 
+test('a timer save that rejects is reported on the console and in the status, SillyTavern keeps running, and the stop still saves', async (context) => {
+  const lines = capture(context);
+  const unhandled = [];
+  /**
+   * @param {*} reason
+   * @returns {void}
+   */
+  const onUnhandled = (reason) => {
+    unhandled.push(reason);
+  };
+  process.on('unhandledRejection', onUnhandled);
+  context.after(() => process.off('unhandledRejection', onUnhandled));
+  const root = await workspace(context);
+  const bucket = new MemoryBucket();
+  const alpha = await machine(root, 'alpha');
+  await put(alpha.dataRoot, starter);
+  const original = ProfileSync.prototype.save;
+  let broken = true;
+  context.mock.method(ProfileSync.prototype, 'save',
+    /**
+     * @param {string} reason
+     * @param {{signal?: AbortSignal}} [options]
+     * @returns {Promise<object>}
+     * @throws {Error}
+     */
+    function save(reason, options) {
+      if (reason === SaveReason.Timer && broken) {
+        broken = false;
+        return Promise.reject(new Error('The timer save broke.'));
+      }
+      return original.call(this, reason, options);
+    });
+  const session = launch(alpha, bucket.transport);
+  await idle(session);
+  session.clock.fire(SyncSettings.SaveIntervalMs);
+  await until(() => lines.includes('[universe] The timer save broke.'), 'the reported failure');
+  assert.equal(session.latest.error, 'The timer save broke.');
+  assert.equal(session.latest.phase, SyncPhase.Running);
+  assert.equal(session.stops, 0);
+  await until(() => session.clock.waiting(SyncSettings.SaveIntervalMs), 'the next timer wait');
+  const edited = '{"m":"after the broken timer save"}\n';
+  await put(alpha.dataRoot, { [story]: edited });
+  session.clock.fire(SyncSettings.SaveIntervalMs);
+  await until(() => session.latest.phase === SyncPhase.Running && cloudFiles(bucket).files[story] === digest(edited), 'the next timer save to land');
+  await stop(session);
+  assert.match(lines.at(-1), /^\[universe] Saved to cloud at /);
+  assert.equal(session.latest.phase, SyncPhase.Stopped);
+  assert.deepEqual(unhandled, []);
+});
+
 test('an offline start whose first answer is an error reports it through the status and console and does not save', async (context) => {
   const lines = capture(context);
   const root = await workspace(context);
@@ -643,6 +925,7 @@ test('an offline start whose first answer is an error reports it through the sta
   const saved = cloudFiles(bucket).head;
   await put(alpha.dataRoot, { [story]: '{"m":"written offline"}\n' });
   line.down = true;
+  const saves = context.mock.method(ProfileSync.prototype, 'save');
   const session = launch(alpha, line.transport);
   await until(() => session.starts === 1, 'SillyTavern to start offline');
   const requestsBefore = bucket.requests.length;
@@ -652,20 +935,38 @@ test('an offline start whose first answer is an error reports it through the sta
   await until(() => lines.includes(`[universe] ${refused}`), 'the refused contact on the console');
   assert.equal(session.latest.error, refused);
   assert.equal(session.latest.phase, SyncPhase.Offline);
-  await pause(50);
+  assert.equal(saves.mock.callCount(), 0);
   assert.equal(bucket.requests.length, requestsBefore + 1);
   assert.equal(cloudFiles(bucket).head, saved);
   await stop(session);
 });
 
 for (const [label, prepare, pattern] of [
-  ['a bucket mismatch', (config) => put(config.stateRoot, {
-    'sync.json': JSON.stringify({ bucket: 'other/bucket', revision: null, pending: null, files: {} }),
-  }), /last synced with bucket other\/bucket, not the configured testaccount\/test-bucket/],
-  ['a case-insensitive data folder', async (config) => {
-    await put(config.stateRoot, { 'case-probe': '' });
-    await link(join(config.stateRoot, 'case-probe'), join(config.stateRoot, 'CASE-PROBE'));
-  }, /case-insensitive filesystem/],
+  [
+    'a bucket mismatch',
+    /**
+     * @param {object} config
+     * @returns {Promise<void>}
+     * @throws {Error}
+     */
+    (config) => put(config.stateRoot, {
+      'sync.json': JSON.stringify({ bucket: 'other/bucket', revision: null, pending: null, files: {} }),
+    }),
+    /last synced with bucket other\/bucket, not the configured testaccount\/test-bucket/,
+  ],
+  [
+    'a case-insensitive data folder',
+    /**
+     * @param {object} config
+     * @returns {Promise<void>}
+     * @throws {Error}
+     */
+    async (config) => {
+      await put(config.stateRoot, { 'case-probe': '' });
+      await link(join(config.stateRoot, 'case-probe'), join(config.stateRoot, 'CASE-PROBE'));
+    },
+    /case-insensitive filesystem/,
+  ],
 ]) {
   test(`${label} disables sync but starts SillyTavern`, async (context) => {
     const lines = capture(context);
@@ -691,13 +992,23 @@ for (const [label, prepare, pattern] of [
 
 test('local-only mode never builds a cloud store and leaves the sync state alone', async (context) => {
   const lines = capture(context);
-  context.mock.method(ProfileSync.prototype, 'start', () => assert.fail('local-only mode started cloud sync'));
+  context.mock.method(ProfileSync.prototype, 'start',
+    /**
+     * @returns {never}
+     * @throws {Error}
+     */
+    () => assert.fail('local-only mode started cloud sync'));
   const root = await workspace(context);
   const application = join(root, 'alpha', 'SillyTavern');
   await put(application, { 'server.js': '' });
   const config = configuration({ ST_DIR: application, ST_DATA_ROOT: join(root, 'alpha', 'local', 'data') });
   assert.equal(config.credentials, null);
-  const session = launch(config, () => assert.fail('local-only mode used the transport'));
+  const session = launch(config,
+    /**
+     * @returns {never}
+     * @throws {Error}
+     */
+    () => assert.fail('local-only mode used the transport'));
   await until(() => session.starts === 1, 'SillyTavern to start');
   assert.equal(session.latest.phase, SyncPhase.Disabled);
   assert.equal(session.latest.error, 'Cloud save is not configured.');
@@ -709,6 +1020,22 @@ test('local-only mode never builds a cloud store and leaves the sync state alone
   assert.equal(await exists(config.stateRoot), false);
 });
 
+test('a final save blocked by a symbolic link in scope ends with the reason alone, without the kept-locally sentence', async (context) => {
+  const lines = capture(context);
+  const root = await workspace(context);
+  const bucket = new MemoryBucket();
+  const alpha = await machine(root, 'alpha');
+  await put(alpha.dataRoot, starter);
+  const session = launch(alpha, bucket.transport);
+  await idle(session);
+  const saved = cloudFiles(bucket).head;
+  await symlink(join(alpha.dataRoot, 'default-user/chats'), join(alpha.dataRoot, 'default-user/linked'));
+  await stop(session);
+  assert.equal(lines.at(-1), '[universe] NOT SAVED TO CLOUD: Save stopped at default-user/linked: not a regular file or folder.');
+  assert.equal(cloudFiles(bucket).head, saved);
+  assert.equal(session.latest.phase, SyncPhase.Stopped);
+});
+
 test('/save answers 202 at once, and presses during a save queue exactly one follow-up', async (context) => {
   capture(context);
   const root = await workspace(context);
@@ -717,10 +1044,17 @@ test('/save answers 202 at once, and presses during a save queue exactly one fol
   const alpha = await machine(root, 'alpha');
   await put(alpha.dataRoot, starter);
   const state = {};
-  const session = launch(alpha, line.transport, { onState: (next) => Object.assign(state, next) });
+  const session = launch(alpha, line.transport, {
+    /**
+     * @param {object} next
+     * @returns {object}
+     */
+    onState: (next) => Object.assign(state, next),
+  });
   const pressed = [];
   /**
    * @returns {?Promise<object>}
+   * @throws {Error}
    */
   const save = () => {
     if (session.saveNow === null) {
@@ -734,8 +1068,9 @@ test('/save answers 202 at once, and presses during a save queue exactly one fol
   const token = await csrfToken(handler);
   /**
    * @returns {Promise<object>}
+   * @throws {Error}
    */
-  const press = () => wrapperRequest(handler, '/save', 'POST', { origin, 'x-universe-csrf': token });
+  const press =() => wrapperRequest(handler, '/save', 'POST', { origin, 'x-universe-csrf': token });
   const early = await press();
   assert.equal(early.code, 503);
   assert.equal(JSON.parse(early.body).phase, SyncPhase.Pulling);
@@ -799,8 +1134,9 @@ test('the wrapper keeps its routes, origin and CSRF checks and rate limit, and e
    * @param {string} [method]
    * @param {object} [headers]
    * @returns {Promise<object>}
+   * @throws {Error}
    */
-  const call = (url, method, headers) => wrapperRequest(handler, url, method, headers);
+  const call =(url, method, headers) => wrapperRequest(handler, url, method, headers);
   const token = await csrfToken(handler);
   assert.equal((await call('/?check=1')).code, 200);
   assert.equal((await call('http://127.0.0.1:8767')).code, 200);
@@ -832,7 +1168,11 @@ test('the wrapper keeps its routes, origin and CSRF checks and rate limit, and e
   assert.equal(limited.headers['Retry-After'], '10');
   assert.equal(calls, 12);
 
-  const local = createWrapperHandler({ phase: SyncPhase.Disabled, error: 'Bucket <b>&"\'$\' is off.' }, 8767, () => null);
+  const local = createWrapperHandler({ phase: SyncPhase.Disabled, error: 'Bucket <b>&"\'$\' is off.' }, 8767,
+    /**
+     * @returns {null}
+     */
+    () => null);
   const page = (await wrapperRequest(local, '/')).body;
   assert.match(page, /<button type="button" id="save" disabled>Save now<\/button>/);
   assert.ok(page.includes('Bucket &#60;b&#62;&#38;&#34;&#39;$&#39; is off.'));
@@ -840,6 +1180,59 @@ test('the wrapper keeps its routes, origin and CSRF checks and rate limit, and e
   const refused = await wrapperRequest(local, '/save', 'POST', { origin, 'x-universe-csrf': await csrfToken(local) });
   assert.equal(refused.code, 503);
   assert.equal(JSON.parse(refused.body).error, 'Bucket <b>&"\'$\' is off.');
+});
+
+test('Save now on the served page disables the button, polls every 2 s while saving and shows the answer for each status', async () => {
+  const savedAt = '2026-11-23T10:15:00.000Z';
+  const saving = { phase: SyncPhase.Saving, error: null, lastSavedAt: null };
+  const notSaved = 'Not saved since 2026-11-23T10:00:00.000Z: fetch failed';
+  const cases = [
+    {
+      label: '202, two polls, then saved',
+      answers: [{ status: 202, body: saving }, { status: 200, body: saving },
+        { status: 200, body: { phase: SyncPhase.Running, error: null, lastSavedAt: savedAt } }],
+      text: `Saved to cloud at ${new Date(savedAt).toLocaleString()}.`,
+      polls: 2,
+    },
+    {
+      label: '202, then an error',
+      answers: [{ status: 202, body: saving }, { status: 200, body: { phase: SyncPhase.Running, error: notSaved, lastSavedAt: null } }],
+      text: notSaved,
+      polls: 1,
+    },
+    {
+      label: '202, then unchanged with no earlier save',
+      answers: [{ status: 202, body: saving }, { status: 200, body: { phase: SyncPhase.Running, error: null, lastSavedAt: null } }],
+      text: 'Up to date.',
+      polls: 1,
+    },
+    { label: '403', answers: [{ status: 403 }], text: 'Reload this page to save.', polls: 0 },
+    { label: '429', answers: [{ status: 429 }], text: 'Please wait a moment before saving again.', polls: 0 },
+    {
+      label: '503 with an error',
+      answers: [{ status: 503, body: { phase: SyncPhase.Disabled, error: 'Cloud save is not configured.', lastSavedAt: null } }],
+      text: 'Cloud save is not configured.',
+      polls: 0,
+    },
+    {
+      label: '503 without an error',
+      answers: [{ status: 503, body: { phase: SyncPhase.Pulling, error: null, lastSavedAt: null } }],
+      text: 'Cloud save is not ready yet. Try again shortly.',
+      polls: 0,
+    },
+    { label: 'a thrown fetch', answers: [new TypeError('Failed to fetch')], text: 'Could not confirm the save. Try again.', polls: 0 },
+  ];
+  for (const { label, answers, text, polls } of cases) {
+    const press = await pressSaveNow(answers);
+    assert.deepEqual(press.texts, ['Saving...', text], label);
+    assert.deepEqual(press.requests.map((request) => [request.url, request.method, request.csrf, request.disabled]), [
+      ['/save', 'POST', press.token, true],
+      ...Array.from({ length: polls }, () => ['/status', 'GET', null, true]),
+    ], label);
+    assert.deepEqual(press.delays, Array.from({ length: polls }, () => 2000), label);
+    assert.equal(answers.length, 0, label);
+    assert.equal(press.disabledAfter, false, label);
+  }
 });
 
 test('the child runs server.js with the data and config paths, only the watchdog preload and channel, and no cloud variables', async (context) => {
@@ -852,12 +1245,12 @@ test('the child runs server.js with the data and config paths, only the watchdog
       env: Object.keys(process.env).sort(),
     }));`,
   });
-  const child = startChild({
+  const child = reap(context, startChild({
     sillyTavern: application,
     dataRoot: join(root, 'data'),
     configPath: join(root, 'config.yaml'),
     env: { PATH: process.env.PATH, KEEP: 'yes', R2_BUCKET: 'secret', AWS_REGION: 'x', cf_token: 'x', NODE_OPTIONS: '--require=x' },
-  });
+  }));
   assert.ok(child.pid > 0);
   assert.deepEqual(await child.finished, { code: 0, signal: null, launchError: null });
   const seen = JSON.parse(await readFile(report, 'utf8'));
@@ -872,31 +1265,43 @@ test('stop sends SIGTERM, and kills a child that ignores it after 15 seconds', a
   const root = await workspace(context);
   const application = join(root, 'SillyTavern');
   const ready = join(root, 'ready');
+  const answered = join(root, 'answered');
   await put(application, {
     'server.js': `process.on('SIGTERM', () => require('node:fs').writeFileSync(${JSON.stringify(join(root, 'termed'))}, ''));
+      process.on('SIGUSR2', () => require('node:fs').writeFileSync(${JSON.stringify(answered)}, ''));
       require('node:fs').writeFileSync(${JSON.stringify(ready)}, '');
       setInterval(() => {}, 1000);`,
   });
-  const child = startChild({ sillyTavern: application, dataRoot: join(root, 'data'), env: {} });
-  await until(() => exists(ready), 'the child to install its SIGTERM handler');
+  const child = reap(context, startChild({ sillyTavern: application, dataRoot: join(root, 'data'), env: {} }));
+  await until(() => exists(ready), 'the child to install its signal handlers');
   context.mock.timers.enable({ apis: ['setTimeout'] });
-  let settled = false;
-  const stopping = child.stop().finally(() => {
-    settled = true;
-  });
+  const stopping = child.stop();
+  const exit = watchSettled(stopping);
   const deadline = Date.now() + 10_000;
   while (!(await exists(join(root, 'termed')))) {
     assert.ok(Date.now() < deadline, 'SIGTERM never arrived');
     await nextTurn();
   }
   context.mock.timers.tick(14_999);
-  const grace = Date.now() + 100;
-  while (Date.now() < grace) {
+  process.kill(child.pid, 'SIGUSR2');
+  while (!(await exists(answered))) {
+    assert.ok(Date.now() < deadline, 'the child stopped answering before 15 seconds');
     await nextTurn();
   }
-  assert.equal(settled, false);
+  assert.equal(exit.settled, false);
   context.mock.timers.tick(1);
   assert.deepEqual(await stopping, { code: null, signal: 'SIGKILL', launchError: null });
+});
+
+test('a SillyTavern that exits on its own is not kept alive by the watchdog channel', async (context) => {
+  const root = await workspace(context);
+  const application = join(root, 'SillyTavern');
+  const report = join(root, 'connected');
+  await put(application, { 'server.js': `require('node:fs').writeFileSync(${JSON.stringify(report)}, String(process.connected));` });
+  const child = reap(context, startChild({ sillyTavern: application, dataRoot: join(root, 'data'), env: {} }));
+  const outcome = await Promise.race([child.finished, pause(20_000, 'still running after 20 s', { ref: false })]);
+  assert.deepEqual(outcome, { code: 0, signal: null, launchError: null });
+  assert.equal(await readFile(report, 'utf8'), 'true');
 });
 
 test('a child that cannot launch resolves finished with the launch error', async (context) => {
@@ -923,7 +1328,22 @@ test('SillyTavern exiting by itself is treated like Ctrl+C: the last writes go u
   const clock = testClock();
   clock.hold = true;
   const states = [];
-  const task = runLauncher(alpha, new AbortController().signal, (state) => states.push(state), { transport: bucket.transport, clock });
+  const task = runLauncher(alpha, new AbortController().signal,
+    /**
+     * @param {object} state
+     * @returns {number}
+     */
+    (state) => states.push(state),
+    {
+      transport: bucket.transport,
+      clock,
+      /**
+       * @param {object} config
+       * @returns {{pid: ?number, finished: Promise<object>, stop: Function}}
+       * @throws {TypeError}
+       */
+      startChild: (config) => reap(context, startChild(config)),
+    });
   await until(() => clock.waiting(SyncSettings.QuietMs), 'the quiet wait after SillyTavern exited');
   assert.ok(states.some((state) => state.phase === SyncPhase.Stopping));
   clock.fire(SyncSettings.QuietMs);

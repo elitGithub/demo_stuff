@@ -14,7 +14,7 @@ const project = dirname(import.meta.dirname);
 const execute = promisify(execFile);
 const npmCli = process.env.npm_execpath ?? join(dirname(dirname(process.execPath)), 'lib/node_modules/npm/bin/npm-cli.js');
 const npmEnvironment = { ...process.env, npm_config_offline: 'true', npm_config_update_notifier: 'false' };
-const currentBuild = 'Universe local build v8\n';
+const currentBuild = 'Universe local build v9\n';
 const replyRetryOutput = 'node_modules/sillytavern/public/scripts/extensions/third-party/universe-retry';
 const replyRetryNames = ['ReplyRetry.js', 'ReplyRetrySettings.js', 'index.js', 'manifest.json'];
 const removedFiles = [
@@ -204,7 +204,7 @@ test('wrapper startup build step recovers a v4 backup and upgrades its home page
   }
 });
 
-test('a v5 checkpoint build runs while sources are missing and is replaced by v8 without any removed file', async context => {
+test('a v5 checkpoint build runs while sources are missing and is replaced by v9 without any removed file', async context => {
   const directory = await fixture(context);
   const output = join(directory, 'dist');
   const backup = join(directory, '.universe-build-previous');
@@ -220,7 +220,7 @@ test('a v5 checkpoint build runs while sources are missing and is replaced by v8
   assert.equal(await readFile(join(output, '.universe-build'), 'utf8'), currentBuild);
   const names = await readdir(output, { recursive: true });
   for (const file of [...removedFiles, 'classes', 'integration']) {
-    assert.ok(!names.includes(file), `${file} must not survive in the v8 build`);
+    assert.ok(!names.includes(file), `${file} must not survive in the v9 build`);
   }
   for (const file of ['server.mjs', 'launcher.mjs', 'LauncherLog.mjs', 'child.mjs', 'child-watchdog.mjs', 'r2.mjs', 'sync/ProfileSync.mjs', 'sync/SyncSettings.mjs']) {
     assert.deepEqual(await readFile(join(output, file)), await readFile(join(directory, 'src', file)));
@@ -228,7 +228,7 @@ test('a v5 checkpoint build runs while sources are missing and is replaced by v8
   assert.deepEqual((await readdir(directory)).filter(name => name.startsWith('.universe-build')), ['.universe-build-owners']);
 });
 
-test('a v6 sync build runs while the retry extension is missing and is replaced by v8 holding its four files', async context => {
+test('a v6 sync build runs while the retry extension is missing and is replaced by v9 holding its four files', async context => {
   const directory = await fixture(context);
   const output = join(directory, 'dist');
   const backup = join(directory, '.universe-build-previous');
@@ -256,7 +256,7 @@ test('a v6 sync build runs while the retry extension is missing and is replaced 
   assert.deepEqual((await readdir(directory)).filter(name => name.startsWith('.universe-build')), ['.universe-build-owners']);
 });
 
-test('a v7 build without the pruner runs while sources are missing and is replaced by v8 holding it', async context => {
+test('a v7 build without the pruner runs while sources are missing and is replaced by v9 holding it', async context => {
   const directory = await fixture(context);
   const output = join(directory, 'dist');
   const backup = join(directory, '.universe-build-previous');
@@ -281,6 +281,39 @@ test('a v7 build without the pruner runs while sources are missing and is replac
   await npm(directory, 'run', 'build', '--', '--if-missing');
   assert.deepEqual(await readFile(join(output, pruner)), await readFile(join(directory, 'src', pruner)));
   assert.deepEqual((await readdir(directory)).filter(name => name.startsWith('.universe-build')), ['.universe-build-owners']);
+});
+
+test('a v8 build with the old child watchdog runs while sources are missing and is replaced by v9 holding the new one', async context => {
+  const directory = await fixture(context);
+  const output = join(directory, 'dist');
+  const backup = join(directory, '.universe-build-previous');
+  const watchdog = 'child-watchdog.mjs';
+  await npm(directory, 'run', 'build');
+  await rename(output, backup);
+  await writeFile(join(backup, '.universe-build'), 'Universe local build v8\n');
+  await writeFile(join(backup, watchdog), 'previous v8 watchdog');
+  await rename(join(directory, 'src'), join(directory, 'unavailable-src'));
+  await npm(directory, 'run', 'build', '--', '--if-missing');
+  assert.equal(await readFile(join(output, '.universe-build'), 'utf8'), 'Universe local build v8\n');
+  assert.equal(await readFile(join(output, watchdog), 'utf8'), 'previous v8 watchdog');
+  await rename(join(directory, 'unavailable-src'), join(directory, 'src'));
+  await npm(directory, 'run', 'build', '--', '--if-missing');
+  assert.equal(await readFile(join(output, '.universe-build'), 'utf8'), currentBuild);
+  assert.deepEqual(await readFile(join(output, watchdog)), await readFile(join(directory, 'src', watchdog)));
+  assert.ok((await readFile(join(output, watchdog), 'utf8')).includes('SIGHUP'));
+  assert.deepEqual((await readdir(directory)).filter(name => name.startsWith('.universe-build')), ['.universe-build-owners']);
+});
+
+test('a v8 build whose file set is incomplete is not accepted as complete', async context => {
+  const directory = await fixture(context);
+  const output = join(directory, 'dist');
+  const backup = join(directory, '.universe-build-previous');
+  await npm(directory, 'run', 'build');
+  await rename(output, backup);
+  await writeFile(join(backup, '.universe-build'), 'Universe local build v8\n');
+  await rm(join(backup, 'sync/Pruner.mjs'));
+  await rename(join(directory, 'src'), join(directory, 'unavailable-src'));
+  await assert.rejects(npm(directory, 'run', 'build', '--', '--if-missing'));
 });
 
 test('npm start prepares a missing build and shuts down using the project settings and bundled child', async context => {

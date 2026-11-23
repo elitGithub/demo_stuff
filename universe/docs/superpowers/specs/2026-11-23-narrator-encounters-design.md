@@ -1,6 +1,6 @@
 # Narrator and encounters
 
-Status: draft for operator approval.
+Status: approved by the operator as it stands, 2026-11-23 ("seems fine, keep it for now"); may be revisited after play.
 
 ## Why
 

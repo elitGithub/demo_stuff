@@ -16,7 +16,8 @@ const fullProfileSignature = 'Universe local build v4\n';
 const checkpointSignature = 'Universe local build v5\n';
 const syncSignature = 'Universe local build v6\n';
 const replyRetrySignature = 'Universe local build v7\n';
-const signature = 'Universe local build v8\n';
+const pruneSignature = 'Universe local build v8\n';
+const signature = 'Universe local build v9\n';
 const checkpointSources = [
   'server.mjs', 'launcher.mjs', 'child.mjs', 'child-preload.mjs', 'checkpoint-store.mjs', 'local-session.mjs',
   'r2.mjs', 'story-files.mjs', 'classes/capture-gate.mjs', 'classes/cloud-save.mjs',
@@ -62,7 +63,7 @@ const required = [...replyRetryRequired, ...pruneSources];
 const requiredBySignature = new Map([
   [legacySignature, legacyRequired], [scenarioBuilderSignature, scenarioBuilderRequired], [vocaliaSignature, vocaliaRequired],
   [fullProfileSignature, fullProfileRequired], [checkpointSignature, checkpointRequired], [syncSignature, syncRequired],
-  [replyRetrySignature, replyRetryRequired], [signature, required],
+  [replyRetrySignature, replyRetryRequired], [pruneSignature, required], [signature, required],
 ]);
 
 /**

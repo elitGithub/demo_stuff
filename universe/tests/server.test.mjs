@@ -7,11 +7,13 @@ import { tmpdir } from 'node:os';
 import { dirname, join } from 'node:path';
 import { test } from 'node:test';
 import { setTimeout as pause } from 'node:timers/promises';
+import { startChild } from '../src/child.mjs';
 import { LauncherLog } from '../src/LauncherLog.mjs';
 import { FileErrors } from '../src/sync/FileErrors.mjs';
 
 const project = dirname(import.meta.dirname);
 const defaultPort = 8767;
+const waitLimitMs = 20_000;
 
 /**
  * @param {string} path
@@ -35,6 +37,24 @@ async function until(predicate, what) {
       assert.fail(`Timed out waiting for ${what}.`);
     }
     await pause(5);
+  }
+}
+
+/**
+ * @param {Promise<*>} pending
+ * @param {string} what
+ * @returns {Promise<*>}
+ * @throws {Error}
+ */
+async function within(pending, what) {
+  let timer;
+  const expired = new Promise((resolve, reject) => {
+    timer = setTimeout(() => reject(new Error(`Timed out waiting for ${what}.`)), waitLimitMs);
+  });
+  try {
+    return await Promise.race([pending, expired]);
+  } finally {
+    clearTimeout(timer);
   }
 }
 
@@ -77,7 +97,7 @@ async function probePort(port) {
 
 /**
  * @param {import('node:test').TestContext} context
- * @returns {Promise<{root: string, settings: string, log: string, pidFile: string, termed: string, createdAt: string, runs: object[]}>}
+ * @returns {Promise<{root: string, settings: string, log: string, pidFile: string, termed: string, interrupted: string, createdAt: string, runs: object[]}>}
  * @throws {Error}
  */
 async function temporaryUniverse(context) {
@@ -88,15 +108,18 @@ async function temporaryUniverse(context) {
     log: join(root, 'local', 'logs', 'launcher.log'),
     pidFile: join(root, 'sillytavern.pid'),
     termed: join(root, 'sillytavern-termed'),
+    interrupted: join(root, 'sillytavern-interrupted'),
     createdAt: new Date().toISOString(),
     runs: [],
   };
   context.after(async () => {
     for (const run of universe.runs) {
-      if (run.launcher.exitCode === null && run.launcher.signalCode === null) {
+      if (run.detached && alive(-run.launcher.pid)) {
+        process.kill(-run.launcher.pid, 'SIGKILL');
+      } else if (run.launcher.exitCode === null && run.launcher.signalCode === null) {
         run.launcher.kill('SIGKILL');
-        await run.exited;
       }
+      await run.exited;
     }
     const recorded = (await exists(universe.pidFile)) ? Number(await readFile(universe.pidFile, 'utf8')) : 0;
     if (recorded > 0 && alive(recorded) && (await FileErrors.missing(readFile(`/proc/${recorded}/cmdline`, 'utf8')))?.includes(root)) {
@@ -112,6 +135,10 @@ async function temporaryUniverse(context) {
       fs.writeFileSync(${JSON.stringify(universe.termed)}, '');
       process.exit(0);
     });
+    process.on('SIGINT', () => {
+      fs.writeFileSync(${JSON.stringify(universe.interrupted)}, '');
+      process.exit(0);
+    });
     fs.writeFileSync(${JSON.stringify(universe.pidFile)}, String(process.pid));
     setInterval(() => {}, 1000);
   `);
@@ -120,16 +147,17 @@ async function temporaryUniverse(context) {
 
 /**
  * @param {{root: string, runs: object[]}} universe
- * @param {boolean} [consoleGone]
+ * @param {{consoleGone?: boolean, detached?: boolean}} [options]
  * @returns {{launcher: import('node:child_process').ChildProcess, output: {stdout: string, stderr: string}, exited: Promise<object>, closed: Promise<object>}}
  * @throws {TypeError}
  */
-function startLauncher(universe, consoleGone = false) {
+function startLauncher(universe, { consoleGone = false, detached = false } = {}) {
   const launcher = spawn(process.execPath, [join(universe.root, 'src', 'server.mjs')], {
-    cwd: universe.root, env: { PATH: process.env.PATH }, stdio: ['ignore', 'pipe', 'pipe'],
+    cwd: universe.root, env: { PATH: process.env.PATH }, stdio: ['ignore', 'pipe', 'pipe'], detached,
   });
   const run = {
     launcher,
+    detached,
     output: { stdout: '', stderr: '' },
     exited: new Promise((resolve) => launcher.once('exit', (code, signal) => resolve({ code, signal }))),
     closed: new Promise((resolve) => launcher.once('close', (code, signal) => resolve({ code, signal }))),
@@ -188,7 +216,7 @@ for (const [label, consoleGone] of [['with the console open', false], ['after th
     const universe = await temporaryUniverse(context);
     const port = await probePort(0);
     await writeFile(universe.settings, `UNIVERSE_PORT=${port}\n`);
-    const run = startLauncher(universe, consoleGone);
+    const run = startLauncher(universe, { consoleGone });
     const pid = await sillyTavernStarted(universe, run);
     if (!consoleGone) {
       await until(() => run.output.stdout.includes('[universe] Cloud save is not configured.\n'), 'the local-only line');
@@ -201,6 +229,38 @@ for (const [label, consoleGone] of [['with the console open', false], ['after th
     assert.deepEqual(await logged(universe), [`http://127.0.0.1:${port}/`, '[universe] Cloud save is not configured.']);
   });
 }
+
+test('SIGHUP to SillyTavern alone, started through startChild, takes its own SIGTERM exit and it exits 0', async (context) => {
+  const universe = await temporaryUniverse(context);
+  const child = startChild({
+    env: { PATH: process.env.PATH },
+    dataRoot: join(universe.root, 'local', 'data'),
+    sillyTavern: join(universe.root, 'node_modules', 'sillytavern'),
+  });
+  context.after(() => child.stop());
+  await until(() => exists(universe.pidFile), 'SillyTavern to start');
+  process.kill(child.pid, 'SIGHUP');
+  assert.deepEqual(await within(child.finished, 'SillyTavern to exit'), { code: 0, signal: null, launchError: null });
+  assert.equal(await exists(universe.termed), true);
+  assert.equal(await exists(universe.interrupted), false);
+});
+
+test('SIGHUP to the whole process group, as when the terminal closes, makes SillyTavern take its own SIGTERM exit, ' +
+  'the launcher exits 0 and the log holds its lines', async (context) => {
+  const universe = await temporaryUniverse(context);
+  const port = await probePort(0);
+  await writeFile(universe.settings, `UNIVERSE_PORT=${port}\n`);
+  const run = startLauncher(universe, { detached: true });
+  const pid = await sillyTavernStarted(universe, run);
+  await until(() => run.output.stdout.includes('[universe] Cloud save is not configured.\n'), 'the local-only line');
+  process.kill(-run.launcher.pid, 'SIGHUP');
+  assert.deepEqual(await within(run.closed, 'the launcher to close'), { code: 0, signal: null });
+  assert.equal(run.output.stderr, '');
+  assert.equal(await exists(universe.termed), true);
+  assert.equal(await exists(universe.interrupted), false);
+  assert.equal(alive(pid), false);
+  assert.deepEqual(await logged(universe), [`http://127.0.0.1:${port}/`, '[universe] Cloud save is not configured.']);
+});
 
 for (const [label, prepare, failure, rootPasses] of [
   [

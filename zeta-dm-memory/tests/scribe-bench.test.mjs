@@ -61,8 +61,14 @@ function replay(log) {
 function apply(log, text, first, last, origin = 'Story') {
     const parsed = ScribeAnswer.parse(text);
     assert.deepEqual(plain(parsed.refused), [], text);
-    const result = ScribeLog.append(log, replay(log), parsed.operations, {
-        messages: story.slice(first - 1, last),
+    const messages = story.slice(first - 1, last);
+    const questions = parsed.operations.filter((operation) => operation.type === 'Question');
+    if (origin === 'Story' && questions.length) {
+        ScribeLog.append(log, replay(log), questions, { messages, origin: 'Notes' });
+    }
+    const result = ScribeLog.append(log, replay(log), origin === 'Story'
+        ? parsed.operations.filter((operation) => operation.type !== 'Question') : parsed.operations, {
+        messages,
         origin,
     });
     assert.deepEqual(plain(result.refused), [], text);
@@ -165,10 +171,11 @@ function folder(log) {
 
 /**
  * @param {object|null} log
+ * @param {string} campaign
  * @return {Promise<FakePage>}
  */
-async function opened(log) {
-    const page = await new FakePage(folder(log)).start();
+async function opened(log, campaign = exported) {
+    const page = await new FakePage({ ...folder(log), 'campaign-a.json': campaign }).start();
     await page.choose('campaign-a.json');
     page.server.model = scripted;
     page.byId('key').value = 'sk-or-test-key';
@@ -674,37 +681,51 @@ test('progress lines', () => {
 });
 
 test('the bench rules on cited questions one at a time and preserves the decision in the saved log', async () => {
-    const log = apply(ScribeLog.create(), answer({ SCENES: ['Day 1 | #1-#2 | The quay | public | present: Orla | They meet.'] }), 1, 2);
-    const book = BenchPage.checkerBook(log, story);
+    const fixture = new CampaignBuilder('Orla');
+    fixture.narrator('Halvard keeps watch at the gate. Mirelle keeps watch at the tower.');
+    fixture.narrator('Halvard keeps watch at the tower. Mirelle keeps watch at the gate.');
+    const messages = ScribeIntake.read(fixture.messages).messages;
+    const campaign = JSON.stringify({ messages: fixture.messages });
+    const log = ScribeLog.create();
+    const scene = answer({ SCENES: ['Day 1 | #1-#2 | The quay | public | present: Orla | They meet.'] });
+    ScribeLog.append(log, ScribeReplay.run(log, messages.map((message) => message.id)), ScribeAnswer.parse(scene).operations,
+        { messages, origin: 'Story' });
+    const book = BenchPage.checkerBook(log, messages);
     const { ScribePedant } = PanelHarness.load();
     for (const number of [1, 2]) {
-        const work = ScribeLog.checkWork(book, story);
+        const work = ScribeLog.checkWork(book, messages);
         await ScribePedant.checkPassage({ ...work,
             ask: async (system, input) => {
                 const request = JSON.parse(input);
-                const source = { ref: request.target[0].ref, quote: 'Halvard keeps watch from line ' + number + '.' };
-                return { text: JSON.stringify({ complete: true, page: request.page, claims: [{ source, attribution: 'claimed' }],
-                    findings: [{ kind: 'Omission', source, question: 'Was the watch at line ' + number + ' filed?' }] }) };
+                const watch = (subject, position) => subject === 'Halvard' ? ['gate', 'tower'][position - 1] : ['tower', 'gate'][position - 1];
+                const cite = (subject, position) => ({ ref: 'm' + position + 'b1',
+                    quote: subject + ' keeps watch at the ' + watch(subject, position) + '.' });
+                const names = ['Halvard', 'Mirelle'];
+                return { text: JSON.stringify({ complete: true, page: request.page,
+                    claims: names.map((subject) => ({ source: cite(subject, number), attribution: 'witnessed',
+                        subject, attribute: 'watch', value: watch(subject, number) })),
+                    findings: number === 2 ? names.map((subject) => ({ kind: 'Contradiction', source: cite(subject, 2),
+                        earlier: cite(subject, 1), question: 'Which watch post belongs to ' + subject + '?' })) : [] }) };
             },
-            savePage: (page) => assert.equal(ScribeLog.saveCheck(book, story, work, page), true),
+            savePage: (page) => assert.equal(ScribeLog.saveCheck(book, messages, work, page), true),
         });
     }
-    const page = await opened(log);
+    const page = await opened(log, campaign);
     page.click('tab-rulings');
     await page.idle();
     assert.equal(page.rows('findings-list').length, 1);
-    assert.match(page.rows('findings-list')[0].textContent, /Missing from the book.*#1.*Halvard keeps watch from line 1/);
+    assert.match(page.rows('findings-list')[0].textContent, /#2.*Halvard keeps watch at the tower.*#1.*Halvard keeps watch at the gate/);
     page.click('findings-next');
     await page.idle();
-    const row = rowSaying(page, 'findings-list', 'watch from line 2');
+    const row = rowSaying(page, 'findings-list', 'Mirelle keeps watch');
     page.button(row, 'Leave open').click();
     await page.idle();
     const deferred = lastPosted(page, 'log-a.json');
-    const fresh = await opened(deferred);
+    const fresh = await opened(deferred, campaign);
     fresh.click('tab-rulings');
     fresh.click('findings-next');
     await fresh.idle();
-    const again = rowSaying(fresh, 'findings-list', 'watch from line 2');
+    const again = rowSaying(fresh, 'findings-list', 'Mirelle keeps watch');
     assert.match(again.textContent, /Left open/);
     const shared = fresh.inputs(again, 'checkbox')[0];
     assert.ok(!shared.checked);
@@ -715,7 +736,7 @@ test('the bench rules on cited questions one at a time and preserves the decisio
     assert.equal(decisions.length, 2);
     assert.equal(decisions[1].checkerRuling.shareInReminder, true);
     assert.match(fresh.text('made-list'), /Chose #2/);
-    assert.match(fresh.rows('findings-list')[0].textContent, /watch from line 1/);
+    assert.match(fresh.rows('findings-list')[0].textContent, /Halvard keeps watch/);
 });
 
 test('every element the page asks for exists in the markup', () => {
@@ -2234,7 +2255,7 @@ test("rulings made leaves out the engine's own dismissals", async () => {
      * @return {string[]}
      */
     const made = () => page.rows('made-list').map((row) => row.children[0].textContent);
-    assert.deepEqual(made(), ['2. Answer: Answer Q1: She does']);
+    assert.deepEqual(made(), ['3. Answer: Answer Q1: She does']);
     page.button(rowSaying(page, 'questions-list', 'Who rang the bell?'), 'Dismiss').click();
     await page.idle();
     assert.equal(made()[0].endsWith('Dismiss: Dismiss Q2: Who rang the bell?'), true);

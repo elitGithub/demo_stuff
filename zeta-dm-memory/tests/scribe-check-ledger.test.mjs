@@ -59,9 +59,11 @@ function disputed(words, filing = '') {
     const source = (number) => page(messages[number - 1]).claims[0].source;
     const certify = (number, fields, findings = []) => {
         const proposed = page(messages[number - 1]);
-        Object.assign(proposed.claims[0], fields);
         const raw = JSON.parse(proposed.answer);
-        Object.assign(raw.claims[0], fields);
+        proposed.claims = (Array.isArray(fields) ? fields : [fields]).map((claim) => ({
+            ...proposed.claims[0], ...claim, text: claim.source?.quote ?? proposed.claims[0].text }));
+        raw.claims = proposed.claims.map(({ source: passage, text, ...claim }) =>
+            ({ ...claim, source: { ref: 'm' + passage.position + 'b' + passage.blockNumber, quote: passage.quote } }));
         raw.findings = findings.map((item) => ({ kind: item.kind, question: item.question,
             source: { ref: 'm' + number + 'b1', quote: item.source.quote },
             earlier: item.earlier && { ref: 'm' + item.earlier.position + 'b1', quote: item.earlier.quote },
@@ -74,6 +76,203 @@ function disputed(words, filing = '') {
     const rule = (row, fields) => ScribeLog.ruleFinding(book, state(), messages, { finding: row.id, version: row.version, ...fields });
     return { book, messages, order, fingerprints, state, source, certify, rule, rows };
 }
+
+test('a book paraphrase of its own source is a citation diagnostic on reload, even when the Checker called it a Question', () => {
+    const room = disputed(['Frost stands by the gate of the dragon stables.'],
+        '=== FACTS\nDragon Stables | feature | where Frost works and stands by the gate | #1');
+    const source = room.source(1);
+    const fact = room.book.log.entries[0].operations.find((operation) => operation.fact);
+    const record = { ref: 'w9', text: JSON.stringify(fact) + '\nFiled citation: ' + JSON.stringify(source) };
+    const question = 'Does this passage support the assertion that Frost works at the stables?';
+    room.certify(1, { subject: 'Frost', attribute: 'location', value: 'at the gate' }, [
+        { kind: 'Question', source, earlier: null, record, question },
+        { kind: 'Contradiction', source, earlier: { ...source, quote: 'the gate of the dragon stables' }, record, question },
+    ]);
+    room.book.log = JSON.parse(JSON.stringify(room.book.log));
+    for (const row of room.rows()) {
+        assert.equal(row.diagnostic, true);
+        assert.equal(row.actionable, false);
+        assert.equal(row.correctable, false);
+        for (const change of [{ action: 'choose', account: 'record' }, { action: 'choose', account: 'source' },
+            { action: 'explain', explanation: 'Both.' }, { action: 'open' }]) {
+            assert.throws(() => room.rule(row, change), /changed/);
+        }
+    }
+    assert.equal(room.book.log.entries.some((entry) => entry.checkerRuling), false);
+    assert.equal(ScribeLog.checkProgress(room.book, room.messages).checkedThrough, 1);
+});
+
+test('only the bound original quote can turn an earlier book entry into an opposing account', () => {
+    const room = disputed(['The flag is blue.', 'The flag is red.'],
+        '=== FACTS\nFlag | color | blue | #1');
+    const fact = room.book.log.entries[0].operations.find((operation) => operation.fact);
+    const source = room.source(2);
+    room.certify(1, { subject: 'Flag', attribute: 'color', value: 'blue' });
+    const variants = [null, { ...room.source(1), quote: 'The flag is gold.' }, room.source(1)];
+    room.certify(2, { subject: 'Flag', attribute: 'color', value: 'red' }, variants.map((citation, index) => ({
+        kind: 'Contradiction', source, earlier: null, question: 'Which flag color stands? ' + index,
+        record: { ref: 'h1', text: JSON.stringify(fact) + (citation ? '\nFiled citation: ' + JSON.stringify(citation) : '') },
+    })));
+    const [loose, invented, bound] = room.rows();
+    assert.deepEqual([loose, invented, bound].map((row) => row.actionable), [false, false, true]);
+    assert.deepEqual(Array.from(bound.choices), ['source', 'record']);
+    assert.deepEqual(Array.from(bound.support, (passage) => passage.position), [2, 1]);
+    room.rule(bound, { action: 'choose', account: 'record' });
+    assert.equal(room.state().checkerRulings[0].canonical, 'blue');
+});
+
+test('the same claim remains agreement across attributions, and an additional conflicting point survives', () => {
+    for (const colors of [false, true]) {
+        const room = disputed(['Nia says the green flag flew in the market.', 'Nia says the red flag flew in the market.']);
+        const claim = { subject: 'Flag', attribute: 'location', value: 'market' };
+        const color = { subject: 'Flag', attribute: 'color' };
+        room.certify(1, [{ ...claim, attribution: 'claimed' }, ...(colors ? [{ ...color, value: 'green' }] : [])]);
+        room.certify(2, [{ ...claim, attribution: 'witnessed' }, ...(colors ? [{ ...color, value: 'red' }] : [])], [
+            { kind: 'Question', question: 'Which account stands?', source: room.source(2), earlier: room.source(1), record: null }]);
+        room.book.log = JSON.parse(JSON.stringify(room.book.log));
+        assert.equal(room.rows()[0].actionable, colors);
+    }
+});
+
+test('unrelated quotes cannot create a Frost employment dispute through save, restore, or a direct ruling request', () => {
+    for (const invent of [false, true]) {
+        const room = disputed(['Frost stands by the gate of the dragon stables.', 'The Crown Prince turns away from the railing.']);
+        room.certify(1, { subject: 'Frost', attribute: 'location', value: 'dragon stables' });
+        room.certify(2, invent ? { subject: 'Frost', attribute: 'location', value: 'railing' } :
+            { subject: 'Crown Prince', attribute: 'action', value: 'turns away' }, [
+            { kind: 'Question', question: 'Does Frost work at the stables?', source: room.source(2), earlier: room.source(1), record: null }]);
+        room.book.log = JSON.parse(JSON.stringify(room.book.log));
+        const [row] = room.rows();
+        assert.equal(row.actionable, false);
+        assert.equal(row.diagnostic, true);
+        assert.throws(() => room.rule(row, { action: 'choose', account: 'earlier' }), /changed/);
+        assert.equal(room.book.log.entries.some((entry) => entry.checkerRuling), false);
+    }
+});
+
+test('a verified operator ruling supplies an opposing value on its own point after reload', () => {
+    const room = disputed(['The flag is red.', 'The flag is blue.', 'The flag is gold.']);
+    const point = { subject: 'Flag', attribute: 'color' };
+    room.certify(1, { ...point, value: 'red' });
+    room.certify(2, { ...point, value: 'blue' }, [{ kind: 'Question', question: 'Which flag color stands?',
+        source: room.source(2), earlier: room.source(1), record: null }]);
+    room.rule(room.rows()[0], { action: 'choose', account: 'source' });
+    const work = ScribeLog.checkWork(room.book, room.messages);
+    const { text, ...meta } = work.rulings.at(-1);
+    const record = { ref: 'r1', text: JSON.stringify(meta) + '\n' + text };
+    room.certify(3, { ...point, value: 'gold' }, [{ kind: 'Contradiction', question: 'Has the flag color changed?',
+        source: room.source(3), earlier: null, record }]);
+    room.book.log = JSON.parse(JSON.stringify(room.book.log));
+    assert.deepEqual(Array.from(room.rows()[1].choices), ['source', 'record']);
+    room.rule(room.rows()[1], { action: 'choose', account: 'record' });
+    assert.equal(room.state().checkerRulings.at(-1).canonical, 'The flag is blue.');
+});
+
+test('a real eye-color dispute cannot label an operator decision as a ruling about employment', () => {
+    const room = disputed(['Frost’s eyes are brown.', 'Frost’s eyes are blue.']);
+    const question = 'Does Frost work at the stables?';
+    room.certify(1, { subject: 'Frost', attribute: 'eyes', value: 'brown' });
+    room.certify(2, { subject: 'Frost', attribute: 'eyes', value: 'blue' }, [
+        { kind: 'Question', question, source: room.source(2), earlier: room.source(1), record: null }]);
+    const [finding] = room.rows();
+    assert.equal(finding.question, question);
+    assert.equal(finding.rulingQuestion, 'Which account should the book keep for Frost (eyes), “blue” or “brown”?');
+    room.rule(finding, { action: 'choose', account: 'earlier' });
+    room.book.log = JSON.parse(JSON.stringify(room.book.log));
+    const [restored] = room.rows();
+    assert.equal(restored.status, 'settled');
+    assert.equal(restored.ruling.question, finding.rulingQuestion);
+    assert.equal(restored.ruling.canonical, 'Frost’s eyes are brown.');
+    assert.equal(room.book.log.entries.find((entry) => entry.check?.messageId === room.order[1]).check.pages[0].findings[0].question, question);
+});
+
+test('settling an eye-color dispute leaves an unrelated job intact even when the job cites the same compound passage', () => {
+    for (const linked of [false, true]) {
+        const room = disputed(['Frost has brown eyes and tends the stables.', 'Frost has blue eyes and wears a green coat.'],
+            '=== FACTS\nFrost | role | tends the stables | #1');
+        const job = room.book.log.entries[0].operations.find((item) => item.fact);
+        const record = { ref: 'w1', text: JSON.stringify(job) + (linked ? '\nFiled citation: ' + JSON.stringify(room.source(1)) : '') };
+        room.certify(1, [{ subject: 'Frost', attribute: 'eyes', value: 'brown' },
+            { subject: 'Frost', attribute: 'role', value: 'tends the stables' }]);
+        room.certify(2, [{ subject: 'Frost', attribute: 'eyes', value: 'blue' },
+            { subject: 'Frost', attribute: 'coat', value: 'green' }], [
+            { kind: 'Question', question: 'Does Frost work at the stables?', source: room.source(2), earlier: room.source(1), record }]);
+        const [row] = room.rows();
+        assert.deepEqual(Array.from(row.choices), ['source', 'earlier']);
+        assert.equal(row.record, null);
+        room.rule(row, { action: 'choose', account: 'source' });
+        room.book.log = JSON.parse(JSON.stringify(room.book.log));
+        const [decision] = room.state().checkerRulings;
+        assert.deepEqual(Array.from(decision.claims, (claim) => claim.attribute), ['eyes']);
+        assert.deepEqual(Array.from(decision.pointClaims, (claim) => claim.attribute), ['eyes']);
+        assert.equal(decision.record, null);
+        assert.deepEqual(Array.from(room.state().facts, (fact) => [fact.category, fact.text]), [['role', 'tends the stables'], ['eyes', 'blue']]);
+        assert.equal(room.book.log.entries.find((entry) => entry.check?.messageId === room.order[1]).check.pages[0].findings[0].record.text, record.text);
+    }
+});
+
+test('permuting compound claims and choosing either account can only change the matching eye fact', () => {
+    const eyes = { subject: 'Frost', attribute: 'eyes' };
+    const current = [{ ...eyes, value: 'blue' }, { subject: 'Frost', attribute: 'coat', value: 'leather' }];
+    const prior = [{ ...eyes, value: 'hazel' }, { subject: 'Frost', attribute: 'role', value: 'tends the stables' }];
+    for (const before of [prior, [...prior].reverse()]) {
+        for (const after of [current, [...current].reverse()]) {
+            for (const pick of ['source', 'earlier']) {
+                for (const recordKind of ['role', 'eyes']) {
+                    const room = disputed(['Frost has hazel eyes, wears a coat and tends the stables.',
+                        'Frost puts on a leather coat and his eyes are blue.'],
+                    '=== FACTS\nFrost | role | tends the stables | #1\nFrost | eyes | hazel | #1');
+                    const fact = room.book.log.entries[0].operations.find((item) => item.fact && item.category === recordKind);
+                    const record = { ref: 'w1', text: JSON.stringify(fact) + '\nFiled citation: ' + JSON.stringify(room.source(1)) };
+                    room.certify(1, before);
+                    room.certify(2, after, [{ kind: 'Question', question: 'Does Frost work at the stables?',
+                        source: room.source(2), earlier: room.source(1), record }]);
+                    const [row] = room.rows();
+                    assert.equal(row.rulingQuestion, 'Which account should the book keep for Frost (eyes), “blue” or “hazel”?');
+                    assert.deepEqual(Array.from(row.choices), recordKind === 'eyes' ? ['source', 'earlier', 'record'] : ['source', 'earlier']);
+                    room.rule(row, { action: 'choose', account: pick });
+                    room.book.log = JSON.parse(JSON.stringify(room.book.log));
+                    const state = room.state();
+                    const [decision] = state.checkerRulings;
+                    assert.deepEqual(Array.from(decision.claims, (claim) => claim.attribute), ['eyes']);
+                    assert.deepEqual(Array.from(decision.pointClaims, (claim) => claim.attribute), ['eyes']);
+                    assert.equal(state.facts.find((item) => item.category === 'role').text, 'tends the stables');
+                    assert.equal(state.facts.some((item) => item.category === 'coat'), false);
+                    assert.equal(state.facts.find((item) => item.category === 'eyes' && item.status === 'InForce').text,
+                        pick === 'source' ? 'blue' : 'hazel');
+                }
+            }
+        }
+    }
+});
+
+test('shop continuity and Galahan’s hair remain genuine disputes when short quotes rely on their original sentences', () => {
+    const room = disputed(['On entering the shop Ironvein Supply, the party finds its shelves stocked in Valenmere.',
+        'Stepping straight out of the same shop, they enter the market district of Thornwall.',
+        'Galahan removes his hood, revealing dark hair.', 'On his return, Galahan wears his silver-grey hair cropped short.']);
+    const seen = (value, position) => ({ ...room.source(position), quote: value });
+    room.certify(1, { subject: 'Shop', attribute: 'town', value: 'Valenmere' });
+    room.certify(2, { subject: 'Shop', attribute: 'town', value: 'Thornwall' }, [{ kind: 'Question',
+        question: 'Did the shop’s town change from Valenmere to Thornwall?', source: seen('the market district of Thornwall.', 2),
+        earlier: seen('its shelves stocked in Valenmere.', 1), record: null }]);
+    room.certify(3, { subject: 'Galahan', attribute: 'hair', value: 'dark' });
+    room.certify(4, { subject: 'Galahan', attribute: 'hair', value: 'silver-grey' }, [{ kind: 'Contradiction',
+        question: 'What colour is Galahan’s hair?', source: seen('silver-grey hair cropped short.', 4),
+        earlier: seen('dark hair.', 3), record: null }]);
+    room.book.log = JSON.parse(JSON.stringify(room.book.log));
+    assert.deepEqual(Array.from(room.rows(), (row) => Array.from(row.choices)), [['source', 'earlier'], ['source', 'earlier']]);
+    room.rule(room.rows()[1], { action: 'choose', account: 'earlier' });
+    assert.equal(room.state().checkerRulings[0].canonical, 'dark hair.');
+});
+
+test('amber eyes and amber describe the same value', () => {
+    const room = disputed(['Orla has amber eyes.', 'Observers report Orla’s eyes are amber.']);
+    room.certify(1, { subject: 'Orla', attribute: 'eyes', value: 'amber eyes' });
+    room.certify(2, { subject: 'Orla', attribute: 'eyes', value: 'amber' }, [{ kind: 'Question', question: 'Which eye color?',
+        source: room.source(2), earlier: room.source(1), record: null }]);
+    room.book.log = JSON.parse(JSON.stringify(room.book.log));
+    assert.equal(room.rows()[0].actionable, false);
+});
 
 test('a bound bounty ruling corrects the subject and preserves the operator decision when its citation changes', () => {
     const room = disputed(['Mirra has a bounty of 50,000 gold.'],
@@ -135,10 +334,10 @@ test('operator-selected fixed and moving values survive a later Story claim and 
 });
 
 test('two points with identical witnesses and text are ruled independently, and an open point remains actionable after reload', () => {
-    const room = disputed(['Mirra wears the red crown.', 'Orla wears the blue crown.']);
-    room.certify(1, { subject: 'Mirra', attribute: 'crown', value: 'red' });
+    const room = disputed(['Mirra wears the red Dawn Crown.', 'Orla put on the blue Dawn Crown.']);
+    room.certify(1, { subject: 'Mirra', attribute: 'wearer', target: 'Dawn Crown', value: 'red' });
     const shared = { kind: 'Question', source: room.source(2), earlier: room.source(1), record: null };
-    room.certify(2, { subject: 'Orla', attribute: 'crown', value: 'blue' }, [
+    room.certify(2, { subject: 'Orla', attribute: 'wearer', target: 'Dawn Crown', value: 'blue' }, [
         { ...shared, question: 'Who wears the crown?' }, { ...shared, question: 'What color is the crown?' }]);
     const [wearer, color] = room.rows();
     assert.notEqual(wearer.id, color.id);
@@ -159,9 +358,9 @@ test('a later incompatible hair account creates a separate finding and keeps the
     room.certify(3, {}, [{ kind: 'Omission', source: room.source(3), question: 'Which town?', earlier: null, record: null }]);
     const [hair, town] = room.rows();
     room.rule(hair, { action: 'choose', account: 'earlier' });
-    room.rule(town, { action: 'open' });
+    assert.equal(town.actionable, false);
     room.certify(4, { subject: 'Galahan', attribute: 'hair', value: 'red' }, [question(4)]);
-    assert.deepEqual(Array.from(room.rows(), (row) => row.status), ['settled', 'deferred', 'open']);
+    assert.deepEqual(Array.from(room.rows(), (row) => row.status), ['settled', 'open', 'open']);
     assert.deepEqual(Array.from(room.rows().slice(0, 2), (row) => row.id), [hair.id, town.id]);
     assert.notEqual(room.rows()[2].id, hair.id);
     assert.equal(room.state().checkerRulings[0].canonical, 'Galahan has dark hair.');
@@ -171,7 +370,7 @@ test('the same hair question and common earlier citation keep two subjects separ
     const room = disputed(['Galahan and Mirra have dark hair.', 'Galahan has silver hair.', 'Mirra has red hair.', 'Galahan has blue hair.']);
     const question = (position) => ({ kind: 'Question', question: 'What color is the hair?',
         source: room.source(position), earlier: room.source(1), record: null });
-    room.certify(1, { subject: 'Mirra', attribute: 'hair', value: 'dark' });
+    room.certify(1, ['Mirra', 'Galahan'].map((subject) => ({ subject, attribute: 'hair', value: 'dark' })));
     room.certify(2, { subject: 'Galahan', attribute: 'hair', value: 'silver' }, [question(2)]);
     const galahan = room.rows()[0];
     room.rule(galahan, { action: 'choose', account: 'source' });
@@ -222,11 +421,11 @@ test('a new citation finding cannot undo an operator correction when left open',
     room.certify(2, { subject: 'Frost', attribute: 'owns', value: 'brown horse' }, [citation(2)]);
     assert.equal(room.rows()[0].status, 'settled');
     assert.equal(room.rows()[1].status, 'open');
-    room.rule(room.rows()[1], { action: 'open' });
+    assert.throws(() => room.rule(room.rows()[1], { action: 'open' }), /changed/);
     room.book.log = JSON.parse(JSON.stringify(room.book.log));
     assert.equal(room.state().facts.find((fact) => fact.text === 'black horse').status, 'InForce');
     assert.equal(room.state().facts.find((fact) => fact.text === 'a white mare').status, 'InForce');
-    assert.deepEqual(Array.from(room.rows(), (row) => row.status), ['settled', 'deferred']);
+    assert.deepEqual(Array.from(room.rows(), (row) => row.status), ['settled', 'open']);
 });
 
 test('the Last Mage combined weapon and reward entry splits into independently cited accounts without creating a transfer', () => {
@@ -260,10 +459,10 @@ test('Finally Unsealed keeps Morwen’s chosen watch separate from the hearing q
 });
 
 test('a Dawn ruling on a wager neither awards a tournament result nor settles an unrelated point in the same block', () => {
-    const room = disputed(['Thessi accepts the wager. There are two chairs.', 'Thessi disputes the terms. She asks for another chair.']);
+    const room = disputed(['Thessi accepts the wager. There are two chairs.', 'Thessi disputes the wager terms. She asks for another chair.']);
     room.certify(1, { subject: 'Thessi', attribute: 'wager', value: 'accepts' });
     const shared = { kind: 'Question', source: room.source(2), earlier: room.source(1), record: null };
-    room.certify(2, { subject: 'Thessi', attribute: 'terms', value: 'disputes' }, [
+    room.certify(2, { subject: 'Thessi', attribute: 'wager', value: 'disputes' }, [
         { ...shared, question: 'What terms were accepted?' }, { ...shared, question: 'How many chairs are there?' }]);
     room.rule(room.rows()[0], { action: 'explain', explanation: 'Thessi accepted the original wager. The contest is still open.' });
     assert.equal(room.rows()[1].status, 'open');
@@ -303,15 +502,18 @@ test('a blue crown ruling never answers who stole it, including after loading a 
     const color = 'What color is Ada’s crown?';
     const theft = 'Who stole the crown from Ada?';
     for (const legacy of [true, false]) {
-        const room = disputed(['Ada owns a blue crown.', 'A thief stole the crown from Ada.'],
+        const room = disputed(['Ada owns a blue crown. Mara insists Ada’s crown is red.', 'A thief stole the crown from Ada.'],
             legacy ? '=== QUESTIONS\n' + color + ' | #1' : '');
         if (legacy) {
             const state = room.state();
             const entry = ScribeLog.rule(room.book.log, state, { type: 'Answer', question: 'Q1', text: 'blue' });
             ScribeLog.link(entry, state, [], room.messages);
         }
-        room.certify(1, { subject: 'Ada', attribute: 'crown', value: 'blue' }, [{
-            kind: 'Question', source: room.source(1), earlier: null, record: null, question: color }]);
+        const blue = { ...room.source(1), quote: 'Ada owns a blue crown.' };
+        const red = { ...room.source(1), quote: 'Mara insists Ada’s crown is red.' };
+        room.certify(1, [{ source: blue, subject: 'Ada', attribute: 'crown', value: 'blue' },
+            { source: red, subject: 'Ada', attribute: 'crown', value: 'red' }], [{
+            kind: 'Question', source: blue, earlier: red, record: null, question: color }]);
         if (!legacy) {
             room.rule(room.rows()[0], { action: 'explain', explanation: 'blue' });
         }

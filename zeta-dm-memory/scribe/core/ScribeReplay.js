@@ -750,6 +750,7 @@ const ScribeReplay = Object.freeze({
                 text: operation.text,
                 cite: operation.cite,
                 position: item.position,
+                origin: item.origin,
                 answer: null,
                 ...(operation.evidence ? { evidence: operation.evidence } : {}),
                 dismissed: false,

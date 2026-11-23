@@ -2623,8 +2623,8 @@ const BenchPage = Object.freeze({
             const key = (role) => BenchPage.key('findings', finding.id, finding.version, role);
             const accounts = BenchView.accounts(finding, state);
             const note = (line) => item.append(BenchPage.make(page, settings.Tags.Paragraph, line));
-            note(finding.question);
-            if (finding.kind === 'Omission') {
+            note(BenchView.checkerTitle(finding));
+            if (finding.kind === 'Omission' && !finding.diagnostic) {
                 note('Missing from the book');
             }
             for (const account of accounts) {
@@ -2637,18 +2637,10 @@ const BenchPage = Object.freeze({
                 note(finding.actionable === false ? 'Evidence changed. Waiting for the Checker to verify the current passages.' :
                     'Evidence changed. Review the current passages.');
             }
-            if (finding.actionable === false) {
+            if (finding.status === 'settled' || (finding.actionable === false && !finding.correctable)) {
                 return item;
             }
-            const select = BenchPage.make(page, settings.Tags.Select, settings.Nothing);
-            BenchPage.keyed(page, select, key('account'));
-            BenchPage.control(page, select);
-            page.fields.push(select);
-            BenchPage.options(page, select, accounts.map((account) => [account.key, account.text]), accounts[0].key);
-            const label = BenchPage.make(page, settings.Tags.Label, settings.Nothing, settings.Classes.Field);
-            label.append(BenchPage.make(page, settings.Tags.Span, 'Account to keep'), select);
-            const detail = BenchPage.field(page, settings.InputTypes.Text, 'Explanation for keeping both accounts', key('explanation'), true);
-            const share = ScribeKnowledge.shareableFinding(state, finding, page.campaign.messages) ? BenchPage.field(page,
+            const share = !finding.correctable && ScribeKnowledge.shareableFinding(state, finding, page.campaign.messages) ? BenchPage.field(page,
                 settings.InputTypes.Checkbox, 'Include this ruling in reminders for everyone', key('share'), true) : null;
             if (share) {
                 item.append(share.label);
@@ -2658,9 +2650,23 @@ const BenchPage = Object.freeze({
                 ScribeLog.ruleFinding(BenchPage.checkerBook(log, messages), current, messages,
                     { finding: finding.id, version: finding.version, ...change,
                         ...(change.action !== 'open' && share?.input.checked ? { shareInReminder: true } : {}) }, ScribeKnowledge.shareableFinding);
-                return 'Ruling saved.';
+                return finding.correctable ? 'Book updated.' : 'Ruling saved.';
             }, null);
             const button = (text, act) => BenchPage.button(page, text, act, true, key(text));
+            if (finding.correctable) {
+                const label = finding.kind === 'Omission' ? 'File cited claim' : 'Correct book entry';
+                item.append(button(label, () => apply({ action: 'choose', account: 'source' })), outcome);
+                return item;
+            }
+            const choices = accounts.filter((account) => finding.choices.includes(account.key));
+            const select = BenchPage.make(page, settings.Tags.Select, settings.Nothing);
+            BenchPage.keyed(page, select, key('account'));
+            BenchPage.control(page, select);
+            page.fields.push(select);
+            BenchPage.options(page, select, choices.map((account) => [account.key, account.text]), choices[0].key);
+            const label = BenchPage.make(page, settings.Tags.Label, settings.Nothing, settings.Classes.Field);
+            label.append(BenchPage.make(page, settings.Tags.Span, 'Account to keep'), select);
+            const detail = BenchPage.field(page, settings.InputTypes.Text, 'Explanation for keeping both accounts', key('explanation'), true);
             item.append(label, button('Choose account', () => apply({ action: 'choose', account: select.value })), detail.label,
                 button('Explain how both fit', () => apply({ action: 'explain', explanation: detail.input.value.trim() })));
             if (finding.status !== 'deferred') {

@@ -107,6 +107,32 @@ test('the Checker keeps interpreted claims with their exact citation even when w
     assert.equal((await run({ subject: 'E\u0301lodie May', attribute: 'carrying', value: '2,000 gold' })).claims.length, 1);
 });
 
+test('h and w citations resolve a verbatim quote to the original block and reject a book paraphrase', async () => {
+    const before = earlier(1, 'Narrator', 'Frost stands at the gate.');
+    const after = earlier(2, 'Narrator', 'Frost leaves the gate.');
+    const work = checkInput(2, [['Narrator', after.quote]], {
+        written: [{ text: 'Frost leaves his workplace.', source: after }],
+        earlierClaims: [before, { text: 'Frost works at the gate.', source: before }],
+    });
+    const check = (quote) => ScribePedant.checkPassage({ ...work, ask: async (system, input) => {
+        const page = JSON.parse(input);
+        return { text: JSON.stringify({ page: page.page, complete: true, claims: [],
+            findings: [{ kind: 'Question', question: 'Which account?', source: { ref: 'w1', quote: after.quote },
+                earlier: { ref: 'h1', quote } }] }) };
+    } });
+    const match = await check(before.quote);
+    const finding = match.findings[0];
+    assert.equal(finding.earlier.messageId, before.messageId);
+    assert.equal(finding.source.messageId, after.messageId);
+    assert.equal(finding.earlier.blockNumber, 1);
+    const filed = JSON.parse(match.pages[0].answer).findings[0];
+    assert.deepEqual(filed.earlier, { ref: 'm1b1', quote: before.quote });
+    assert.deepEqual(filed.source, { ref: 'm2b1', quote: after.quote });
+    const unsupported = (await check('Frost works at the gate.')).findings[0];
+    assert.equal(unsupported.earlier, null);
+    assert.equal(unsupported.incompleteLinks, true);
+});
+
 test('removed reminder text cannot bridge an original citation in either current or historical evidence', async () => {
     const history = new CampaignBuilder('Frost');
     history.player('The gate was closed.\n[Scribe] The secret reminder.\nThe sea was calm.').narrator('The gate opened.');

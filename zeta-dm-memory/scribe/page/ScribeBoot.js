@@ -213,14 +213,14 @@ const ScribeBoot = Object.freeze({
      * @param {number} milliseconds
      * @param {Function} action
      * @param {Function|null} ended
-     * @return {void}
+     * @return {number|null}
      */
     later(session, milliseconds, action, ended) {
         if (session.closed) {
             if (ended !== null) {
                 ended();
             }
-            return;
+            return null;
         }
         const timer = session.boot.environment.timers.setTimeout(
             /**
@@ -233,14 +233,16 @@ const ScribeBoot = Object.freeze({
             milliseconds,
         );
         session.timers.set(timer, ended);
+        return timer;
     },
 
     /**
      * @param {object} session
      * @param {number} milliseconds
+     * @param {AbortSignal|null} signal
      * @return {Promise<void>}
      */
-    pause(session, milliseconds) {
+    pause(session, milliseconds, signal = null) {
         return new Promise(
             /**
              * @param {Function} resolve
@@ -248,17 +250,23 @@ const ScribeBoot = Object.freeze({
              * @return {void}
              */
             (resolve, reject) => {
-                ScribeBoot.later(
-                    session,
-                    milliseconds,
-                    resolve,
-                    /**
-                     * @return {void}
-                     */
-                    () => {
-                        reject(new Error(ScribeBoot.Settings.Messages.Left));
-                    },
-                );
+                const stopped = () => {
+                    session.boot.environment.timers.clearTimeout(timer);
+                    session.timers.delete(timer);
+                    reject(new Error(ScribeBoot.Settings.Messages.Stopped));
+                };
+                const timer = ScribeBoot.later(session, milliseconds, () => {
+                    signal?.removeEventListener('abort', stopped);
+                    resolve();
+                }, () => {
+                    signal?.removeEventListener('abort', stopped);
+                    reject(new Error(ScribeBoot.Settings.Messages.Left));
+                });
+                if (signal?.aborted) {
+                    stopped();
+                } else if (timer !== null) {
+                    signal?.addEventListener('abort', stopped, { once: true });
+                }
             },
         );
     },
@@ -398,23 +406,22 @@ const ScribeBoot = Object.freeze({
      * @param {string} user
      * @param {{ amount: number, settled: boolean }} bill
      * @param {'keeper'|'live'} helper
+     * @param {Function|null} beforeDispatch
      * @return {Promise<{ text: string, tokensIn: number, tokensOut: number, reasoningTokens: number|null, finish: string, stopped: number }>}
      * @throws {Error}
      */
-    async call(session, role, system, user, bill, helper) {
+    async call(session, role, system, user, bill, helper, beforeDispatch = null) {
         const settings = ScribeBoot.Settings;
         const messages = settings.Messages;
         const environment = session.boot.environment;
         if (!ScribeBoot.currentRoom(session)) {
             throw new Error(messages.Left);
         }
+        if (session.keeper?.view().stop?.reason === ScribeAdoption.Stop.Paused) {
+            throw new Error(messages.Paused);
+        }
+        const epoch = session.pauseEpoch;
         const model = ScribeBoot.setting(session, settings.Models[role]);
-
-        /**
-         * @param {number} milliseconds
-         * @return {Promise<void>}
-         */
-        const pause = (milliseconds) => ScribeBoot.pause(session, milliseconds);
 
         const dispatchedKeys = new Set();
         const historicalCheck = role === ScribeBoot.Role.Pedant && helper === 'keeper';
@@ -424,11 +431,15 @@ const ScribeBoot = Object.freeze({
         let asked = told;
         let stopped = settings.NoneStopped;
         for (;;) {
+            if (session.pauseEpoch !== epoch) {
+                throw new Error(messages.Paused);
+            }
             const trial = {
                 startedAt: environment.clock.now(),
                 cancelled: false,
                 keyVersion: null,
-                stopper: null,
+                stopper: new environment.pageWindow.AbortController(),
+                dispatchError: null,
                 halt: null,
                 leave: null,
             };
@@ -438,24 +449,31 @@ const ScribeBoot = Object.freeze({
                  * @return {void}
                  */
                 (resolve) => {
-                    trial.halt = () => {
+                    trial.halt = (reason = null) => {
                         trial.cancelled = true;
-                        if (trial.stopper !== null) {
-                            trial.stopper.abort();
-                        }
-                        resolve(null);
+                        trial.stopper.abort();
+                        resolve(reason || historicalCheck ? { answer: null, error: new Error(reason ?? messages.Stopped) } : null);
                     };
                     trial.leave = () => {
                         resolve({ answer: null, error: new Error(messages.Left) });
                     };
                 },
             );
+            const pause = (milliseconds) => ScribeBoot.pause(session, milliseconds, trial.stopper.signal);
             /**
              * @param {string} url
              * @param {object} options
              * @return {Promise<{ status: number, text: () => Promise<string> }>}
              */
             const fetch = async (url, options) => {
+                if (beforeDispatch !== null) {
+                    try {
+                        beforeDispatch();
+                    } catch (error) {
+                        trial.dispatchError = error;
+                        throw error;
+                    }
+                }
                 trial.keyVersion = session.boot.keyVersion;
                 dispatchedKeys.add(session.boot.keyValue);
                 const response = await session.boot.request(url, options);
@@ -482,10 +500,12 @@ const ScribeBoot = Object.freeze({
                     if (!ScribeBoot.currentRoom(session)) {
                         throw new Error(messages.Left);
                     }
+                    if (epoch !== session.pauseEpoch) {
+                        throw new Error(messages.Paused);
+                    }
                     if (bill.settled || trial.cancelled) {
                         throw new Error(messages.Stopped);
                     }
-                    trial.stopper = new environment.pageWindow.AbortController();
                     let key;
                     let preparedVersion;
                     let wasUnreadable;
@@ -524,7 +544,7 @@ const ScribeBoot = Object.freeze({
                         signal: trial.stopper.signal,
                     });
                 },
-                { attempts: settings.Attempts, pauseMs: settings.PauseMs, sleep: pause },
+                { attempts: historicalCheck ? 1 : settings.Attempts, pauseMs: settings.PauseMs, sleep: pause },
             ).then(
                 /**
                  * @param {object} answer
@@ -536,8 +556,9 @@ const ScribeBoot = Object.freeze({
                  * @return {{ answer: null, error: * }}
                  */
                 (error) => {
-                    error.source = trial.keyVersion === null ? 'Scribe' : 'OpenRouter';
-                    return { answer: null, error };
+                    const failure = trial.dispatchError ?? error;
+                    failure.source = trial.keyVersion === null ? 'Scribe' : 'OpenRouter';
+                    return { answer: null, error: failure };
                 },
             );
             session.running.add(trial);
@@ -561,12 +582,22 @@ const ScribeBoot = Object.freeze({
             }
             if (outcome === null) {
                 stopped++;
-                asked = historicalCheck ? told : `${told}${settings.NudgeOpen}${settings.Nudge}`;
+                asked = `${told}${settings.NudgeOpen}${settings.Nudge}`;
                 continue;
             }
             if (outcome.error !== null) {
                 let error = outcome.error;
-                if ((error.status === 401 || error.providerCode === 401) && trial.keyVersion !== null) {
+                const unauthorized = error.status === 401 || error.providerCode === 401;
+                if (historicalCheck && trial.keyVersion !== null) {
+                    error.billed = bill.amount > settings.NoSpending;
+                    if (unauthorized && !error.billed && !error.usedTokens && beforeDispatch !== null) {
+                        error.unbilledAuth = true;
+                        error.keyChanged = () => {
+                            ScribeBoot.refreshKey(session.boot);
+                            return !session.boot.keyProblem && trial.keyVersion !== session.boot.keyVersion;
+                        };
+                    }
+                } else if (unauthorized && trial.keyVersion !== null) {
                     try {
                         ScribeBoot.modelKey(session);
                         if (trial.keyVersion !== session.boot.keyVersion) {
@@ -607,7 +638,7 @@ const ScribeBoot = Object.freeze({
              * @param {{ startedAt: number }} trial
              * @return {boolean}
              */
-            (trial) => now - trial.startedAt >= ScribeBoot.Settings.ForceAfterMs,
+            (trial) => !trial.cancelled && now - trial.startedAt >= ScribeBoot.Settings.ForceAfterMs,
         );
     },
 
@@ -616,13 +647,14 @@ const ScribeBoot = Object.freeze({
      * @param {string} role
      * @param {string} system
      * @param {string} user
+     * @param {Function|null} beforeDispatch
      * @return {Promise<{ text: string, cost: number, stopped: number }>}
      * @throws {Error}
      */
-    async ask(session, role, system, user) {
+    async ask(session, role, system, user, beforeDispatch = null) {
         const bill = { amount: ScribeBoot.Settings.NoSpending, settled: false };
         try {
-            const answer = await ScribeBoot.call(session, role, system, user, bill, 'keeper');
+            const answer = await ScribeBoot.call(session, role, system, user, bill, 'keeper', beforeDispatch);
             bill.settled = true;
             return { text: answer.text, cost: bill.amount, finish: answer.finish, stopped: answer.stopped };
         } catch (error) {
@@ -760,24 +792,22 @@ const ScribeBoot = Object.freeze({
                         return;
                     }
                     if (signal !== null) {
-                        signal.addEventListener(
-                            settings.AbortEvent,
-                            /**
-                             * @return {void}
-                             */
-                            () => {
-                                if (typeof handle?.abort !== settings.FunctionType) {
-                                    reject(new Error(messages.Stopped));
-                                    return;
-                                }
-                                try {
-                                    handle.abort();
-                                } catch {
-                                    reject(new Error(messages.Stopped));
-                                }
-                            },
-                            settings.Once,
-                        );
+                        const abort = () => {
+                            if (typeof handle?.abort !== settings.FunctionType) {
+                                reject(new Error(messages.Stopped));
+                                return;
+                            }
+                            try {
+                                handle.abort();
+                            } catch {
+                                reject(new Error(messages.Stopped));
+                            }
+                        };
+                        if (signal.aborted) {
+                            abort();
+                        } else {
+                            signal.addEventListener(settings.AbortEvent, abort, settings.Once);
+                        }
                     }
                 },
             );
@@ -812,9 +842,10 @@ const ScribeBoot = Object.freeze({
                 session.keyRecoveryProblem = false;
                 return;
             }
-            if (pending.keeper) {
-                session.keeper.rekey();
+            if (pending.keeper || pending.changed) {
+                session.keeper.rekey(pending.changed === true, pending.keeper);
                 pending.keeper = false;
+                pending.changed = false;
             }
             session.live.rekey(pending.liveWork);
             if (session.keyPending === pending) {
@@ -859,7 +890,7 @@ const ScribeBoot = Object.freeze({
         const session = boot.session;
         if ((changed || unreadable) && session && ScribeBoot.currentRoom(session)) {
             if (changed) {
-                session.keyPending = { keeper: true };
+                session.keyPending = { keeper: true, changed: true };
                 session.panel?.keyChanged();
             }
             ScribeBoot.redraw(session);
@@ -895,7 +926,7 @@ const ScribeBoot = Object.freeze({
             throw new Error(ScribeStore.Settings.Messages.KeyFailed);
         }
         if (version === boot.keyVersion) {
-            session.keyPending = { keeper: true };
+            session.keyPending = { ...session.keyPending, keeper: true };
             ScribeBoot.recoverKey(session);
         }
         return true;
@@ -2099,6 +2130,16 @@ const ScribeBoot = Object.freeze({
                  * @return {Promise<{ text: string, cost: number }>}
                  */
                 ask: (role, system, user) => ScribeBoot.ask(session, role, system, user),
+                askChecker: (system, user, beforeDispatch) => ScribeBoot.ask(session, ScribeBoot.Role.Pedant, system, user, beforeDispatch),
+                pauseCalls: () => {
+                    session.pauseEpoch++;
+                    /** @type {{pause?: () => void}|null} */
+                    const live = session.live;
+                    live?.pause?.();
+                    for (const trial of session.running) {
+                        trial.halt(messages.Paused);
+                    }
+                },
                 checkPassage: (request) => ScribePedant.checkPassage(request),
                 clock: environment.clock,
 
@@ -2371,6 +2412,7 @@ const ScribeBoot = Object.freeze({
                     reservedDelivery: null,
                     panel: null,
                     running: new Set(),
+                    pauseEpoch: 0,
                     sender: null,
                     held: null,
                     interval: null,

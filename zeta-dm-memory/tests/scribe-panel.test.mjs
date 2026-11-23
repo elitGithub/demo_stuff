@@ -71,8 +71,13 @@ function replay(log) {
 function apply(log, text, first, last) {
     const parsed = ScribeAnswer.parse(text);
     assert.deepEqual(plain(parsed.refused), [], text);
-    const result = ScribeLog.append(log, replay(log), parsed.operations, {
-        messages: story.slice(first - 1, last),
+    const messages = story.slice(first - 1, last);
+    const questions = parsed.operations.filter((operation) => operation.type === 'Question');
+    if (questions.length) {
+        ScribeLog.append(log, replay(log), questions, { messages, origin: 'Notes' });
+    }
+    const result = ScribeLog.append(log, replay(log), parsed.operations.filter((operation) => operation.type !== 'Question'), {
+        messages,
         origin: 'Story',
     });
     assert.deepEqual(plain(result.refused), [], text);
@@ -349,6 +354,25 @@ test('an inaccurate book entry displays its saved subject, fact and citation bes
     assert.match(row.textContent, /#559.*Frost.*Mirra is 50,000 gold/);
     assert.match(row.textContent, /Book entry · F120 · Mirelle · reward · 100,000 gold · cites #4 · #4 · Mirelle “We divided the old reward.”/);
     assert.ok(!row.textContent.includes('{"type"'));
+});
+
+test('a Checker question backed by the same narrator quote only displays the book citation after reopening', async () => {
+    const source = { position: 1, speaker: 'Narrator', quote: 'Frost stands by the gate of the dragon stables.' };
+    const question = 'Does the target support the assertion that Frost works at the Dragon Stables?';
+    const fact = { type: 'Fact', fact: 'F20', category: 'feature', text: 'where Frost works and stands by the gate' };
+    const check = { id: 'saved', version: 'receipt', kind: 'Question', status: 'open', diagnostic: true, actionable: false,
+        correctable: false, source, earlier: null, question, record: { ref: 'w9',
+            text: JSON.stringify(fact) + '\nFiled citation: ' + JSON.stringify(source) } };
+    const room = mounted(findingsBook(), { keeper: { checkerFindings: [JSON.parse(JSON.stringify(check))] } });
+    await room.tab('Findings');
+    const row = room.rowSaying('findings', 'Book entry citation');
+    assert.ok(row.textContent.includes(source.quote));
+    assert.ok(row.textContent.includes(fact.text));
+    assert.ok(!row.textContent.includes(question));
+    assert.equal(row.descendants().some((element) => ['BUTTON', 'SELECT', 'INPUT'].includes(element.tagName)), false);
+    assert.equal(room.text('scribe-badge'), '1 finding');
+    await room.tab('Rulings');
+    assert.ok(!room.root.textContent.includes(question));
 });
 
 test('independent findings show the two cited passages, count once alongside live decisions and expose checked progress', async () => {
@@ -4071,7 +4095,7 @@ test('the header button does what the Progress button does', async () => {
     assert.deepEqual(stopped.keeper.called('adopt'), []);
 });
 
-test('the header button is locked like the Progress one, except during a routine poll', async () => {
+test('both Resume buttons work while a paused room is polling', async () => {
     const cases = [
         { ...stoppedFailed, reader: false },
         { ...stoppedFailed, flight: 'Reading #41 to #80' },
@@ -4112,10 +4136,11 @@ test('the header button is locked like the Progress one, except during a routine
     assert.equal(paused.harness.byId('scribe-next').hidden, false);
     assert.equal(paused.harness.byId('scribe-next').textContent, paused.harness.byId('scribe-resume').textContent);
     assert.equal(paused.harness.byId('scribe-next').disabled, false);
-    assert.equal(paused.harness.byId('scribe-resume').disabled, true);
+    assert.equal(paused.harness.byId('scribe-resume').disabled, false);
     paused.harness.click('scribe-next');
     await paused.harness.flush();
-    assert.equal(paused.harness.text('scribe-next-outcome'), pulling);
+    assert.equal(paused.keeper.view().phase, Phase.Idle);
+    assert.equal(paused.harness.text('scribe-next-outcome'), '');
     pausedPoll.release();
     await pausedPoll.ticking;
     await paused.harness.flush();

@@ -121,10 +121,8 @@ for (const kind of ['Contradiction', 'Question', 'Citation']) {
             assert.match(prompt, /^F\d+ eye colour: green/mu);
             assert.doesNotMatch(prompt, /^F\d+ eyes: blue/mu);
             assert.ok(active.some((fact) => fact.text === 'brown' && state.subjects.find((subject) => subject.id === fact.subject).label === 'Nia (the miller)'));
-            const ada = active.find((fact) => fact.text === 'grey');
-            assert.ok(ruling.factIds.includes(ada.id));
-            assert.equal(state.subjects.find((person) => person.id === ada.subject).label, 'Ada');
-            assert.equal(ada.evidence.attribution, 'claimed');
+            assert.equal(active.some((fact) => fact.text === 'grey'), false);
+            assert.deepEqual(plain(ruling.claims.map((claim) => [claim.subject, claim.value, claim.attribution])), [['Nia', 'green', 'witnessed']]);
         }
     });
 }

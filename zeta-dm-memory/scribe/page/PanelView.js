@@ -557,10 +557,10 @@ const PanelView = Object.freeze({
             questions: PanelView.tally(
                 state.questions,
                 /**
-                 * @param {{ answer: string|null, dismissed: boolean }} question
+                 * @param {{ origin: string, answer: string|null, dismissed: boolean }} question
                  * @return {boolean}
                  */
-                (question) => question.answer === null && !question.dismissed,
+                (question) => question.answer === null && BenchView.visibleQuestion(question),
             ),
         };
     },

@@ -1407,9 +1407,9 @@ test('questions are numbered and kept', () => {
     );
     const { state } = apply(log, storyOrder, answer({ QUESTIONS: ['Where did Kira go? | #4'] }), pick(4));
     assert.deepEqual(plain(state.questions), [
-        { id: 'Q2', text: 'Who sent the letter?', cite: 'MESSAGE-3', position: 3, answer: null, dismissed: false },
-        { id: 'Q3', text: 'Where did Kira go?', cite: 'MESSAGE-4', position: 4, answer: null, dismissed: false },
-        { id: 'Q1', text: 'Does Mirelle trust Halvard?', cite: 'MESSAGE-5', position: 5, answer: null, dismissed: false },
+        { id: 'Q2', text: 'Who sent the letter?', cite: 'MESSAGE-3', position: 3, origin: 'Story', answer: null, dismissed: false },
+        { id: 'Q3', text: 'Where did Kira go?', cite: 'MESSAGE-4', position: 4, origin: 'Story', answer: null, dismissed: false },
+        { id: 'Q1', text: 'Does Mirelle trust Halvard?', cite: 'MESSAGE-5', position: 5, origin: 'Story', answer: null, dismissed: false },
     ]);
     assert.equal(log.nextQuestion, 4);
 });

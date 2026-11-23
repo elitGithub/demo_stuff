@@ -336,13 +336,16 @@ const ScribeGateway = Object.freeze({
         } catch {
             parsed = null;
         }
+        const counts = ScribeGateway.counted(parsed?.usage);
+        const usedTokens = counts.tokensIn > 0 || counts.tokensOut > 0 || counts.reasoningTokens > 0 || parsed?.usage?.total_tokens > 0;
         if (status < settings.FirstSuccess || status > settings.LastSuccess) {
-            throw ScribeGateway.failure(key, settings.Messages.BadStatus, {
+            const failed = ScribeGateway.failure(key, settings.Messages.BadStatus, {
                 retryable: ScribeGateway.transient(status),
                 status,
                 finish: null,
                 reason: ScribeGateway.refusal(parsed, raw),
             });
+            throw Object.assign(failed, counts, { usedTokens });
         }
         if (!ScribeGateway.isObject(parsed)) {
             throw ScribeGateway.failure(key, settings.Messages.NotObject, {
@@ -354,7 +357,6 @@ const ScribeGateway = Object.freeze({
         }
         const choice = Array.isArray(parsed.choices) && ScribeGateway.isObject(parsed.choices[0]) ? parsed.choices[0] : null;
         const finish = ScribeGateway.finishOf(key, choice?.finish_reason);
-        const counts = ScribeGateway.counted(parsed.usage);
         const content = choice?.message?.content;
         const parts = Array.isArray(content) ? content.map((part) => {
             if (typeof part === 'string') {
@@ -395,7 +397,7 @@ const ScribeGateway = Object.freeze({
             failed = ScribeGateway.failure(key, settings.Messages.Empty, passing);
         }
         if (failed !== null) {
-            throw Object.assign(failed, counts);
+            throw Object.assign(failed, counts, { usedTokens });
         }
         const usage = ScribeGateway.isObject(parsed.usage) ? parsed.usage : {};
         return {

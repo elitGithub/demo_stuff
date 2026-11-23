@@ -7,9 +7,9 @@ import CampaignBuilder from './support/CampaignBuilder.mjs';
 const installed = readFileSync(new URL('../scribe/scribe.user.js', import.meta.url), 'utf8');
 const boundary = installed.indexOf('/** @file scribe/page/ScribeStart.js */');
 assert.ok(boundary > 0);
-const { ScribeIntake, ScribeAdoption, ScribeAnswer, ScribeAnalyzer, ScribeReplay, ScribeLog, ScribeGateway } =
+const { ScribeIntake, ScribeAdoption, ScribeAnalyzer, ScribeReplay, ScribeLog, ScribeGateway, PanelView } =
     vm.runInNewContext(installed.slice(0, boundary) +
-        'return { ScribeIntake, ScribeAdoption, ScribeAnswer, ScribeAnalyzer, ScribeReplay, ScribeLog, ScribeGateway };})();',
+        'return { ScribeIntake, ScribeAdoption, ScribeAnalyzer, ScribeReplay, ScribeLog, ScribeGateway, PanelView };})();',
     { TextEncoder, AbortController, setTimeout, clearTimeout });
 
 /**
@@ -35,7 +35,7 @@ async function run(room, answer, options = {}) {
 
 /**
  * @param {string} section
- * @param {number} messageNumber
+ * @param {number|null} messageNumber
  * @param {string} quote
  * @param {object} detail
  * @return {string}
@@ -132,11 +132,108 @@ test('installed reader saves the exact plain response for its batch, presents it
     assert.equal(ScribeAdoption.pendingSources(result.log, room.messages).length, 0);
 });
 
+test('the next installed Writer request uses the filed book and leaves partial structured replies in diagnostics', async () => {
+    const room = ScribeIntake.read(new CampaignBuilder('Frost').narrator('The gate is blue.')
+        .narrator('The gate opens.').messages);
+    const response = ['=== FACTS', 'Gate | colour | blue | #1', 'discarded diagnostic row',
+        '=== EVIDENCE', evidence('FACTS', 1, 'The gate is blue.'), '=== READ', '#1 | read'].join('\n');
+    const result = await run(room, (system, input) => {
+        if (input.includes('NEW MESSAGES (#1 to #1)')) {
+            return { text: response };
+        }
+        assert.ok(input.includes('blue (#1)'));
+        assert.ok(!input.includes('discarded diagnostic row'));
+        assert.ok(!input.includes('PREVIOUS SCRIBE READING'));
+        return { text: '=== READ\n#2 | read' };
+    }, { size: 1 });
+    assert.equal(result.calls.length, 2);
+    assert.equal(result.log.entries[0].modelResponse, response);
+    assert.equal(result.log.entries[1].sources[0].result, 'read');
+});
+
+test('the installed Writer reads the mounting and the flight without asking the player to resolve the plot', async () => {
+    const invitation = 'Mount, Frost. ...You may refuse.';
+    const mounting = "*climbs the dragon's back easily, hands finding holds in the ridges and spikes*";
+    const flight = 'How long have you wanted to fly?';
+    const room = ScribeIntake.read(new CampaignBuilder('Frost').says('Luveria', invitation).player(mounting)
+        .says('Luveria', flight).messages);
+    const response = ['=== READ', '#1 | read', '#2 | read', '#3 | read', '=== TOLD', '(none)', '=== NIGHTS', '(none)',
+        '=== QUESTIONS', "Does Frost accept Luveria's choice and mount her? | #1",
+        'Is Frost truly only a commoner, or does he conceal another nature? | (owner)',
+        'Does Frost explain why flying feels natural to him? | #3', '=== EVIDENCE',
+        evidence('READ', 2, mounting), evidence('QUESTIONS', 1, invitation,
+            {subject: 'Frost', attribute: 'acceptance', value: 'mounting Luveria'}),
+        evidence('QUESTIONS', null, 'He seems to be just a simple commoner... But is he?', { row: 2, blockNumber: null }),
+        evidence('QUESTIONS', 3, 'Words never spoken.', {row: 3, subject: 'Frost', attribute: 'flight', value: 'ease in flight'}),
+        '', 'The book now records the flight.'].join('\n');
+    const result = await run(room, () => ({text: response}));
+    assert.deepEqual(Array.from(result.state.questions), []);
+    assert.deepEqual(Array.from(result.log.entries[0].sources, (source) => source.result), ['read', 'read', 'read']);
+    assert.ok(result.log.entries[0].sources.every((source) => !source.filingPending));
+    assert.equal(result.log.entries[0].unfiledRows, undefined);
+    assert.equal(result.log.entries[0].proposals, undefined);
+    assert.equal(result.calls.length, 1);
+});
+
+test('only a standalone narrative from the preceding Writer response goes into the next request', async () => {
+    const room = ScribeIntake.read(new CampaignBuilder('Orla').narrator('They enter.').narrator('They leave.').messages);
+    for (const [first, keep] of [
+        ['Here is the reading:\n\n```json\n{"facts":[{"name":"Gate"}]}\n```', false],
+        ['Here is the reading:\n\n```\n[{"name":"Gate"}]\n```', false],
+        ['{"facts":[{"name":"Gate"}', false],
+        ['[At dusk] Frost reaches the gate.', true],
+        ['The party reached the gate after nightfall.', true],
+    ]) {
+        let next;
+        const result = await run(room, (system, input) => {
+            if (input.includes('NEW MESSAGES (#1 to #1)')) {
+                return {text: first};
+            }
+            next = input;
+            return {text: '=== READ\n#2 | read\n\nThey have left.\nNothing further was filed.'};
+        }, {size: 1});
+        assert.equal(next.includes(first), keep, first);
+        assert.equal(result.log.entries[1].unfiledRows, undefined);
+        assert.equal(result.log.entries[1].sources[0].result, 'read');
+    }
+});
+
+test('an old book row is skipped only when its operation and supplied evidence repeat the saved source', async () => {
+    const room = ScribeIntake.read(new CampaignBuilder('Orla').narrator('The gate is blue. The watch begins.')
+        .narrator('The gate was painted blue again. The watch begins.').messages);
+    const old = 'Gate | colour | blue | #1';
+    const details = {event: 'Inspection', day: 1};
+    const first = ['=== FACTS', old, '=== THREADS', 'OPEN | the watch | #1', '=== EVIDENCE',
+        evidence('FACTS', 1, 'The gate is blue.', details), evidence('THREADS', 1, 'The watch begins.'),
+        '=== READ', '#1 | read'].join('\n');
+    for (const [position, quote, meaning, ignored] of [
+        [1, 'The gate is blue.', details, true],
+        [2, 'The gate was painted blue again.', {event: 'Repainting', day: 2}, false],
+        [1, 'The gate is blue.', {event: 'Inspection', day: 2}, false],
+    ]) {
+        const second = ['=== FACTS', 'Gate | colour | blue | #2', old, '=== THREADS', 'OPEN | the watch | #2',
+            '=== EVIDENCE', evidence('FACTS', 2, 'The gate was painted blue again.'),
+            evidence('FACTS', position, quote, {...meaning, row: 2}), evidence('THREADS', 2, 'The watch begins.'),
+            '=== READ', '#2 | read'].join('\n');
+        const result = await run(room, (system, input) => ({text: input.includes('NEW MESSAGES (#1 to #1)') ? first : second}), {size: 1});
+        const entry = result.log.entries[1];
+        assert.ok(entry.operations.some((row) => row.type === 'Fact' && row.position === 2));
+        assert.ok(entry.operations.some((row) => row.type === 'ThreadOpen' && row.position === 2));
+        assert.equal(entry.proposals?.length ?? 0, ignored ? 0 : 1);
+        if (!ignored) {
+            assert.equal(entry.proposals[0].operation.modelEvidence.day, meaning.day);
+        }
+    }
+});
+
 test('installed Answers saves the operator ruling before a call and files only the question actually submitted', async () => {
     const room = ScribeIntake.read(new CampaignBuilder('Orla').narrator('They raised the flag.').messages);
-    const result = await run(room, () => ({ text: ['=== QUESTIONS', 'What colour is the flag? | #1', 'Who owns the flag? | #1',
-        '=== EVIDENCE', evidence('QUESTIONS', 1, 'They raised the flag.'), evidence('QUESTIONS', 1, 'They raised the flag.', { row: 2 }),
-        '=== READ', '#1 | read'].join('\n') }));
+    const result = await run(room, () => ({ text: '=== READ\n#1 | read' }));
+    ScribeLog.append(result.log, result.state, [
+        {type: 'Question', text: 'What colour is the flag?', position: 1},
+        {type: 'Question', text: 'Who owns the flag?', position: 1},
+    ], {origin: 'Notes', messages: room.messages});
+    result.state = ScribeReplay.run(result.log, room.messages.map((message) => message.id));
     const question = result.state.questions[0];
     ScribeLog.rule(result.log, result.state, { type: 'Answer', question: question.id, text: 'blue' });
     const ruled = ScribeReplay.run(result.log, room.messages.map((message) => message.id));
@@ -155,6 +252,27 @@ test('installed Answers saves the operator ruling before a call and files only t
     delete paid.modelResponse;
     const upgraded = await run(room, () => assert.fail('An already paid answer was requested again'), {log: legacy});
     assert.deepEqual(Array.from(upgraded.state.questions, (row) => [row.answer, row.dismissed]), [['blue', true], [null, false]]);
+});
+
+test('restoring an earlier Writer question preserves its history and leaves only operator work in Rulings', () => {
+    const room = ScribeIntake.read(new CampaignBuilder('Frost').narrator('Frost mounts the dragon.').messages);
+    const order = room.messages.map((message) => message.id);
+    const log = ScribeLog.create();
+    ScribeLog.append(log, ScribeReplay.run(log, order), [
+        {type: 'Question', text: 'Does Frost mount her?', position: 1},
+        {type: 'Question', text: 'Who is riding?', position: 1},
+    ], {origin: 'Story', messages: room.messages});
+    ScribeLog.rule(log, ScribeReplay.run(log, order), {type: 'Answer', question: 'Q2', text: 'Frost.'});
+    ScribeLog.append(log, ScribeReplay.run(log, order), [{type: 'Question', text: 'Which entry should use my note?', position: 1}],
+        {origin: 'Notes', messages: room.messages});
+    const saved = JSON.stringify(log);
+    const restored = JSON.parse(saved);
+    const state = ScribeReplay.run(restored, order);
+    assert.deepEqual(Array.from(PanelView.rulings(state).questions, (question) => [question.id, question.answer]),
+        [['Q2', 'Frost.'], ['Q3', null]]);
+    assert.equal(PanelView.needs(state).questions, 1);
+    assert.equal(state.questions.length, 3);
+    assert.equal(JSON.stringify(restored), saved);
 });
 
 test('installed updates honor the named fact ID and retain model category and subject wording for the Checker', async () => {

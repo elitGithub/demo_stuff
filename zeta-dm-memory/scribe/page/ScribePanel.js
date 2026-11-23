@@ -2596,7 +2596,8 @@ const ScribePanel = Object.freeze({
         const adopting = step === PanelView.Step.Adopt;
         const routine = view.flight === ScribeKeeper.Settings.Flight.Looking;
         const ruled = routine ? !view.reader || panel.busy > 0 : ScribePanel.ruled(panel, view);
-        parts.Next.disabled = ruled || (adopting && view.adoptBlock !== null);
+        const resuming = step === PanelView.Step.Resume && view.reader && view.stop?.reason === ScribeAdoption.Stop.Paused;
+        parts.Next.disabled = !resuming && (ruled || (adopting && view.adoptBlock !== null));
         const adoptLabel = cloud.bookRevision === 0 && !cloud.lookupFailed && !cloud.unreadable && [ScribeCloud.Phase.Leading, ScribeCloud.Phase.Watching].includes(cloud.phase)
             ? words.Adopt : 'Start a new local book';
         ScribePanel.write(parts.Next, adopting ? adoptLabel : words.Resume);
@@ -2822,6 +2823,9 @@ const ScribePanel = Object.freeze({
             for (const control of controls) {
                 control.disabled = true;
             }
+        }
+        if (view.reader && view.phase === phases.Stopped && view.stop?.reason === ScribeAdoption.Stop.Paused) {
+            parts.Resume.disabled = false;
         }
     },
 
@@ -4168,7 +4172,7 @@ const ScribePanel = Object.freeze({
                 findings.push({
                     key: JSON.stringify(['checker', finding.kind, finding.source, finding.earlier, finding.record]),
                     kind: finding.kind, status: ScribeLive.Status.Open, title: finding.kind,
-                    detail: finding.question, notes, actions: [], draft: null,
+                    detail: BenchView.checkerTitle(finding), notes, actions: [], draft: null,
                 });
             }
             ScribePanel.paged(
@@ -5197,8 +5201,8 @@ const ScribePanel = Object.freeze({
             const outlet = ScribePanel.key(settings.Sections.Findings, check.id);
             const key = (role) => ScribePanel.key(outlet, check.version, role);
             const { item, actions, outcome } = ScribePanel.Rows.frame(panel, outlet);
-            item.append(ScribePanel.make(panel, settings.Tags.Paragraph, check.question, settings.Classes.Strong));
-            if (check.kind === 'Omission') {
+            item.append(ScribePanel.make(panel, settings.Tags.Paragraph, BenchView.checkerTitle(check), settings.Classes.Strong));
+            if (check.kind === 'Omission' && !check.diagnostic) {
                 item.append(ScribePanel.make(panel, settings.Tags.Paragraph, 'Missing from the book'));
             }
             for (const account of accounts) {
@@ -5212,28 +5216,34 @@ const ScribePanel = Object.freeze({
                     'Evidence changed. Waiting for the Checker to verify the current passages.' :
                     'Evidence changed. Review the current passages.', settings.Classes.Meta));
             }
-            if (check.status === 'settled' || check.actionable === false) {
+            if (check.status === 'settled' || (check.actionable === false && !check.correctable)) {
                 item.append(outcome);
                 return item;
             }
-            const account = ScribePanel.select(panel, 'Account to keep', key('account'), true);
-            ScribePanel.options(panel, account.select, accounts.map((option) => [option.key, option.text]), accounts[0].key);
-            ScribePanel.belong(panel, outlet, account.select);
-            const explanation = ScribePanel.field(panel, settings.InputTypes.Text, 'Explanation for keeping both accounts',
-                key('explanation'), false, true);
-            ScribePanel.belong(panel, outlet, explanation.input);
-            const share = ScribeKnowledge.shareableFinding(row.state, check, row.messages) ? ScribePanel.field(panel,
+            const share = !check.correctable && ScribeKnowledge.shareableFinding(row.state, check, row.messages) ? ScribePanel.field(panel,
                 settings.InputTypes.Checkbox, 'Include this ruling in reminders for everyone', key('share'), false, true) : null;
             if (share) {
                 ScribePanel.belong(panel, outlet, share.input);
                 item.append(share.label);
             }
             const apply = (change) => ScribePanel.perform(panel, { outlet, question: null, book: true,
-                pending: settings.Words.Saving, done: 'Ruling saved.',
+                pending: settings.Words.Saving, done: check.correctable ? 'Book updated.' : 'Ruling saved.',
                 call: () => panel.keeper.ruling({ finding: check.id, version: check.version, ...change,
                     ...(change.action !== 'open' && share?.input.checked ? { shareInReminder: true } : {}) }) });
             const button = (label, act) => ScribePanel.wait(panel, outlet,
                 ScribePanel.button(panel, label, act, settings.Guard.Book, key(label)));
+            if (check.correctable) {
+                const label = check.kind === 'Omission' ? 'File cited claim' : 'Correct book entry';
+                item.append(button(label, () => apply({ action: 'choose', account: 'source' })), outcome);
+                return item;
+            }
+            const choices = check.choices ? accounts.filter((option) => check.choices.includes(option.key)) : accounts;
+            const account = ScribePanel.select(panel, 'Account to keep', key('account'), true);
+            ScribePanel.options(panel, account.select, choices.map((option) => [option.key, option.text]), choices[0].key);
+            ScribePanel.belong(panel, outlet, account.select);
+            const explanation = ScribePanel.field(panel, settings.InputTypes.Text, 'Explanation for keeping both accounts',
+                key('explanation'), false, true);
+            ScribePanel.belong(panel, outlet, explanation.input);
             const choose = button('Choose account', () => apply({ action: 'choose', account: account.select.value }));
             const explain = button('Explain how both fit', async () => {
                 const text = explanation.input.value.trim();

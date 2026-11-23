@@ -1569,6 +1569,7 @@ const ScribeLive = Object.freeze({
      * @return {function(string, string): Promise<{ text: string, cost: * }>}
      */
     asker(live, role, noted) {
+        const epoch = live.epoch;
         /**
          * @param {string} system
          * @param {string} user
@@ -1576,18 +1577,19 @@ const ScribeLive = Object.freeze({
          * @throws {Error}
          */
         const ask = async (system, user) => {
-            const refused = ScribeLive.refusal(live);
+            const refused = epoch === live.epoch ? ScribeLive.refusal(live) : ScribeLive.Settings.Messages.Stopped;
             if (refused !== null) {
                 noted.source = 'Scribe';
                 throw Object.assign(new Error(refused), { source: noted.source });
             }
+            const keys = ScribeStore.diagnosticKeys(live.storage);
+            let answer;
             try {
-                const keys = ScribeStore.diagnosticKeys(live.storage);
-                const answer = await live.ask(role, system, user);
-                ScribeLive.stoppedCalls(live, role, answer);
-                ScribeLive.called(live, role, answer, null);
-                return { ...answer, text: typeof answer.text === 'string' ? ScribeStore.redactor(live.storage, keys)(answer.text) : answer.text };
+                answer = await live.ask(role, system, user);
             } catch (error) {
+                if (live.epoch !== epoch) {
+                    throw error;
+                }
                 const reason = ScribeLive.words(error);
                 const status = error?.status;
                 const hasStatus = Number.isSafeInteger(status) && status >= 100 && status <= 599;
@@ -1608,6 +1610,12 @@ const ScribeLive = Object.freeze({
                 ScribeLive.called(live, role, error, noted.failure);
                 throw error;
             }
+            if (live.epoch !== epoch) {
+                throw new Error(ScribeLive.Settings.Messages.Stopped);
+            }
+            ScribeLive.stoppedCalls(live, role, answer);
+            ScribeLive.called(live, role, answer, null);
+            return { ...answer, text: typeof answer.text === 'string' ? ScribeStore.redactor(live.storage, keys)(answer.text) : answer.text };
         };
         return ask;
     },
@@ -1934,6 +1942,7 @@ const ScribeLive = Object.freeze({
      * @return {Promise<{ composed: Readonly<{ text: string, led: readonly string[] }>|null, basis: { revision: number, first: string[], notes: string, story?: string } }>}
      */
     async remind(live, view, now, findings, notes) {
+        const epoch = live.epoch;
         const first = ScribeLive.first(findings, view.state);
         const given = ScribeLive.standing(notes, view);
         const basis = { revision: view.state.revision, first, notes: ScribeLive.marked(given) };
@@ -1942,11 +1951,11 @@ const ScribeLive = Object.freeze({
         }
         const cast = await ScribeLive.cast(live);
         const latest = live.keeper.view();
-        if (!latest.readerCurrent || latest.state.revision !== basis.revision || ScribeLive.behind(now, latest) !== null) {
+        if (live.epoch !== epoch || !latest.readerCurrent || latest.state.revision !== basis.revision || ScribeLive.behind(now, latest) !== null) {
             return { composed: null, basis, deferred: true };
         }
         const story = await ScribeLive.recount(live, view, now);
-        if (story === null) {
+        if (story === null || live.epoch !== epoch) {
             return { composed: null, basis };
         }
         basis.story = live.record.story.key;
@@ -2174,14 +2183,6 @@ const ScribeLive = Object.freeze({
                           entry.fingerprint === message.fingerprint &&
                           entry.revision === revision,
                   );
-        if (again === null) {
-            record.seen = {
-                id: message.id,
-                fingerprint: message.fingerprint,
-                position: message.position,
-                before: previous,
-            };
-        }
         const kinds = settings.Retried;
         const asking = {
             scene: again === null || again.role === kinds.Scene,
@@ -2199,6 +2200,9 @@ const ScribeLive = Object.freeze({
             } catch (error) {
                 live.problem = ScribeLive.words(error);
             }
+            if (!ScribeLive.current(live, epoch)) {
+                return;
+            }
             if (asking.scene) {
                 const sceneNoted = { failure: null, retryable: false };
                 try {
@@ -2211,15 +2215,15 @@ const ScribeLive = Object.freeze({
                         profile,
                     });
                 } catch (error) {
-                    if (!sceneNoted.keyChanged) {
+                    if (live.epoch === epoch && !sceneNoted.keyChanged) {
                         live.problem = ScribeLive.words(error);
                     }
                 }
-                if (!sceneNoted.keyChanged) {
-                    ScribeLive.report(live, sceneNoted);
-                }
                 if (!ScribeLive.current(live, epoch)) {
                     return;
+                }
+                if (!sceneNoted.keyChanged) {
+                    ScribeLive.report(live, sceneNoted);
                 }
                 if (found === null) {
                     failed.scene = sceneNoted.failure ?? settings.Messages.SceneUnreadable;
@@ -2255,7 +2259,7 @@ const ScribeLive = Object.freeze({
                             modelReading: true, statement: ScribeStore.diagnostic(live.storage, reviewed.modelReading) });
                     }
                 } catch (error) {
-                    if (!pedantNoted.keyChanged) {
+                    if (live.epoch === epoch && !pedantNoted.keyChanged) {
                         live.problem = ScribeLive.words(error);
                     }
                     failed.check = pedantNoted.failure ?? ScribeStore.diagnostic(live.storage, ScribeLive.words(error));
@@ -2263,15 +2267,14 @@ const ScribeLive = Object.freeze({
                     failed.checkKeyChanged = pedantNoted.keyChanged;
                     failed.checkRetryable = pedantNoted.retryable;
                 }
-                if (!pedantNoted.keyChanged) {
-                    ScribeLive.report(live, pedantNoted);
-                }
                 if (!ScribeLive.current(live, epoch)) {
                     return;
                 }
+                if (!pedantNoted.keyChanged) {
+                    ScribeLive.report(live, pedantNoted);
+                }
             }
             if (ScribeLive.refusal(live) !== null) {
-                record.seen = seen;
                 if (ScribeLive.distrust(live) !== null) {
                     live.problem = earlier;
                 }
@@ -2308,7 +2311,6 @@ const ScribeLive = Object.freeze({
             return;
         }
         if (!ScribeLive.trusted(live)) {
-            record.seen = seen;
             live.problem = earlier;
             return;
         }
@@ -2319,6 +2321,9 @@ const ScribeLive = Object.freeze({
         }
         if (remembered === undefined) {
             ScribeLive.retried(live, message, again, asking, failed);
+        }
+        if (again === null) {
+            record.seen = { id: message.id, fingerprint: message.fingerprint, position: message.position, before: previous };
         }
         record.now = now;
         record.findings = ScribeLive.merged(
@@ -3819,6 +3824,16 @@ const ScribeLive = Object.freeze({
              * @return {Readonly<object>}
              */
             view: () => ScribeLive.view(live),
+
+            /**
+             * @return {void}
+             */
+            pause: () => {
+                live.epoch++;
+                live.waiting = null;
+                live.again = null;
+                live.refreshing = false;
+            },
 
             /**
              * @return {boolean}

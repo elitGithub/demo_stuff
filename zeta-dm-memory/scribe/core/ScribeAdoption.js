@@ -339,6 +339,47 @@ const ScribeAdoption = Object.freeze({
 
     /**
      * @param {object} job
+     * @param {number} position
+     * @param {object} operation
+     * @param {object|undefined} item
+     * @param {Map<number, Map<string, object>>} originalRows
+     * @return {boolean}
+     */
+    filed(job, position, operation, item, originalRows) {
+        const message = job.places.get(position);
+        const owner = message && job.log.read[message.id];
+        if (owner === undefined) {
+            return false;
+        }
+        if (!originalRows.has(owner)) {
+            const entry = job.log.entries.find((candidate) => candidate.sequence === owner);
+            const saved = new Map();
+            if (entry?.modelResponse && !entry.withdrawn && entry.origin === ScribeLog.Origin.Story) {
+                const protocol = ScribeAnswer.parseStory(entry.modelResponse);
+                for (const filed of entry.operations) {
+                    const evidence = filed.evidence;
+                    if (!evidence || filed.revoked || evidence.verified === false ||
+                        job.fingerprints.get(evidence.messageId) !== evidence.fingerprint) {
+                        continue;
+                    }
+                    const key = evidence.section + ':' + evidence.row;
+                    const original = protocol.rows.get(key);
+                    const citation = protocol.evidence.get(key);
+                    if (original && citation && evidence.filingKey === ScribeText.fingerprint(JSON.stringify([original, evidence.form, evidence.dimension]))) {
+                        saved.set(JSON.stringify([evidence.messageId, original, evidence.form, evidence.dimension]), citation);
+                    }
+                }
+            }
+            originalRows.set(owner, saved);
+        }
+        const prior = originalRows.get(owner).get(JSON.stringify([message.id, operation, item?.form ?? null, item?.dimension ?? null]));
+        return Boolean(prior && (!item || ['messageNumber', 'blockNumber', 'quote', 'attribution', 'form', 'dimension',
+            'subject', 'attribute', 'value', 'event', 'day', 'time', 'related'].every((field) =>
+            JSON.stringify(prior[field] ?? null) === JSON.stringify(item[field] ?? null))));
+    },
+
+    /**
+     * @param {object} job
      * @param {{ pass: string, origin: string, first: number|null, last: number|null, system: string, user: string, messages: readonly object[], state: object, notes: readonly object[], questions: readonly object[] }} step
      * @return {Promise<Readonly<{ stop: string, problem: string|null, spent: number, calls: number, unpriced: number }>|null>}
      * @throws {Error}
@@ -358,10 +399,10 @@ const ScribeAdoption = Object.freeze({
             const owner = before && job.log.read[before.id];
             if (owner !== undefined) {
                 const entry = job.log.entries.find((candidate) => candidate.sequence === owner);
-                const earlier = ScribeLog.modelReading(entry);
+                const earlier = entry?.modelReading;
                 if (earlier && entry.messageIds.at(-1) === before.id &&
                     entry.sources?.every((source) => job.fingerprints.get(source.id) === source.fingerprint) &&
-                    entry.messageIds.every((id) => job.log.read[id] === owner)) {
+                    entry.messageIds.every((id) => job.log.read[id] === owner) && !ScribeAnswer.parseStory(earlier).structured) {
                     step.user = 'PREVIOUS SCRIBE READING:\n' + earlier + '\n\n' + step.user;
                 }
             }
@@ -400,8 +441,7 @@ const ScribeAdoption = Object.freeze({
             lines.push(line);
         }
         const protocol = story ? ScribeAnswer.parseStory(answer.text) : null;
-        const narrative = story && answer.text.trim() && !protocol.rows.size && !protocol.read.size && !protocol.evidence.size &&
-            protocol.refused.every((row) => row.block === ScribeAnswer.Settings.Preamble) ? answer.text : null;
+        const narrative = story && answer.text.trim() && !protocol.structured ? answer.text : null;
         const parsed = story ? { operations: [], refused: narrative ? [] : protocol.refused } : ScribeAnswer.parse(lines.join('\n'));
         const shown = new Map(step.messages.map((message) => [message.position, message]));
         const copying = job.diagnostic ?? ((value) => value);
@@ -438,9 +478,19 @@ const ScribeAdoption = Object.freeze({
                     parsed.refused.push({ block: 'EVIDENCE', line: JSON.stringify(item), reason: 'Citation', messageNumber: item.messageNumber });
                 }
             }
+            const originalRows = new Map();
             for (const [key, operation] of protocol.rows) {
                 const item = protocol.evidence.get(key);
                 const number = item?.messageNumber ?? operation.position ?? operation.last;
+                if (operation.type === ScribeAnswer.Type.Subject && !item && step.state.subjects.some((subject) =>
+                    !subject.assumed && subject.mergedInto === null && subject.label === operation.label && subject.kind === operation.kind &&
+                    subject.evidence?.verified !== false && subject.evidence && job.fingerprints.get(subject.evidence.messageId) === subject.evidence.fingerprint)) {
+                    continue;
+                }
+                const position = operation.position ?? operation.last;
+                if (position < step.first && ScribeAdoption.filed(job, position, operation, item, originalRows)) {
+                    continue;
+                }
                 const bound = operation.type === ScribeAnswer.Type.Contradiction ? 'checkerOnly' :
                     ScribeAdoption.bind(operation, item, shown);
                 if (typeof bound === 'string') {

@@ -447,6 +447,14 @@ const BenchView = Object.freeze({
     },
 
     /**
+     * @param {{ origin: string, answer: string|null, dismissed: boolean }} question
+     * @return {boolean}
+     */
+    visibleQuestion(question) {
+        return !question.dismissed && (question.origin !== ScribeLog.Origin.Story || question.answer !== null);
+    },
+
+    /**
      * @param {object} state
      * @return {{ conflicts: object[], lookAlikes: object[], publicScenes: object[], questions: object[], refinements: object[], aliases: object[] }}
      */
@@ -514,13 +522,7 @@ const BenchView = Object.freeze({
                 (scene) => BenchView.scene(scene, labels, state),
             );
         const questions = state.questions
-            .filter(
-                /**
-                 * @param {{ dismissed: boolean }} question
-                 * @return {boolean}
-                 */
-                (question) => !question.dismissed,
-            )
+            .filter(BenchView.visibleQuestion)
             .map(
                 /**
                  * @param {{ id: string, text: string, position: number, answer: string|null }} question
@@ -561,6 +563,20 @@ const BenchView = Object.freeze({
 
     /**
      * @param {object} finding
+     * @return {string}
+     */
+    checkerTitle(finding) {
+        if (!finding.diagnostic) {
+            return finding.rulingQuestion ?? finding.question;
+        }
+        if (finding.kind === 'Omission') {
+            return 'Missing from the book';
+        }
+        return finding.record ? 'Book entry citation' : 'No independently cited conflict';
+    },
+
+    /**
+     * @param {object} finding
      * @param {object} state
      * @return {{key:string,label:string,text:string}[]}
      */
@@ -570,7 +586,7 @@ const BenchView = Object.freeze({
             const citation = finding[key];
             if (citation?.unlinked) {
                 const label = 'Checker wording for #' + citation.position + ' (no linked passage)';
-                accounts.push({ key, label, text: label + ' · ' + (citation.quote ?? finding.question) });
+                accounts.push({ key, label, text: label + ' · ' + (citation.quote ?? 'No source words supplied.') });
             } else if (citation) {
                 const label = '#' + citation.position + ' · ' + citation.speaker;
                 accounts.push({ key, label, text: label + ' “' + citation.quote + '”' });
@@ -600,8 +616,8 @@ const BenchView = Object.freeze({
                     content.push(filed);
                 }
             }
-            const label = 'Book entry';
-            accounts.push({ key: 'record', label, text: label + ' · ' + (content.join(' · ') || finding.record.text) });
+            const label = /^r\d+$/.test(finding.record.ref) ? 'Earlier ruling' : 'Book entry';
+            accounts.push({ key: 'record', label, text: label + ' · ' + (content.join(' · ') || finding.operatorStatement || finding.record.text) });
         }
         return accounts;
     },

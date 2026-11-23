@@ -856,7 +856,14 @@ const ScribeAnswer = Object.freeze({
         const rejectedRows = new Map();
         const rejectedRead = new Map();
         let block = ScribeAnswer.Settings.Preamble;
-        for (const raw of text.split(ScribeAnswer.Settings.LineBreak)) {
+        const trimmed = text.trimStart();
+        const jsonStart = /^(?:\{|\[\s*(?:[[{"\d\]-]|true\b|false\b|null\b))/;
+        let structured = jsonStart.test(trimmed) || /^\s*```json\b/im.test(text) ||
+            text.split(/^\s*```[ \t]*\r?$/m).slice(1).some((part) => jsonStart.test(part.trimStart())) ||
+            /^\s*===\s*[A-Z]+(?:\s*===)?\s*$/m.test(text);
+        const lines = text.split(ScribeAnswer.Settings.LineBreak);
+        let paragraph = false;
+        for (const [index, raw] of lines.entries()) {
             const line = raw.trim();
             if (!line || /^`{3,}(?:[\w+-]+)?$/.test(line)) {
                 continue;
@@ -864,14 +871,31 @@ const ScribeAnswer = Object.freeze({
             const heading = ScribeAnswer.bare(line).toUpperCase();
             if (sections.has(heading) && !line.includes('|') && !line.startsWith('{')) {
                 block = heading;
+                structured = true;
+                paragraph = false;
                 continue;
             }
+            if (block === 'QUESTIONS') {
+                continue;
+            }
+            if (structured && /^(?:none|\(none(?: new)?\))$/i.test(line)) {
+                continue;
+            }
+            if ((block === 'READ' || block === 'EVIDENCE') && /^\p{L}/u.test(line) && !line.includes('|') &&
+                (paragraph || !lines[index - 1]?.trim())) {
+                paragraph = true;
+                continue;
+            }
+            paragraph = false;
             if (block === 'EVIDENCE') {
                 let item = null;
                 try {
                     item = JSON.parse(line);
                 } catch {
                     refused.push({ block, line, reason: ScribeAnswer.Reason.Shape });
+                    continue;
+                }
+                if (item?.section === 'READ' || item?.section === 'QUESTIONS') {
                     continue;
                 }
                 const string = (value) => typeof value === 'string' && value.trim() !== '';
@@ -923,7 +947,7 @@ const ScribeAnswer = Object.freeze({
                     { ...operation, sourceCitation: field } : operation);
             }
         }
-        return { rows, read, evidence, refused, rejectedRows, rejectedRead };
+        return { rows, read, evidence, refused, rejectedRows, rejectedRead, structured };
     },
 
     /**

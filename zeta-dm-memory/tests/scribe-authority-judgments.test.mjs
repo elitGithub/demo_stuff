@@ -202,7 +202,7 @@ for (const legacy of [false, true]) {
     });
 }
 
-test('installed historical Checker persists its complete fenced verdict, retains unlinked judgments, and accepts the operator ruling', async () => {
+test('installed historical Checker persists its complete fenced verdict and keeps unlinked questions out of adjudication', async () => {
     const { book, messages } = room(['The bell rang.', 'Rain fell.']);
     const work = ScribeLog.checkWork(book, messages);
     let original;
@@ -227,9 +227,10 @@ test('installed historical Checker persists its complete fenced verdict, retains
     assert.equal(row.support.length, 0);
     assert.equal(row.source.unlinked, true);
     const state = ScribeReplay.run(restored.log, messages.map((message) => message.id));
-    ScribeLog.ruleFinding(restored, state, messages, { finding: row.id, version: row.version, action: 'explain', explanation: 'The bell.' });
-    assert.equal(ScribeLog.checkProgress(restored, messages).findings.find((item) => item.id === row.id).status, 'settled');
-    assert.equal(restored.log.entries.at(-1).checkerRuling.explanation, 'The bell.');
+    assert.ok(progress.findings.every((item) => item.diagnostic && !item.actionable && !item.correctable));
+    assert.throws(() => ScribeLog.ruleFinding(restored, state, messages,
+        { finding: row.id, version: row.version, action: 'explain', explanation: 'The bell.' }), /changed/);
+    assert.equal(restored.log.entries.some((item) => item.checkerRuling), false);
 });
 
 test('built historical Checker distinguishes unjudged from processed and preserves both questions on one passage', async () => {
@@ -265,7 +266,7 @@ test('built historical Checker distinguishes unjudged from processed and preserv
         ['Where is the crown?', 'Who has the crown?']);
 });
 
-test('installed Checker files a nonliteral Omission with no duplicate claim; an operator can rule without certifying the quote', async () => {
+test('installed Checker retains an unverified omission and preserves a previously saved operator correction', async () => {
     const { book, messages } = room(['Nia has hazel eyes.', 'Nia waits.']);
     const work = ScribeLog.checkWork(book, messages);
     let asked = 0;
@@ -300,7 +301,20 @@ test('installed Checker files a nonliteral Omission with no duplicate claim; an 
     assert.equal(recovered.findings[0].accounts.source[0].value, 'hazel');
     const row = recovered.findings[0];
     const state = ScribeReplay.run(restored.log, messages.map((message) => message.id));
-    ScribeLog.ruleFinding(restored, state, messages, { finding: row.id, version: row.version, action: 'choose', account: 'source' });
+    assert.throws(() => ScribeLog.ruleFinding(restored, state, messages,
+        { finding: row.id, version: row.version, action: 'choose', account: 'source' }), /changed/);
+    assert.equal(row.correctable, false);
+    assert.equal(state.facts.length, 0);
+    const [claim] = row.accounts.source;
+    const { subject, attribute, value, attribution } = claim;
+    restored.log.entries.push({ sequence: restored.log.nextSequence++, kind: 'Operator', origin: 'Operator', messageIds: [], withdrawn: false,
+        operations: [{ type: 'Subject', subject: 'S1', label: subject, kind: null }],
+        checkerRuling: { finding: row.id, version: row.version, kind: row.kind, question: row.question, source: row.source,
+            earlier: null, record: null, support: [], action: 'choose', account: 'source', explanation: null, claims: [claim],
+            canonical: value, factIds: ['F1'], patches: [], pointClaims: [{ subject, attribute }], after: row.source.messageId,
+            additions: [{ type: 'AddFact', fact: 'F1', subject: 'S1', category: attribute, text: value, hidden: true,
+                target: null, targetText: null, cite: row.source.messageId, position: 1, ruledAttribute: attribute,
+                evidence: { ...row.source, messageNumber: 1, subject, attribute, value, attribution } }] } });
     const fact = ScribeReplay.run(restored.log, messages.map((message) => message.id)).facts[0];
     assert.equal(fact.text, 'hazel');
     assert.equal(fact.evidence.verified, false);

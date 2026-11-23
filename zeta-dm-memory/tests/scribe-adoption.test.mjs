@@ -777,18 +777,6 @@ function scripted(call) {
 }
 
 /**
- * @param {{ pass: string, marks: number[] }} call
- * @return {string}
- */
-function questioning(call) {
-    const text = scripted(call);
-    if (call.pass === 'Story' && call.marks[0] === 1) {
-        return `${text}\n${answer({ QUESTIONS: questions })}`;
-    }
-    return text;
-}
-
-/**
  * @param {object} log
  * @param {string} question
  * @param {string} text
@@ -835,6 +823,10 @@ async function adopt(chosen = {}) {
         savesAtReport: [],
         pauses: 0,
     };
+    if (chosen.withQuestions) {
+        ScribeLog.append(context.log, ScribeReplay.run(context.log, orderOf(book)),
+            ScribeAnswer.parse(answer({ QUESTIONS: questions })).operations, { origin: 'Notes', messages: book.messages });
+    }
     const result = await ScribeAdoption.run({
         messages: book.messages,
         readThrough: chosen.readThrough,
@@ -986,7 +978,7 @@ function ended(stop, problem, spent, calls, unpriced = 0) {
  * @return {Promise<object>}
  */
 async function answeredLog() {
-    const run = await adopt({ answering: questioning });
+    const run = await adopt({ withQuestions: true });
     reply(run.log, 'Q1', 'She trusts him with the ledger');
     return run.log;
 }
@@ -1751,7 +1743,7 @@ test('the answers pass sends only what it was asked', async () => {
 
 test('after the answers pass the loop starts again', async () => {
     const order = orderOf(plainCampaign);
-    const first = await adopt({ answering: questioning, pausing: (context) => context.reports.length >= 1 });
+    const first = await adopt({ withQuestions: true, pausing: (context) => context.reports.length >= 1 });
     reply(first.log, 'Q1', 'She trusts him with the ledger');
     const run = await adopt({
         log: first.log,
@@ -1772,18 +1764,13 @@ test('after the answers pass the loop starts again', async () => {
     );
     assert.equal(run.calls[1].user.includes('- Kira (character)'), true);
     assert.deepEqual(plain(run.log.entries.map((entry) => entry.origin)), [
-        'Story',
-        'Operator',
-        'Answers',
-        'Operator',
-        'Story',
-        'Story',
+        'Notes', 'Story', 'Operator', 'Answers', 'Operator', 'Story', 'Story',
     ]);
     assert.equal(readCount(run.log, plainCampaign), 100);
 });
 
 test('a stale state is retried once', async () => {
-    const first = await adopt({ answering: questioning, pausing: (context) => context.reports.length >= 1 });
+    const first = await adopt({ withQuestions: true, pausing: (context) => context.reports.length >= 1 });
     const log = first.log;
     let ruled = false;
     const run = await adopt({
@@ -1812,8 +1799,9 @@ test('a stale state is retried once', async () => {
 });
 
 test('a question whose message is gone is not asked about', async () => {
-    const first = await adopt({ answering: questioning, pausing: (context) => context.reports.length >= 1 });
-    const log = first.log;
+    const log = ScribeLog.create();
+    ScribeLog.append(log, ScribeReplay.run(log, orderOf(plainCampaign)), ScribeAnswer.parse(answer({ QUESTIONS: questions })).operations,
+        { origin: 'Story', messages: plainCampaign.messages.slice(0, 40) });
     reply(log, 'Q1', 'She trusts him with the ledger');
     const shorter = campaign({}, [12]);
     const second = await adopt({ campaign: shorter, log });

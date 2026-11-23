@@ -1224,7 +1224,8 @@ test('the prompt names every block and no removed one', () => {
     const prompt = ScribeAnalyzer.Prompt;
     let previous = -1;
     assert.equal(prompt.includes('=== CONTRADICTIONS'), false);
-    for (const block of ScribeAnswer.Blocks.filter((block) => block !== 'CONTRADICTIONS')) {
+    assert.equal(prompt.includes('=== QUESTIONS'), false);
+    for (const block of ScribeAnswer.Blocks.filter((block) => !['CONTRADICTIONS', 'QUESTIONS'].includes(block))) {
         const index = prompt.indexOf(`\n=== ${block}\n`);
         assert.ok(index > previous, `=== ${block} at ${index}, after ${previous}`);
         previous = index;
@@ -1267,7 +1268,6 @@ test('every example line in the prompts parses', () => {
                 'Night',
                 'ThreadOpen',
                 'ThreadClose',
-                'Question',
             ],
         ],
         [
@@ -1309,11 +1309,11 @@ test('the prompts are exact', () => {
     assert.ok(ScribeAnalyzer.Prompt.includes('full dragon / length'));
     const prompts = [
         [
-            ScribeAnalyzer.Prompt.split('\nEvery row in every block')[0],
-            '15. Preserve each account and its speaker when the sources disagree. Leave comparisons and discrepancy findings to the independent Checker.',
-            15,
-            9163,
-            '1a0f6f05',
+            ScribeAnalyzer.Settings.PromptLines.join('\n'),
+            '14. Preserve each account and its speaker when sources disagree. The independent Checker raises material disputes with the operator. Record what the story establishes and leave unknowns open.',
+            14,
+            8940,
+            'd73c7b71',
         ],
         [
             ScribeAnalyzer.NotesPrompt,

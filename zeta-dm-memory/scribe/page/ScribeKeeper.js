@@ -95,6 +95,8 @@ const ScribeKeeper = Object.freeze({
             BadOperations: 'The argument is not valid: operations',
             BadClaim: 'The argument is not valid: claim',
             CheckSchedule: 'Scribe could not read or save the history-check schedule on this device. Check that Tampermonkey storage is available.',
+            CheckDispatched: 'The Checker already requested this comparison. Its answer is unavailable. The passage remains pending.',
+            CheckAuth: 'The Checker request was rejected before billing. Replace the saved API key to continue.',
             BadProfile: 'The argument is not valid: profile',
         }),
         Flight: Object.freeze({
@@ -470,13 +472,15 @@ const ScribeKeeper = Object.freeze({
             keeper.damaged ??
             keeper.cut ?? (pending ? ScribeKeeper.Settings.Messages.Attribution + pending.position : null);
         const history = local === null && problem !== null && problem === keeper.cut;
+        const flight = keeper.stop?.reason === ScribeAdoption.Stop.Paused && keeper.phase === ScribeKeeper.Phase.Stopped
+            ? null : keeper.flight;
         const processedChecks = keeper.checkProgress?.processedThrough ?? keeper.checkProgress?.checkedThrough ?? 0;
         const nextCheck = keeper.checkProgress && messages[processedChecks];
         const waiting = keeper.reader && !keeper.closed && keeper.phase === ScribeKeeper.Phase.Idle &&
             keeper.book?.adopted && keeper.compared && keeper.historyChecked && !keeper.pausing &&
             keeper.unloaded === null && !keeper.owed.size && ScribeKeeper.held(keeper) === null &&
             keeper.writtenThrough > processedChecks && nextCheck &&
-            (keeper.checkPage || keeper.spentToday < keeper.settings.budget) &&
+            (keeper.checkPage || keeper.book.log.checkRequests || keeper.spentToday < keeper.settings.budget) &&
             keeper.expensiveAfter > keeper.clock.now() &&
             (keeper.deferredCheck?.id === nextCheck.id && !keeper.zeta.onHead?.(keeper.deferredCheck.sources) ||
                 keeper.zeta.distant?.(nextCheck.id));
@@ -510,8 +514,8 @@ const ScribeKeeper = Object.freeze({
             player: keeper.intake === null ? ScribeIntake.Settings.UnknownPlayer : keeper.intake.player,
             settings: keeper.settings,
             spentToday: keeper.spentToday,
-            flight: keeper.flight,
-            began: keeper.flight === null ? null : keeper.began,
+            flight,
+            began: flight === null ? null : keeper.began,
             stop: keeper.stop,
             storyRetry: ScribeKeeper.storyRetry(keeper),
             inputRetry: ScribeKeeper.storyRetry(keeper, false, 'input'),
@@ -1702,10 +1706,9 @@ const ScribeKeeper = Object.freeze({
      * @return {void}
      */
     holdPause(keeper) {
-        const phases = ScribeKeeper.Phase;
         ScribeKeeper.keepStop(keeper, Object.freeze({ reason: ScribeAdoption.Stop.Paused, problem: null }), false);
-        if (keeper.reader && keeper.busy !== ScribeKeeper.Busy.Reading && keeper.phase !== phases.Loading) {
-            keeper.phase = phases.Stopped;
+        if (keeper.reader) {
+            keeper.phase = ScribeKeeper.Phase.Stopped;
         }
     },
 
@@ -1855,7 +1858,7 @@ const ScribeKeeper = Object.freeze({
                     } finally {
                         ScribeStore.diagnosticKeys(keeper.storage, credentials);
                     }
-                    if (!keeper.closed) {
+                    if (!keeper.closed && keeper.epoch === epoch) {
                         keeper.kept.push({ key, text: answer.text, ...(Object.hasOwn(answer, 'finish') ? { finish: answer.finish } : {}), credentials });
                         keeper.kept.splice(settings.NoCount, Math.max(keeper.kept.length - settings.KeptAnswers, settings.NoCount));
                     }
@@ -1928,6 +1931,9 @@ const ScribeKeeper = Object.freeze({
                  * @return {Promise<void>}
                  */
                 record: async (item) => {
+                    if (keeper.epoch !== epoch) {
+                        return;
+                    }
                     if (!item.readable) {
                         const key = JSON.stringify([item.system, item.input]);
                         keeper.kept = keeper.kept.filter(
@@ -1937,9 +1943,6 @@ const ScribeKeeper = Object.freeze({
                              */
                             (answer) => answer.key !== key,
                         );
-                    }
-                    if (keeper.epoch !== epoch) {
-                        return;
                     }
                     const calls = keeper.calls;
                     calls.unshift(diagnostic(item));
@@ -2079,7 +2082,8 @@ const ScribeKeeper = Object.freeze({
      */
     async start(keeper) {
         const epoch = keeper.epoch;
-        keeper.phase = ScribeKeeper.Phase.Loading;
+        keeper.phase = keeper.stop?.reason === ScribeAdoption.Stop.Paused
+            ? ScribeKeeper.Phase.Stopped : ScribeKeeper.Phase.Loading;
         try {
             ScribeStore.sweep(keeper.storage, keeper.roomId);
         } catch (error) {
@@ -2169,6 +2173,33 @@ const ScribeKeeper = Object.freeze({
 
     /**
      * @param {object} keeper
+     * @return {{adopted: boolean, fingerprints: Object<string, string>, log: {checkRequests?: Object<string, {messageId: string, version: string, planBytes: number, authRejected?: boolean, reply?: {text: string, finish?: string}}>, checkLimits?: Object<string, {bytes: number, blocked?: string, reason?: string}>}}}
+     * @throws {Error}
+     */
+    checkBook(keeper) {
+        const durable = ScribeKeeper.readKind(keeper, ScribeStore.Kind.Book);
+        if (durable.damage || !durable.value || !ScribeKeeper.soundBook(durable.value)) {
+            throw new Error(durable.damage ?? ScribeKeeper.damagedBook());
+        }
+        return durable.value;
+    },
+
+    /**
+     * @param {object} book
+     * @param {string} id
+     * @return {void}
+     */
+    releaseCheckRequest(book, id) {
+        if (book.log.checkRequests) {
+            delete book.log.checkRequests[id];
+            if (!Object.keys(book.log.checkRequests).length) {
+                delete book.log.checkRequests;
+            }
+        }
+    },
+
+    /**
+     * @param {object} keeper
      * @return {Promise<void>}
      */
     async check(keeper) {
@@ -2185,7 +2216,7 @@ const ScribeKeeper = Object.freeze({
             return;
         }
         const budgetProblem = ScribeKeeper.recount(keeper);
-        if (budgetProblem || (!keeper.checkPage && keeper.spentToday >= keeper.settings.budget)) {
+        if (budgetProblem || (!keeper.checkPage && !keeper.book.log.checkRequests && keeper.spentToday >= keeper.settings.budget)) {
             keeper.checkProblem = { source: 'Scribe', reason: budgetProblem
                 ? ScribeStore.diagnostic(keeper.storage, budgetProblem) : "The day's budget is spent" };
             return;
@@ -2214,18 +2245,21 @@ const ScribeKeeper = Object.freeze({
         const current = () => keeper.epoch === epoch && !keeper.closed && !keeper.pausing &&
             keeper.compared && keeper.settings.pedant === selected && ScribeKeeper.writable(keeper);
         const yieldPage = {};
-        const durableBook = () => {
-            const durable = ScribeKeeper.readKind(keeper, ScribeStore.Kind.Book);
-            if (durable.damage || !durable.value || !ScribeKeeper.soundBook(durable.value)) {
-                throw new Error(durable.damage ?? ScribeKeeper.damagedBook());
-            }
-            return durable.value;
+        const pending = keeper.book.log.checkRequests ?? {};
+        const writeBook = (book) => {
+            ScribeKeeper.store(keeper, ScribeStore.Kind.Book, book);
+            keeper.book = book;
         };
+        /**
+         * @param {number|null} bytes
+         * @param {string|null} reason
+         * @return {void}
+         */
         const learnLimit = (bytes, reason = null) => {
             if (!current()) {
                 throw yieldPage;
             }
-            const book = durableBook();
+            const book = ScribeKeeper.checkBook(keeper);
             const latest = ScribeLog.checkWork(book, keeper.intake.messages, false);
             if (latest.message?.id !== target.id || latest.version !== work.version) {
                 throw yieldPage;
@@ -2235,8 +2269,7 @@ const ScribeKeeper = Object.freeze({
             book.log.checkLimits = { ...book.log.checkLimits, [modelKey]: {
                 bytes: bound, ...(reason === null ? {} : { blocked: work.version, reason }),
             } };
-            ScribeKeeper.store(keeper, ScribeStore.Kind.Book, book);
-            keeper.book = book;
+            writeBook(book);
         };
         const save = async (page, sources = null) => {
             if (!current()) {
@@ -2271,9 +2304,13 @@ const ScribeKeeper = Object.freeze({
                 ids, check) || !current()) {
                 throw yieldPage;
             }
-            const book = durableBook();
+            const book = ScribeKeeper.checkBook(keeper);
             if (ScribeLog.saveCheck(book, keeper.intake.messages, work, page)) {
-                ScribeKeeper.store(keeper, ScribeStore.Kind.Book, book);
+                ScribeKeeper.releaseCheckRequest(book, page.id);
+                writeBook(book);
+                if (keeper.checkReply?.id === page.id) {
+                    keeper.checkReply = null;
+                }
             } else {
                 const latest = ScribeLog.checkWork(book, keeper.intake.messages, false);
                 if (latest.message?.id === target.id && latest.version === work.version &&
@@ -2300,11 +2337,28 @@ const ScribeKeeper = Object.freeze({
                 message: target, written: work.written, earlierClaims: work.earlierClaims, rulings: work.rulings,
                 diagnostic: (value) => ScribeStore.diagnosticCopy(value, ScribeStore.redactor(keeper.storage, credentials)),
                 completedPages: work.completed, completedSegments: work.segments, priorPages: work.priorPages,
+                requests: pending, planBytes: Object.values(pending).find((request) =>
+                    request.messageId === target.id && request.version === work.version)?.planBytes,
                 savePage: save, saveSegment: save, learnLimit,
                 ...(Number.isSafeInteger(limit?.bytes) && limit.bytes > 0 ? { pageBytes: limit.bytes } : {}),
-                ask: async (system, input, sources = []) => {
+                ask: async (system, input, sources, id, planBytes) => {
                     if (!current()) {
                         throw yieldPage;
+                    }
+                    const book = ScribeKeeper.checkBook(keeper);
+                    const previous = book.log.checkRequests?.[id];
+                    if (previous) {
+                        if (previous.authRejected) {
+                            throw new Error(ScribeKeeper.Settings.Messages.CheckAuth);
+                        }
+                        if (!previous.reply && keeper.checkReply?.id === id) {
+                            previous.reply = keeper.checkReply.reply;
+                            writeBook(book);
+                        }
+                        if (!previous.reply) {
+                            throw new Error(ScribeKeeper.Settings.Messages.CheckDispatched);
+                        }
+                        return previous.reply;
                     }
                     if (keeper.expensiveAfter === null || keeper.clock.now() < keeper.expensiveAfter) {
                         const ids = [...sources].map((position) => messages[position - 1].id);
@@ -2317,11 +2371,58 @@ const ScribeKeeper = Object.freeze({
                     if (failure || keeper.owed.size || keeper.spentToday >= keeper.settings.budget) {
                         throw new Error(failure ?? keeper.owing ?? "The day's budget is spent");
                     }
-                    const answer = await keeper.ask('Pedant', system, input);
-                    if (Number.isFinite(answer.cost) && answer.cost > 0) {
+                    let dispatched = false;
+                    const beforeDispatch = () => {
+                        if (!current()) {
+                            throw yieldPage;
+                        }
+                        const latest = ScribeKeeper.checkBook(keeper);
+                        const next = ScribeLog.checkWork(latest, keeper.intake.messages, false);
+                        if (next.message?.id !== target.id || next.version !== work.version ||
+                            latest.log.checkRequests?.[id] || [...next.completed, ...next.segments].some((page) => page.id === id)) {
+                            throw yieldPage;
+                        }
+                        (latest.log.checkRequests ??= {})[id] = { messageId: target.id, version: work.version, planBytes };
+                        writeBook(latest);
+                        dispatched = true;
+                    };
+                    let answer;
+                    try {
+                        answer = await keeper.askChecker(system, input, beforeDispatch);
+                    } catch (error) {
+                        if (dispatched && current() && (ScribePedant.contextLimitError(error) || error?.unbilledAuth)) {
+                            const latest = ScribeKeeper.checkBook(keeper);
+                            if (error.unbilledAuth && !error.keyChanged?.()) {
+                                latest.log.checkRequests[id].authRejected = true;
+                            } else {
+                                ScribeKeeper.releaseCheckRequest(latest, id);
+                            }
+                            writeBook(latest);
+                        }
+                        throw error;
+                    }
+                    if (Number.isFinite(answer?.cost) && answer.cost > 0) {
                         ScribeKeeper.pay(keeper, answer.cost);
                     }
-                    return answer;
+                    if (typeof answer?.text !== 'string' || !answer.text.trim()) {
+                        throw new Error(ScribeKeeper.Settings.Messages.CheckDispatched);
+                    }
+                    const mask = ScribeStore.redactor(keeper.storage, credentials);
+                    const reply = { text: mask(answer.text), ...(typeof answer.finish === 'string' ? { finish: mask(answer.finish) } : {}) };
+                    keeper.checkReply = { id, reply };
+                    if (keeper.closed || !ScribeKeeper.writable(keeper)) {
+                        throw yieldPage;
+                    }
+                    const latest = ScribeKeeper.checkBook(keeper);
+                    if (!latest.log.checkRequests?.[id]) {
+                        throw yieldPage;
+                    }
+                    latest.log.checkRequests[id].reply = reply;
+                    writeBook(latest);
+                    if (!current()) {
+                        throw yieldPage;
+                    }
+                    return reply;
                 },
             });
         } catch (error) {
@@ -2733,9 +2834,22 @@ const ScribeKeeper = Object.freeze({
      * @throws {Error}
      */
     async resume(keeper) {
+        const paused = keeper.stop?.reason === ScribeAdoption.Stop.Paused;
+        const restartHistory = paused && !keeper.pullDone;
+        const beforeAdoption = paused && keeper.book === null && keeper.damaged === null;
+        if (paused && keeper.phase === ScribeKeeper.Phase.Stopped &&
+            [ScribeKeeper.Busy.Looking, ScribeKeeper.Busy.Pulling].includes(keeper.busy)) {
+            keeper.epoch++;
+            keeper.busy = null;
+            keeper.flight = null;
+        }
         ScribeKeeper.guard(keeper);
-        ScribeKeeper.needBook(keeper);
-        ScribeKeeper.readable(keeper);
+        if (!beforeAdoption) {
+            ScribeKeeper.needBook(keeper);
+            if (!restartHistory) {
+                ScribeKeeper.readable(keeper);
+            }
+        }
         ScribeKeeper.solvent(keeper);
         if (!ScribeKeeper.writable(keeper)) {
             throw new Error(ScribeKeeper.Settings.Messages.Watching);
@@ -2745,7 +2859,16 @@ const ScribeKeeper = Object.freeze({
         }
         keeper.pausing = false;
         ScribeKeeper.keepStop(keeper, null, false);
-        if (keeper.checkStretch) {
+        if (beforeAdoption) {
+            if (restartHistory) {
+                await ScribeKeeper.begin(keeper);
+            } else {
+                keeper.phase = ScribeKeeper.Phase.NoBook;
+                ScribeKeeper.tell(keeper, { kind: ScribeKeeper.Event.Changed });
+            }
+            return;
+        }
+        if (restartHistory || keeper.checkStretch) {
             keeper.phase = ScribeKeeper.Phase.Idle;
             await ScribeKeeper.step(keeper);
             return;
@@ -2825,14 +2948,27 @@ const ScribeKeeper = Object.freeze({
 
     /**
      * @param {object} keeper
+     * @param {boolean} changed
+     * @param {boolean} retryReading
      * @return {void}
      */
-    rekey(keeper) {
+    rekey(keeper, changed = false, retryReading = true) {
         keeper.checkRetryAt = 0;
         keeper.checkProblem = null;
+        if (changed && !keeper.closed && keeper.reader && keeper.book?.log.checkRequests && ScribeKeeper.writable(keeper)) {
+            const book = ScribeKeeper.checkBook(keeper);
+            const rejected = Object.entries(book.log.checkRequests ?? {}).filter(([, request]) => request.authRejected);
+            if (rejected.length) {
+                for (const [id] of rejected) {
+                    ScribeKeeper.releaseCheckRequest(book, id);
+                }
+                ScribeKeeper.store(keeper, ScribeStore.Kind.Book, book);
+                keeper.book = book;
+            }
+        }
         const stop = keeper.stop;
         const failed = stop !== null && stop.reason === ScribeAdoption.Stop.Failed;
-        if (keeper.closed || !keeper.reader || !failed || Object.hasOwn(stop, 'storyFailure') || keeper.busy === ScribeKeeper.Busy.Reading) {
+        if (!retryReading || keeper.closed || !keeper.reader || !failed || Object.hasOwn(stop, 'storyFailure') || keeper.busy === ScribeKeeper.Busy.Reading) {
             return;
         }
         if (!ScribeKeeper.writable(keeper)) {
@@ -2873,7 +3009,12 @@ const ScribeKeeper = Object.freeze({
             throw new Error(messages.Watching);
         }
         keeper.pausing = true;
+        keeper.epoch++;
+        keeper.busy = null;
+        keeper.flight = null;
+        keeper.pollPending = false;
         ScribeKeeper.holdPause(keeper);
+        keeper.pauseCalls?.();
         ScribeKeeper.tell(keeper, { kind: ScribeKeeper.Event.Changed });
     },
 
@@ -3160,10 +3301,12 @@ const ScribeKeeper = Object.freeze({
             },
 
             /**
+             * @param {boolean} changed
+             * @param {boolean} retryReading
              * @return {void}
              */
-            rekey: () => {
-                ScribeKeeper.rekey(keeper);
+            rekey: (changed = false, retryReading = true) => {
+                ScribeKeeper.rekey(keeper, changed, retryReading);
             },
 
             /**
@@ -3293,7 +3436,7 @@ const ScribeKeeper = Object.freeze({
     },
 
     /**
-     * @param {{ storage: { get: Function, set: Function, remove: Function, list: Function }, roomId: string, tabId: string, zeta: { history: Function, newest: Function }, ask: Function, clock: { now: Function, today: Function }, notify: Function, claim?: () => boolean, lease?: () => boolean, profile?: () => Promise<string|null> }} options
+     * @param {{ storage: { get: Function, set: Function, remove: Function, list: Function }, roomId: string, tabId: string, zeta: { history: Function, newest: Function }, ask: Function, askChecker?: (system: string, input: string, beforeDispatch: Function) => Promise<object>, pauseCalls?: Function, checkPassage?: Function, clock: { now: Function, today: Function }, notify: Function, claim?: () => boolean, lease?: () => boolean, profile?: () => Promise<string|null> }} options
      * @return {Promise<Readonly<object>>}
      * @throws {Error}
      */
@@ -3317,11 +3460,17 @@ const ScribeKeeper = Object.freeze({
             roomId,
             tabId,
             zeta,
+            pauseCalls: options.pauseCalls,
             ask,
+            askChecker: options.askChecker ?? ((system, input, beforeDispatch) => {
+                beforeDispatch();
+                return ask('Pedant', system, input);
+            }),
             checkPassage: options.checkPassage ?? null,
             checkProgress: null,
             deciding: false,
             checkPage: null,
+            checkReply: null,
             checkProblem: null,
             checkRetryAt: 0,
             checkAfterKey: ScribeStore.name(ScribeStore.Settings.Types.CheckAfter, ScribeStore.room(roomId)),

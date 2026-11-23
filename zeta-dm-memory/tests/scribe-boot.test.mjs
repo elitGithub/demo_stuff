@@ -2188,6 +2188,135 @@ test('Force stop shows at 4 minutes, ends the call and asks once more to answer 
     run.boot.stop();
 });
 
+test('Pause terminates a gateway backoff and every concurrent room request even when the provider ignores abort', async () => {
+    const run = harness();
+    run.sent = requests({ aborting: false });
+    run.environment.xmlHttpRequest = run.sent.xmlHttpRequest;
+    start(run);
+    await settle();
+    ScribeStore.setKey(run.storage, KEY);
+    const keeper = run.world.keepers[0];
+    const live = run.world.lives[0];
+    const reading = failureOf(keeper.options.ask('Analyzer', SYSTEM, USER));
+    const scene = failureOf(live.options.ask('Scribe', SYSTEM, USER));
+    const checking = failureOf(live.options.ask('Pedant', SYSTEM, USER));
+    await settle();
+    assert.equal(run.sent.calls.length, 3);
+    answer(run.sent.calls[0], 503, '{"error":"unavailable"}');
+    await settle();
+    assert.ok(run.timers.delays.includes(ScribeBoot.Settings.PauseMs));
+    keeper.stop = { reason: 'Paused' };
+    keeper.options.pauseCalls();
+    assert.equal(run.sent.calls[1].handle.aborts, 1);
+    assert.equal(run.sent.calls[2].handle.aborts, 1);
+    assert.ok(!run.timers.delays.includes(ScribeBoot.Settings.PauseMs));
+    const blocked = failureOf(live.options.ask('Scribe', SYSTEM, USER));
+    for (const failure of await Promise.all([reading, scene, checking, blocked])) {
+        assert.equal(failure.message, ScribeBoot.Settings.Messages.Paused);
+    }
+    keeper.stop = null;
+    const resumed = live.options.ask('Scribe', SYSTEM, USER);
+    await settle();
+    answer(run.sent.calls[1], 200, completion('Old scene.', 0));
+    answer(run.sent.calls[2], 200, completion('Old finding.', 0));
+    answer(run.sent.calls[3], 200, completion('Current scene.', 0));
+    assert.equal((await resumed).text, 'Current scene.');
+    await pass(run, 2 * ScribeBoot.Settings.ForceAfterMs);
+    assert.equal(run.sent.calls.length, 4);
+    run.boot.stop();
+});
+
+test('historical checks reserve at dispatch, and a reservation failure, ambiguous response or forced stop cannot cause a retry', async () => {
+    const run = harness();
+    start(run);
+    await settle();
+    const keeper = run.world.keepers[0];
+    const attempts = [];
+    const reserve = () => attempts.push(run.sent.calls.length);
+    await failureOf(keeper.options.askChecker(SYSTEM, USER, reserve));
+    assert.deepEqual(attempts, []);
+    ScribeStore.setKey(run.storage, KEY);
+    const failure = await failureOf(keeper.options.askChecker(SYSTEM, USER, () => { throw new Error('Storage refused'); }));
+    assert.equal(failure.message, 'Storage refused');
+    assert.equal(failure.source, 'Scribe');
+    assert.equal(run.sent.calls.length, 0);
+    for (const force of [false, true]) {
+        const checking = failureOf(keeper.options.askChecker(SYSTEM, USER, reserve));
+        await settle();
+        const count = run.sent.calls.length;
+        const call = run.sent.calls.at(-1);
+        if (force) {
+            await pass(run, ScribeBoot.Settings.ForceAfterMs);
+            run.world.panels[0].options.calls.stop();
+            assert.equal(call.handle.aborts, 1);
+        } else {
+            answer(call, 503, '{"error":"unavailable"}');
+        }
+        await checking;
+        await pass(run, 3 * ScribeBoot.Settings.PauseMs);
+        assert.equal(run.sent.calls.length, count);
+    }
+    assert.deepEqual(attempts, [0, 1]);
+    run.boot.stop();
+});
+
+test('a Force stop replacement queued before Pause cannot dispatch after a same-turn Resume', async () => {
+    const run = harness();
+    start(run);
+    await settle();
+    ScribeStore.setKey(run.storage, KEY);
+    const keeper = run.world.keepers[0];
+    const reading = failureOf(keeper.options.ask('Analyzer', SYSTEM, USER));
+    await pass(run, ScribeBoot.Settings.ForceAfterMs);
+    const calls = run.world.panels[0].options.calls;
+    assert.equal(calls.due(), true);
+    calls.stop();
+    keeper.stop = { reason: 'Paused' };
+    keeper.options.pauseCalls();
+    assert.equal(calls.due(), false);
+    keeper.stop = null;
+    assert.equal((await reading).message, ScribeBoot.Settings.Messages.Paused);
+    assert.equal(run.sent.calls.length, 1);
+    run.boot.stop();
+});
+
+test('only a historical auth rejection without observed charges can be released after the key actually changes', async () => {
+    const run = harness();
+    start(run);
+    await settle();
+    ScribeStore.setKey(run.storage, KEY);
+    const keeper = run.world.keepers[0];
+    for (const cost of [0.1, 0]) {
+        const checking = failureOf(keeper.options.askChecker(SYSTEM, USER, () => {}));
+        await settle();
+        answer(run.sent.calls.at(-1), 401, JSON.stringify({ error: 'Denied', usage: { cost } }));
+        const error = await checking;
+        assert.equal(error.billed, cost > 0);
+        if (cost > 0) {
+            assert.equal(error.unbilledAuth, undefined);
+            assert.equal(error.keyChanged, undefined);
+        } else {
+            assert.equal(error.unbilledAuth, true);
+            ScribeStore.setKey(run.storage, KEY);
+            assert.equal(error.keyChanged(), false);
+            ScribeStore.setKey(run.storage, 'rotated-test-key');
+            assert.equal(error.keyChanged(), true);
+        }
+    }
+    const generated = failureOf(keeper.options.askChecker(SYSTEM, USER, () => {}));
+    await settle();
+    answer(run.sent.calls.at(-1), 200, JSON.stringify({
+        error: { code: 401, message: 'Provider authentication failed' }, usage: { completion_tokens: 7 },
+    }));
+    /** @type {Error & {providerCode?: number, unbilledAuth?: boolean, keyChanged?: Function}} */
+    const uncertain = await generated;
+    assert.equal(uncertain.providerCode, 401);
+    assert.equal(uncertain.unbilledAuth, undefined);
+    assert.equal(uncertain.keyChanged, undefined);
+    assert.equal(run.sent.calls.length, 3);
+    run.boot.stop();
+});
+
 test('one Force stop stops every call past 4 minutes and leaves a younger call running', async () => {
     const run = harness();
     start(run);

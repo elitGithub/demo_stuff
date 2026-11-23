@@ -18,7 +18,7 @@ const runtimeRoot = import.meta.dirname === join(project, 'src') ? project : imp
 const localOnly = 'Cloud save is not configured.';
 const unreachable = 'Cloud unreachable: not pulled.';
 const keptLocally = 'The changes stay on this PC. They go up the next time Universe starts here, unless the other PC saves first; ' +
-  'then files changed on both PCs go to local/conflicts.';
+  'then every file this PC changed goes to local/conflicts first.';
 const announcedPhases = Object.freeze([SyncPhase.Offline, SyncPhase.Conflict, SyncPhase.Disabled]);
 const savedOutcomes = Object.freeze([SaveOutcome.Saved, SaveOutcome.Unchanged]);
 const systemClock = Object.freeze({

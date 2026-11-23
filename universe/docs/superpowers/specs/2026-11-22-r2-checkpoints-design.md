@@ -1,4 +1,4 @@
-# Universe R2 checkpoints
+# Universe R2 checkpoints (superseded by `2026-11-22-sync-rewrite-design.md`)
 
 ## What the operator gets
 

@@ -378,7 +378,7 @@ test('[5] when the other PC saves first the next save reports a conflict without
   assert.equal(conflict.outcome, SaveOutcome.Conflict);
   assert.equal(conflict.at, '2030-01-01T10:00:00.000Z');
   assert.equal(conflict.error, "The other PC saved newer changes at 2030-01-01T10:00:00.000Z. This PC's changes stay here. " +
-    'Restart Universe to pull; files changed on both PCs go to local/conflicts.');
+    'Restart Universe to pull; every file this PC changed goes to local/conflicts first.');
   assert.equal(first.statuses.at(-1).phase, SyncPhase.Conflict);
   assert.equal(first.statuses.at(-1).conflictAt, conflict.at);
   assert.equal(headOf(bucket), head);

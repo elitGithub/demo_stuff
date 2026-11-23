@@ -348,7 +348,7 @@ export class ProfileSync {
     const at = new Date(savedAt).toISOString();
     this.#conflict = {
       at,
-      error: `The other PC saved newer changes at ${at}. This PC's changes stay here. Restart Universe to pull; files changed on both PCs go to local/conflicts.`,
+      error: `The other PC saved newer changes at ${at}. This PC's changes stay here. Restart Universe to pull; every file this PC changed goes to local/conflicts first.`,
     };
     return { outcome: SaveOutcome.Conflict, ...this.#conflict };
   }

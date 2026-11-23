@@ -353,6 +353,46 @@ test('a project without .env starts SillyTavern in local-only mode', async (cont
   assert.equal(await exists(universe.termed), true);
 });
 
+test('the served page carries its CSP nonce on its one style and one script, has no inline style, and /status carries every field it reads', async (context) => {
+  const universe = await temporaryUniverse(context);
+  const port = await probePort(0);
+  await writeFile(universe.settings, `UNIVERSE_PORT=${port}\n`);
+  const run = startLauncher(universe);
+  await sillyTavernStarted(universe, run);
+  await until(() => run.output.stdout.includes('[universe] Cloud save is not configured.\n'), 'the local-only line');
+  const response = await fetch(`http://127.0.0.1:${port}/`);
+  assert.equal(response.status, 200);
+  assert.equal(response.headers.get('content-type'), 'text/html; charset=utf-8');
+  const policy = response.headers.get('content-security-policy');
+  const nonce = /style-src 'nonce-([^']+)'/.exec(policy)[1];
+  assert.equal(policy, `default-src 'none'; script-src 'nonce-${nonce}'; style-src 'nonce-${nonce}'; connect-src 'self'; ` +
+    "base-uri 'none'; form-action 'none'; frame-ancestors 'none'");
+  const page = await response.text();
+  assert.deepEqual(page.match(/<style\b[^>]*>/g), [`<style nonce="${nonce}">`]);
+  assert.deepEqual(page.match(/<script\b[^>]*>/g), [`<script nonce="${nonce}">`]);
+  assert.doesNotMatch(page, /<[^>]*\sstyle\s*=/i);
+  assert.doesNotMatch(page, /<[^>]*\son[a-z]+\s*=/i);
+  assert.doesNotMatch(page, /\.style\b/);
+  assert.doesNotMatch(page, /\{\{|}}/);
+  assert.match(page, /<button type="button" id="save" disabled>Save now<\/button>/);
+  assert.match(page, /<p id="result" role="status" aria-live="polite">Cloud save is not configured\.<\/p>/);
+  const script = /<script nonce="[^"]+">([\s\S]*?)<\/script>/.exec(page)[1];
+  const ids = [...script.matchAll(/getElementById\('([^']+)'\)/g)].map((match) => match[1]);
+  assert.ok(ids.length > 0);
+  for (const id of ids) {
+    assert.equal(page.split(` id="${id}"`).length, 2, `the page has not exactly one #${id}`);
+  }
+  const fields = new Set([...script.matchAll(/\bstatus\.(\w+)/g)].map((match) => match[1]));
+  assert.ok(fields.has('phase') && fields.has('progress'), [...fields].join(', '));
+  const status = await (await fetch(`http://127.0.0.1:${port}/status`)).json();
+  for (const field of fields) {
+    assert.ok(Object.hasOwn(status, field), `/status lacks ${field}`);
+  }
+  run.launcher.kill('SIGINT');
+  assert.deepEqual(await run.closed, { code: 0, signal: null });
+  assert.equal(run.output.stderr, '');
+});
+
 test('SillyTavern is gone within 2 s after the launcher is killed with SIGKILL, and the log keeps the lines written before it', async (context) => {
   const universe = await temporaryUniverse(context);
   const port = await probePort(0);

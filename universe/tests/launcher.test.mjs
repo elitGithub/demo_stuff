@@ -1,4 +1,5 @@
 import assert from 'node:assert/strict';
+import { Buffer } from 'node:buffer';
 import { link, mkdir, mkdtemp, readFile, rm, stat, symlink, writeFile } from 'node:fs/promises';
 import { tmpdir } from 'node:os';
 import { dirname, join } from 'node:path';
@@ -33,7 +34,7 @@ const starter = {
   'default-user/characters/Ann.png': 'png-bytes',
 };
 const keptLocally = 'The changes stay on this PC. They go up the next time Universe starts here, unless the other PC saves first; ' +
-  'then files changed on both PCs go to local/conflicts.';
+  'then every file this PC changed goes to local/conflicts first.';
 const parkedDurations = [SyncSettings.SaveIntervalMs, SyncSettings.StopBudgetMs, SyncSettings.ConsoleProgressMs];
 const origin = 'http://127.0.0.1:8767';
 
@@ -379,55 +380,102 @@ async function csrfToken(handler) {
 }
 
 /**
- * @param {Array<{status: number, body?: object}|Error>} answers
- * @returns {Promise<{token: string, texts: string[], requests: object[], delays: number[], disabledAfter: boolean}>}
+ * @param {object} [changes]
+ * @returns {object}
+ */
+function wrapperStatus(changes = {}) {
+  const phase = changes.phase ?? SyncPhase.Running;
+  return {
+    phase, progress: null, lastSavedAt: null, unsavedSince: null, error: null, conflictAt: null, conflictsFolder: null, reloadTabs: false,
+    ...changes, ok: phase === SyncPhase.Running,
+  };
+}
+
+/**
+ * @param {Array<{status: number, body?: object}|Error|Promise<{status: number, body?: object}>>} answers
+ * @param {object} [state]
+ * @returns {Promise<{token: string, elements: Record<string, {hidden: boolean, disabled: boolean, max: number, value: number, texts: string[], textContent: string}>, requests: object[], delays: number[], now: number, click: Function, tick: Function}>}
  * @throws {Error}
  */
-async function pressSaveNow(answers) {
-  const page = (await wrapperRequest(createWrapperHandler({ phase: SyncPhase.Running, error: null }, 8767,
+async function servedPage(answers, state = { phase: SyncPhase.Running, error: null }) {
+  const page = (await wrapperRequest(createWrapperHandler(state, 8767,
     /**
      * @returns {null}
      */
     () => null), '/')).body;
-  const press = {
+  const listeners = new Map();
+  const timers = [];
+  const served = {
     token: /<meta name="universe-csrf" content="([^"]+)">/.exec(page)[1],
-    texts: [],
+    elements: {},
     requests: [],
     delays: [],
-  };
-  const listeners = new Map();
-  const button = {
-    disabled: false,
+    now: 0,
     /**
-     * @param {string} type
-     * @param {Function} listener
-     * @returns {void}
+     * @returns {Promise<void>}
+     * @throws {TypeError}
      */
-    addEventListener(type, listener) {
-      listeners.set(type, listener);
+    click: () => listeners.get('save click')(),
+    /**
+     * @returns {Promise<void>}
+     * @throws {Error}
+     */
+    async tick() {
+      assert.ok(timers.length > 0, 'the page set no timer');
+      const next = timers.reduce((earliest, timer) => (timer.due < earliest.due ? timer : earliest));
+      timers.splice(timers.indexOf(next), 1);
+      served.now = next.due;
+      next.wake();
+      await nextTurn();
     },
   };
-  const result = {
-    /**
-     * @param {string} text
-     * @returns {void}
-     */
-    set textContent(text) {
-      press.texts.push(text);
-    },
-  };
+  for (const [, attributes, id, text] of page.matchAll(/<\w+\s([^>]*\bid="([^"]+)"[^>]*)>([^<]*)/g)) {
+    const element = {
+      hidden: /(?:^|\s)hidden(?:\s|$)/.test(attributes),
+      disabled: /(?:^|\s)disabled(?:\s|$)/.test(attributes),
+      max: Number(/\bmax="([^"]*)"/.exec(attributes)?.[1] ?? Number.NaN),
+      value: Number(/\bvalue="([^"]*)"/.exec(attributes)?.[1] ?? Number.NaN),
+      texts: [text],
+      /**
+       * @returns {string}
+       */
+      get textContent() {
+        return element.texts.at(-1);
+      },
+      /**
+       * @param {string} next
+       * @returns {void}
+       */
+      set textContent(next) {
+        element.texts.push(String(next));
+      },
+      /**
+       * @param {string} type
+       * @param {Function} listener
+       * @returns {void}
+       */
+      addEventListener(type, listener) {
+        listeners.set(`${id} ${type}`, listener);
+      },
+    };
+    served.elements[id] = element;
+  }
   runInNewContext(/<script nonce="[^"]+">([\s\S]*?)<\/script>/.exec(page)[1], {
     document: {
       /**
        * @param {string} id
        * @returns {object}
+       * @throws {Error}
        */
-      getElementById: (id) => ({ save: button, result })[id],
+      getElementById: (id) => {
+        assert.ok(Object.hasOwn(served.elements, id), `the page has no element #${id}`);
+        return served.elements[id];
+      },
       /**
        * @param {string} selector
        * @returns {?{content: string}}
        */
-      querySelector: (selector) => (selector === 'meta[name="universe-csrf"]' ? { content: press.token } : null),
+      querySelector: (selector) => (selector === 'meta[name="universe-csrf"]' ? { content: served.token } : null),
     },
     /**
      * @param {string} url
@@ -436,8 +484,13 @@ async function pressSaveNow(answers) {
      * @throws {Error}
      */
     fetch: async (url, options = {}) => {
-      press.requests.push({ url, method: options.method ?? 'GET', csrf: options.headers?.['X-Universe-CSRF'] ?? null, disabled: button.disabled });
-      const answer = answers.shift();
+      served.requests.push({
+        url, method: options.method ?? 'GET', csrf: options.headers?.['X-Universe-CSRF'] ?? null, disabled: served.elements.save.disabled,
+      });
+      const answer = await answers.shift();
+      if (answer === undefined) {
+        throw new Error(`No answer left for ${url}.`);
+      }
       if (answer instanceof Error) {
         throw answer;
       }
@@ -445,23 +498,61 @@ async function pressSaveNow(answers) {
         status: answer.status,
         /**
          * @returns {Promise<object>}
+         * @throws {SyntaxError}
          */
-        json: async () => answer.body,
+        json: async () => {
+          if (answer.body === undefined) {
+            throw new SyntaxError('Unexpected end of JSON input');
+          }
+          return answer.body;
+        },
       };
     },
     /**
      * @param {Function} wake
      * @param {number} milliseconds
      * @returns {void}
-     * @throws {Error}
      */
     setTimeout: (wake, milliseconds) => {
-      press.delays.push(milliseconds);
-      wake();
+      served.delays.push(milliseconds);
+      timers.push({ due: served.now + milliseconds, wake });
     },
   });
-  await listeners.get('click')();
-  return { ...press, disabledAfter: button.disabled };
+  await nextTurn();
+  return served;
+}
+
+/**
+ * @param {object} page
+ * @returns {Promise<void>}
+ * @throws {Error}
+ */
+async function finishPress(page) {
+  const pressing = watchSettled(page.click());
+  await nextTurn();
+  for (let ticks = 0; !pressing.settled; ticks += 1) {
+    assert.ok(ticks < 20, 'the press never ended');
+    await page.tick();
+  }
+}
+
+/**
+ * @param {Array<{status: number, body?: object}|Error|Promise<{status: number, body?: object}>>} answers
+ * @returns {Promise<{page: object, texts: string[], requests: object[], unanswered: number, disabledAfter: boolean}>}
+ * @throws {Error}
+ */
+async function pressSaveNow(answers) {
+  const queue = [{ status: 200, body: wrapperStatus() }, ...answers];
+  const page = await servedPage(queue);
+  const before = { texts: page.elements.result.texts.length, requests: page.requests.length };
+  await finishPress(page);
+  return {
+    page,
+    texts: page.elements.result.texts.slice(before.texts),
+    requests: page.requests.slice(before.requests),
+    unanswered: queue.length,
+    disabledAfter: page.elements.save.disabled,
+  };
 }
 
 test('project configuration uses local paths and settings even when the shell has overrides', () => {
@@ -1182,57 +1273,615 @@ test('the wrapper keeps its routes, origin and CSRF checks and rate limit, and e
   assert.equal(JSON.parse(refused.body).error, 'Bucket <b>&"\'$\' is off.');
 });
 
-test('Save now on the served page disables the button, polls every 2 s while saving and shows the answer for each status', async () => {
+test('Save now on the served page disables the button at once, polls every 2 s while saving and shows the answer for each status', async () => {
   const savedAt = '2026-11-23T10:15:00.000Z';
-  const saving = { phase: SyncPhase.Saving, error: null, lastSavedAt: null };
-  const notSaved = 'Not saved since 2026-11-23T10:00:00.000Z: fetch failed';
+  const conflictAt = '2026-11-23T10:20:00.000Z';
+  const unsavedSince = '2026-11-23T10:00:00.000Z';
+  const saving = wrapperStatus({ phase: SyncPhase.Saving });
+  const conflictTail = ". This PC's changes stay here. Restart Universe to pull; every file this PC changed goes to local/conflicts first.";
   const cases = [
     {
       label: '202, two polls, then saved',
-      answers: [{ status: 202, body: saving }, { status: 200, body: saving },
-        { status: 200, body: { phase: SyncPhase.Running, error: null, lastSavedAt: savedAt } }],
+      answers: [{ status: 202, body: saving }, { status: 200, body: saving }, { status: 200, body: wrapperStatus({ lastSavedAt: savedAt }) }],
       text: `Saved to cloud at ${new Date(savedAt).toLocaleString()}.`,
       polls: 2,
+      locked: false,
     },
     {
       label: '202, then an error',
-      answers: [{ status: 202, body: saving }, { status: 200, body: { phase: SyncPhase.Running, error: notSaved, lastSavedAt: null } }],
-      text: notSaved,
+      answers: [{ status: 202, body: saving }, { status: 200, body: wrapperStatus({ unsavedSince, error: `Not saved since ${unsavedSince}: fetch failed` }) }],
+      text: `Not saved since ${new Date(unsavedSince).toLocaleString()}: fetch failed`,
       polls: 1,
+      locked: false,
     },
     {
       label: '202, then unchanged with no earlier save',
-      answers: [{ status: 202, body: saving }, { status: 200, body: { phase: SyncPhase.Running, error: null, lastSavedAt: null } }],
+      answers: [{ status: 202, body: saving }, { status: 200, body: wrapperStatus() }],
       text: 'Up to date.',
       polls: 1,
+      locked: false,
     },
-    { label: '403', answers: [{ status: 403 }], text: 'Reload this page to save.', polls: 0 },
-    { label: '429', answers: [{ status: 429 }], text: 'Please wait a moment before saving again.', polls: 0 },
+    {
+      label: '202 after a conflict',
+      answers: [{
+        status: 202,
+        body: wrapperStatus({ phase: SyncPhase.Conflict, conflictAt, error: `The other PC saved newer changes at ${conflictAt}${conflictTail}` }),
+      }],
+      text: `The other PC saved newer changes at ${new Date(conflictAt).toLocaleString()}${conflictTail}`,
+      polls: 0,
+      locked: false,
+    },
+    { label: '403', answers: [{ status: 403 }], text: 'Reload this page to save.', polls: 0, locked: false },
+    { label: '429', answers: [{ status: 429 }], text: 'Please wait a moment before saving again.', polls: 0, locked: false },
     {
       label: '503 with an error',
-      answers: [{ status: 503, body: { phase: SyncPhase.Disabled, error: 'Cloud save is not configured.', lastSavedAt: null } }],
+      answers: [{ status: 503, body: wrapperStatus({ phase: SyncPhase.Disabled, error: 'Cloud save is not configured.' }) }],
       text: 'Cloud save is not configured.',
       polls: 0,
+      locked: true,
     },
     {
       label: '503 without an error',
-      answers: [{ status: 503, body: { phase: SyncPhase.Pulling, error: null, lastSavedAt: null } }],
+      answers: [{ status: 503, body: wrapperStatus({ phase: SyncPhase.Pulling }) }],
       text: 'Cloud save is not ready yet. Try again shortly.',
       polls: 0,
+      locked: false,
     },
-    { label: 'a thrown fetch', answers: [new TypeError('Failed to fetch')], text: 'Could not confirm the save. Try again.', polls: 0 },
+    { label: 'a thrown fetch', answers: [new TypeError('Failed to fetch')], text: 'Could not confirm the save. Try again.', polls: 0, locked: false },
+    { label: 'a 202 that is not JSON', answers: [{ status: 202 }], text: 'Could not confirm the save. Try again.', polls: 0, locked: false },
+    {
+      label: 'a poll that throws while saving',
+      answers: [{ status: 202, body: saving }, new TypeError('Failed to fetch')],
+      text: 'Could not confirm the save.',
+      polls: 1,
+      locked: true,
+    },
   ];
-  for (const { label, answers, text, polls } of cases) {
+  for (const { label, answers, text, polls, locked } of cases) {
     const press = await pressSaveNow(answers);
     assert.deepEqual(press.texts, ['Saving...', text], label);
     assert.deepEqual(press.requests.map((request) => [request.url, request.method, request.csrf, request.disabled]), [
-      ['/save', 'POST', press.token, true],
+      ['/save', 'POST', press.page.token, true],
       ...Array.from({ length: polls }, () => ['/status', 'GET', null, true]),
     ], label);
-    assert.deepEqual(press.delays, Array.from({ length: polls }, () => 2000), label);
-    assert.equal(answers.length, 0, label);
-    assert.equal(press.disabledAfter, false, label);
+    assert.ok(press.page.delays.length > polls && press.page.delays.every((milliseconds) => milliseconds === 2000), label);
+    assert.equal(press.unanswered, 0, label);
+    assert.equal(press.disabledAfter, locked, label);
   }
+});
+
+test('the served page shows a progress bar with file counts, and sizes in KB while the total rounds up to under 1000 KB and in MB above, with the done size rounded down and the total up, only while pulling, saving or stopping', async () => {
+  const steps = [
+    [SyncPhase.Pulling, { filesDone: 0, filesTotal: 4, bytesDone: 0, bytesTotal: 2_400_000 }, 'Pulling from the cloud', '0 of 4 files, 0.0 of 2.4 MB.'],
+    [SyncPhase.Pulling, { filesDone: 3, filesTotal: 4, bytesDone: 1_200_000, bytesTotal: 2_400_000 }, 'Pulling from the cloud', '3 of 4 files, 1.2 of 2.4 MB.'],
+    [SyncPhase.Pulling, { filesDone: 3, filesTotal: 4, bytesDone: 1_999_999, bytesTotal: 2_000_001 }, 'Pulling from the cloud', '3 of 4 files, 1.9 of 2.1 MB.'],
+    [SyncPhase.Pulling, { filesDone: 1, filesTotal: 2, bytesDone: 0, bytesTotal: 0 }, 'Pulling from the cloud', '1 of 2 files.'],
+    [SyncPhase.Pulling, { filesDone: 0, filesTotal: 1, bytesDone: 0, bytesTotal: 26 }, 'Pulling from the cloud', '0 of 1 file, 0 of 1 KB.'],
+    [SyncPhase.Saving, { filesDone: 2, filesTotal: 5, bytesDone: 600_000, bytesTotal: 900_000 }, 'Saving to the cloud', '2 of 5 files, 600 of 900 KB.'],
+    [SyncPhase.Saving, { filesDone: 2, filesTotal: 5, bytesDone: 1_999, bytesTotal: 2_001 }, 'Saving to the cloud', '2 of 5 files, 1 of 3 KB.'],
+    [SyncPhase.Saving, { filesDone: 2, filesTotal: 5, bytesDone: 500_000, bytesTotal: 999_000 }, 'Saving to the cloud', '2 of 5 files, 500 of 999 KB.'],
+    [SyncPhase.Saving, { filesDone: 2, filesTotal: 5, bytesDone: 500_000, bytesTotal: 999_001 }, 'Saving to the cloud', '2 of 5 files, 0.5 of 1.0 MB.'],
+    [SyncPhase.Saving, { filesDone: 2, filesTotal: 5, bytesDone: 500_000, bytesTotal: 999_999 }, 'Saving to the cloud', '2 of 5 files, 0.5 of 1.0 MB.'],
+    [SyncPhase.Saving, { filesDone: 1, filesTotal: 1, bytesDone: 1_000_000, bytesTotal: 1_000_000 }, 'Saving to the cloud', '1 of 1 file, 1.0 of 1.0 MB.'],
+    [SyncPhase.Saving, { filesDone: 0, filesTotal: 1, bytesDone: 0, bytesTotal: 0 }, 'Saving to the cloud', '0 of 1 file.'],
+    [SyncPhase.Saving, { filesDone: 4, filesTotal: 5, bytesDone: 0, bytesTotal: 0 }, 'Saving to the cloud', '4 of 5 files.'],
+    [SyncPhase.Stopping, { filesDone: 1, filesTotal: 2, bytesDone: 10, bytesTotal: 20 }, 'Saving to the cloud', '1 of 2 files, 0 of 1 KB.'],
+  ];
+  const quiet = [
+    wrapperStatus({ phase: SyncPhase.Saving }),
+    wrapperStatus({ phase: SyncPhase.Stopping }),
+    wrapperStatus({ progress: { filesDone: 1, filesTotal: 2, bytesDone: 10, bytesTotal: 20 } }),
+    wrapperStatus(),
+  ];
+  const page = await servedPage([
+    ...steps.map(([phase, progress]) => ({ status: 200, body: wrapperStatus({ phase, progress }) })),
+    ...quiet.map((body) => ({ status: 200, body })),
+  ]);
+  const { transfer, 'transfer-label': label, 'transfer-bar': bar, 'transfer-counts': counts } = page.elements;
+  for (const [index, [, progress, title, text]] of steps.entries()) {
+    if (index > 0) {
+      await page.tick();
+    }
+    assert.equal(transfer.hidden, false, text);
+    assert.equal(label.textContent, title, text);
+    assert.deepEqual([bar.value, bar.max], [progress.filesDone, progress.filesTotal], text);
+    assert.equal(counts.textContent, text);
+  }
+  for (const status of quiet) {
+    await page.tick();
+    assert.equal(transfer.hidden, true, status.phase);
+  }
+  assert.equal(page.requests.length, steps.length + quiet.length);
+});
+
+test('a wrapper handler over the launcher state serves / and /status with the progress of a held save and of a hung start pull, and the page shows it', async (context) => {
+  capture(context);
+  const root = await workspace(context);
+  const bucket = new MemoryBucket();
+  const line = wire(bucket);
+  const alpha = await machine(root, 'alpha');
+  await put(alpha.dataRoot, starter);
+  /**
+   * @param {object} state
+   * @returns {Promise<object>}
+   * @throws {Error}
+   */
+  const servedStatus = async (state) => {
+    const handler = createWrapperHandler(state, 8767,
+      /**
+       * @returns {null}
+       */
+      () => null);
+    const home = await wrapperRequest(handler, '/');
+    assert.equal(home.code, 200);
+    assert.equal(home.headers['Content-Type'], 'text/html; charset=utf-8');
+    const answer = await wrapperRequest(handler, '/status');
+    assert.equal(answer.code, 200);
+    return JSON.parse(answer.body);
+  };
+  const savingState = {};
+  const first = launch(alpha, line.transport, {
+    /**
+     * @param {object} next
+     * @returns {object}
+     */
+    onState: (next) => Object.assign(savingState, next),
+  });
+  await idle(first);
+  const held = '{"m":"held for the page"}\n';
+  await put(alpha.dataRoot, { [story]: held });
+  const release = Promise.withResolvers();
+  let holding = false;
+  /**
+   * @param {string} method
+   * @param {string} key
+   * @returns {Promise<void>}
+   */
+  line.before = async (method, key) => {
+    if (method === 'PUT' && key === `${prefix}/blobs/${digest(held)}`) {
+      holding = true;
+      await release.promise;
+    }
+  };
+  first.clock.fire(SyncSettings.SaveIntervalMs);
+  await until(() => holding, 'the held upload');
+  const saving = await servedStatus(savingState);
+  assert.equal(saving.phase, SyncPhase.Saving);
+  assert.deepEqual(saving.progress, { filesDone: 0, filesTotal: 1, bytesDone: 0, bytesTotal: Buffer.byteLength(held) });
+  const savingPage = await servedPage([{ status: 200, body: saving }]);
+  assert.equal(savingPage.elements.transfer.hidden, false);
+  assert.equal(savingPage.elements['transfer-label'].textContent, 'Saving to the cloud');
+  assert.equal(savingPage.elements['transfer-counts'].textContent, '0 of 1 file, 0 of 1 KB.');
+  assert.equal(savingPage.elements.save.disabled, true);
+  line.before = null;
+  release.resolve();
+  await until(() => first.latest.phase === SyncPhase.Running && cloudFiles(bucket).files[story] === digest(held), 'the held save to land');
+  await stop(first);
+  const beta = await machine(root, 'beta');
+  const hung = [];
+  /**
+   * @param {string} method
+   * @param {string} key
+   * @param {{signal: AbortSignal}} options
+   * @returns {?Promise<never>}
+   * @throws {Error}
+   */
+  line.before = (method, key, options) => {
+    if (!key.startsWith(`${prefix}/blobs/`)) {
+      return null;
+    }
+    hung.push(options.signal);
+    return hang(options.signal);
+  };
+  const pullingState = {};
+  const second = launch(beta, line.transport, {
+    /**
+     * @param {object} next
+     * @returns {object}
+     */
+    onState: (next) => Object.assign(pullingState, next),
+  });
+  const pulled = Object.values({ ...starter, [story]: held });
+  await until(() => hung.length === pulled.length, 'the hung downloads');
+  const pulling = await servedStatus(pullingState);
+  assert.equal(pulling.phase, SyncPhase.Pulling);
+  assert.deepEqual(pulling.progress, {
+    filesDone: 0, filesTotal: pulled.length, bytesDone: 0, bytesTotal: pulled.reduce((sum, content) => sum + Buffer.byteLength(content), 0),
+  });
+  const pullingPage = await servedPage([{ status: 200, body: pulling }]);
+  assert.equal(pullingPage.elements.transfer.hidden, false);
+  assert.equal(pullingPage.elements['transfer-label'].textContent, 'Pulling from the cloud');
+  assert.equal(pullingPage.elements['transfer-counts'].textContent, `0 of ${pulled.length} files, 0 of 1 KB.`);
+  assert.deepEqual([pullingPage.elements['transfer-bar'].value, pullingPage.elements['transfer-bar'].max], [0, pulled.length]);
+  assert.equal(second.starts, 0);
+  second.controller.abort();
+  await second.task;
+  assert.ok(hung.every((signal) => signal.aborted));
+});
+
+test('the served page shows the conflict text, the conflicts folder and the reload notice beside Save now while the status asks for them', async () => {
+  const conflictAt = '2026-11-23T10:20:00.000Z';
+  const conflictTail = ". This PC's changes stay here. Restart Universe to pull; every file this PC changed goes to local/conflicts first.";
+  const conflict = `The other PC saved newer changes at ${conflictAt}${conflictTail}`;
+  const shownConflict = `The other PC saved newer changes at ${new Date(conflictAt).toLocaleString()}${conflictTail}`;
+  const folder = '/home/player/universe/local/conflicts/2026-11-23T10-00-00-000Z';
+  const movedLine = `Files this PC changed since its last pull or save were moved to ${folder}.`;
+  const page = await servedPage([
+    { status: 200, body: wrapperStatus({ reloadTabs: true, conflictsFolder: folder }) },
+    { status: 200, body: wrapperStatus({ phase: SyncPhase.Conflict, reloadTabs: true, conflictsFolder: folder, conflictAt, error: conflict }) },
+    { status: 200, body: wrapperStatus({ phase: SyncPhase.Conflict, conflictAt, error: conflict }) },
+  ]);
+  const { reload, conflicts, result, save } = page.elements;
+  assert.equal(reload.hidden, false);
+  assert.equal(reload.textContent, 'Pulled newer files from the cloud. Reload any open SillyTavern tabs.');
+  assert.equal(conflicts.hidden, false);
+  assert.equal(conflicts.textContent, movedLine);
+  assert.equal(result.textContent, '');
+  await page.tick();
+  assert.equal(result.textContent, shownConflict);
+  assert.equal(conflicts.textContent, movedLine);
+  assert.equal(save.disabled, false);
+  await page.tick();
+  assert.deepEqual([reload.hidden, conflicts.hidden], [true, true]);
+  assert.deepEqual(result.texts, ['', shownConflict]);
+});
+
+test('Save now is disabled while any save runs or no save can start, and the last saved time and a press outcome stay beside it', async () => {
+  const savedAt = '2026-11-23T10:15:00.000Z';
+  const laterAt = '2026-11-23T10:30:00.000Z';
+  const notSaved = `Not saved since ${laterAt}: fetch failed`;
+  const locked = [SyncPhase.Saving, SyncPhase.Stopping, SyncPhase.Stopped, SyncPhase.Disabled];
+  const open = [SyncPhase.Pulling, SyncPhase.Running, SyncPhase.Offline, SyncPhase.Conflict, SyncPhase.Failed];
+  assert.deepEqual([...locked, ...open].sort(), Object.values(SyncPhase).sort());
+  const page = await servedPage([
+    ...[...locked, ...open].map((phase) => ({ status: 200, body: wrapperStatus({ phase }) })),
+    { status: 200, body: wrapperStatus({ lastSavedAt: savedAt }) },
+    { status: 202, body: wrapperStatus({ phase: SyncPhase.Saving, lastSavedAt: savedAt }) },
+    { status: 200, body: wrapperStatus({ lastSavedAt: laterAt }) },
+    { status: 200, body: wrapperStatus({ lastSavedAt: laterAt }) },
+    { status: 200, body: wrapperStatus({ lastSavedAt: laterAt, unsavedSince: laterAt, error: notSaved }) },
+    { status: 200, body: wrapperStatus({ lastSavedAt: laterAt }) },
+  ]);
+  const { save, saved, result } = page.elements;
+  assert.equal(save.disabled, true);
+  await page.click();
+  assert.equal(page.requests.length, 1);
+  for (const phase of [...locked, ...open].slice(1)) {
+    await page.tick();
+    assert.equal(save.disabled, locked.includes(phase), phase);
+  }
+  assert.equal(saved.hidden, true);
+  await page.tick();
+  assert.equal(save.disabled, false);
+  assert.equal(saved.hidden, false);
+  assert.equal(saved.textContent, `Last saved to cloud at ${new Date(savedAt).toLocaleString()}.`);
+  const pressing = watchSettled(page.click());
+  assert.equal(result.textContent, 'Saving...');
+  assert.equal(save.disabled, true);
+  await nextTurn();
+  for (let ticks = 0; !pressing.settled; ticks += 1) {
+    assert.ok(ticks < 20, 'the press never ended');
+    assert.equal(save.disabled, true);
+    await page.tick();
+  }
+  const outcome = `Saved to cloud at ${new Date(laterAt).toLocaleString()}.`;
+  assert.equal(result.textContent, outcome);
+  assert.equal(saved.textContent, `Last saved to cloud at ${new Date(laterAt).toLocaleString()}.`);
+  assert.equal(save.disabled, false);
+  await page.tick();
+  assert.equal(result.textContent, outcome);
+  await page.tick();
+  assert.equal(result.textContent, `Not saved since ${new Date(laterAt).toLocaleString()}: fetch failed`);
+  await page.tick();
+  assert.equal(result.textContent, '');
+  assert.equal(saved.textContent, `Last saved to cloud at ${new Date(laterAt).toLocaleString()}.`);
+});
+
+test('a stop that takes over a Save now press, in its first answer or while the page waits, says the console shows the final save, and a served stopped hides the last save, the reload notice and the conflicts line', async () => {
+  const older = '2026-11-23T09:00:00.000Z';
+  const stopping = 'Stopping: the console shows the final save.';
+  const facts = { lastSavedAt: older, reloadTabs: true, conflictsFolder: '/home/player/universe/local/conflicts/2026-11-23T09-00-00-000Z' };
+  for (const [phase, error] of [
+    [SyncPhase.Stopping, null],
+    [SyncPhase.Stopped, null],
+    [SyncPhase.Stopping, 'fetch failed Retrying in 4 s.'],
+    [SyncPhase.Stopped, 'Stopped before the save finished: fetch failed'],
+  ]) {
+    const label = `${phase} ${error}`;
+    const stopped = phase === SyncPhase.Stopped;
+    const waited = await pressSaveNow([
+      { status: 202, body: wrapperStatus({ phase: SyncPhase.Saving, lastSavedAt: older }) },
+      { status: 200, body: wrapperStatus({ ...facts, phase, error }) },
+    ]);
+    assert.deepEqual(waited.texts, ['Saving...', stopping], label);
+    assert.equal(waited.unanswered, 0, label);
+    assert.equal(waited.disabledAfter, true, label);
+    const { saved, reload, conflicts } = waited.page.elements;
+    assert.deepEqual([saved.hidden, reload.hidden, conflicts.hidden], [stopped, stopped, stopped], label);
+    for (const code of [202, 503]) {
+      const refused = await pressSaveNow([{ status: code, body: wrapperStatus({ ...facts, phase, error }) }]);
+      assert.deepEqual(refused.texts, ['Saving...', stopping], `${code} ${label}`);
+      assert.equal(refused.requests.length, 1, `${code} ${label}`);
+      assert.equal(refused.unanswered, 0, `${code} ${label}`);
+      assert.equal(refused.disabledAfter, true, `${code} ${label}`);
+      const shown = refused.page.elements;
+      assert.deepEqual([shown.saved.hidden, shown.reload.hidden, shown.conflicts.hidden], [stopped, stopped, stopped], `${code} ${label}`);
+    }
+  }
+});
+
+test('the page shows the stop and its final save without a press: stopping with the progress bar, then a served stopped shows the end view without the last save, the reload notice or the conflicts line', async () => {
+  const savedAt = '2026-11-23T10:15:00.000Z';
+  const progress = { filesDone: 2, filesTotal: 3, bytesDone: 4_000, bytesTotal: 9_000 };
+  const facts = { lastSavedAt: savedAt, reloadTabs: true, conflictsFolder: '/home/player/universe/local/conflicts/2026-11-23T10-00-00-000Z' };
+  const page = await servedPage([
+    { status: 200, body: wrapperStatus({ lastSavedAt: savedAt }) },
+    { status: 202, body: wrapperStatus({ phase: SyncPhase.Saving, lastSavedAt: savedAt }) },
+    { status: 200, body: wrapperStatus({ lastSavedAt: savedAt }) },
+    { status: 200, body: wrapperStatus({ ...facts, phase: SyncPhase.Stopping }) },
+    { status: 200, body: wrapperStatus({ ...facts, phase: SyncPhase.Stopping, progress, error: 'fetch failed Retrying in 2 s.' }) },
+    { status: 200, body: wrapperStatus({ ...facts, phase: SyncPhase.Stopped, error: 'Stopped before the save finished: fetch failed' }) },
+  ]);
+  const { save, result, transfer, saved: lastSaved, reload, conflicts, 'transfer-label': label, 'transfer-bar': bar, 'transfer-counts': counts } = page.elements;
+  const saved = `Saved to cloud at ${new Date(savedAt).toLocaleString()}.`;
+  const stopping = 'Stopping: the console shows the final save.';
+  await finishPress(page);
+  assert.equal(result.textContent, saved);
+  await page.tick();
+  assert.equal(result.textContent, stopping);
+  assert.equal(save.disabled, true);
+  assert.equal(transfer.hidden, true);
+  await page.tick();
+  assert.equal(result.textContent, stopping);
+  assert.equal(save.disabled, true);
+  assert.equal(transfer.hidden, false);
+  assert.equal(label.textContent, 'Saving to the cloud');
+  assert.deepEqual([bar.value, bar.max], [2, 3]);
+  assert.equal(counts.textContent, '2 of 3 files, 4 of 9 KB.');
+  assert.deepEqual([lastSaved.hidden, reload.hidden, conflicts.hidden], [false, false, false]);
+  await page.tick();
+  const ended = 'Universe is not running. The console shows how it ended.';
+  assert.equal(result.textContent, ended);
+  assert.equal(save.disabled, true);
+  assert.deepEqual([transfer.hidden, lastSaved.hidden, reload.hidden, conflicts.hidden], [true, true, true, true]);
+  assert.deepEqual(result.texts, ['', 'Saving...', saved, stopping, ended]);
+  assert.equal(page.requests.length, 6);
+});
+
+test('after a stop with progress, every failed poll says Universe is not running, hides the bar, the last save, the reload notice and the conflicts line, disables Save now and keeps polling', async () => {
+  const savedAt = '2026-11-23T10:15:00.000Z';
+  const stopping = 'Stopping: the console shows the final save.';
+  const ended = 'Universe is not running. The console shows how it ended.';
+  const known = { lastSavedAt: savedAt, reloadTabs: true, conflictsFolder: '/home/player/universe/local/conflicts/2026-11-23T10-00-00-000Z' };
+  const progress = { filesDone: 2, filesTotal: 3, bytesDone: 4_000, bytesTotal: 9_000 };
+  for (const [label, failure] of [['a thrown fetch', new TypeError('Failed to fetch')], ['an answer that is not JSON', { status: 502 }]]) {
+    const page = await servedPage([
+      { status: 200, body: wrapperStatus(known) },
+      { status: 200, body: wrapperStatus({ ...known, phase: SyncPhase.Stopping, progress, error: 'fetch failed Retrying in 2 s.' }) },
+      failure,
+      failure,
+      failure,
+    ]);
+    const { save, result, saved, reload, conflicts, transfer } = page.elements;
+    /**
+     * @returns {boolean[]}
+     */
+    const shown = () => [save.disabled, transfer.hidden, saved.hidden, reload.hidden, conflicts.hidden];
+    assert.deepEqual(shown(), [false, true, false, false, false], label);
+    await page.tick();
+    assert.equal(result.textContent, stopping, label);
+    assert.deepEqual(shown(), [true, false, false, false, false], label);
+    for (const attempt of [1, 2, 3]) {
+      await page.tick();
+      assert.equal(result.textContent, ended, `${label} ${attempt}`);
+      assert.deepEqual(shown(), [true, true, true, true, true], `${label} ${attempt}`);
+      assert.equal(page.requests.length, 2 + attempt, `${label} ${attempt}`);
+      assert.equal(page.delays.length, 2 + attempt, `${label} ${attempt}`);
+    }
+    assert.deepEqual(result.texts, ['', stopping, ended], label);
+    assert.ok(page.delays.every((milliseconds) => milliseconds === 2000), label);
+  }
+});
+
+test('a failed poll during a pull removes the progress bar and says Universe is not running', async () => {
+  const progress = { filesDone: 1, filesTotal: 4, bytesDone: 2_000, bytesTotal: 8_000 };
+  const page = await servedPage([{ status: 200, body: wrapperStatus({ phase: SyncPhase.Pulling, progress }) }, new TypeError('Failed to fetch')]);
+  const { save, result, transfer, 'transfer-counts': counts } = page.elements;
+  assert.deepEqual([transfer.hidden, counts.textContent, save.disabled], [false, '1 of 4 files, 2 of 8 KB.', false]);
+  await page.tick();
+  assert.deepEqual([transfer.hidden, save.disabled], [true, true]);
+  assert.equal(result.textContent, 'Universe is not running. The console shows how it ended.');
+  assert.deepEqual(page.delays, [2000, 2000]);
+});
+
+test('a Save now outcome gives way to the end text at the first failed poll or served stopped, a press that a stop took over included', async () => {
+  const savedAt = '2026-11-23T10:15:00.000Z';
+  const stopping = 'Stopping: the console shows the final save.';
+  const saving = { status: 202, body: wrapperStatus({ phase: SyncPhase.Saving }) };
+  const endings = [['a failed poll', new TypeError('Failed to fetch')], ['a served stopped', { status: 200, body: wrapperStatus({ phase: SyncPhase.Stopped }) }]];
+  for (const [answers, outcome] of [
+    [[saving, { status: 200, body: wrapperStatus({ lastSavedAt: savedAt }) }], `Saved to cloud at ${new Date(savedAt).toLocaleString()}.`],
+    [[saving, { status: 200, body: wrapperStatus({ phase: SyncPhase.Stopping }) }], stopping],
+    [[{ status: 202, body: wrapperStatus({ phase: SyncPhase.Stopped }) }], stopping],
+  ]) {
+    for (const [ending, finalAnswer] of endings) {
+      const label = `${outcome} ${ending}`;
+      const press = await pressSaveNow([...answers, finalAnswer]);
+      assert.deepEqual(press.texts, ['Saving...', outcome], label);
+      await press.page.tick();
+      assert.equal(press.page.elements.result.textContent, 'Universe is not running. The console shows how it ended.', label);
+      assert.equal(press.page.elements.save.disabled, true, label);
+      assert.equal(press.page.requests.length, answers.length + 2, label);
+    }
+  }
+});
+
+test('a press outcome is cleared once a later save starts or the last saved time changes, refusals included', async () => {
+  const firstAt = '2026-11-23T10:15:00.000Z';
+  const secondAt = '2026-11-23T10:30:00.000Z';
+  const page = await servedPage([
+    { status: 200, body: wrapperStatus() },
+    { status: 202, body: wrapperStatus({ phase: SyncPhase.Saving }) },
+    { status: 200, body: wrapperStatus() },
+    { status: 200, body: wrapperStatus() },
+    { status: 200, body: wrapperStatus({ phase: SyncPhase.Saving }) },
+    { status: 200, body: wrapperStatus({ lastSavedAt: firstAt }) },
+    { status: 202, body: wrapperStatus({ phase: SyncPhase.Saving, lastSavedAt: firstAt }) },
+    { status: 200, body: wrapperStatus({ lastSavedAt: firstAt }) },
+    { status: 200, body: wrapperStatus({ lastSavedAt: firstAt }) },
+    { status: 200, body: wrapperStatus({ lastSavedAt: secondAt }) },
+    { status: 403 },
+    { status: 200, body: wrapperStatus({ lastSavedAt: secondAt }) },
+    { status: 200, body: wrapperStatus({ phase: SyncPhase.Saving, lastSavedAt: secondAt }) },
+  ]);
+  const { result } = page.elements;
+  await finishPress(page);
+  assert.equal(result.textContent, 'Up to date.');
+  await page.tick();
+  assert.equal(result.textContent, 'Up to date.');
+  await page.tick();
+  assert.equal(result.textContent, '');
+  await page.tick();
+  assert.equal(result.textContent, '');
+  await finishPress(page);
+  assert.equal(result.textContent, `Saved to cloud at ${new Date(firstAt).toLocaleString()}.`);
+  await page.tick();
+  assert.equal(result.textContent, `Saved to cloud at ${new Date(firstAt).toLocaleString()}.`);
+  await page.tick();
+  assert.equal(result.textContent, '');
+  await finishPress(page);
+  assert.equal(result.textContent, 'Reload this page to save.');
+  await page.tick();
+  assert.equal(result.textContent, 'Reload this page to save.');
+  await page.tick();
+  assert.equal(result.textContent, '');
+  assert.equal(page.requests.length, 13);
+});
+
+test('every time the page shows is local time: the conflict sentence, Not saved since and the last save', async () => {
+  const conflictAt = '2026-11-23T10:20:00.000Z';
+  const unsavedSince = '2026-11-23T10:05:00.000Z';
+  const savedAt = '2026-11-23T10:00:00.000Z';
+  const conflictTail = ". This PC's changes stay here. Restart Universe to pull; every file this PC changed goes to local/conflicts first.";
+  const page = await servedPage([
+    { status: 200, body: wrapperStatus({ lastSavedAt: savedAt, unsavedSince, error: `Not saved since ${unsavedSince}: fetch failed` }) },
+    {
+      status: 200,
+      body: wrapperStatus({
+        phase: SyncPhase.Conflict, lastSavedAt: savedAt, unsavedSince, conflictAt, error: `The other PC saved newer changes at ${conflictAt}${conflictTail}`,
+      }),
+    },
+  ]);
+  const { result, saved } = page.elements;
+  assert.equal(result.textContent, `Not saved since ${new Date(unsavedSince).toLocaleString()}: fetch failed`);
+  assert.equal(saved.textContent, `Last saved to cloud at ${new Date(savedAt).toLocaleString()}.`);
+  await page.tick();
+  assert.equal(result.textContent, `The other PC saved newer changes at ${new Date(conflictAt).toLocaleString()}${conflictTail}`);
+  const shown = [...result.texts, ...saved.texts];
+  for (const moment of [conflictAt, unsavedSince, savedAt]) {
+    assert.ok(!shown.some((text) => text.includes(moment)), moment);
+  }
+});
+
+test('a background poll sent before a Save now press and answered after it never overwrites what the press shows', async () => {
+  const savedAt = '2026-11-23T10:15:00.000Z';
+  const foreign = 'The bucket holds other objects but no Universe save, so cloud sync is off.';
+  const progress = { filesDone: 0, filesTotal: 2, bytesDone: 0, bytesTotal: 2_000 };
+  const firstPoll = Promise.withResolvers();
+  const secondPoll = Promise.withResolvers();
+  const stale = wrapperStatus({ reloadTabs: true, error: 'fetch failed Retrying in 2 s.' });
+  const page = await servedPage([
+    firstPoll.promise,
+    { status: 202, body: wrapperStatus({ phase: SyncPhase.Saving, progress }) },
+    { status: 200, body: wrapperStatus({ lastSavedAt: savedAt }) },
+    secondPoll.promise,
+    { status: 202, body: wrapperStatus({ phase: SyncPhase.Disabled, lastSavedAt: savedAt, error: foreign }) },
+    { status: 200, body: wrapperStatus({ phase: SyncPhase.Disabled, lastSavedAt: savedAt, error: foreign }) },
+  ]);
+  const { save, result, transfer, reload } = page.elements;
+  const pressing = watchSettled(page.click());
+  await nextTurn();
+  firstPoll.resolve({ status: 200, body: stale });
+  await nextTurn();
+  assert.equal(pressing.settled, false);
+  assert.equal(save.disabled, true);
+  assert.deepEqual(result.texts, ['', 'Saving...']);
+  assert.deepEqual([transfer.hidden, reload.hidden], [false, true]);
+  await page.tick();
+  assert.equal(pressing.settled, true);
+  const saved = `Saved to cloud at ${new Date(savedAt).toLocaleString()}.`;
+  assert.equal(result.textContent, saved);
+  await page.tick();
+  assert.equal(save.disabled, false);
+  await page.click();
+  assert.equal(result.textContent, foreign);
+  assert.equal(save.disabled, true);
+  secondPoll.resolve({ status: 200, body: wrapperStatus({ lastSavedAt: savedAt }) });
+  await nextTurn();
+  assert.equal(save.disabled, true);
+  assert.deepEqual(result.texts, ['', 'Saving...', saved, 'Saving...', foreign]);
+  await page.tick();
+  assert.equal(save.disabled, true);
+  assert.deepEqual(result.texts, ['', 'Saving...', saved, 'Saving...', foreign]);
+  assert.deepEqual(page.requests.map((request) => [request.url, request.disabled]), [
+    ['/status', false], ['/save', true], ['/status', true], ['/status', false], ['/save', true], ['/status', true],
+  ]);
+});
+
+test('a background poll sent before a Save now press that fails after it changes nothing, and the next failed poll says Universe is not running', async () => {
+  const savedAt = '2026-11-23T10:15:00.000Z';
+  const secondPoll = Promise.withResolvers();
+  const page = await servedPage([
+    { status: 200, body: wrapperStatus({ lastSavedAt: savedAt }) }, secondPoll.promise, { status: 403 }, new TypeError('Failed to fetch'),
+  ]);
+  const { save, saved, result } = page.elements;
+  /**
+   * @returns {string}
+   */
+  const snapshot = () => JSON.stringify(Object.entries(page.elements).map(([id, element]) =>
+    [id, element.hidden, element.disabled, element.max, element.value, element.texts]));
+  await page.tick();
+  await page.click();
+  assert.equal(result.textContent, 'Reload this page to save.');
+  const before = snapshot();
+  secondPoll.reject(new TypeError('Failed to fetch'));
+  await nextTurn();
+  assert.equal(snapshot(), before);
+  assert.deepEqual([save.disabled, saved.hidden], [false, false]);
+  await page.tick();
+  assert.equal(result.textContent, 'Universe is not running. The console shows how it ended.');
+  assert.deepEqual([save.disabled, saved.hidden], [true, true]);
+  assert.deepEqual(page.requests.map((request) => request.url), ['/status', '/status', '/save', '/status']);
+  assert.deepEqual(page.delays, [2000, 2000, 2000]);
+});
+
+test('after failed polls, a Universe that answers again brings back the normal view with its last save and Save now, and a press there is told to reload the page', async () => {
+  const savedAt = '2026-11-23T10:15:00.000Z';
+  const laterAt = '2026-11-23T10:30:00.000Z';
+  const ended = 'Universe is not running. The console shows how it ended.';
+  const page = await servedPage([
+    { status: 200, body: wrapperStatus({ lastSavedAt: savedAt }) },
+    new TypeError('Failed to fetch'),
+    { status: 502 },
+    { status: 200, body: wrapperStatus({ lastSavedAt: laterAt }) },
+    { status: 403 },
+  ]);
+  const { save, saved, result } = page.elements;
+  for (const label of ['a thrown fetch', 'an answer that is not JSON']) {
+    await page.tick();
+    assert.equal(result.textContent, ended, label);
+    assert.deepEqual([save.disabled, saved.hidden], [true, true], label);
+  }
+  await page.tick();
+  assert.equal(result.textContent, '');
+  assert.deepEqual([save.disabled, saved.hidden], [false, false]);
+  assert.equal(saved.textContent, `Last saved to cloud at ${new Date(laterAt).toLocaleString()}.`);
+  await page.click();
+  assert.equal(result.textContent, 'Reload this page to save.');
+  assert.equal(save.disabled, false);
+  assert.deepEqual(result.texts, ['', ended, '', 'Saving...', 'Reload this page to save.']);
+  assert.deepEqual(page.requests.map((request) => request.url), ['/status', '/status', '/status', '/status', '/save']);
+  assert.deepEqual(page.delays, [2000, 2000, 2000, 2000]);
 });
 
 test('the child runs server.js with the data and config paths, only the watchdog preload and channel, and no cloud variables', async (context) => {

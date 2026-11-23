@@ -1,0 +1,9 @@
+{
+  "display_name": "Universe: Reply Retry",
+  "loading_order": 1,
+  "requires": [],
+  "optional": [],
+  "js": "index.js",
+  "author": "Universe",
+  "version": "1.0.0"
+}

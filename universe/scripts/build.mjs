@@ -14,7 +14,8 @@ const scenarioBuilderSignature = 'Universe local build v2\n';
 const vocaliaSignature = 'Universe local build v3\n';
 const fullProfileSignature = 'Universe local build v4\n';
 const checkpointSignature = 'Universe local build v5\n';
-const signature = 'Universe local build v6\n';
+const syncSignature = 'Universe local build v6\n';
+const signature = 'Universe local build v7\n';
 const checkpointSources = [
   'server.mjs', 'launcher.mjs', 'child.mjs', 'child-preload.mjs', 'checkpoint-store.mjs', 'local-session.mjs',
   'r2.mjs', 'story-files.mjs', 'classes/capture-gate.mjs', 'classes/cloud-save.mjs',
@@ -32,24 +33,32 @@ const runtimeFiles = [
 const extensionDirectory = join(runtime, 'public/scripts/extensions/third-party');
 const scenarioBuilder = join(extensionDirectory, 'tavernScenarioBuilder');
 const vocalia = join(extensionDirectory, 'st-aspect-vocalia');
+const replyRetry = join(extensionDirectory, 'universe-retry');
+const replyRetrySource = 'extension/universe-retry';
+const replyRetryNames = ['manifest.json', 'index.js', 'ReplyRetry.js', 'ReplyRetrySettings.js'];
 const packageInputs = ['package.json', 'package-lock.json',
   'packages/tavern-scenario-builder-1.1.0.tgz', 'packages/st-aspect-vocalia-1.0.4.tgz'];
-const buildInputs = [...sources.map(file => join('src', file)), ...packageInputs];
+const buildInputs = [
+  ...sources.map(file => join('src', file)), ...replyRetryNames.map(file => join(replyRetrySource, file)), ...packageInputs,
+];
 const scenarioBuilderFiles = [
   'manifest.json', 'index.js', 'style.css', 'templates/workspace.html', 'modules/creation.js', 'modules/entries.js',
   'modules/generation.js', 'modules/state.js', 'modules/utils.js', 'modules/workspace.js',
 ].map(file => join(scenarioBuilder, file));
 const vocaliaFiles = [join(vocalia, 'manifest.json'), join(vocalia, 'index.js')];
 const fullProfileFiles = [join(runtime, 'public/scripts/personas.js'), join(runtime, 'src/endpoints/thumbnails.js')];
+const replyRetryFiles = replyRetryNames.map(file => join(replyRetry, file));
 const legacyRequired = [...checkpointSources, ...runtimeFiles];
 const scenarioBuilderRequired = [...legacyRequired, ...scenarioBuilderFiles];
 const vocaliaRequired = [...scenarioBuilderRequired, ...vocaliaFiles];
 const fullProfileRequired = [...vocaliaRequired, ...fullProfileFiles];
 const checkpointRequired = [...fullProfileRequired, 'wrapper-home.html'];
-const required = [...sources, ...runtimeFiles, ...scenarioBuilderFiles, ...vocaliaFiles, ...fullProfileFiles];
+const syncRequired = [...sources, ...runtimeFiles, ...scenarioBuilderFiles, ...vocaliaFiles, ...fullProfileFiles];
+const required = [...syncRequired, ...replyRetryFiles];
 const requiredBySignature = new Map([
   [legacySignature, legacyRequired], [scenarioBuilderSignature, scenarioBuilderRequired], [vocaliaSignature, vocaliaRequired],
-  [fullProfileSignature, fullProfileRequired], [checkpointSignature, checkpointRequired], [signature, required],
+  [fullProfileSignature, fullProfileRequired], [checkpointSignature, checkpointRequired], [syncSignature, syncRequired],
+  [signature, required],
 ]);
 
 /**
@@ -202,6 +211,10 @@ async function assemble() {
     await mkdir(join(next, extensionDirectory), { recursive: true });
     await rename(join(next, 'node_modules/tavern-scenario-builder'), join(next, scenarioBuilder));
     await rename(join(next, 'node_modules/st-aspect-vocalia'), join(next, vocalia));
+    await mkdir(join(next, replyRetry));
+    for (const file of replyRetryNames) {
+      await copyInput(join(project, replyRetrySource, file), join(next, replyRetry, file));
+    }
     if (!hasFiles(next, required)) {
       throw new Error('Incomplete Universe build. A required entry point is missing.');
     }

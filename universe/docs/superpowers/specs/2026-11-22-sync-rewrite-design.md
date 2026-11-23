@@ -116,7 +116,7 @@ Triggers: a 15-minute timer, **Save now**, and stopping. One save runs at a time
 3. Upload the blobs not present in B or H, six at a time. Each file is read once by the safe-read rule; those bytes are hashed and uploaded, and that hash and size go into the manifest. Uploads use `If-None-Match: *`; a 409 or 412 means the blob already exists and is accepted.
 4. Upload `manifests/<id>.json` with `parent` = B, then record `pending` in `sync.json`.
 5. Compare-and-set `control.json`: if its head equals B, set head to the new id. On success, record B = new manifest and clear `pending`. If the request fails or its reply is lost, re-read `control.json`: a head equal to `pending.id` counts as success; a head with `pending.id` among its first 100 ancestors means the save landed and the other PC has saved since, so record B = `pending` and report a conflict.
-6. **Conflict:** the status shows **The other PC saved newer changes at <time>. This PC's changes stay here. Restart Universe to pull; files changed on both PCs go to local/conflicts.** Automatic saves stop until restart, and **Save now** reports the same message. SillyTavern keeps running.
+6. **Conflict:** the status shows **The other PC saved newer changes at <time>. This PC's changes stay here. Restart Universe to pull; every file this PC changed goes to local/conflicts first.** Automatic saves stop until restart, and **Save now** reports the same message. SillyTavern keeps running.
 
 ## Network failures
 
@@ -126,7 +126,7 @@ Triggers: a 15-minute timer, **Save now**, and stopping. One save runs at a time
 
 ## Stopping
 
-Ctrl+C, or SillyTavern exiting, stops SillyTavern first, waits for a save already running, then runs the final save, all within 2 minutes in total. The console prints **Saved to cloud at <time>**, or **NOT SAVED TO CLOUD: <reason>. The changes stay on this PC. They go up the next time Universe starts here, unless the other PC saves first; then files changed on both PCs go to local/conflicts.**
+Ctrl+C, or SillyTavern exiting, stops SillyTavern first, waits for a save already running, then runs the final save, all within 2 minutes in total. The console prints **Saved to cloud at <time>**, or **NOT SAVED TO CLOUD: <reason>. The changes stay on this PC. They go up the next time Universe starts here, unless the other PC saves first; then every file this PC changed goes to local/conflicts first.**
 
 ## Local-only mode
 

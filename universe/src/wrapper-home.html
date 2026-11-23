@@ -6,60 +6,246 @@
   <meta name="universe-csrf" content="{{token}}">
   <title>Universe</title>
   <style nonce="{{nonce}}">
-    :root { color-scheme: light dark; font: 100%/1.5 "Inter", system-ui, sans-serif; }
-    body { max-width: 36rem; margin: 12vh auto; padding: 0 1.25rem; }
-    h1 { margin-bottom: 1rem; }
-    button { font: inherit; padding: .65rem 1.25rem; cursor: pointer; }
-    button:focus-visible { outline: .2rem solid Highlight; outline-offset: .2rem; }
-    button:disabled { cursor: default; }
+    :root {
+      color-scheme: light dark;
+      --color-page: #f6f6f8;
+      --color-text: #1c1c21;
+      --color-muted: #55555f;
+      --color-accent: #2a4fc4;
+      --color-on-accent: #ffffff;
+      --color-idle: #6a6a74;
+      --color-on-idle: #ffffff;
+      --color-focus: #a34700;
+      --color-notice: #fff3d1;
+      --color-on-notice: #4d3600;
+      --color-notice-edge: #c99500;
+      font: 100%/1.5 "Inter", system-ui, sans-serif;
+    }
+    @media (prefers-color-scheme: dark) {
+      :root {
+        --color-page: #15151a;
+        --color-text: #ececf1;
+        --color-muted: #a9a9b4;
+        --color-accent: #8aa4ff;
+        --color-on-accent: #0f1424;
+        --color-idle: #4b4b56;
+        --color-on-idle: #ececf1;
+        --color-focus: #ffb36b;
+        --color-notice: #352a08;
+        --color-on-notice: #ffe6a6;
+        --color-notice-edge: #d9a400;
+      }
+    }
+    *, *::before, *::after { box-sizing: border-box; }
+    [hidden] { display: none !important; }
+    body { margin: 0; padding: 1.5rem 1rem 2rem; background: var(--color-page); color: var(--color-text); }
+    main { display: grid; gap: 1.25rem; max-width: 36rem; margin: 0 auto; }
+    h1 { margin: 0; font-size: 1.75rem; line-height: 1.2; }
+    p { margin: 0; overflow-wrap: anywhere; }
+    .notice { padding: .75rem 1rem; border-left: .25rem solid var(--color-notice-edge); background: var(--color-notice); color: var(--color-on-notice); }
+    .transfer { display: grid; gap: .375rem; }
+    .transfer progress { width: 100%; height: .75rem; accent-color: var(--color-accent); }
+    .muted { color: var(--color-muted); }
+    .save { display: grid; gap: .75rem; align-items: start; }
+    .beside { display: grid; gap: .25rem; }
+    button {
+      justify-self: start; min-height: 2.75rem; padding: .625rem 1.25rem; border: 0; border-radius: .375rem;
+      background: var(--color-accent); color: var(--color-on-accent); font: inherit; font-weight: 600; cursor: pointer;
+    }
+    button:disabled { background: var(--color-idle); color: var(--color-on-idle); cursor: default; }
+    button:focus-visible { outline: .1875rem solid var(--color-focus); outline-offset: .1875rem; }
+    @media (min-width: 40rem) {
+      body { padding-top: 12vh; }
+      .save { grid-template-columns: auto 1fr; }
+    }
+    @media (prefers-reduced-motion: reduce) {
+      *, *::before, *::after { animation: none !important; transition: none !important; scroll-behavior: auto !important; }
+    }
   </style>
 </head>
 <body>
   <main>
     <h1>Universe</h1>
-    <button type="button" id="save" {{disabled}}>Save now</button>
-    <p id="result" role="status" aria-live="polite">{{message}}</p>
+    <p id="reload" class="notice" hidden>Pulled newer files from the cloud. Reload any open SillyTavern tabs.</p>
+    <div id="transfer" class="transfer" hidden>
+      <label id="transfer-label" for="transfer-bar">Pulling from the cloud</label>
+      <progress id="transfer-bar" max="1" value="0"></progress>
+      <p id="transfer-counts" class="muted"></p>
+    </div>
+    <div class="save">
+      <button type="button" id="save" {{disabled}}>Save now</button>
+      <div class="beside">
+        <p id="result" role="status" aria-live="polite">{{message}}</p>
+        <p id="saved" class="muted" hidden></p>
+        <p id="conflicts" hidden></p>
+      </div>
+    </div>
   </main>
   <script nonce="{{nonce}}">
     const button = document.getElementById('save');
     const result = document.getElementById('result');
+    const saved = document.getElementById('saved');
+    const conflicts = document.getElementById('conflicts');
+    const reload = document.getElementById('reload');
+    const transfer = document.getElementById('transfer');
+    const transferLabel = document.getElementById('transfer-label');
+    const transferBar = document.getElementById('transfer-bar');
+    const transferCounts = document.getElementById('transfer-counts');
     const pollMs = 2000;
-    button.addEventListener('click', async () => {
-      if (button.disabled) {
-        return;
+    const lockedPhases = ['saving', 'stopping', 'stopped', 'disabled'];
+    const movingPhases = ['pulling', 'saving', 'stopping'];
+    const stoppingText = 'Stopping: the console shows the final save.';
+    const stopTexts = new Map([['stopping', stoppingText], ['stopped', 'Universe is not running. The console shows how it ended.']]);
+    const endedStatus = {
+      phase: 'stopped', progress: null, lastSavedAt: null, unsavedSince: null, error: null, conflictAt: null, conflictsFolder: null, reloadTabs: false,
+    };
+    let latest = { phase: null, lastSavedAt: null, error: null };
+    let outcomeStatus = null;
+    let presses = 0;
+    let waiting = false;
+
+    /**
+     * @param {string} moment
+     * @returns {string}
+     */
+    function localTime(moment) {
+      return new Date(moment).toLocaleString();
+    }
+
+    /**
+     * @param {object} status
+     * @returns {string}
+     * @throws {TypeError}
+     */
+    function latestMessage(status) {
+      let text = status.error ?? '';
+      for (const moment of [status.conflictAt, status.unsavedSince]) {
+        if (moment !== null) {
+          text = text.replaceAll(moment, localTime(moment));
+        }
       }
-      button.disabled = true;
-      result.textContent = 'Saving...';
+      return text;
+    }
+
+    /**
+     * @param {object} served
+     * @returns {void}
+     * @throws {TypeError}
+     */
+    function show(served) {
+      const status = served.phase === 'stopped' ? endedStatus : served;
+      latest = status;
+      const moving = status.progress !== null && movingPhases.includes(status.phase);
+      transfer.hidden = !moving;
+      if (moving) {
+        const { filesDone, filesTotal, bytesDone, bytesTotal } = status.progress;
+        const files = `${filesDone} of ${filesTotal} ${filesTotal === 1 ? 'file' : 'files'}`;
+        const kilobytesTotal = Math.ceil(bytesTotal / 1000);
+        const sizes = kilobytesTotal < 1000
+          ? `${Math.floor(bytesDone / 1000)} of ${kilobytesTotal} KB`
+          : `${(Math.floor(bytesDone / 100_000) / 10).toFixed(1)} of ${(Math.ceil(bytesTotal / 100_000) / 10).toFixed(1)} MB`;
+        transferLabel.textContent = status.phase === 'pulling' ? 'Pulling from the cloud' : 'Saving to the cloud';
+        transferBar.max = filesTotal;
+        transferBar.value = filesDone;
+        transferCounts.textContent = bytesTotal > 0 ? `${files}, ${sizes}.` : `${files}.`;
+      }
+      reload.hidden = !status.reloadTabs;
+      saved.hidden = status.lastSavedAt === null;
+      if (status.lastSavedAt !== null) {
+        saved.textContent = `Last saved to cloud at ${localTime(status.lastSavedAt)}.`;
+      }
+      conflicts.hidden = status.conflictsFolder === null;
+      if (status.conflictsFolder !== null) {
+        conflicts.textContent = `Files this PC changed since its last pull or save were moved to ${status.conflictsFolder}.`;
+      }
+    }
+
+    /**
+     * @returns {Promise<void>}
+     * @throws {TypeError}
+     */
+    async function refresh() {
       try {
-        const response = await fetch('/save', {
-          method: 'POST', headers: { 'X-Universe-CSRF': document.querySelector('meta[name="universe-csrf"]').content },
-        });
-        if (response.status === 403) {
-          result.textContent = 'Reload this page to save.';
+        if (waiting) {
           return;
         }
-        if (response.status === 429) {
-          result.textContent = 'Please wait a moment before saving again.';
+        const pressesBefore = presses;
+        let status;
+        try {
+          status = await (await fetch('/status')).json();
+        } catch {
+          status = endedStatus;
+        }
+        if (presses !== pressesBefore) {
           return;
         }
-        let state = await response.json();
-        while (response.status === 202 && state.phase === 'saving') {
-          await new Promise((wake) => setTimeout(wake, pollMs));
-          state = await (await fetch('/status')).json();
+        show(status);
+        button.disabled = lockedPhases.includes(status.phase);
+        if (outcomeStatus !== null && (latest === endedStatus || outcomeStatus.phase !== status.phase ||
+            outcomeStatus.lastSavedAt !== status.lastSavedAt || outcomeStatus.error !== status.error)) {
+          outcomeStatus = null;
         }
-        if (state.error !== null) {
-          result.textContent = state.error;
-        } else if (response.status !== 202) {
-          result.textContent = 'Cloud save is not ready yet. Try again shortly.';
-        } else {
-          result.textContent = state.lastSavedAt === null ? 'Up to date.' : 'Saved to cloud at ' + new Date(state.lastSavedAt).toLocaleString() + '.';
+        if (outcomeStatus === null) {
+          const text = stopTexts.get(status.phase) ?? latestMessage(status);
+          if (result.textContent !== text) {
+            result.textContent = text;
+          }
         }
-      } catch {
-        result.textContent = 'Could not confirm the save. Try again.';
       } finally {
-        button.disabled = false;
+        setTimeout(refresh, pollMs);
       }
-    });
+    }
+
+    button.addEventListener('click',
+      /**
+       * @returns {Promise<void>}
+       */
+      async () => {
+        if (button.disabled) {
+          return;
+        }
+        presses += 1;
+        waiting = true;
+        button.disabled = true;
+        result.textContent = 'Saving...';
+        let outcome;
+        try {
+          const response = await fetch('/save', {
+            method: 'POST', headers: { 'X-Universe-CSRF': document.querySelector('meta[name="universe-csrf"]').content },
+          });
+          if (response.status === 403) {
+            outcome = 'Reload this page to save.';
+          } else if (response.status === 429) {
+            outcome = 'Please wait a moment before saving again.';
+          } else {
+            let status = await response.json();
+            show(status);
+            while (response.status === 202 && status.phase === 'saving') {
+              await new Promise((wake) => setTimeout(wake, pollMs));
+              status = await (await fetch('/status')).json();
+              show(status);
+            }
+            if (stopTexts.has(status.phase)) {
+              outcome = stoppingText;
+            } else if (status.error !== null) {
+              outcome = latestMessage(status);
+            } else if (response.status !== 202) {
+              outcome = 'Cloud save is not ready yet. Try again shortly.';
+            } else {
+              outcome = status.lastSavedAt === null ? 'Up to date.' : `Saved to cloud at ${localTime(status.lastSavedAt)}.`;
+            }
+          }
+        } catch {
+          outcome = lockedPhases.includes(latest.phase) ? 'Could not confirm the save.' : 'Could not confirm the save. Try again.';
+        } finally {
+          waiting = false;
+          button.disabled = lockedPhases.includes(latest.phase);
+          outcomeStatus = latest;
+          result.textContent = outcome;
+        }
+      });
+
+    refresh();
   </script>
 </body>
 </html>

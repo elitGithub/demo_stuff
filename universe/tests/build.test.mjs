@@ -14,6 +14,9 @@ const project = dirname(import.meta.dirname);
 const execute = promisify(execFile);
 const npmCli = process.env.npm_execpath ?? join(dirname(dirname(process.execPath)), 'lib/node_modules/npm/bin/npm-cli.js');
 const npmEnvironment = { ...process.env, npm_config_offline: 'true', npm_config_update_notifier: 'false' };
+const currentBuild = 'Universe local build v7\n';
+const replyRetryOutput = 'node_modules/sillytavern/public/scripts/extensions/third-party/universe-retry';
+const replyRetryNames = ['ReplyRetry.js', 'ReplyRetrySettings.js', 'index.js', 'manifest.json'];
 const removedFiles = [
   'child-preload.mjs', 'checkpoint-store.mjs', 'local-session.mjs', 'story-files.mjs', 'classes/capture-gate.mjs',
   'classes/cloud-save.mjs', 'integration/browser-bridge.js', 'integration/pinned-hooks.mjs', 'integration/server-bridge.mjs',
@@ -55,7 +58,7 @@ async function asOlderBuild(directory, signature) {
 async function fixture(context) {
   const directory = await mkdtemp(join(tmpdir(), 'universe-build-test-'));
   context.after(() => rm(directory, { recursive: true, force: true }));
-  for (const name of ['src', 'scripts', 'packages', '.npmrc']) {
+  for (const name of ['src', 'scripts', 'extension', 'packages', '.npmrc']) {
     await cp(join(project, name), join(directory, name), { recursive: true });
   }
   const upstream = join(directory, 'upstream');
@@ -175,7 +178,7 @@ test('the npm startup build step recovers a v3 backup and installs the profile s
   assert.equal(await readFile(join(output, 'launcher.mjs'), 'utf8'), 'previous v3 launcher');
   await rename(join(directory, 'unavailable-src'), join(directory, 'src'));
   await npm(directory, 'run', 'build', '--', '--if-missing');
-  assert.equal(await readFile(join(output, '.universe-build'), 'utf8'), 'Universe local build v6\n');
+  assert.equal(await readFile(join(output, '.universe-build'), 'utf8'), currentBuild);
   for (const file of ['launcher.mjs', 'child.mjs', 'sync/ProfileSync.mjs', 'sync/CloudStore.mjs']) {
     assert.deepEqual(await readFile(join(output, file)), await readFile(join(directory, 'src', file)));
   }
@@ -195,13 +198,13 @@ test('wrapper startup build step recovers a v4 backup and upgrades its home page
   assert.equal(await readFile(join(output, 'server.mjs'), 'utf8'), 'previous v4 server');
   await rename(join(directory, 'unavailable-src'), join(directory, 'src'));
   await npm(directory, 'run', 'build', '--', '--if-missing');
-  assert.equal(await readFile(join(output, '.universe-build'), 'utf8'), 'Universe local build v6\n');
+  assert.equal(await readFile(join(output, '.universe-build'), 'utf8'), currentBuild);
   for (const name of ['server.mjs', 'launcher.mjs', 'wrapper-home.html']) {
     assert.deepEqual(await readFile(join(output, name)), await readFile(join(directory, 'src', name)));
   }
 });
 
-test('a v5 checkpoint build runs while sources are missing and is replaced by v6 without any removed file', async context => {
+test('a v5 checkpoint build runs while sources are missing and is replaced by v7 without any removed file', async context => {
   const directory = await fixture(context);
   const output = join(directory, 'dist');
   const backup = join(directory, '.universe-build-previous');
@@ -214,14 +217,42 @@ test('a v5 checkpoint build runs while sources are missing and is replaced by v6
   assert.equal(await readFile(join(output, 'checkpoint-store.mjs'), 'utf8'), 'previous build file');
   await rename(join(directory, 'unavailable-src'), join(directory, 'src'));
   await npm(directory, 'run', 'build', '--', '--if-missing');
-  assert.equal(await readFile(join(output, '.universe-build'), 'utf8'), 'Universe local build v6\n');
+  assert.equal(await readFile(join(output, '.universe-build'), 'utf8'), currentBuild);
   const names = await readdir(output, { recursive: true });
   for (const file of [...removedFiles, 'classes', 'integration']) {
-    assert.ok(!names.includes(file), `${file} must not survive in the v6 build`);
+    assert.ok(!names.includes(file), `${file} must not survive in the v7 build`);
   }
   for (const file of ['server.mjs', 'launcher.mjs', 'LauncherLog.mjs', 'child.mjs', 'child-watchdog.mjs', 'r2.mjs', 'sync/ProfileSync.mjs', 'sync/SyncSettings.mjs']) {
     assert.deepEqual(await readFile(join(output, file)), await readFile(join(directory, 'src', file)));
   }
+  assert.deepEqual((await readdir(directory)).filter(name => name.startsWith('.universe-build')), ['.universe-build-owners']);
+});
+
+test('a v6 sync build runs while the retry extension is missing and is replaced by v7 holding its four files', async context => {
+  const directory = await fixture(context);
+  const output = join(directory, 'dist');
+  const backup = join(directory, '.universe-build-previous');
+  const source = join(directory, 'extension/universe-retry');
+  await npm(directory, 'run', 'build');
+  await rename(output, backup);
+  await writeFile(join(backup, '.universe-build'), 'Universe local build v6\n');
+  await rm(join(backup, replyRetryOutput), { recursive: true });
+  await rename(join(directory, 'extension'), join(directory, 'unavailable-extension'));
+  await npm(directory, 'run', 'build', '--', '--if-missing');
+  assert.equal(await readFile(join(output, '.universe-build'), 'utf8'), 'Universe local build v6\n');
+  await assert.rejects(stat(join(output, replyRetryOutput)), { code: 'ENOENT' });
+  await rename(join(directory, 'unavailable-extension'), join(directory, 'extension'));
+  await npm(directory, 'run', 'build', '--', '--if-missing');
+  assert.equal(await readFile(join(output, '.universe-build'), 'utf8'), currentBuild);
+  assert.deepEqual((await readdir(join(output, replyRetryOutput))).sort(), replyRetryNames);
+  for (const file of replyRetryNames) {
+    assert.deepEqual(await readFile(join(output, replyRetryOutput, file)), await readFile(join(source, file)));
+  }
+  assert.ok(!(await readdir(output)).includes('extension'));
+  const removed = join(output, replyRetryOutput, 'ReplyRetry.js');
+  await rm(removed);
+  await npm(directory, 'run', 'build', '--', '--if-missing');
+  assert.deepEqual(await readFile(removed), await readFile(join(source, 'ReplyRetry.js')));
   assert.deepEqual((await readdir(directory)).filter(name => name.startsWith('.universe-build')), ['.universe-build-owners']);
 });
 

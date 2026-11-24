@@ -544,11 +544,24 @@ export class PedantService {
         return subject.id === speakerSubjectId && subject.mergedInto === null;
       });
       if (speakerSubjectId === null || !subjectExists) {
+        const excludeSubjectIds = new Set();
+        for (const otherCharacter of this.#scribeService.listAllCharacters(campaignId)) {
+          if (
+            otherCharacter.id !== speakerCharacter.id &&
+            typeof otherCharacter.scribeSubjectId === 'string' &&
+            otherCharacter.scribeSubjectId.trim().length > 0
+          ) {
+            const trimmedId = otherCharacter.scribeSubjectId.trim();
+            excludeSubjectIds.add(trimmedId);
+            excludeSubjectIds.add(ScribeKnowledge.survivor(state, trimmedId));
+          }
+        }
         const synced = ScribeLogCore.syncCharacterSubject(log, state, {
           subjectId: speakerSubjectId,
           name: speakerCharacter.name,
           aliases: speakerCharacter.aliases,
           kind: ScribeCategory.SubjectKinds.Character,
+          excludeSubjectIds,
         });
         speakerSubjectId = synced.subjectId;
         if (synced.changed) {

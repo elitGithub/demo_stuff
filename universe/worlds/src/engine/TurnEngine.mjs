@@ -74,6 +74,18 @@ export class TurnEngine {
   }
 
   /**
+   * @param {string} campaignId
+   * @returns {boolean}
+   * @throws {RangeError}
+   */
+  isInFlight(campaignId) {
+    if (typeof campaignId !== 'string' || campaignId.trim().length === 0) {
+      throw new RangeError('campaignId must be a non-empty string.');
+    }
+    return this.#inFlight.has(campaignId);
+  }
+
+  /**
    * @param {{campaignId: string, text: string, mode?: string, oocNudge?: string | null, signal?: AbortSignal | null, emit?: ((payload: {event: string, data: unknown}) => void | Promise<void>) | null}} options
    * @returns {Promise<Readonly<{userTurn: object, assistantTurn: object, sceneState: object, plan: object, truncated: boolean, playerBeatRemapped: boolean}>>}
    * @throws {Error}

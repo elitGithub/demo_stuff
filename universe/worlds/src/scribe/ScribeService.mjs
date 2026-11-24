@@ -552,11 +552,24 @@ export class ScribeService {
         });
       }
       if (character.scribeSubjectId === null || existingSubject === undefined || labelChanged || missingAlias) {
+        const excludeSubjectIds = new Set();
+        for (const otherCharacter of allCharacters) {
+          if (
+            otherCharacter.id !== character.id &&
+            typeof otherCharacter.scribeSubjectId === 'string' &&
+            otherCharacter.scribeSubjectId.trim().length > 0
+          ) {
+            const trimmedId = otherCharacter.scribeSubjectId.trim();
+            excludeSubjectIds.add(trimmedId);
+            excludeSubjectIds.add(ScribeKnowledge.survivor(state, trimmedId));
+          }
+        }
         const synced = ScribeLogCore.syncCharacterSubject(log, state, {
           subjectId: character.scribeSubjectId,
           name: character.name,
           aliases: character.aliases,
           kind: ScribeCategory.SubjectKinds.Character,
+          excludeSubjectIds,
         });
         if (character.scribeSubjectId !== synced.subjectId) {
           pendingSubjectUpdates.push({ characterId: character.id, scribeSubjectId: synced.subjectId });

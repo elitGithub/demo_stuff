@@ -6,12 +6,15 @@ import { WorldsConfig } from './config.mjs';
 import { RateLimiter } from './http/RateLimiter.mjs';
 import { Router } from './http/Router.mjs';
 import { Security } from './http/Security.mjs';
+import { ModelCatalog } from './openrouter/ModelCatalog.mjs';
 import { OpenRouterClient } from './openrouter/OpenRouterClient.mjs';
 import { MuseService } from './scribe/MuseService.mjs';
 import { PedantService } from './scribe/PedantService.mjs';
 import { ScribeService } from './scribe/ScribeService.mjs';
 import { TurnEngine } from './engine/TurnEngine.mjs';
 import { SqliteStore } from './store/SqliteStore.mjs';
+import { R2Transport } from './sync/R2Transport.mjs';
+import { WorldSync } from './sync/WorldSync.mjs';
 
 export class WorldsServer {
   #config;
@@ -50,7 +53,7 @@ export class WorldsServer {
   }
 
   /**
-   * @param {{config?: object | null, store?: object | null, client?: object | null, syncService?: object | null, publicDir?: string, csrfToken?: string, rateLimiter?: RateLimiter}} [options]
+   * @param {{config?: object | null, store?: object | null, client?: object | null, syncService?: object | null, publicDir?: string, csrfToken?: string, rateLimiter?: RateLimiter, modelCatalog?: ModelCatalog}} [options]
    * @returns {Promise<WorldsServer>}
    * @throws {Error}
    */
@@ -67,6 +70,7 @@ export class WorldsServer {
       publicDir = path.resolve(import.meta.dirname, '..', 'public'),
       csrfToken = Security.generateCsrfToken(),
       rateLimiter = new RateLimiter(),
+      modelCatalog = new ModelCatalog(),
     } = options;
 
     const resolvedConfig = config ?? WorldsConfig.load();
@@ -164,6 +168,7 @@ export class WorldsServer {
         rateLimiter,
         activeControllers,
         getSyncStatus,
+        modelCatalog,
       });
 
       const httpServer = http.createServer((request, response) => {
@@ -189,13 +194,45 @@ export class WorldsServer {
   }
 
   /**
+   * @param {object} store
+   * @param {ModelCatalog} modelCatalog
+   * @returns {boolean}
+   */
+  static seedDefaultModelsIfEmpty(store, modelCatalog) {
+    const currentSettings = store.getSettings();
+    const models = currentSettings.models ?? {};
+    const allBlank = ['director', 'composer', 'main', 'recurring', 'scribe'].every((slotKey) => {
+      return typeof models[slotKey] !== 'string' || models[slotKey].trim().length === 0;
+    });
+    if (!allBlank) {
+      return false;
+    }
+    store.updateSettings({ models: modelCatalog.getDefaults() });
+    return true;
+  }
+
+  /**
    * @returns {Promise<void>}
    * @throws {Error}
    */
   static async runCli() {
     const config = WorldsConfig.load();
-    const server = await WorldsServer.create({ config });
+    const modelCatalog = new ModelCatalog();
+    const syncService = config.r2 !== null
+      ? new WorldSync({
+          transport: new R2Transport(config.r2),
+          bucket: config.r2.bucket,
+        })
+      : null;
+    const server = await WorldsServer.create({ config, syncService, modelCatalog });
     try {
+      if (syncService !== null) {
+        const syncStatus = syncService.getStatus();
+        if (syncStatus.warning) {
+          process.stderr.write(`Worlds sync warning: ${syncStatus.warning}\n`);
+        }
+      }
+      WorldsServer.seedDefaultModelsIfEmpty(server.store, modelCatalog);
       const started = await server.start();
       process.stdout.write(`Worlds listening on ${started.url}\n`);
 

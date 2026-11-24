@@ -1,0 +1,88 @@
+{
+  "defaultSlots": {
+    "director": "nousresearch/hermes-3-llama-3.1-70b",
+    "composer": "sao10k/l3.3-euryale-70b",
+    "main": "thedrummer/cydonia-24b-v4.1",
+    "recurring": "thedrummer/rocinante-12b",
+    "scribe": "cognitivecomputations/dolphin3.0-mistral-24b"
+  },
+  "recommended": [
+    {
+      "id": "nousresearch/hermes-3-llama-3.1-70b",
+      "name": "Hermes 3 70B Instruct",
+      "recommendedFor": "Director / Scribe / Main",
+      "notes": "Strong JSON and instruction adherence with high steerability and low refusal rates.",
+      "uncensored": true
+    },
+    {
+      "id": "sao10k/l3.3-euryale-70b",
+      "name": "Llama 3.3 Euryale 70B",
+      "recommendedFor": "Composer / Main",
+      "notes": "Roleplay-tuned 70B Llama 3.3 model for rich multi-beat prose without moralizing.",
+      "uncensored": true
+    },
+    {
+      "id": "sao10k/l3.1-euryale-70b",
+      "name": "Llama 3.1 Euryale 70B",
+      "recommendedFor": "Composer / Main",
+      "notes": "Roleplay-tuned 70B Llama 3.1 variant with strong character consistency.",
+      "uncensored": true
+    },
+    {
+      "id": "thedrummer/cydonia-24b-v4.1",
+      "name": "Cydonia 24B V4.1",
+      "recommendedFor": "Main / Composer / Recurring",
+      "notes": "Mistral-Small-24B fine-tune built for descriptive RP without soft-refusal platitudes.",
+      "uncensored": true
+    },
+    {
+      "id": "thedrummer/skyfall-36b-v2",
+      "name": "Skyfall 36B V2",
+      "recommendedFor": "Composer / Main",
+      "notes": "Mistral-based storytelling fine-tune for nuanced multi-character scenes.",
+      "uncensored": true
+    },
+    {
+      "id": "thedrummer/valkyrie-49b-v1",
+      "name": "Valkyrie 49B V1",
+      "recommendedFor": "Composer / Main",
+      "notes": "Nemotron 49B creative RP fine-tune with strong dialogue flow.",
+      "uncensored": true
+    },
+    {
+      "id": "thedrummer/rocinante-12b",
+      "name": "Rocinante 12B",
+      "recommendedFor": "Recurring",
+      "notes": "Compact, low-cost 12B storytelling fine-tune suited to recurring minds.",
+      "uncensored": true
+    },
+    {
+      "id": "thedrummer/unslopnemo-12b",
+      "name": "UnslopNemo 12B",
+      "recommendedFor": "Recurring",
+      "notes": "Compact 12B adventure/RP fine-tune with large context support.",
+      "uncensored": true
+    },
+    {
+      "id": "cognitivecomputations/dolphin-mistral-24b-venice-edition",
+      "name": "Dolphin Mistral 24B Venice Edition",
+      "recommendedFor": "Main / Composer / Recurring",
+      "notes": "Minimal-guardrail Venice/Dolphin edition designed for strict system-prompt compliance.",
+      "uncensored": true
+    },
+    {
+      "id": "cognitivecomputations/dolphin3.0-mistral-24b",
+      "name": "Dolphin 3.0 Mistral 24B",
+      "recommendedFor": "Scribe / Director / Recurring",
+      "notes": "Unaligned 24B instruction model that processes adult facts without filtering.",
+      "uncensored": true
+    },
+    {
+      "id": "nousresearch/hermes-4-70b",
+      "name": "Hermes 4 70B",
+      "recommendedFor": "Main / Director",
+      "notes": "Hybrid reasoning model by Nous Research; may emit think traces unless configured otherwise.",
+      "uncensored": true
+    }
+  ]
+}

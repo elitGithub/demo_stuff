@@ -1,5 +1,6 @@
 import fs from 'node:fs';
 import { WorldsConfig } from '../config.mjs';
+import { ModelCatalog } from '../openrouter/ModelCatalog.mjs';
 import { ScribeAnalyzer } from '../scribe/ScribeAnalyzer.mjs';
 import { ScribeAnswer } from '../scribe/ScribeAnswer.mjs';
 import { ScribeCategory } from '../scribe/ScribeCategory.mjs';
@@ -31,11 +32,12 @@ export class Router {
   #rateLimiter;
   #activeControllers;
   #getSyncStatus;
+  #modelCatalog;
   #exclusiveCampaignOps = new Set();
   #activeCampaignLlmCounts = new Map();
 
   /**
-   * @param {{config: object, store: object, scribeService: object, pedantService: object, museService: object, turnEngine: object, syncService?: object | null, publicDir: string, csrfToken: string, port: number, rateLimiter?: RateLimiter, activeControllers?: Set<AbortController>, getSyncStatus?: (() => object) | null}} options
+   * @param {{config: object, store: object, scribeService: object, pedantService: object, museService: object, turnEngine: object, syncService?: object | null, publicDir: string, csrfToken: string, port: number, rateLimiter?: RateLimiter, activeControllers?: Set<AbortController>, getSyncStatus?: (() => object) | null, modelCatalog?: ModelCatalog}} options
    * @throws {TypeError | RangeError}
    */
   constructor(options = {}) {
@@ -57,6 +59,7 @@ export class Router {
       rateLimiter = new RateLimiter(),
       activeControllers = new Set(),
       getSyncStatus = null,
+      modelCatalog = new ModelCatalog(),
     } = options;
 
     if (config === null || typeof config !== 'object') {
@@ -98,6 +101,9 @@ export class Router {
     if (getSyncStatus !== null && typeof getSyncStatus !== 'function') {
       throw new TypeError('getSyncStatus must be null or a function.');
     }
+    if (modelCatalog === null || typeof modelCatalog !== 'object' || typeof modelCatalog.listModels !== 'function') {
+      throw new TypeError('modelCatalog must provide listModels().');
+    }
 
     this.#config = config;
     this.#store = store;
@@ -112,6 +118,7 @@ export class Router {
     this.#rateLimiter = rateLimiter;
     this.#activeControllers = activeControllers;
     this.#getSyncStatus = getSyncStatus;
+    this.#modelCatalog = modelCatalog;
   }
 
   /**
@@ -365,6 +372,22 @@ export class Router {
           return;
         }
         this.#sendJson(response, 405, { error: 'Method not allowed.' });
+        return;
+      }
+
+      if (segments.length === 2 && segments[1] === 'models') {
+        if (method !== 'GET') {
+          this.#sendJson(response, 405, { error: 'Method not allowed.' });
+          return;
+        }
+        const includeAll = this.#parseBooleanParam(searchParams, 'includeAll');
+        const refresh = this.#parseBooleanParam(searchParams, 'refresh');
+        const catalogResult = includeAll
+          ? await this.#runWithAbortController(request, response, async (signal) => {
+              return await this.#modelCatalog.listModels({ includeAll: true, refresh, signal });
+            })
+          : await this.#modelCatalog.listModels({ includeAll: false, refresh: false });
+        this.#sendJson(response, 200, catalogResult);
         return;
       }
 
@@ -1348,6 +1371,26 @@ export class Router {
       throw this.#createHttpError(400, 'after cursor must not be empty.');
     }
     return cursorValue;
+  }
+
+  /**
+   * @param {URLSearchParams} searchParams
+   * @param {string} paramName
+   * @returns {boolean}
+   * @throws {Error}
+   */
+  #parseBooleanParam(searchParams, paramName) {
+    if (!searchParams.has(paramName)) {
+      return false;
+    }
+    const rawValue = searchParams.get(paramName);
+    if (rawValue === 'true' || rawValue === '1') {
+      return true;
+    }
+    if (rawValue === 'false' || rawValue === '0') {
+      return false;
+    }
+    throw this.#createHttpError(400, `${paramName} must be true or false.`);
   }
 
   /**

@@ -1,7 +1,7 @@
 // ==UserScript==
 // @name         Zeta Scribe
 // @namespace    zeta-scribe
-// @version      0.3.43
+// @version      0.3.46
 // @description  Keeps the book of a Zeta campaign, tells the scene what it knows, and checks replies against the book.
 // @match        https://zeta-ai.io/*
 // @match        https://frame.pingpong.ai/*
@@ -25327,11 +25327,14 @@ const ScribeLive = Object.freeze({
         record.edition = Number.isSafeInteger(saved.edition) ? saved.edition : null;
         record.retries = ScribeLive.retries(saved.retries).filter((entry) => entry.role === settings.Retried.Scene);
         const failing = ScribeLive.isObject(saved.failing) ? saved.failing : {};
-        for (const role of [settings.Retried.Scene]) {
-            const failure = failing[role];
-            if (ScribeLive.isText(failure) || (ScribeStore.localSource(failure?.source) && ScribeLive.isText(failure.reason))) {
-                record.failing[role] = failure;
-            }
+        const sceneFailure = failing.scene;
+        if (ScribeLive.isText(sceneFailure) || (ScribeStore.localSource(sceneFailure?.source) && ScribeLive.isText(sceneFailure.reason))) {
+            record.failing.scene = sceneFailure;
+        }
+        const checkFailure = failing.check;
+        if (ScribeLive.isText(checkFailure) && (/^HTTP 401(?:\s|:|$)/.test(checkFailure) ||
+            /^(?:unexpected HTTP status|response has no readable body|response body could not be read); status 401; finish [^;]+(?:; reason: .*)?$/.test(checkFailure))) {
+            record.failing.check = checkFailure;
         }
         const story = saved.story;
         if (ScribeLive.isObject(story) && ScribeLive.isText(story.key) && story.key.startsWith(settings.RecapKeyPrefix) && ScribeLive.isText(story.text)) {

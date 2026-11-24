@@ -33,6 +33,7 @@ export class WorldsApp {
 
   #health = null;
   #settings = null;
+  #modelCatalog = null;
   #campaigns = [];
   #campaignsTotal = 0;
   #campaignsNextCursor = null;
@@ -365,10 +366,18 @@ export class WorldsApp {
           this.#applyUpdatedCampaign(updated);
         },
         onAddCharacter: () => {
-          this.#characterModal.open({ character: null });
+          this.#characterModal.open({
+            character: null,
+            modelCatalog: this.#modelCatalog,
+            onLoadAllModels: (refresh) => this.#loadAllModels(refresh),
+          });
         },
         onEditCharacter: (character) => {
-          this.#characterModal.open({ character });
+          this.#characterModal.open({
+            character,
+            modelCatalog: this.#modelCatalog,
+            onLoadAllModels: (refresh) => this.#loadAllModels(refresh),
+          });
         },
         onToggleArchiveCharacter: async (character) => {
           const campaignId = this.#activeCampaignId;
@@ -496,6 +505,9 @@ export class WorldsApp {
           this.#inspectorDrawer.setSettings(updatedSettings);
           this.#renderTopBar();
         },
+        onLoadAllModels: async (refresh = false) => {
+          await this.#loadAllModels(refresh);
+        },
       },
     });
   }
@@ -604,17 +616,20 @@ export class WorldsApp {
     this.#chatView.render();
 
     try {
-      const [health, settings, campaignsPage] = await Promise.all([
+      const [health, settings, campaignsPage, modelCatalog] = await Promise.all([
         this.#api.getHealth(),
         this.#api.getSettings(),
         this.#api.listCampaigns({ limit: 25 }),
+        this.#api.getModels({ includeAll: false }),
       ]);
       this.#health = health;
       this.#settings = settings;
+      this.#modelCatalog = modelCatalog;
       this.#campaigns = [...(campaignsPage.items ?? [])];
       this.#campaignsTotal = Number.isInteger(campaignsPage.total) ? campaignsPage.total : this.#campaigns.length;
       this.#campaignsNextCursor = campaignsPage.nextCursor ?? null;
 
+      this.#inspectorDrawer.setModelCatalog(modelCatalog);
       this.#inspectorDrawer.setSettings(settings);
       this.#renderTopBar();
 
@@ -862,6 +877,20 @@ export class WorldsApp {
     } catch (healthError) {
       this.#setGlobalBanner(healthError instanceof Error ? healthError.message : String(healthError), 'warning');
     }
+  }
+
+  /**
+   * @param {boolean} [refresh]
+   * @returns {Promise<void>}
+   */
+  async #loadAllModels(refresh = false) {
+    const catalog = await this.#api.getModels({
+      includeAll: true,
+      refresh: Boolean(refresh),
+    });
+    this.#modelCatalog = catalog;
+    this.#inspectorDrawer.setModelCatalog(catalog);
+    this.#characterModal.setModelCatalog(catalog);
   }
 
   /**

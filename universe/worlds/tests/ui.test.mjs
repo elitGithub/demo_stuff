@@ -12,6 +12,7 @@ import { ComposerBar } from '../public/components/ComposerBar.mjs';
 import { ConfirmModal } from '../public/components/ConfirmModal.mjs';
 import { InspectorDrawer } from '../public/components/InspectorDrawer.mjs';
 import { Security } from '../src/http/Security.mjs';
+import { ModelCatalog } from '../src/openrouter/ModelCatalog.mjs';
 import { OpenRouterClient } from '../src/openrouter/OpenRouterClient.mjs';
 import { WorldsServer } from '../src/server.mjs';
 import { SqliteStore } from '../src/store/SqliteStore.mjs';
@@ -1249,5 +1250,280 @@ describe('Live WorldsServer static serving and WorldsApp boot integration', () =
     assert.equal(sendButton.textContent, 'Send');
     assert.equal(shell.querySelector('#chat-view').querySelectorAll('.turn-card').length, 2);
     assert.ok(composerBar.textContent.includes('Turn stopped. No changes were committed.'));
+  });
+});
+
+describe('ModelCatalog, /api/models endpoint, default prefill, and OpenRouter catalog picker', () => {
+  const cleanups = [];
+
+  after(async () => {
+    for (const cleanupFn of cleanups) {
+      await cleanupFn();
+    }
+  });
+
+  it('loads curated defaults without network calls, caches OpenRouter catalog, and rejects malformed upstream responses', async () => {
+    let fetchCount = 0;
+    let fakeNow = 100_000;
+    let mode = 'ok';
+    const catalog = new ModelCatalog({
+      nowProvider: () => fakeNow,
+      cacheTtlMs: 60_000,
+      fetchImpl: async (url, init) => {
+        fetchCount += 1;
+        assert.equal(url, 'https://openrouter.ai/api/v1/models');
+        if (init.signal?.aborted) {
+          const abortErr = new Error('Aborted');
+          abortErr.name = 'AbortError';
+          throw abortErr;
+        }
+        if (mode === 'http_error') {
+          return new Response('Upstream down', { status: 503 });
+        }
+        if (mode === 'bad_json') {
+          return new Response('not-json', { status: 200 });
+        }
+        if (mode === 'bad_shape') {
+          return new Response(JSON.stringify({ items: [] }), { status: 200 });
+        }
+        return new Response(
+          JSON.stringify({
+            data: [
+              { id: '', name: 'Broken' },
+              {
+                id: 'sao10k/l3.3-euryale-70b',
+                name: 'Euryale 70B',
+                context_length: 131072,
+                pricing: { prompt: '0.0000007', completion: '0.0000008' },
+                top_provider: { is_moderated: false },
+                supported_parameters: ['temperature', 'response_format'],
+              },
+              {
+                id: 'custom/alpha-model',
+                name: 'Alpha Model',
+                context_length: 32768,
+                pricing: { prompt: '0', completion: '0' },
+                top_provider: { is_moderated: true },
+                supported_parameters: ['temperature'],
+              },
+            ],
+          }),
+          { status: 200 },
+        );
+      },
+    });
+
+    const defaultsOnly = await catalog.listModels({ includeAll: false });
+    assert.equal(fetchCount, 0);
+    assert.equal(defaultsOnly.openrouter, null);
+    assert.equal(defaultsOnly.defaults.director, 'nousresearch/hermes-3-llama-3.1-70b');
+    assert.equal(defaultsOnly.defaults.composer, 'sao10k/l3.3-euryale-70b');
+    assert.ok(defaultsOnly.recommended.length >= 10);
+
+    const loadedFirst = await catalog.listModels({ includeAll: true });
+    assert.equal(fetchCount, 1);
+    assert.equal(loadedFirst.openrouter.length, 2);
+    assert.equal(loadedFirst.openrouter[0].id, 'custom/alpha-model');
+    assert.equal(loadedFirst.openrouter[0].isModerated, true);
+    assert.equal(loadedFirst.openrouter[1].id, 'sao10k/l3.3-euryale-70b');
+    assert.equal(loadedFirst.openrouter[1].promptCostPerMillion, 0.7);
+    assert.equal(loadedFirst.openrouter[1].supportsStructuredOutput, true);
+
+    fakeNow += 10_000;
+    await catalog.listModels({ includeAll: true });
+    assert.equal(fetchCount, 1);
+
+    await catalog.listModels({ includeAll: true, refresh: true });
+    assert.equal(fetchCount, 2);
+
+    mode = 'http_error';
+    await assert.rejects(
+      () => catalog.listModels({ includeAll: true, refresh: true }),
+      (err) => err.statusCode === 502 && /HTTP 503/.test(err.message),
+    );
+    mode = 'bad_json';
+    await assert.rejects(
+      () => catalog.listModels({ includeAll: true, refresh: true }),
+      (err) => err.statusCode === 502 && /malformed JSON/i.test(err.message),
+    );
+    mode = 'bad_shape';
+    await assert.rejects(
+      () => catalog.listModels({ includeAll: true, refresh: true }),
+      (err) => err.statusCode === 502 && /missing data array/i.test(err.message),
+    );
+
+    const abortController = new AbortController();
+    abortController.abort();
+    await assert.rejects(
+      () => catalog.listModels({ includeAll: true, signal: abortController.signal }),
+      (err) => err.name === 'AbortError',
+    );
+  });
+
+  it('seeds defaults only when all model slots are empty, serves GET /api/models, and wires prefill & full picker in UI', async () => {
+    const tempRoot = fs.mkdtempSync(path.join(os.tmpdir(), 'worlds-models-ui-'));
+    const localDir = path.join(tempRoot, 'local');
+    fs.mkdirSync(localDir, { recursive: true, mode: 0o700 });
+    const config = Object.freeze({
+      port: 0,
+      rootDir: tempRoot,
+      localDir,
+      dbPath: path.join(localDir, 'worlds.sqlite'),
+      secretsPath: path.join(localDir, 'secrets.json'),
+      syncStatePath: path.join(localDir, 'sync-state.json'),
+      conflictsDir: path.join(localDir, 'conflicts'),
+      envApiKey: null,
+      r2: null,
+    });
+
+    const store = new SqliteStore(config.dbPath);
+    const catalog = new ModelCatalog({
+      fetchImpl: async () => new Response(
+        JSON.stringify({
+          data: [
+            {
+              id: 'thedrummer/cydonia-24b-v4.1',
+              name: 'Cydonia 24B V4.1',
+              context_length: 32768,
+              pricing: { prompt: '0.0000003', completion: '0.0000005' },
+              top_provider: { is_moderated: false },
+              supported_parameters: ['temperature'],
+            },
+            {
+              id: 'vendor/custom-story-model',
+              name: 'Custom Story Model',
+              context_length: 65536,
+              pricing: { prompt: '0.0000002', completion: '0.0000004' },
+              top_provider: { is_moderated: false },
+              supported_parameters: ['temperature'],
+            },
+          ],
+        }),
+        { status: 200 },
+      ),
+    });
+
+    const seededFirst = WorldsServer.seedDefaultModelsIfEmpty(store, catalog);
+    assert.equal(seededFirst, true);
+    const seededSecond = WorldsServer.seedDefaultModelsIfEmpty(store, catalog);
+    assert.equal(seededSecond, false);
+    assert.equal(store.getSettings().models.composer, 'sao10k/l3.3-euryale-70b');
+
+    store.updateSettings({
+      models: { director: '', composer: '', main: '', recurring: '', scribe: '' },
+    });
+
+    const client = new OpenRouterClient({
+      apiKeyProvider: () => 'sk-models-test-key',
+      fetchImpl: async () => new Response('{}', { status: 200 }),
+      onSpend: (dto) => store.recordSpend(dto),
+    });
+
+    const server = await WorldsServer.create({
+      config,
+      store,
+      client,
+      modelCatalog: catalog,
+      publicDir: PublicDirPath,
+    });
+    const started = await server.start();
+    cleanups.push(async () => {
+      await server.stop();
+      store.close();
+      fs.rmSync(tempRoot, { recursive: true, force: true });
+    });
+
+    const badParamRes = await fetch(`${started.url}/api/models?includeAll=maybe`);
+    assert.equal(badParamRes.status, 400);
+
+    const postModelsRes = await fetch(`${started.url}/api/models`, {
+      method: 'POST',
+      headers: {
+        Origin: started.url,
+        'X-Worlds-CSRF': started.csrfToken,
+      },
+    });
+    assert.equal(postModelsRes.status, 405);
+
+    const { documentRef, createRootShell } = createFakeDomEnvironment();
+    const shell = createRootShell();
+    const liveApi = new WorldsApi({
+      baseUrl: started.url,
+      csrfToken: started.csrfToken,
+      fetchImpl: (url, init) => {
+        return fetch(url, {
+          ...init,
+          headers: {
+            ...(init?.headers ?? {}),
+            Origin: started.url,
+          },
+        });
+      },
+    });
+
+    const app = new WorldsApp({
+      api: liveApi,
+      rootElement: shell,
+      documentRef,
+    });
+    await app.init();
+
+    const drawerEl = shell.querySelector('#inspector-drawer');
+    const settingsTabBtn = drawerEl.querySelectorAll('button').find((btn) => btn.textContent === 'Settings');
+    await settingsTabBtn.dispatchEvent('click');
+    await new Promise((resolve) => setTimeout(resolve, 25));
+
+    assert.equal(drawerEl.querySelector('#settings-model-director').value, 'nousresearch/hermes-3-llama-3.1-70b');
+    assert.equal(drawerEl.querySelector('#settings-model-composer').value, 'sao10k/l3.3-euryale-70b');
+    assert.ok(drawerEl.textContent.includes('Suggested unrestricted defaults are prefilled below'));
+
+    const loadAllBtn = drawerEl.querySelectorAll('button').find((btn) => btn.textContent === 'Load all OpenRouter models');
+    assert.notEqual(loadAllBtn, undefined);
+    await loadAllBtn.dispatchEvent('click');
+    assert.notEqual(
+      drawerEl.querySelectorAll('button').find((btn) => btn.textContent === 'Refresh OpenRouter models'),
+      undefined,
+    );
+
+    const filterInput = drawerEl.querySelector('#settings-model-filter');
+    filterInput.value = 'vendor/custom';
+    await filterInput.dispatchEvent('input');
+    assert.equal(drawerEl.querySelector('#settings-model-filter'), filterInput);
+
+    const mainPicker = drawerEl.querySelector('#settings-model-picker-main');
+    const mainOptions = mainPicker.querySelectorAll('option').map((opt) => opt.value);
+    assert.ok(mainOptions.includes('vendor/custom-story-model'));
+
+    mainPicker.value = 'vendor/custom-story-model';
+    await mainPicker.dispatchEvent('change');
+    assert.equal(drawerEl.querySelector('#settings-model-main').value, 'vendor/custom-story-model');
+
+    await drawerEl.querySelector('form').dispatchEvent('submit');
+    const savedSettings = await liveApi.getSettings();
+    assert.equal(savedSettings.models.main, 'vendor/custom-story-model');
+    assert.equal(savedSettings.models.composer, 'sao10k/l3.3-euryale-70b');
+
+    const modalRoot = shell.querySelector('#modal-root');
+    const overrideSaves = [];
+    const charModal = new CharacterModal({
+      modalRoot,
+      documentRef,
+      onSave: async (payload) => {
+        overrideSaves.push(payload);
+      },
+    });
+    const catalogData = await liveApi.getModels({ includeAll: true });
+    charModal.open({
+      modelCatalog: catalogData,
+      onLoadAllModels: async () => {},
+    });
+    const charNameInput = modalRoot.querySelector('#char-name-input');
+    charNameInput.value = 'Maya';
+    await charNameInput.dispatchEvent('input');
+    const charPicker = modalRoot.querySelector('#char-model-picker');
+    charPicker.value = 'vendor/custom-story-model';
+    await charPicker.dispatchEvent('change');
+    await modalRoot.querySelector('form').dispatchEvent('submit');
+    assert.equal(overrideSaves[0].modelOverride, 'vendor/custom-story-model');
   });
 });

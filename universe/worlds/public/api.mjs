@@ -269,6 +269,19 @@ export class WorldsApi {
   }
 
   /**
+   * @param {{includeAll?: boolean, refresh?: boolean, signal?: AbortSignal | null}} [options]
+   * @returns {Promise<{defaults: Record<string, string>, recommended: Array<object>, openrouter: Array<object> | null, fetchedAt: string | null}>}
+   * @throws {Error}
+   */
+  async getModels({ includeAll = false, refresh = false, signal = null } = {}) {
+    const params = new URLSearchParams({
+      includeAll: includeAll ? 'true' : 'false',
+      refresh: refresh ? 'true' : 'false',
+    });
+    return await this.#requestJson('GET', `/api/models?${params.toString()}`, { signal });
+  }
+
+  /**
    * @param {{signal?: AbortSignal | null}} [options]
    * @returns {Promise<{models: Record<string, string>, publicOdds: number, privateOdds: number, scribeInterval: number, pedantEnabled: boolean, dailyWarnUsd: number | null, apiKey: {configured: boolean, source: string}}>}
    * @throws {Error}

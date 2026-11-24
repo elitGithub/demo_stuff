@@ -97,6 +97,11 @@ export class InspectorDrawer {
 
   #settingsData = {
     serverSettings: null,
+    modelCatalog: null,
+    modelCatalogLoading: false,
+    modelCatalogError: '',
+    modelFilter: '',
+    prefilledDefaults: false,
     draft: {
       models: { director: '', composer: '', main: '', recurring: '', scribe: '' },
       publicOdds: '8',
@@ -316,6 +321,19 @@ export class InspectorDrawer {
       openRouterApiKey: '',
     };
     this.#settingsData.error = '';
+    this.#applyBlankModelDefaults();
+    this.render();
+  }
+
+  /**
+   * @param {object | null} modelCatalog
+   * @returns {void}
+   */
+  setModelCatalog(modelCatalog) {
+    this.#settingsData.modelCatalog = modelCatalog;
+    this.#settingsData.modelCatalogLoading = false;
+    this.#settingsData.modelCatalogError = '';
+    this.#applyBlankModelDefaults();
     this.render();
   }
 
@@ -1619,8 +1637,98 @@ export class InspectorDrawer {
 
         const busy = this.#settingsData.saving || this.#settingsData.clearingKey;
         const draft = this.#settingsData.draft;
+        const catalog = this.#settingsData.modelCatalog;
 
+        if (this.#settingsData.prefilledDefaults) {
+          settingsForm.append(
+            this.#buildAlert('Suggested unrestricted defaults are prefilled below. Review and click Save to apply.', 'info'),
+          );
+        }
+
+        const catalogBar = this.#documentRef.createElement('div');
+        catalogBar.className = 'model-catalog-bar';
+
+        const catalogButtons = this.#documentRef.createElement('div');
+        catalogButtons.className = 'action-row-split';
+
+        const applyDefaultsBtn = this.#buildButton('Apply suggested defaults', {
+          variant: 'secondary',
+          compact: true,
+          disabled: busy || !catalog?.defaults,
+          onClick: () => {
+            if (!catalog?.defaults) {
+              return;
+            }
+            for (const slot of InspectorDrawer.#ModelSlots) {
+              if (typeof catalog.defaults[slot.key] === 'string') {
+                draft.models[slot.key] = catalog.defaults[slot.key];
+              }
+            }
+            this.#settingsData.prefilledDefaults = true;
+            this.#settingsData.success = '';
+            this.render();
+          },
+        });
+
+        const hasOpenRouterModels = Array.isArray(catalog?.openrouter);
+        const loadAllModelsBtn = this.#buildButton(
+          hasOpenRouterModels ? 'Refresh OpenRouter models' : 'Load all OpenRouter models',
+          {
+            variant: 'secondary',
+            compact: true,
+            busy: this.#settingsData.modelCatalogLoading,
+            busyLabel: 'Loading catalog...',
+            disabled: busy || typeof this.#callbacks.onLoadAllModels !== 'function',
+            onClick: async () => {
+              if (this.#settingsData.modelCatalogLoading || typeof this.#callbacks.onLoadAllModels !== 'function') {
+                return;
+              }
+              this.#settingsData.modelCatalogLoading = true;
+              this.#settingsData.modelCatalogError = '';
+              this.render();
+              try {
+                await this.#callbacks.onLoadAllModels(hasOpenRouterModels);
+              } catch (catalogError) {
+                this.#settingsData.modelCatalogLoading = false;
+                this.#settingsData.modelCatalogError = catalogError instanceof Error
+                  ? catalogError.message
+                  : String(catalogError);
+                this.render();
+              }
+            },
+          },
+        );
+        catalogButtons.append(applyDefaultsBtn, loadAllModelsBtn);
+        catalogBar.append(catalogButtons);
+
+        const filterInput = this.#documentRef.createElement('input');
+        filterInput.id = 'settings-model-filter';
+        filterInput.type = 'search';
+        filterInput.className = 'field-control';
+        filterInput.placeholder = 'Filter suggested or OpenRouter models...';
+        filterInput.value = this.#settingsData.modelFilter;
+        filterInput.disabled = busy;
+        catalogBar.append(this.#buildField('Model picker filter', filterInput));
+
+        const catalogStatus = this.#documentRef.createElement('div');
+        catalogStatus.className = 'item-meta';
+        const suggestedCount = Array.isArray(catalog?.recommended) ? catalog.recommended.length : 0;
+        const openRouterCount = hasOpenRouterModels ? catalog.openrouter.length : 0;
+        catalogStatus.textContent = hasOpenRouterModels
+          ? `Suggested: ${suggestedCount} · OpenRouter loaded: ${openRouterCount}`
+          : `Suggested: ${suggestedCount} · Click "Load all OpenRouter models" to browse full catalog`;
+        catalogBar.append(catalogStatus);
+
+        if (this.#settingsData.modelCatalogError.length > 0) {
+          catalogBar.append(this.#buildAlert(this.#settingsData.modelCatalogError, 'danger'));
+        }
+        settingsForm.append(catalogBar);
+
+        const slotPickers = [];
         for (const slot of InspectorDrawer.#ModelSlots) {
+          const slotGroup = this.#documentRef.createElement('div');
+          slotGroup.className = 'model-slot-group';
+
           const slotInput = this.#documentRef.createElement('input');
           slotInput.id = `settings-model-${slot.key}`;
           slotInput.type = 'text';
@@ -1628,11 +1736,41 @@ export class InspectorDrawer {
           slotInput.placeholder = 'provider/model-name';
           slotInput.value = draft.models[slot.key];
           slotInput.disabled = busy;
+
+          const slotSelect = this.#documentRef.createElement('select');
+          slotSelect.id = `settings-model-picker-${slot.key}`;
+          slotSelect.className = 'field-control model-picker-select';
+          slotSelect.setAttribute('aria-label', `${slot.label} quick pick`);
+          slotSelect.disabled = busy;
+          this.#populateModelSelect(slotSelect, draft.models[slot.key], this.#settingsData.modelFilter);
+
           slotInput.addEventListener('input', () => {
             draft.models[slot.key] = slotInput.value;
+            this.#populateModelSelect(slotSelect, draft.models[slot.key], this.#settingsData.modelFilter);
           });
-          settingsForm.append(this.#buildField(slot.label, slotInput));
+
+          slotSelect.addEventListener('change', () => {
+            if (slotSelect.value.length > 0) {
+              draft.models[slot.key] = slotSelect.value;
+              slotInput.value = slotSelect.value;
+            }
+          });
+
+          slotGroup.append(this.#buildField(slot.label, slotInput), slotSelect);
+          settingsForm.append(slotGroup);
+          slotPickers.push({ slotKey: slot.key, selectElement: slotSelect });
         }
+
+        filterInput.addEventListener('input', () => {
+          this.#settingsData.modelFilter = filterInput.value;
+          for (const picker of slotPickers) {
+            this.#populateModelSelect(
+              picker.selectElement,
+              draft.models[picker.slotKey],
+              this.#settingsData.modelFilter,
+            );
+          }
+        });
 
         const oddsGrid = this.#documentRef.createElement('div');
         oddsGrid.className = 'form-grid-two';
@@ -1925,7 +2063,7 @@ export class InspectorDrawer {
     button.textContent = busy ? busyLabel : text;
     if (typeof onClick === 'function') {
       button.addEventListener('click', () => {
-        void onClick();
+        return onClick();
       });
     }
     return button;
@@ -2008,5 +2146,128 @@ export class InspectorDrawer {
       );
     }
     return footer;
+  }
+
+  /**
+   * @returns {void}
+   */
+  #applyBlankModelDefaults() {
+    const defaults = this.#settingsData.modelCatalog?.defaults;
+    const serverModels = this.#settingsData.serverSettings?.models;
+    if (!defaults || !serverModels) {
+      this.#settingsData.prefilledDefaults = false;
+      return;
+    }
+    let filledAny = false;
+    for (const slot of InspectorDrawer.#ModelSlots) {
+      const serverValue = typeof serverModels[slot.key] === 'string' ? serverModels[slot.key].trim() : '';
+      const currentDraft = typeof this.#settingsData.draft.models[slot.key] === 'string'
+        ? this.#settingsData.draft.models[slot.key].trim()
+        : '';
+      const defaultValue = typeof defaults[slot.key] === 'string' ? defaults[slot.key].trim() : '';
+      if (serverValue.length === 0 && currentDraft.length === 0 && defaultValue.length > 0) {
+        this.#settingsData.draft.models[slot.key] = defaultValue;
+        filledAny = true;
+      }
+    }
+    const stillMissingInServer = InspectorDrawer.#ModelSlots.some((slot) => {
+      const serverValue = typeof serverModels[slot.key] === 'string' ? serverModels[slot.key].trim() : '';
+      return serverValue.length === 0;
+    });
+    this.#settingsData.prefilledDefaults = filledAny || stillMissingInServer;
+  }
+
+  /**
+   * @param {HTMLSelectElement} selectElement
+   * @param {string} currentValue
+   * @param {string} filterQuery
+   * @returns {void}
+   */
+  #populateModelSelect(selectElement, currentValue, filterQuery) {
+    const normalizedFilter = typeof filterQuery === 'string' ? filterQuery.trim().toLowerCase() : '';
+    const catalog = this.#settingsData.modelCatalog;
+    const nodes = [];
+
+    const placeholderOpt = this.#documentRef.createElement('option');
+    placeholderOpt.value = '';
+    placeholderOpt.textContent = 'Select a suggested or OpenRouter model...';
+    nodes.push(placeholderOpt);
+
+    const recommendedList = Array.isArray(catalog?.recommended) ? catalog.recommended : [];
+    const matchingRecommended = recommendedList.filter((item) => {
+      if (normalizedFilter.length === 0) {
+        return true;
+      }
+      return [item.id, item.name, item.recommendedFor, item.notes].some((field) => {
+        return typeof field === 'string' && field.toLowerCase().includes(normalizedFilter);
+      });
+    });
+
+    if (matchingRecommended.length > 0) {
+      const recGroup = this.#documentRef.createElement('optgroup');
+      recGroup.label = `Suggested (Unrestricted RP) - ${matchingRecommended.length}`;
+      for (const item of matchingRecommended) {
+        const option = this.#documentRef.createElement('option');
+        option.value = item.id;
+        option.textContent = item.recommendedFor
+          ? `${item.id} (${item.recommendedFor})`
+          : item.id;
+        recGroup.append(option);
+      }
+      nodes.push(recGroup);
+    }
+
+    const openRouterList = Array.isArray(catalog?.openrouter) ? catalog.openrouter : [];
+    if (openRouterList.length > 0) {
+      const matchingOpenRouter = openRouterList.filter((item) => {
+        if (normalizedFilter.length === 0) {
+          return true;
+        }
+        return [item.id, item.name].some((field) => {
+          return typeof field === 'string' && field.toLowerCase().includes(normalizedFilter);
+        });
+      });
+      const maxDisplayed = 60;
+      const displayed = matchingOpenRouter.slice(0, maxDisplayed);
+      if (
+        typeof currentValue === 'string' &&
+        currentValue.length > 0 &&
+        !displayed.some((item) => item.id === currentValue)
+      ) {
+        const currentMatch = openRouterList.find((item) => item.id === currentValue);
+        if (currentMatch !== undefined) {
+          displayed.unshift(currentMatch);
+        }
+      }
+
+      if (displayed.length > 0) {
+        const orGroup = this.#documentRef.createElement('optgroup');
+        orGroup.label = `OpenRouter Catalog (${displayed.length} of ${matchingOpenRouter.length})`;
+        for (const item of displayed) {
+          const option = this.#documentRef.createElement('option');
+          option.value = item.id;
+          const parts = [];
+          if (Number.isInteger(item.contextLength)) {
+            parts.push(`${Math.round(item.contextLength / 1000)}k`);
+          }
+          if (item.promptCostPerMillion !== null && item.completionCostPerMillion !== null) {
+            parts.push(`$${item.promptCostPerMillion}/$${item.completionCostPerMillion}`);
+          }
+          if (item.isModerated === true) {
+            parts.push('moderated');
+          }
+          option.textContent = parts.length > 0 ? `${item.id} (${parts.join(', ')})` : item.id;
+          orGroup.append(option);
+        }
+        nodes.push(orGroup);
+      }
+    }
+
+    selectElement.replaceChildren(...nodes);
+    const hasExactOption = [
+      ...matchingRecommended.map((item) => item.id),
+      ...(Array.isArray(catalog?.openrouter) ? catalog.openrouter.map((item) => item.id) : []),
+    ].includes(currentValue);
+    selectElement.value = hasExactOption ? currentValue : '';
   }
 }

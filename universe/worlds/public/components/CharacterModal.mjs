@@ -37,14 +37,19 @@ export class CharacterModal {
   }
 
   /**
-   * @param {{character?: object | null}} [options]
+   * @param {{character?: object | null, modelCatalog?: object | null, onLoadAllModels?: ((refresh: boolean) => Promise<void>) | null}} [options]
    * @returns {void}
    */
-  open({ character = null } = {}) {
+  open({ character = null, modelCatalog = null, onLoadAllModels = null } = {}) {
     this.close();
     const isEdit = character !== null && typeof character === 'object';
     this.#state = {
       character: isEdit ? character : null,
+      modelCatalog,
+      onLoadAllModels,
+      catalogLoading: false,
+      catalogError: '',
+      modelFilter: '',
       slugManuallyEdited: isEdit,
       values: {
         name: isEdit ? String(character.name ?? '') : '',
@@ -72,6 +77,20 @@ export class CharacterModal {
       this.#documentRef.addEventListener('keydown', this.#keyHandler);
     }
 
+    this.#render();
+  }
+
+  /**
+   * @param {object | null} modelCatalog
+   * @returns {void}
+   */
+  setModelCatalog(modelCatalog) {
+    if (this.#state === null) {
+      return;
+    }
+    this.#state.modelCatalog = modelCatalog;
+    this.#state.catalogLoading = false;
+    this.#state.catalogError = '';
     this.#render();
   }
 
@@ -250,6 +269,9 @@ export class CharacterModal {
     playerLabel.append(playerCheckbox, playerText);
     body.append(playerLabel);
 
+    const modelGroup = this.#documentRef.createElement('div');
+    modelGroup.className = 'model-slot-group';
+
     const modelInput = this.#documentRef.createElement('input');
     modelInput.id = 'char-model-input';
     modelInput.type = 'text';
@@ -257,10 +279,91 @@ export class CharacterModal {
     modelInput.value = state.values.modelOverride;
     modelInput.disabled = state.busy;
     modelInput.placeholder = 'Optional OpenRouter model override';
-    modelInput.addEventListener('input', () => {
-      state.values.modelOverride = modelInput.value;
-    });
-    body.append(this.#createField('Model override', modelInput));
+    modelGroup.append(this.#createField('Model override', modelInput));
+
+    if (state.modelCatalog !== null || typeof state.onLoadAllModels === 'function') {
+      const hasOpenRouter = Array.isArray(state.modelCatalog?.openrouter);
+      const pickerToolbar = this.#documentRef.createElement('div');
+      pickerToolbar.className = 'action-row-split';
+
+      const filterInput = this.#documentRef.createElement('input');
+      filterInput.type = 'search';
+      filterInput.className = 'field-control';
+      filterInput.placeholder = 'Filter models...';
+      filterInput.value = state.modelFilter;
+      filterInput.disabled = state.busy;
+
+      const modelSelect = this.#documentRef.createElement('select');
+      modelSelect.id = 'char-model-picker';
+      modelSelect.className = 'field-control model-picker-select';
+      modelSelect.setAttribute('aria-label', 'Model override quick pick');
+      modelSelect.disabled = state.busy;
+      this.#populateOverrideSelect(modelSelect, state.values.modelOverride, state.modelFilter);
+
+      if (typeof state.onLoadAllModels === 'function') {
+        const loadBtn = this.#documentRef.createElement('button');
+        loadBtn.type = 'button';
+        loadBtn.className = state.catalogLoading
+          ? 'btn btn-secondary btn-compact is-loading'
+          : 'btn btn-secondary btn-compact';
+        loadBtn.disabled = state.busy || state.catalogLoading;
+        loadBtn.textContent = state.catalogLoading
+          ? 'Loading catalog...'
+          : hasOpenRouter
+            ? 'Refresh OpenRouter models'
+            : 'Load all OpenRouter models';
+        loadBtn.addEventListener('click', async () => {
+          if (state.catalogLoading) {
+            return;
+          }
+          state.catalogLoading = true;
+          state.catalogError = '';
+          this.#render();
+          try {
+            await state.onLoadAllModels(hasOpenRouter);
+          } catch (loadError) {
+            if (this.#state === state) {
+              state.catalogLoading = false;
+              state.catalogError = loadError instanceof Error ? loadError.message : String(loadError);
+              this.#render();
+            }
+          }
+        });
+        pickerToolbar.append(filterInput, loadBtn);
+      } else {
+        pickerToolbar.append(filterInput);
+      }
+
+      filterInput.addEventListener('input', () => {
+        state.modelFilter = filterInput.value;
+        this.#populateOverrideSelect(modelSelect, state.values.modelOverride, state.modelFilter);
+      });
+
+      modelInput.addEventListener('input', () => {
+        state.values.modelOverride = modelInput.value;
+        this.#populateOverrideSelect(modelSelect, state.values.modelOverride, state.modelFilter);
+      });
+
+      modelSelect.addEventListener('change', () => {
+        state.values.modelOverride = modelSelect.value;
+        modelInput.value = modelSelect.value;
+      });
+
+      modelGroup.append(pickerToolbar, modelSelect);
+      if (state.catalogError.length > 0) {
+        const catalogAlert = this.#documentRef.createElement('div');
+        catalogAlert.className = 'inline-alert is-danger';
+        catalogAlert.setAttribute('role', 'alert');
+        catalogAlert.textContent = state.catalogError;
+        modelGroup.append(catalogAlert);
+      }
+    } else {
+      modelInput.addEventListener('input', () => {
+        state.values.modelOverride = modelInput.value;
+      });
+    }
+
+    body.append(modelGroup);
 
     const tokenGroup = this.#documentRef.createElement('div');
     tokenGroup.className = 'field-group';
@@ -465,5 +568,75 @@ export class CharacterModal {
 
     group.append(label, controlElement);
     return group;
+  }
+
+  /**
+   * @param {HTMLSelectElement} selectElement
+   * @param {string} currentValue
+   * @param {string} filterQuery
+   * @returns {void}
+   */
+  #populateOverrideSelect(selectElement, currentValue, filterQuery) {
+    const normalizedFilter = typeof filterQuery === 'string' ? filterQuery.trim().toLowerCase() : '';
+    const catalog = this.#state?.modelCatalog ?? null;
+    const nodes = [];
+
+    const defaultOpt = this.#documentRef.createElement('option');
+    defaultOpt.value = '';
+    defaultOpt.textContent = 'Use tier default (no override)';
+    nodes.push(defaultOpt);
+
+    const recommendedList = Array.isArray(catalog?.recommended) ? catalog.recommended : [];
+    const matchingRec = recommendedList.filter((item) => {
+      if (normalizedFilter.length === 0) {
+        return true;
+      }
+      return [item.id, item.name, item.recommendedFor].some((field) => {
+        return typeof field === 'string' && field.toLowerCase().includes(normalizedFilter);
+      });
+    });
+    if (matchingRec.length > 0) {
+      const recGroup = this.#documentRef.createElement('optgroup');
+      recGroup.label = `Suggested (Unrestricted RP) - ${matchingRec.length}`;
+      for (const item of matchingRec) {
+        const option = this.#documentRef.createElement('option');
+        option.value = item.id;
+        option.textContent = item.recommendedFor ? `${item.id} (${item.recommendedFor})` : item.id;
+        recGroup.append(option);
+      }
+      nodes.push(recGroup);
+    }
+
+    const openRouterList = Array.isArray(catalog?.openrouter) ? catalog.openrouter : [];
+    if (openRouterList.length > 0) {
+      const matchingOr = openRouterList
+        .filter((item) => {
+          if (normalizedFilter.length === 0) {
+            return true;
+          }
+          return [item.id, item.name].some((field) => {
+            return typeof field === 'string' && field.toLowerCase().includes(normalizedFilter);
+          });
+        })
+        .slice(0, 60);
+      if (matchingOr.length > 0) {
+        const orGroup = this.#documentRef.createElement('optgroup');
+        orGroup.label = `OpenRouter Catalog (${matchingOr.length})`;
+        for (const item of matchingOr) {
+          const option = this.#documentRef.createElement('option');
+          option.value = item.id;
+          option.textContent = item.isModerated === true ? `${item.id} (moderated)` : item.id;
+          orGroup.append(option);
+        }
+        nodes.push(orGroup);
+      }
+    }
+
+    selectElement.replaceChildren(...nodes);
+    const hasExactOption = [
+      ...matchingRec.map((item) => item.id),
+      ...openRouterList.map((item) => item.id),
+    ].includes(currentValue);
+    selectElement.value = hasExactOption ? currentValue : '';
   }
 }

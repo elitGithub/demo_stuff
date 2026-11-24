@@ -1064,6 +1064,27 @@ textarea.field-control {
   flex: 0 0 auto;
 }
 
+.model-catalog-bar {
+  display: flex;
+  flex-direction: column;
+  gap: var(--space-2);
+  padding: var(--space-2);
+  border-radius: var(--radius-sm);
+  border: 1px solid var(--border-subtle);
+  background-color: var(--bg-surface-elevated);
+}
+
+.model-slot-group {
+  display: flex;
+  flex-direction: column;
+  gap: var(--space-1);
+}
+
+.model-picker-select {
+  font-size: 0.875rem;
+  color: var(--text-secondary);
+}
+
 @supports (backdrop-filter: blur(12px)) {
   .top-bar {
     background-color: var(--bg-topbar-glass);

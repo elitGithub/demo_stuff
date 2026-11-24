@@ -36,6 +36,45 @@ node src/server.mjs
 
 The server binds strictly to `127.0.0.1` on `WORLDS_PORT` (default `8768`) and stores local data under `local/worlds.sqlite` (gitignored).
 
+## Models
+
+On first startup with blank model slots, the server seeds non-frontier unrestricted defaults (`src/openrouter/recommended-models.json`):
+
+- `director`: `nousresearch/hermes-3-llama-3.1-70b`
+- `composer`: `sao10k/l3.3-euryale-70b`
+- `main`: `thedrummer/cydonia-24b-v4.1`
+- `recurring`: `thedrummer/rocinante-12b`
+- `scribe`: `cognitivecomputations/dolphin3.0-mistral-24b`
+
+In the web UI **Settings** tab (and character edit modal), you can apply these suggested defaults or load and search the full live OpenRouter model catalog (`GET /api/models`).
+
+## Seeding from a Zeta Export
+
+Pre-populate a campaign, cast (`scribe_subject_id`, slugs, aliases, tiers, personas), and initial Scribe book (`Origin: 'Operator'`, `position: 0`, `cite: null`) from a Zeta Scribe JSON export (book/state or raw log format):
+
+1. Place your export file anywhere inside `/var/www` (paths resolving outside `/var/www` via symlinks are rejected).
+2. Preview without writing SQLite:
+
+   ```bash
+   node scripts/seed-from-export.mjs /var/www/demo_stuff/zeta-dm-memory/scribe/private/hero_gone_latest.json --dry-run
+   ```
+
+3. Seed into `local/worlds.sqlite`:
+
+   ```bash
+   node scripts/seed-from-export.mjs /var/www/demo_stuff/zeta-dm-memory/scribe/private/hero_gone_latest.json
+   ```
+
+Optional flags:
+
+- `--title <name>`: override campaign title (prevents duplicate-title collision errors).
+- `--main <slugOrName,...>`: comma-separated characters to assign to `main` tier instead of default auto-promotion.
+- `--db <sqlitePath>`: target a custom SQLite path instead of `local/worlds.sqlite`.
+- `--force`: replace an existing campaign with the same title inside an atomic transaction.
+- Omitting `[exportPath]` defaults to `/var/www/demo_stuff/zeta-dm-memory/scribe/private/hero_gone_latest.json`.
+
+Then start `node src/server.mjs` and open `http://127.0.0.1:8768`.
+
 ## Tests
 
 ```bash

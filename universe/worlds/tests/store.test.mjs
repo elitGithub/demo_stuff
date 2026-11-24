@@ -1028,4 +1028,71 @@ describe('SqliteStore findings, spend aggregation, and vacuumInto', () => {
       store.close();
     }
   });
+
+  it('supports nested savepoints via runTransaction, rolls back inner/outer errors atomically, and rejects async operations', async () => {
+    const store = new SqliteStore(':memory:');
+    try {
+      const campaign = store.createCampaign({ title: 'Savepoint Campaign' });
+      const initialSeq = store.getLocalChangeSeq();
+
+      assert.throws(() => store.runTransaction('not-a-function'), TypeError);
+
+      assert.throws(() => {
+        store.runTransaction(() => {
+          store.updateCampaign(campaign.id, { premise: 'Outer update' });
+          store.runTransaction(() => {
+            store.createCharacter(campaign.id, {
+              slug: 'innerchar',
+              name: 'Inner Char',
+              tier: CharacterTier.Main,
+              avatarToken: AvatarToken.Sage,
+            });
+            throw new Error('Inner boom');
+          });
+        });
+      }, /Inner boom/);
+
+      assert.equal(store.getCampaign(campaign.id).premise, '');
+      assert.equal(store.listCharacters(campaign.id).total, 0);
+      assert.equal(store.getLocalChangeSeq(), initialSeq);
+
+      const caughtSavepointResult = store.runTransaction(() => {
+        store.updateCampaign(campaign.id, { premise: 'Kept outer premise' });
+        let caughtInnerMessage = '';
+        try {
+          store.runTransaction(() => {
+            store.createCharacter(campaign.id, {
+              slug: 'rolledback',
+              name: 'Rolled Back',
+              tier: CharacterTier.Recurring,
+              avatarToken: AvatarToken.Amber,
+            });
+            throw new Error('Handled inner failure');
+          });
+        } catch (innerError) {
+          caughtInnerMessage = innerError.message;
+        }
+        assert.equal(caughtInnerMessage, 'Handled inner failure');
+        return store.getCampaign(campaign.id).premise;
+      });
+      assert.equal(caughtSavepointResult, 'Kept outer premise');
+      assert.equal(store.getCampaign(campaign.id).premise, 'Kept outer premise');
+      assert.equal(store.listCharacters(campaign.id).total, 0);
+
+      assert.throws(() => {
+        store.runTransaction(async () => {
+          store.updateCampaign(campaign.id, { title: 'Should Never Commit' });
+        });
+      }, /synchronous/);
+      assert.equal(store.getCampaign(campaign.id).title, 'Savepoint Campaign');
+
+      const seqAfterAsyncRejection = store.runTransaction(() => {
+        store.updateCampaign(campaign.id, { title: 'Clean After Error' });
+        return store.getCampaign(campaign.id).title;
+      });
+      assert.equal(seqAfterAsyncRejection, 'Clean After Error');
+    } finally {
+      store.close();
+    }
+  });
 });

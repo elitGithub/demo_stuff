@@ -15,6 +15,7 @@ import { TurnRole } from './enums/TurnRole.mjs';
 export class SqliteStore {
   #db;
   #closed = false;
+  #transactionDepth = 0;
 
   /**
    * @param {string} dbPath
@@ -1726,15 +1727,66 @@ export class SqliteStore {
    * @returns {ResultType}
    * @throws {Error}
    */
+  runTransaction(operation) {
+    if (typeof operation !== 'function') {
+      throw new TypeError('runTransaction operation must be a function.');
+    }
+    return this.#runTransaction(operation);
+  }
+
+  /**
+   * @template ResultType
+   * @param {() => ResultType} operation
+   * @returns {ResultType}
+   * @throws {Error}
+   */
   #runTransaction(operation) {
-    this.#db.exec('BEGIN IMMEDIATE');
+    if (this.#transactionDepth === 0) {
+      this.#db.exec('BEGIN IMMEDIATE');
+      this.#transactionDepth = 1;
+      try {
+        const result = operation();
+        if (
+          result !== null &&
+          (typeof result === 'object' || typeof result === 'function') &&
+          typeof result.then === 'function'
+        ) {
+          throw new TypeError('runTransaction operation must be synchronous.');
+        }
+        this.#db.exec('COMMIT');
+        return result;
+      } catch (error) {
+        if (this.#db.isTransaction) {
+          this.#db.exec('ROLLBACK');
+        }
+        throw error;
+      } finally {
+        this.#transactionDepth = 0;
+      }
+    }
+
+    const savepointName = `worlds_sp_${this.#transactionDepth}`;
+    this.#db.exec(`SAVEPOINT ${savepointName}`);
+    this.#transactionDepth += 1;
     try {
       const result = operation();
-      this.#db.exec('COMMIT');
+      if (
+        result !== null &&
+        (typeof result === 'object' || typeof result === 'function') &&
+        typeof result.then === 'function'
+      ) {
+        throw new TypeError('runTransaction operation must be synchronous.');
+      }
+      this.#db.exec(`RELEASE SAVEPOINT ${savepointName}`);
       return result;
     } catch (error) {
-      this.#db.exec('ROLLBACK');
+      if (this.#db.isTransaction) {
+        this.#db.exec(`ROLLBACK TO SAVEPOINT ${savepointName}`);
+        this.#db.exec(`RELEASE SAVEPOINT ${savepointName}`);
+      }
       throw error;
+    } finally {
+      this.#transactionDepth -= 1;
     }
   }
 

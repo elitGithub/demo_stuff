@@ -2164,7 +2164,7 @@ const ScribeKeeper = Object.freeze({
 
     /**
      * @param {object} keeper
-     * @return {object}
+     * @return {{ log: object, fingerprints: Object<string, string>, adopted: boolean }}
      * @throws {Error}
      */
     checkBook(keeper) {
@@ -2380,7 +2380,7 @@ const ScribeKeeper = Object.freeze({
                 requests: pending, planBytes: Object.values(pending)[0]?.planBytes,
                 savePage: save, saveSegment: save, learnLimit,
                 ...(Number.isSafeInteger(limit?.bytes) && limit.bytes > 0 ? { pageBytes: limit.bytes } : {}),
-                ask: async (system, input, sources, id, planBytes) => {
+                ask: async (system, input, sources, id, planBytes, inputWithProfile = null) => {
                     if (!current()) {
                         throw yieldPage;
                     }
@@ -2407,6 +2407,16 @@ const ScribeKeeper = Object.freeze({
                     if (failure || keeper.owed.size || keeper.spentToday >= keeper.settings.budget) {
                         throw new Error(failure ?? keeper.owing ?? "The day's budget is spent");
                     }
+                    let outgoing = input;
+                    if (inputWithProfile && keeper.profile) {
+                        const profile = await keeper.profile();
+                        if (!current()) {
+                            throw yieldPage;
+                        }
+                        if (profile) {
+                            outgoing = inputWithProfile(profile);
+                        }
+                    }
                     let dispatched = false;
                     const beforeDispatch = () => {
                         if (!current()) {
@@ -2425,15 +2435,16 @@ const ScribeKeeper = Object.freeze({
                     };
                     let answer;
                     try {
-                        answer = await keeper.askChecker(system, input, beforeDispatch);
+                        answer = await keeper.askChecker(system, outgoing, beforeDispatch);
                     } catch (error) {
                         if (dispatched && current() && error?.unbilledAuth) {
                             const latest = ScribeKeeper.checkBook(keeper);
-                            if (!error.keyChanged?.()) {
-                                latest.log.checkRequests[id].authRejected = true;
-                            } else {
+                            if (error.keyChanged?.()) {
                                 ScribeKeeper.releaseCheckRequest(latest, id);
+                                writeBook(latest);
+                                throw yieldPage;
                             }
+                            latest.log.checkRequests[id].authRejected = true;
                             writeBook(latest);
                         }
                         throw error;

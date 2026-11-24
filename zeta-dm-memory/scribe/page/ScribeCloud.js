@@ -247,7 +247,7 @@ const ScribeCloud = Object.freeze({
      * @param {string|object|null} body
      * @param {number} timeoutMs
      * @param {AbortSignal|null} signal
-     * @return {Promise<{ status: number, data: *, text: string, retryAfter: number }>}
+     * @return {Promise<{ status: number, data: *, text: string, retryAfter: number, transportProblem: string|null }>}
      */
     request(cloud, method, path, query, body, timeoutMs, signal = null) {
         const settings = ScribeCloud.Settings;
@@ -269,6 +269,7 @@ const ScribeCloud = Object.freeze({
                         data: null,
                         text: settings.Nothing,
                         retryAfter: settings.NoDelay,
+                        transportProblem: key ? 'The DM API key saved on this PC has an invalid format.' : 'No DM API key is saved on this PC.',
                     });
                     return;
                 }
@@ -280,23 +281,25 @@ const ScribeCloud = Object.freeze({
                  * @param {*} data
                  * @param {string} text
                  * @param {number} retryAfter
+                 * @param {string|null} transportProblem
                  * @return {void}
                  */
-                const finish = (status, data, text, retryAfter) => {
+                const finish = (status, data, text, retryAfter, transportProblem = null) => {
                     if (finished) {
                         return;
                     }
                     finished = true;
                     signal?.removeEventListener('abort', abort);
-                    resolve({ status, data, text, retryAfter });
+                    resolve({ status, data, text, retryAfter, transportProblem });
                 };
 
                 /**
                  * @param {number} status
+                 * @param {string|null} transportProblem
                  * @return {void}
                  */
-                const fail = (status) => {
-                    finish(status, null, settings.Nothing, settings.NoDelay);
+                const fail = (status, transportProblem = null) => {
+                    finish(status, null, settings.Nothing, settings.NoDelay, transportProblem);
                 };
                 const abort = () => {
                     fail(transport.Cancelled);
@@ -369,14 +372,14 @@ const ScribeCloud = Object.freeze({
                      * @return {void}
                      */
                     ontimeout: () => {
-                        fail(transport.Network);
+                        fail(transport.Network, 'The Worker request timed out.');
                     },
 
                     /**
                      * @return {void}
                      */
                     onabort: () => {
-                        fail(transport.Network);
+                        fail(transport.Network, 'The Worker request was cancelled.');
                     },
                 };
                 if (typeof body === settings.StringType) {
@@ -392,7 +395,7 @@ const ScribeCloud = Object.freeze({
                      * @return {void}
                      */
                     () => {
-                        fail(transport.Network);
+                        fail(transport.Network, 'The Worker request timed out.');
                         try {
                             handle?.abort?.();
                         } catch {
@@ -1051,6 +1054,35 @@ const ScribeCloud = Object.freeze({
     },
 
     /**
+     * @param {{status: number, transportProblem?: string|null}} response
+     * @param {string} activity
+     * @return {void}
+     * @throws {Error}
+     */
+    checkForkResponse(response, activity) {
+        const {Messages, Statuses, Transport} = ScribeCloud.Settings;
+        if (response.status === Statuses.Ok) {
+            return;
+        }
+        if (response.transportProblem) {
+            throw new Error(response.transportProblem);
+        }
+        if (response.status === Transport.Cancelled) {
+            throw new Error('The Worker request was cancelled.');
+        }
+        if (response.status === Transport.Rejected) {
+            throw new Error(Messages.Rejected + '.');
+        }
+        if (response.status === Transport.Network) {
+            throw new Error('The Worker could not be reached while ' + activity + '.');
+        }
+        if (!Number.isInteger(response.status) || response.status < 100 || response.status > 599) {
+            throw new Error('The Worker returned an invalid HTTP status while ' + activity + '.');
+        }
+        throw new Error('The Worker returned HTTP ' + response.status + ' while ' + activity + '.');
+    },
+
+    /**
      * @param {object} cloud
      * @param {string} sourceRoomId
      * @param {AbortSignal|null} signal
@@ -1064,22 +1096,30 @@ const ScribeCloud = Object.freeze({
             throw new Error('The source room is unavailable.');
         }
         const response = await ScribeCloud.heads(cloud, room, signal);
-        if (response.status !== settings.Statuses.Ok || !Array.isArray(response.data?.heads)) {
-            throw new Error('The Worker could not read the saved Book for the selected room.');
+        ScribeCloud.checkForkResponse(response, 'looking up the saved Book');
+        if (!Array.isArray(response.data?.heads)) {
+            throw new Error('The Worker returned an invalid list of saved records for this chat.');
         }
         const heads = response.data.heads.filter((item) => item?.kind === ScribeStore.Kind.Book);
         if (!heads.length) {
+            if (response.data.heads.some((item) => !settings.Synced.includes(item?.kind))) {
+                throw new Error('The Worker returned an invalid list of saved records for this chat.');
+            }
             return null;
         }
         const [head] = heads;
         if (heads.length !== 1 || !Number.isSafeInteger(head.parts) || head.parts < 1 ||
             head.parts > settings.MostParts || !Number.isSafeInteger(head.revision) || head.revision < 1) {
-            throw new Error(settings.Messages.Unreadable);
+            throw new Error('The Worker returned invalid revision or part information for the saved Book.');
         }
         const result = await ScribeCloud.download(cloud, head.kind, head, room, signal);
+        if (result.result !== null) {
+            ScribeCloud.checkForkResponse(result.result, 'downloading the saved Book');
+            throw new Error('The Worker connection changed while downloading the saved Book.');
+        }
         const book = ScribeStore.decode(result.text);
         if (!book || !ScribeKeeper.soundBook(book)) {
-            throw new Error('The saved source Book could not be downloaded or verified.');
+            throw new Error('The downloaded data does not contain a readable Scribe Book.');
         }
         return book.adopted ? book : null;
     },

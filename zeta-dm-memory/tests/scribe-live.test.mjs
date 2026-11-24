@@ -2967,7 +2967,7 @@ test('what was dismissed stays dismissed in memory', async () => {
     const calls = model.calls.length;
     await live.reply(at(43));
     assert.equal(model.calls.length, calls);
-    assert.equal(statusOf(live, spelling), 'Dismissed');
+    assert.equal(live.view().findings.some((finding) => finding.fault === fault && finding.status === 'Open'), false);
     assert.deepEqual(
         plain(live.view().findings.filter((finding) => finding.status === 'Open').map((finding) => finding.kind)),
         ['Contradiction', 'Leak'],

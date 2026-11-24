@@ -10,6 +10,8 @@ import FakeZeta from './support/FakeZeta.mjs';
  */
 function load(name) {
     const context = vm.createContext({ URL, URLSearchParams, TextDecoder });
+    const fork = new URL('../scribe/core/ScribeFork.js', import.meta.url);
+    vm.runInContext(readFileSync(fork, 'utf8'), context, { filename: fork.pathname });
     const url = new URL(`../scribe/page/${name}.js`, import.meta.url);
     vm.runInContext(readFileSync(url, 'utf8'), context, { filename: url.pathname });
     return vm.runInContext(name, context);
@@ -398,7 +400,7 @@ test('the observer forwards the captured candidate edit, selected reply, head an
     assert.equal(reports.length, 1);
     deliver(MESSAGES, changed, 201, MESSAGES, 'POST');
     assert.equal(reports[1].created, true);
-    deliver(FIRST_PAGE, { messages: [changed, first, first], nextCursor: null });
+    deliver(FIRST_PAGE, { messages: [changed, first, latest], nextCursor: null });
     assert.equal(reports.length, 2);
     const edited = { id: 'candidate-a', contents: changed.contents, edited: true };
     const candidateUrl = MESSAGES + '/last/candidates/candidate-a';
@@ -416,6 +418,33 @@ test('the observer forwards the captured candidate edit, selected reply, head an
     assert.equal(reports[3].replacement, true);
     assert.deepEqual(structuredClone(reports[3].messages[0]), changed);
     assert.equal(ZetaSource.validPage('abc', reports[3]), true);
+    watcher.stop();
+});
+
+test('a native message page keeps an identical repeated row once and rejects the whole page for conflicting copies', () => {
+    const page = FakeZeta.window();
+    const watcher = ZetaSource.watch(page);
+    const reports = [];
+    watcher.onMessages(() => (received) => reports.push(received));
+    const first = {...said('first', 1), contents: [{type: 'TEXT', text: 'First.'}, {type: 'TEXT', text: 'Second.'}]};
+    const latest = {...said('last', 2), contents: [{type: 'TEXT', text: 'Last.'}]};
+    const contents = first.contents.map((block) => Object.fromEntries(Object.entries(block).reverse()));
+    const duplicate = Object.fromEntries(Object.entries({ ...first, contents }).reverse());
+    const deliver = (messages, nextCursor) => {
+        const xhr = new page.XMLHttpRequest();
+        xhr.open('GET', FIRST_PAGE);
+        xhr.send();
+        Object.assign(xhr, {status: 200, responseType: 'json', responseURL: FIRST_PAGE, response: {messages, nextCursor}});
+        xhr.finish();
+    };
+    deliver([latest, duplicate, first], 'next-page');
+    assert.deepEqual(ids(reports[0].messages), [first.id, latest.id]);
+    assert.deepEqual(structuredClone(reports[0].messages[0]), first);
+    assert.equal(reports[0].complete, false);
+    deliver([latest, duplicate, first, {...first, contents: [...first.contents].reverse()}], null);
+    deliver([latest, first, {...first, edited: !first.edited}], null);
+    assert.equal(reports.length, 1);
+    assert.equal(page.fetchCalls.length, 0);
     watcher.stop();
 });
 

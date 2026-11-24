@@ -934,7 +934,9 @@ const ScribePanel = Object.freeze({
      */
     fail(panel, outlet, text) {
         ScribePanel.say(panel, outlet, text);
-        panel.signed.set(outlet, panel.composing ? ScribePanel.signature(panel.keeper.view()) : null);
+        if (outlet !== ScribePanel.Settings.Outlets.Fork) {
+            panel.signed.set(outlet, panel.composing ? ScribePanel.signature(panel.keeper.view()) : null);
+        }
     },
 
     /**
@@ -1590,17 +1592,24 @@ const ScribePanel = Object.freeze({
         const fork = ScribePanel.own(panel, 'Fork', ScribePanel.make(panel, tags.Block, settings.Nothing));
         const forkPicker = ScribePanel.select(panel, 'Which saved chat should I pull the Book from?', settings.Ids.ForkSource, false);
         ScribePanel.own(panel, 'ForkSource', forkPicker.select);
-        ScribePanel.listen(panel, forkPicker.select, settings.Events.Change, () => {
-            const room = panel.forkRooms.find((item) => item.id === forkPicker.select.value);
-            if (room) {
-                return ScribePanel.pullFork(panel, room.id, null);
-            }
-        });
+        forkPicker.select.addEventListener(settings.Events.Change, () => ScribePanel.redraw(panel));
         fork.append(
             ScribePanel.own(panel, 'ForkOrigin', ScribePanel.make(panel, tags.Paragraph, settings.Nothing, classes.Meta)),
-            ScribePanel.own(panel, 'ForkOpen', ScribePanel.button(panel, 'Pull Book from saved chat', () => {
+            ScribePanel.own(panel, 'ForkOpen', ScribePanel.button(panel, 'Pull Book from saved chat', async () => {
+                if (panel.pending.has(settings.Outlets.Fork)) {
+                    return;
+                }
                 const origin = panel.forkOrigin();
-                return origin ? ScribePanel.pullFork(panel, origin.parentRoomId, origin.messageId) : ScribePanel.listForks(panel);
+                if (origin) {
+                    return ScribePanel.pullFork(panel, origin.parentRoomId, origin.messageId);
+                }
+                if (!panel.forkRooms.length) {
+                    return ScribePanel.listForks(panel);
+                }
+                const room = panel.forkRooms.find((item) => item.id === forkPicker.select.value);
+                if (room) {
+                    return ScribePanel.pullFork(panel, room.id, null);
+                }
             }, settings.Guard.Free, settings.Ids.ForkOpen)),
             ScribePanel.own(panel, 'ForkPicker', forkPicker.label),
             ScribePanel.outlet(panel, 'ForkOutcome', settings.Outlets.Fork),
@@ -2727,15 +2736,16 @@ const ScribePanel = Object.freeze({
         const recovering = panel.pending.has(forkOutlet);
         const eligible = view.canRecoverFork === true;
         const origin = panel.forkOrigin?.() ?? null;
+        const choosingSource = origin === null && panel.forkRooms.length > 0;
         parts.Fork.hidden = !eligible && !recovering && !forkOutcome && !origin;
         parts.ForkOrigin.hidden = origin === null;
         if (origin) {
             ScribePanel.write(parts.ForkOrigin, 'Forked from room ' + origin.parentRoomId + ' at message ' + origin.messageId);
         }
         parts.ForkOpen.hidden = !eligible && !recovering;
-        parts.ForkOpen.disabled = !eligible || recovering;
-        ScribePanel.write(parts.ForkOpen, origin ? 'Pull Book from fork origin' : 'Pull Book from saved chat');
-        parts.ForkPicker.hidden = !eligible || origin !== null || !panel.forkRooms.length;
+        parts.ForkOpen.disabled = !eligible || recovering || (choosingSource && !parts.ForkSource.value);
+        ScribePanel.write(parts.ForkOpen, origin ? 'Pull Book from fork origin' : choosingSource ? 'Pull Book' : 'Pull Book from saved chat');
+        parts.ForkPicker.hidden = !eligible || !choosingSource;
         parts.ForkSource.disabled = !eligible || recovering;
         ScribePanel.write(parts.ForkOutcome, forkOutcome);
         parts.ForkOutcome.hidden = !forkOutcome;
@@ -3142,7 +3152,7 @@ const ScribePanel = Object.freeze({
      * @param {string|null} messageId
      * @return {Promise<boolean>}
      */
-    async pullFork(panel, sourceRoomId, messageId) {
+    pullFork(panel, sourceRoomId, messageId) {
         const action = {
             outlet: ScribePanel.Settings.Outlets.Fork, question: null,
             pending: 'Verifying the shared messages and source Book…', done: '', book: true,
@@ -3156,11 +3166,7 @@ const ScribePanel = Object.freeze({
                     ' from ' + sourceRoomId + '. Verified ' + result.shared + (result.shared === 1 ? ' shared message.' : ' shared messages.');
             },
         };
-        const recovered = await ScribePanel.perform(panel, action);
-        if (!recovered) {
-            panel.parts.ForkSource.value = '';
-        }
-        return recovered;
+        return ScribePanel.perform(panel, action);
     },
 
     /**

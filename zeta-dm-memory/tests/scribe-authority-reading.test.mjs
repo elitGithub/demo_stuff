@@ -59,19 +59,21 @@ test('installed intake preserves marker-looking NPC and player lines and ordinar
 });
 
 test('installed player text reaches the Story model in full and a mixed reply is saved once', async () => {
-    const room = ScribeIntake.read(new CampaignBuilder('Orla').player('[Operator note] Stop, Ada.')
-        .player('[Operator note] Stop Ada.').messages);
+    const room = ScribeIntake.read(new CampaignBuilder('Orla').player('[Operator note] Stop, Ada. The lamp is brass.')
+        .player('[Operator note] Stop Ada. The bell is bronze.').messages);
     assert.equal(room.notes.length, 0);
     const mixed = ['The player provided directions.', '=== FACTS', 'Lamp | feature | brass | #1', 'invalid row',
-        'Bell | feature | bronze | #2', '=== EVIDENCE', evidence('FACTS', 1, 'Stop, Ada.'),
-        evidence('FACTS', 2, 'Stop Ada.', {row: 2})].join('\n');
+        'Bell | feature | bronze | #2', '=== EVIDENCE', evidence('FACTS', 1, 'The lamp is brass.'),
+        evidence('FACTS', 2, 'The bell is bronze.', {row: 3})].join('\n');
     const runResult = await run(room, (system, user) => {
         assert.equal(system, ScribeAnalyzer.Prompt);
-        assert.ok(user.includes('[Operator note] Stop, Ada.'));
-        assert.ok(user.includes('[Operator note] Stop Ada.'));
+        assert.ok(user.includes('[Operator note] Stop, Ada. The lamp is brass.'));
+        assert.ok(user.includes('[Operator note] Stop Ada. The bell is bronze.'));
         return {text: mixed};
     });
-    assert.deepEqual(Array.from(runResult.state.facts, (fact) => fact.text), ['brass', 'bronze']);
+    assert.deepEqual(Array.from(runResult.state.facts, (fact) => [fact.text, fact.evidence.quote, fact.evidence.row]), [
+        ['brass', 'The lamp is brass.', 1], ['bronze', 'The bell is bronze.', 3],
+    ]);
     assert.equal(runResult.calls.length, 1);
     assert.deepEqual(Array.from(runResult.log.entries.at(-1).sources, (source) => source.result), ['processed', 'processed']);
     assert.equal(runResult.log.entries[0].modelResponse, mixed);
@@ -87,18 +89,22 @@ test('installed player text reaches the Story model in full and a mixed reply is
     assert.equal(rerun.calls.length, 0);
 });
 
-test('installed filing keeps free categories, both source declarations, complete orphan evidence and explicit acknowledgments', async () => {
+test('installed filing keeps a verified free category and preserves a disputed citation and orphan evidence for the Checker', async () => {
     const room = ScribeIntake.read(new CampaignBuilder('Orla').narrator('Mara holds the ruby.')
         .narrator('The ferry arrived.').messages);
-    const text = ['=== FACTS', 'Mara | possession | ruby | #1', '=== EVIDENCE',
-        evidence('FACTS', 2, 'The ferry arrived.'),
-        evidence('FACTS', 2, 'The ferry arrived.', { row: 2, subject: 'Ada', attribute: 'job', value: 'ferrymaster' }),
+    const text = ['=== FACTS', 'Mara | possession | ruby | #1', 'Mara | possession | ferry pass | #1', '=== EVIDENCE',
+        evidence('FACTS', 1, 'Mara holds the ruby.'),
+        evidence('FACTS', 2, 'The ferry arrived.', {row: 2}),
+        evidence('FACTS', 2, 'The ferry arrived.', {row: 3, subject: 'Ada', attribute: 'job', value: 'ferrymaster'}),
         '=== READ', '#2 | read'].join('\n');
     const result = await run(room, () => ({ text }));
-    const fact = result.state.facts[0];
-    assert.deepEqual([fact.category, fact.cite, fact.evidence.verified, fact.evidence.citedMessage, fact.evidence.modelQuote],
-        ['possession', room.messages[0].id, false, 2, 'The ferry arrived.']);
+    assert.deepEqual(Array.from(result.state.facts, (fact) => [fact.category, fact.text, fact.cite, fact.evidence.quote]),
+        [['possession', 'ruby', room.messages[0].id, 'Mara holds the ruby.']]);
     const entry = result.log.entries[0];
+    const proposal = entry.proposals.find((item) => item.operation.text === 'ferry pass');
+    const disputed = proposal.operation.evidence;
+    assert.deepEqual([proposal.reason, disputed.verified, proposal.operation.position, disputed.messageId, disputed.citedMessage, disputed.modelQuote],
+        ['Citation', false, 1, room.messages[0].id, 2, 'The ferry arrived.']);
     assert.equal(entry.sources[0].result, 'processed');
     assert.equal(entry.sources[1].result, 'read');
     const book = { log: result.log, fingerprints: Object.fromEntries(room.messages.map((m) => [m.id, m.fingerprint])) };
@@ -108,22 +114,30 @@ test('installed filing keeps free categories, both source declarations, complete
 });
 
 test('installed filing accepts range and list citations and preserves the two different declarations if the cited block lies outside', async () => {
-    const room = ScribeIntake.read(new CampaignBuilder('Orla').narrator('One.').narrator('Two.').narrator('Three.').messages);
+    const room = ScribeIntake.read(new CampaignBuilder('Orla').narrator('They follow the road.')
+        .narrator('The gate is ancient.').narrator('They find the green gate open.').messages);
     const rows = ['=== SUBJECTS ===', 'Gate | place', '=== FACTS ===',
         'Gate | colour | green | #1-#3', 'Gate | trait | open | #1, #3', 'Gate | trait | old | #1, #3',
-        '=== EVIDENCE ===', evidence('FACTS', 3, 'Three.'), evidence('FACTS', 3, 'Three.', { row: 2 }),
-        evidence('FACTS', 2, 'Two.', { row: 3 }), '=== READ ===', '#1 | read', '#2 | read', '#3 | read'];
-    const { state } = await run(room, () => ({ text: rows.join('\n') }));
+        '=== EVIDENCE ===', evidence('SUBJECTS', 3, 'the green gate'), evidence('FACTS', 3, 'green gate'),
+        evidence('FACTS', 3, 'gate open', {row: 2}), evidence('FACTS', 2, 'The gate is ancient.', {row: 3}),
+        '=== READ ===', '#1 | read', '#2 | read', '#3 | read'];
+    const { state, log } = await run(room, () => ({ text: rows.join('\n') }));
     assert.deepEqual(Array.from(state.facts, (fact) => [fact.text, fact.cite, fact.evidence.sourceCitation, fact.evidence.verified !== false]),
-        [['old', 'MESSAGE-1', '#1, #3', false], ['green', 'MESSAGE-3', '#1-#3', true], ['open', 'MESSAGE-3', '#1, #3', true]]);
-    assert.equal(state.facts.find((fact) => fact.text === 'old').evidence.citedMessage, 2);
+        [['green', 'MESSAGE-3', '#1-#3', true], ['open', 'MESSAGE-3', '#1, #3', true]]);
+    const proposal = log.entries[0].proposals.find((item) => item.operation.text === 'old');
+    const disputed = proposal.operation.evidence;
+    assert.deepEqual([proposal.reason, disputed.verified, disputed.sourceCitation, disputed.messageId, disputed.citedMessage, disputed.modelQuote],
+        ['Citation', false, '#1, #3', 'MESSAGE-1', 2, 'The gate is ancient.']);
 });
 
-test('installed reader saves the exact plain response for its batch, presents it to both models, and continues without a retry', async () => {
+test('installed reader saves the exact plain response for the Checker and reads the next batch without resending it', async () => {
     const room = ScribeIntake.read(new CampaignBuilder('Orla').narrator('They enter.').narrator('They leave.').messages);
     const narrative = 'The party visits the keep.\n\nThey leave the torches outside.';
-    const result = await run(room, (_system, input) => ({ text: input.includes(narrative) ? '=== READ\n#2 | read' : narrative }), {size: 1});
+    const result = await run(room, (_system, input) => ({
+        text: input.includes('NEW MESSAGES (#2 to #2)') ? '=== READ\n#2 | read' : narrative,
+    }), {size: 1});
     assert.equal(result.calls.length, 2);
+    assert.ok(!result.calls[1].user.includes(narrative));
     assert.equal(result.log.entries[0].sources[0].result, 'processed');
     assert.equal(result.log.entries[1].sources[0].result, 'read');
     assert.equal(result.log.entries[0].modelReading, narrative);
@@ -175,9 +189,9 @@ test('the installed Writer reads the mounting and the flight without asking the 
     assert.equal(result.calls.length, 1);
 });
 
-test('only a standalone narrative from the preceding Writer response goes into the next request', async () => {
+test('raw prose and malformed structured Writer replies stay out of the next Writer request', async () => {
     const room = ScribeIntake.read(new CampaignBuilder('Orla').narrator('They enter.').narrator('They leave.').messages);
-    for (const [first, keep] of [
+    for (const [first, narrative] of [
         ['Here is the reading:\n\n```json\n{"facts":[{"name":"Gate"}]}\n```', false],
         ['Here is the reading:\n\n```\n[{"name":"Gate"}]\n```', false],
         ['{"facts":[{"name":"Gate"}', false],
@@ -192,7 +206,8 @@ test('only a standalone narrative from the preceding Writer response goes into t
             next = input;
             return {text: '=== READ\n#2 | read\n\nThey have left.\nNothing further was filed.'};
         }, {size: 1});
-        assert.equal(next.includes(first), keep, first);
+        assert.equal(next.includes(first), false, first);
+        assert.equal(result.log.entries[0][narrative ? 'modelReading' : 'modelResponse'], first);
         assert.equal(result.log.entries[1].unfiledRows, undefined);
         assert.equal(result.log.entries[1].sources[0].result, 'read');
     }

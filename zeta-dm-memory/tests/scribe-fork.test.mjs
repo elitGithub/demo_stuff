@@ -282,10 +282,72 @@ test('Worker Book lookup reads the selected parent revision even when the child 
             assert.equal(url.searchParams.get('roomId'), '/rooms/parent');
             assert.equal(details.method, 'GET');
             paths.push(url.pathname);
-            const response = url.pathname.endsWith('/part') ? book : {heads: [{kind:'book', revision:4, parts:1}]};
+            const response = url.pathname.endsWith('/part') ? book : {heads: [null, {kind:'book', revision:4, parts:1}]};
             details.onload({status:200, finalUrl:details.url, responseText: JSON.stringify(response)});
         }};
     const found = await ScribeCloud.forkBook(cloud, 'parent');
     assert.equal(found.log.entries.length, 5);
     assert.deepEqual(paths, ['/v1/scribe', '/v1/scribe/part']);
+});
+
+test('a saved Book lookup reports why it failed without exposing credentials or retrying', async () => {
+    const metadata = {heads: [{kind: 'book', revision: 1, parts: 1}]};
+    const key = 'synthetic'.repeat(8);
+    const revoked = 'The Worker request was cancelled.';
+    for (const [setup, reason, expectedRequests] of [
+        [{key: ''}, 'No DM API key is saved on this PC.', 0],
+        [{key: 'short'}, 'The DM API key saved on this PC has an invalid format.', 0],
+        [{status: 401}, 'The Worker returned HTTP 401 while looking up the saved Book.', 1],
+        [{status: 503}, 'The Worker returned HTTP 503 while looking up the saved Book.', 1],
+        [{parts: true, status: 404}, 'The Worker returned HTTP 404 while downloading the saved Book.', 2],
+        [{parts: true, status: 503}, 'The Worker returned HTTP 503 while downloading the saved Book.', 2],
+        [{event: 'onerror'}, 'The Worker could not be reached while looking up the saved Book.', 1],
+        [{parts: true, event: 'onerror'}, 'The Worker could not be reached while downloading the saved Book.', 2],
+        [{event: 'ontimeout'}, 'The Worker request timed out.', 1],
+        [{event: 'deadline'}, 'The Worker request timed out.', 1],
+        [{event: 'onabort'}, revoked, 1],
+        [{event: 'abort'}, revoked, 1],
+        [{redirect: true}, 'An answer did not come straight from your Worker.', 1],
+        [{body: {error: {message: key}}}, 'The Worker returned an invalid list of saved records for this chat.', 1],
+        [{body: {heads: [{kind: 'BOok', revision: 2, parts: 1}]}}, 'The Worker returned an invalid list of saved records for this chat.', 1],
+        [{body: {heads: [null]}}, 'The Worker returned an invalid list of saved records for this chat.', 1],
+        [{body: {heads: [{kind: 'book', parts: 0, revision: 1}]}}, 'The Worker returned invalid revision or part information for the saved Book.', 1],
+        [{parts: true, body: key}, 'The downloaded data does not contain a readable Scribe Book.', 2],
+        [{parts: true, restart: true}, 'The Worker connection changed while downloading the saved Book.', 2],
+        [{body: {heads: []}}, null, 1],
+        [{body: {heads: [{kind: 'settings', revision: 2, parts: 1}]}}, null, 1],
+    ]) {
+        const storage = new FakeStorage();
+        ScribeStore.setCloudKey(storage, setup.key ?? key);
+        const controller = new AbortController();
+        let requests = 0;
+        let deadline;
+        const cloud = {room: '/rooms/child', roomId: 'child', storage, clock: {today: () => '2026-11-24'},
+            random: () => 'Fictional-Browser-Z-9999', epoch: 0, texts: new Map(),
+            later: (delay, callback) => { deadline = callback; }, xmlHttpRequest: (details) => {
+                requests++;
+                if (setup.parts && requests === 1) {
+                    details.onload({status: 200, finalUrl: details.url, responseText: JSON.stringify(metadata)});
+                } else if (setup.event === 'abort') {
+                    controller.abort();
+                } else if (setup.event === 'deadline') {
+                    deadline();
+                } else if (setup.event) {
+                    details[setup.event]();
+                } else {
+                    details.onload({status: setup.status ?? 200, finalUrl: setup.redirect ? 'https://elsewhere.example' : details.url,
+                        responseText: JSON.stringify(setup.body ?? {error: {message: key}})});
+                    if (setup.restart) {
+                        cloud.epoch++;
+                    }
+                }
+            }};
+        const lookup = ScribeCloud.forkBook(cloud, 'parent', controller.signal);
+        if (reason === null) {
+            assert.equal(await lookup, null);
+        } else {
+            await assert.rejects(lookup, {message: reason});
+        }
+        assert.equal(requests, expectedRequests);
+    }
 });

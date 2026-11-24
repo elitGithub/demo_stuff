@@ -286,8 +286,14 @@ const ZetaSource = Object.freeze({
                 return;
             }
             const messages = ZetaSource.ordered(body.messages);
+            if (messages.length !== body.messages.length) {
+                const byId = new Map(messages.map((row) => [row.id, row]));
+                if (body.messages.some((row) => !ScribeFork.equal(row, byId.get(row.id)))) {
+                    return;
+                }
+            }
             const cursor = body.nextCursor;
-            if (messages.length === body.messages.length && (cursor === null || ZetaSource.filled(cursor) || Number.isFinite(cursor))) {
+            if (cursor === null || ZetaSource.filled(cursor) || Number.isFinite(cursor)) {
                 deliver({ messages, head: true, complete: cursor === null, observedAt });
             }
         };

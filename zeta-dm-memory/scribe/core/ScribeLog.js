@@ -2162,12 +2162,11 @@ const ScribeLog = Object.freeze({
         if (ScribeCategory.same(left.value, right.value)) {
             return false;
         }
-        const sameFrame = lhs.replace(words(left.value), ' [] ') === rhs.replace(words(right.value), ' [] ');
         const property = [left.attribute, right.attribute].find((key) =>
             words(source.context ?? source.quote).includes(words(key)) && words(opposing.context ?? opposing.quote).includes(words(key)));
         const issue = words(question);
         const namesAlternatives = [left.attribute, left.value, right.value].every((field) => issue.includes(words(field)));
-        if (!property && !sameFrame && !namesAlternatives) {
+        if (!property && !namesAlternatives) {
             return false;
         }
         const normalized = (claim) => {
@@ -2782,11 +2781,9 @@ const ScribeLog = Object.freeze({
                 identity.push(removed);
             }
             version = ScribeText.fingerprint(JSON.stringify(identity));
-            if (source.id === legacyVersionAt) {
-                return { version };
-            }
             const incomingVersion = 'incoming-' + ScribeText.fingerprint(JSON.stringify([source.id, source.fingerprint, source.projection ?? null]));
-            const receipt = (sparse ? checks.get(JSON.stringify([source.id, incomingVersion])) : null) ?? checks.get(JSON.stringify([source.id, version]));
+            const receipt = (sparse && legacyVersionAt === null ? checks.get(JSON.stringify([source.id, incomingVersion])) : null) ??
+                checks.get(JSON.stringify([source.id, version]));
             completed = [];
             segments = [];
             priorPages = [];
@@ -2824,6 +2821,10 @@ const ScribeLog = Object.freeze({
                     completed = [];
                     segments = [];
                 }
+            }
+            if (source.id === legacyVersionAt) {
+                return { message: source, version, written: bucket.written, earlierClaims, rulings: [...rulings],
+                    completed, segments, priorPages };
             }
             const currentIds = new Set([...completed, ...segments].map((page) => page.id));
             const previous = priorPages.filter((page) => !currentIds.has(page.id));
@@ -3004,24 +3005,38 @@ const ScribeLog = Object.freeze({
         }
         const version = 'incoming-' + ScribeText.fingerprint(JSON.stringify([targetId, source.fingerprint, source.projection ?? null]));
         Object.assign(result, { message: source, version });
-        const requests = Object.values(log.checkRequests ?? {}).filter((request) => request.messageId === targetId && !request.authRejected);
-        if (requests.some((request) => request.version !== version)) {
-            const legacy = ScribeLog.checkWork(book, messages, false, null, true, targetId).version;
-            result.targetDispatched = requests.some((request) => request.version === legacy);
-        }
-        result.targetDispatched ||= requests.some((request) => request.version === version && !request.reply);
+        const requests = Object.values(log.checkRequests ?? {}).filter((request) => request.messageId === targetId &&
+            (request.fingerprint === undefined || request.fingerprint === source.fingerprint && (request.projection ?? null) === (source.projection ?? null)));
+        const legacyRequests = requests.filter((request) => typeof request.version === 'string' && !request.version.startsWith('incoming-'));
+        result.targetDispatched = requests.some((request) => request.version === version && !request.authRejected && !request.reply);
+        const partial = [];
         for (const entry of log.entries) {
             const receipt = entry.check;
             if (entry.withdrawn || !receipt || receipt.messageId !== targetId || receipt.fingerprint !== source.fingerprint ||
-                receipt.targeted && receipt.version !== version || !receipt.pages?.length) {
+                receipt.targeted && receipt.version !== version) {
                 continue;
             }
-            const pages = receipt.pages;
-            if (pages.length === pages[0].total && pages.every((page, index) => page.index === index &&
+            const pages = receipt.pages ?? [];
+            if (pages.length && pages.length === pages[0].total && pages.every((page, index) => page.index === index &&
                 page.total === pages.length && page.seal === ScribeLog.checkSeal(page) && ScribeLog.validCheckPage(page, source, messages))) {
                 result.completed = pages;
                 result.targetComplete = true;
                 return result;
+            }
+            if (!receipt.targeted && (pages.length || receipt.segments?.length || receipt.priorPages?.length)) {
+                partial.push(receipt);
+            }
+        }
+        if (partial.length || legacyRequests.length) {
+            const legacy = ScribeLog.checkWork(book, messages, includeContext, null, true, targetId);
+            const matching = legacyRequests.filter((request) => request.fingerprint !== undefined || request.version === legacy.version);
+            if (partial.length || matching.length) {
+                const receipts = new Set([...legacy.completed, ...legacy.segments, ...legacy.priorPages].map((page) => page.seal));
+                const verifiable = partial.every((receipt) => receipt.version === legacy.version &&
+                    [...(receipt.pages ?? []), ...(receipt.segments ?? []), ...(receipt.priorPages ?? [])].every((page) => receipts.has(page.seal)));
+                result.targetDispatched ||= !verifiable || matching.some((request) => request.version !== legacy.version ||
+                    !request.authRejected && !request.reply);
+                return { ...result, ...legacy, legacyPartial: true };
             }
         }
         const savedSources = new Map((owner.sources ?? []).map((row) => [row.id, row]));
@@ -3144,7 +3159,7 @@ const ScribeLog = Object.freeze({
             existing = { sequence: log.nextSequence++, kind: ScribeLog.Kind.Update, origin: ScribeLog.Origin.Checker,
                 messageIds: [], operations: [], withdrawn: false, check: { messageId: target.id,
                     fingerprint: target.fingerprint, version: current.version, pages: [],
-                    ...(work.targetId ? { targeted: true } : {}) } };
+                    ...(work.targetId && !work.legacyPartial ? { targeted: true } : {}) } };
             log.entries.push(existing);
         }
         if (existing.check.planVersion !== ScribeLog.CheckerPlanVersion) {

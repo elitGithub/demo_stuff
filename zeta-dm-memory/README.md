@@ -362,7 +362,7 @@ The chat box lives inside a frame served by `frame.pingpong.ai`, so the script r
 ### First evening
 
 1. In **Settings**, enter your OpenRouter key and press **Save key**. Tampermonkey keeps it in private userscript storage. Scribe sends it only in the authorization header of a model request to OpenRouter. Decline the browser's offer to save it as a password.
-2. On the same tab, check the three models, the messages per stretch (40), the sends between reminders (6) and the day's budget in dollars (3), then press **Adopt this chat** in the panel header. The scribe pulls the whole chat with the page's own login, then reads it stretch by stretch. A long chat takes a while and costs most of what the scribe will ever cost for it. **Pause** stops after the stretch in flight; **Resume** goes on.
+2. On the same tab, check the three models, the messages per stretch (40), the sends between reminders (6) and the day's budget in dollars (3), then press **Adopt this chat** in the panel header. This starts the first history pull. The scribe then reads the saved chat stretch by stretch. **Pause** immediately cancels the active history or model request. **Resume** continues from saved progress. If the first import was interrupted, use **Pull the chat again** to finish it.
 3. **Rulings** tab: rule what the engine could not decide (conflicts, look-alikes, questions). Your rulings outrank the story and survive every later reading.
 4. Play. From then on the scribe works at the newest message.
 
@@ -372,7 +372,7 @@ The chat box lives inside a frame served by `frame.pingpong.ai`, so the script r
 - **Findings.** Each new reply is checked for a misspelt name, a contradiction with the book, or a character using a secret they were never told. The scribe only reports. A contradicted fact goes first in the next reminder when everyone present may hear it. **Rule it...** puts the reply's value into the Tell box if the reply is right and the book wrong; **They were told** records that the speaker now knows; **Dismiss** drops the finding. The scribe never writes a correction into the chat.
 - **A development.** **Suggest one** asks for a narrator line that brings an open thread back. Nothing is sent unless you press **Use**; it then goes with your next message.
 - **Tell the scribe.** Write what the book should know. **Work it out** shows what would change in the book; **File it** files exactly that. Nothing typed here is sent to the chat.
-- **Regenerated and edited replies.** Findings about a reply that was regenerated, edited or deleted go away, and the new text is checked. An edit to an old message is noticed at the next whole pull (**Pull the chat again**), and only its stretch is read again.
+- **Chat edits and regenerated replies.** When Zeta returns an edit to the selected reply or selects a regenerated reply for the same message, Scribe updates the saved passage from that response. While paused, it holds the change until Resume. Neither action requires a history pull.
 
 The other tabs: **Summary** (what needs you, the cast, where the story stands), **Book** (every subject with its facts; add, remove, make public, split), **Timeline** (scenes by day), **Progress** (readings, the last model calls, how the last pull ended, **Export**, **Start the book over**), **Settings** (the key, the models, the sizes and the budget).
 
@@ -410,7 +410,7 @@ The scribe also reads the chat's DM Memory notes from the Worker when the chat o
 
 ### Limits
 
-- Nothing here has run in a real browser or against the real site or a real model yet. The [scribe page verification record](docs/verification/scribe-page-verification.md) lists what the tests cover and, in order, what to check on the real page first.
+- Offline Chromium tests exercised the history, Pause and Resume controls. Network captures from Zeta were replayed offline. Verification of this build in a live room with Scribe enabled is still pending. [Scribe page verification record](docs/verification/scribe-page-verification.md)
 - The book runs up to one stretch behind the newest message. Until a stretch is read, reminders carry lasting facts and who knows what, not locations or passing conditions.
 - A reminder is left out of a message when the book, the scene or the findings changed after it was prepared; the next message carries a fresh one.
 - Deleting the opening messages of a chat on the site is not noticed. Use **Start the book over**.

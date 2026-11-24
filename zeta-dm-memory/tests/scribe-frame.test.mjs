@@ -1057,8 +1057,8 @@ test('native observations wait for their room, use its frame grant and ignore la
     const frame = ScribeFrame.start({ window: raw, document, token: () => TOKEN,
         watch: () => ({ onMessages: (callback) => { observed = callback; }, onPost: () => {}, stop: () => {} }) });
     const grant = 'observation-grant-for-one-room';
-    const source = { head: false, complete: false, observedAt: 1000,
-        messages: [{ id: 'edited', roomId: 'room', sender: { type: 'BOT' }, contents: [{ type: 'TEXT', text: 'Changed.' }],
+    const source = { head: false, complete: false, created: true, observedAt: 1000,
+        messages: [{ id: 'new', roomId: 'room', sender: { type: 'BOT' }, contents: [{ type: 'TEXT', text: 'A new reply.' }],
             messageTime: new Date(1000).toISOString() }] };
     observed('room')(source);
     observed('other')(source);

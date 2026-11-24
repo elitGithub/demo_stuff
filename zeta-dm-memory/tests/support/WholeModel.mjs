@@ -98,9 +98,9 @@ export default class WholeModel {
             return handle;
         }
         if (call.role === this.holding) {
-            this.held.set(call, (status, responseText) => {
+            this.held.set(call, (status, responseText, deliverAfterAbort = false) => {
                 this.held.delete(call);
-                if (!call.ended && !tab.dead) {
+                if ((!call.ended || deliverAfterAbort) && !tab.dead) {
                     call.ended = true;
                     details.onload({ status, responseText });
                 }

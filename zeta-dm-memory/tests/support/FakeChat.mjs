@@ -155,7 +155,6 @@ export default class FakeChat {
     edit(number, text) {
         const message = this.find(number);
         message.contents[0].text = text;
-        message.edited = true;
         return this;
     }
 
@@ -166,14 +165,6 @@ export default class FakeChat {
     remove(number) {
         this.raw.splice(this.raw.indexOf(this.find(number)), 1);
         return this;
-    }
-
-    /**
-     * @return {FakeChat}
-     */
-    regenerate() {
-        this.raw.pop();
-        return this.add(1);
     }
 
     /**

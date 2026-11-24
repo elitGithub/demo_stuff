@@ -42,6 +42,7 @@ export const ScribePack = Object.freeze({
         'scribe/core/ScribeAnswer.js',
         'scribe/core/ScribeLog.js',
         'scribe/core/ScribeReplay.js',
+        'scribe/core/ScribeFork.js',
         'scribe/core/ScribeKnowledge.js',
         'scribe/core/ScribeAnalyzer.js',
         'scribe/core/ScribeGateway.js',

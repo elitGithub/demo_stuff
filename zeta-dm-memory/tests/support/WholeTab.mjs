@@ -483,10 +483,11 @@ export default class WholeTab {
     }
 
     /**
+     * @param {WholeWindow} window
      * @return {Promise<object>}
      */
-    pageGet() {
-        return this.window.fetch(`${WholeSite.messagesOf(this.room())}?limit=${WholeTab.PageSize}`, {
+    pageGet(window = this.window) {
+        return window.fetch(`${WholeSite.messagesOf(this.room())}?limit=${WholeTab.PageSize}`, {
             headers: { Authorization: WholeSite.Token },
             own: true,
         });
@@ -520,22 +521,6 @@ export default class WholeTab {
             await this.pageGet();
         }
         return response;
-    }
-
-    /**
-     * @param {string} id
-     * @return {Promise<object>}
-     */
-    pageRegenerate(id) {
-        return this.chatWindow.fetch(`${WholeSite.messagesOf(this.room())}/${id}/candidates/stream`, {
-            method: 'POST',
-            headers: { Authorization: WholeSite.Token, 'Content-Type': 'application/json' },
-            body: '{}',
-            own: true,
-        }).then(async () => {
-            await this.pageMessage(id, this.chatWindow);
-            return this.pageGet();
-        });
     }
 
     /**

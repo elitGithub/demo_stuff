@@ -104,41 +104,48 @@ function checkedModel(onCheck) {
     } };
 }
 
-test('Pause, native edits, Resume and reopen make no further history requests unless Pull is pressed', async () => {
+test('Resume ignores a legacy queued same-ID row and a conflicting head recorded during Pause', async () => {
     const chat = new FakeChat(4);
     const clock = clockAt();
     const model = analyst({ blank: true });
     const first = await opened(chat, model, { clock });
     await first.keeper.adopt({});
     const before = first.keeper.view().messages.at(-1);
+    const calls = model.calls.length;
+    const book = savedBook(first.storage);
     first.keeper.pause();
     chat.edit(4, 'The revised last reply.');
-    await first.keeper.observe({ head: false, complete: false, messages: chat.copy([chat.find(4)]), observedAt: clock.now() });
+    const legacy = { head: false, complete: false, messages: chat.copy([chat.find(4)]), observedAt: clock.now() };
+    await first.keeper.observe(legacy);
+    chat.remove(4).add(1);
+    await first.keeper.observe({ head: true, complete: true, messages: chat.copy(chat.raw), observedAt: clock.now() });
     await first.keeper.tick();
     assert.equal(first.keeper.view().messages.at(-1).fingerprint, before.fingerprint);
     await assert.rejects(first.keeper.pull(), /paused/i);
     first.keeper.close();
+    const campaign = ScribeStore.read(first.storage, ROOM, ScribeStore.Kind.Campaign);
+    assert.equal(campaign.observations.length, 1);
+    campaign.observations.unshift(legacy);
+    ScribeStore.write(first.storage, ROOM, ScribeStore.Kind.Campaign, campaign);
     const second = await opened(chat, model, { clock, storage: first.storage });
     assert.equal(second.keeper.view().stop.reason, 'Paused');
     assert.equal(second.keeper.view().messages.at(-1).fingerprint, before.fingerprint);
     await second.keeper.resume();
-    const revised = ScribeIntake.read(chat.raw).messages.at(-1);
-    assert.equal(second.keeper.view().messages.at(-1).fingerprint, revised.fingerprint);
-    assert.equal(savedBook(first.storage).fingerprints[revised.id], revised.fingerprint);
-    chat.regenerate();
-    await second.keeper.observe({ head: true, complete: false, messages: chat.copy(chat.raw.slice(-3)), observedAt: clock.now() });
-    const redone = second.keeper.view().messages.at(-1);
-    assert.equal(redone.id, chat.raw.at(-1).id);
-    assert.equal(Object.hasOwn(savedBook(first.storage).fingerprints, revised.id), false);
-    await until(() => savedBook(first.storage).fingerprints[redone.id] === redone.fingerprint);
+    await second.keeper.tick();
+    assert.equal(second.keeper.view().messages.at(-1).id, before.id);
+    assert.equal(second.keeper.view().messages.at(-1).fingerprint, before.fingerprint);
+    assert.deepEqual(savedBook(first.storage), book);
+    assert.equal(model.calls.length, calls);
     assert.deepEqual(chat.requests.map((request) => request.kind), ['history']);
     await second.keeper.pull();
+    assert.equal(second.keeper.view().messages.at(-1).id, chat.raw.at(-1).id);
     assert.deepEqual(chat.requests.map((request) => request.kind), ['history', 'history']);
 });
 
-test('a confirmed native create retains the new row without an automatic request; a lone unknown GET waits for its placement', async () => {
+test('an isolated unknown row is ignored and a reported creation can add it without a history request', async () => {
     const chat = new FakeChat(3);
     const { keeper, clock } = await opened(chat, analyst({ blank: true }));
+    await keeper.adopt({});
     chat.add(1);
     await keeper.observe({ head: false, complete: false, messages: chat.copy([chat.find(4)]), observedAt: clock.now() });
     assert.equal(keeper.view().total, 3);
@@ -147,6 +154,63 @@ test('a confirmed native create retains the new row without an automatic request
     await keeper.observe({ head: false, complete: false, created: true, messages: chat.copy([chat.find(4)]), observedAt: clock.now() });
     assert.equal(keeper.view().total, 4);
     assert.ok(keeper.view().messages.at(-1).text.includes('Final text'));
+    assert.deepEqual(chat.requests.map((request) => request.kind), ['history']);
+});
+
+test('the candidate edit applies to its selected message, and delayed edit and head responses cannot restore its old candidate', async () => {
+    const chat = new FakeChat(3);
+    chat.find(3).candidateId = 'candidate-a';
+    const model = checkedModel(() => {});
+    const { keeper, clock } = await opened(chat, model, { checkPassage: ScribePedant.checkPassage });
+    await keeper.adopt({});
+    const initial = chat.copy(chat.raw);
+    const target = chat.find(3);
+    chat.edit(3, 'The revised account.');
+    const candidate = { message: target.id, id: target.candidateId, contents: chat.copy(chat.find(3).contents) };
+    const editedAt = ++clock.time;
+    await deliver(keeper, chat, { head: false, complete: false, messages: [], candidate, observedAt: editedAt });
+    assert.ok(keeper.view().messages.at(-1).text.includes('The revised account.'));
+    await deliver(keeper, chat);
+    assert.deepEqual(model.calls.map((call) => call.position), [3]);
+    chat.edit(3, 'The selected regenerated account.');
+    chat.find(3).candidateId = 'candidate-b';
+    await deliver(keeper, chat, { head: false, complete: false, replacement: true, messages: [chat.find(3)], observedAt: ++clock.time });
+    await deliver(keeper, chat, { messages: initial, observedAt: editedAt });
+    await deliver(keeper, chat, { head: false, complete: false, messages: [], candidate, observedAt: ++clock.time });
+    await deliver(keeper, chat);
+    assert.ok(keeper.view().messages.at(-1).text.includes('The selected regenerated account.'));
+    assert.deepEqual(model.calls.map((call) => call.position), [3, 3]);
+    assert.deepEqual(chat.requests.map((request) => request.kind), ['history']);
+});
+
+test('a canonical head containing an edit and an addition reads only the changed passages even if all rows are marked edited', async () => {
+    const chat = new FakeChat(3);
+    const model = checkedModel(() => {});
+    const asked = [];
+    const ask = model.ask;
+    model.ask = async (...args) => {
+        asked.push(args[0]);
+        return ask(...args);
+    };
+    const { keeper, storage, events } = await opened(chat, model, { checkPassage: ScribePedant.checkPassage });
+    await keeper.adopt({});
+    asked.length = 0;
+    events.length = 0;
+    chat.add(1);
+    chat.edit(3, 'The speaker revised this reply.');
+    for (const row of chat.raw) {
+        row.edited = true;
+    }
+    await deliver(keeper, chat);
+    await keeper.tick();
+    const billed = asked.length;
+    await deliver(keeper, chat);
+    await keeper.tick();
+    assert.deepEqual(model.calls.map((check) => check.position), [3, 4]);
+    assert.equal(asked.length, billed);
+    assert.deepEqual(plain(savedIds(storage)), chat.raw.map((row) => row.id));
+    assert.deepEqual(plain(replies(events).map((event) => event.message.id)), ['MESSAGE-4']);
+    assert.equal(keeper.view().read, 4);
     assert.deepEqual(chat.requests.map((request) => request.kind), ['history']);
 });
 
@@ -184,9 +248,10 @@ test('startup and manual import buy no checks; only the requested inclusive rang
     assert.deepEqual(chat.requests.map((request) => request.kind), ['history', 'history']);
 });
 
-test('an older native head cannot remove a later confirmed creation or revert a later edit across reopening', async () => {
+test('a passive head and a conflicting same-ID row leave a saved creation and existing source intact across reopening', async () => {
     const chat = new FakeChat(3);
     const { keeper, storage, clock } = await opened(chat, analyst());
+    await keeper.adopt({});
     const stale = chat.copy(chat.raw);
     clock.time += 3;
     chat.add(1);
@@ -197,7 +262,7 @@ test('an older native head cannot remove a later confirmed creation or revert a 
     const restored = await opened(chat, analyst(), { storage, clock });
     await deliver(restored.keeper, chat, { messages: stale, observedAt: clock.time - 1 });
     assert.equal(restored.keeper.view().total, 4);
-    assert.equal(restored.keeper.view().messages[1].fingerprint, ScribeIntake.read(chat.raw).messages[1].fingerprint);
+    assert.equal(restored.keeper.view().messages[1].fingerprint, ScribeIntake.read(stale).messages[1].fingerprint);
     assert.deepEqual(chat.requests.map((request) => request.kind), ['history']);
 });
 
@@ -214,7 +279,7 @@ test('Keeper re-observes both cited accounts before saving a ruling, refuses par
         if (system === ScribePedant.CheckPrompt) {
             const page = JSON.parse(user);
             if (page.position === 2) {
-                const finding = { kind: 'Contradiction', question: 'What is the town called?',
+                const finding = { kind: 'Contradiction', question: 'Is the town’s name Talon or Harrow?',
                     source: { ref: 'm2b1', quote: 'The town is called Harrow.' },
                     earlier: { ref: 'm1b1', quote: 'The town is called Talon.' } };
                 answer.text = JSON.stringify({ page: page.page, complete: true, claims: [{ source: finding.source,
@@ -244,14 +309,14 @@ test('Keeper re-observes both cited accounts before saving a ruling, refuses par
     const next = await opened(chat, model, { storage, tabId: 'next', checkPassage: ScribePedant.checkPassage });
     assert.equal(next.keeper.view().state.checkerRulings[0].status, 'deferred');
     chat.edit(1, 'The town is called Rowan.');
-    await deliver(next.keeper, chat, { head: false, complete: false, messages: [chat.find(1)] });
+    await next.keeper.pull();
     await assert.rejects(next.keeper.ruling({ ...change, action: 'choose', account: 'earlier' }));
     assert.equal(next.keeper.view().state.checkerRulings[0].status, 'deferred');
     assert.equal(next.keeper.view().state.checkerRulings[0].sourceStale, true);
     assert.equal(savedBook(storage).log.entries.filter((entry) => entry.checkerRuling).length, 1);
 });
 
-test('an edit to #1 during a paid independent check is re-observed without a poll and cannot be published', async () => {
+test('a conflicting passive row during a paid check leaves its original passage and single receipt intact', async () => {
     const chat = new FakeChat(80);
     const held = gate();
     const model = checkedModel(() => held.promise);
@@ -266,10 +331,10 @@ test('an edit to #1 during a paid independent check is re-observed without a pol
     held.release();
     await checking;
     const receipts = savedBook(storage).log.entries.flatMap((entry) => entry.check ? [entry.check] : []);
-    assert.equal(receipts.some((receipt) => receipt.fingerprint === original), false);
-    assert.deepEqual(plain(receipts.map((receipt) => receipt.fingerprint)), [keeper.view().messages[0].fingerprint]);
-    assert.deepEqual(model.calls.map((page) => page.position), [1, 1]);
-    assert.equal(cents(keeper.view().spentToday), 2);
+    assert.equal(keeper.view().messages[0].fingerprint, original);
+    assert.deepEqual(plain(receipts.map((receipt) => receipt.fingerprint)), [original]);
+    assert.deepEqual(model.calls.map((page) => page.position), [1]);
+    assert.equal(cents(keeper.view().spentToday), 1);
 });
 
 test('a historical comparison uses the saved passage across reader handoff without requesting history', async () => {
@@ -300,9 +365,9 @@ for (const refusal of ['dropSetsMatching', 'refuseSetsMatching', 'refuseGetsMatc
         await keeper.adopt({});
         await keeper.tick();
         assert.deepEqual(model.calls, []);
-        chat.edit(2, 'A confirmed native change.');
-        await deliver(keeper, chat, { messages: [chat.find(2)], head: false, complete: false });
-        assert.equal(keeper.view().read, 80);
+        chat.add(1);
+        await deliver(keeper, chat);
+        assert.equal(keeper.view().read, 81);
         assert.equal(keeper.view().checkedCount, 1);
         assert.equal(keeper.view().checkerProblem, null);
         assert.deepEqual(chat.requests.map((request) => request.kind), ['history']);
@@ -310,7 +375,7 @@ for (const refusal of ['dropSetsMatching', 'refuseSetsMatching', 'refuseGetsMatc
 }
 
 for (const edit of [false, true]) {
-    test('a canonical source response during a comparison invalidates only a changed answer: edit=' + edit, async () => {
+    test('a passive same-ID response cannot buy a second comparison, differing text=' + edit, async () => {
         const chat = new FakeChat(80);
         const held = gate();
         const model = checkedModel(() => held.promise);
@@ -326,7 +391,7 @@ for (const edit of [false, true]) {
         held.release();
         await checking;
         assert.equal(keeper.view().checkedThrough, 1);
-        assert.equal(model.calls.length, edit ? 2 : 1);
+        assert.equal(model.calls.length, 1);
         assert.equal(new Set(model.calls.map((page) => page.page)).size, model.calls.length);
         assert.deepEqual(chat.requests.map((request) => request.kind), ['history', 'history']);
     });
@@ -519,8 +584,8 @@ test('a context limit on an incoming passage never fans out into smaller paid co
     const model = checkedModel(() => { throw Object.assign(new Error('maximum context length exceeded'), { status: 400 }); });
     const { keeper, clock, storage } = await opened(chat, model, { checkPassage: ScribePedant.checkPassage });
     await keeper.adopt({});
-    chat.edit(1, 'The dusk settled. '.repeat(1600));
-    await deliver(keeper, chat, { head: false, messages: [chat.find(1)] });
+    chat.add(1).edit(2, 'The dusk settled. '.repeat(1600));
+    await deliver(keeper, chat);
     assert.equal(model.calls.length, 1);
     keeper.close();
     const next = await opened(chat, model, { clock, storage, checkPassage: ScribePedant.checkPassage });
@@ -528,6 +593,57 @@ test('a context limit on an incoming passage never fans out into smaller paid co
     assert.equal(model.calls.length, 1);
     assert.equal(next.keeper.view().pendingChecks, 1);
 });
+
+for (const checkpoint of ['page', 'segment']) {
+    test('Check history resumes only unpaid comparisons from a saved legacy ' + checkpoint, async () => {
+        const passage = Array.from({ length: 390 }, (value, index) => 'Marker' + String(index).padStart(3, '0') + '.').join(' ');
+        const chat = new FakeChat(1).edit(1, passage);
+        const model = checkedModel(() => {});
+        const original = await opened(chat, model);
+        await original.keeper.adopt({});
+        const book = savedBook(original.storage);
+        const messages = original.keeper.view().messages;
+        original.keeper.close();
+        const work = ScribeLog.checkWork(book, messages);
+        const pageBytes = ScribePedant.minimumPassageBytes() + (checkpoint === 'page' ? 1800 : 6000);
+        let paid;
+        const interrupt = (part) => {
+            assert.ok(ScribeLog.saveCheck(book, messages, work, part));
+            throw new Error('Stopped after one receipt');
+        };
+        await assert.rejects(ScribePedant.checkPassage({ ...work, pageBytes, ask: async (system, input) => {
+            const request = JSON.parse(input);
+            if (checkpoint === 'segment' && !request.page.includes('/')) {
+                throw Object.assign(new Error('maximum context length exceeded'), { status: 400 });
+            }
+            paid = request;
+            return { text: JSON.stringify({ page: request.page, complete: true, claims: [], findings: [] }) };
+        }, saveSegment: interrupt, savePage: interrupt }), /Stopped after one receipt/);
+        ScribeStore.write(original.storage, ROOM, ScribeStore.Kind.Book, book);
+        const settings = { storage: original.storage, checkPassage: ScribePedant.checkPassage };
+        const { keeper } = await opened(chat, model, { ...settings, tabId: 'resumed' });
+        await keeper.pull();
+        await keeper.checkHistory(1, 1);
+        assert.ok(model.calls.length);
+        const comparisons = model.calls.map((request) => request.page);
+        assert.ok(!comparisons.includes(paid.page));
+        assert.ok(!comparisons.includes(paid.page.split('/')[0]));
+        assert.equal(new Set(comparisons).size, comparisons.length);
+        if (checkpoint === 'page') {
+            const sent = new Set(model.calls.flatMap((request) => request.target.flatMap((target) => target.quote.match(/Marker\d+/g) ?? [])));
+            const done = paid.target.flatMap((target) => target.quote.match(/Marker\d+/g));
+            assert.ok(done.length);
+            assert.ok(done.every((word) => !sent.has(word)));
+            assert.equal(new Set([...sent, ...done]).size, 390);
+        }
+        assert.equal(keeper.view().pendingChecks, 0);
+        assert.equal(keeper.view().checkedCount, 1);
+        keeper.close();
+        const restored = await opened(chat, model, { ...settings, tabId: 'after-check' });
+        await restored.keeper.checkHistory(1, 1);
+        assert.equal(model.calls.length, comparisons.length);
+    });
+}
 
 test('a recent-only comparison verifies its own source range without pulling the first room page', async () => {
     const chat = new FakeChat(100);
@@ -740,7 +856,7 @@ function scripted(call, options, input) {
 }
 
 /**
- * @param {{ cost?: number, broken?: string|null, hold?: Function|null, conflict?: boolean, question?: boolean }} options
+ * @param {{ cost?: number, broken?: string|null, hold?: Function|null, conflict?: boolean, question?: boolean, blank?: boolean }} options
  * @return {{ calls: object[], broken: string|null, cost: number, ask: Function }}
  */
 function analyst(options = {}) {
@@ -794,7 +910,7 @@ function ranges(model) {
 /**
  * @param {FakeChat} chat
  * @param {{ ask: Function }} model
- * @param {{ storage?: FakeStorage, clock?: object, tabId?: string, roomId?: string, claim?: Function, lease?: Function, profile?: Function, wait?: boolean, onNotify?: Function, checkPassage?: (work: object) => Promise<object>, askChecker?: (system: string, input: string, beforeDispatch: Function) => Promise<object> }} extra
+ * @param {{ storage?: FakeStorage, clock?: object, tabId?: string, roomId?: string, claim?: Function, lease?: Function, profile?: Function, wait?: boolean, onNotify?: Function, pauseCalls?: Function, checkPassage?: (work: object) => Promise<object>, askChecker?: (system: string, input: string, beforeDispatch: Function) => Promise<object> }} extra
  * @return {Promise<{ keeper: object, events: object[], storage: FakeStorage, clock: object }>}
  */
 async function opened(chat, model, extra = {}) {
@@ -822,6 +938,7 @@ async function opened(chat, model, extra = {}) {
         zeta: chat.zeta(tabId),
         ask: model.ask,
         askChecker: extra.askChecker,
+        pauseCalls: extra.pauseCalls,
         checkPassage: extra.checkPassage,
         clock,
         /**
@@ -1109,18 +1226,62 @@ test('a chat with no book says so', async () => {
     assert.equal(view.phase, 'NoBook');
     assert.equal(view.reader, true);
     assert.equal(view.roomId, ROOM);
-    assert.equal(view.total, 100);
-    assert.equal(view.settled, 100);
+    assert.equal(view.total, 0);
+    assert.equal(view.settled, 0);
     assert.equal(view.read, 0);
     assert.equal(view.problem, null);
     assert.equal(view.flight, null);
-    assert.equal(ScribeStore.read(storage, ROOM, ScribeStore.Kind.Campaign).messages.length, 100);
+    assert.equal(ScribeStore.read(storage, ROOM, ScribeStore.Kind.Campaign), null);
     assert.equal(savedBook(storage), null);
-    assert.equal(chat.count('tab-1', 'history'), 1);
+    await assert.rejects(keeper.pull(), /No book has been started/);
     await keeper.tick();
+    assert.deepEqual(chat.requests, []);
     assert.equal(keeper.view().phase, 'NoBook');
     assert.equal(model.calls.length, 0);
     assert.equal(savedBook(storage), null);
+});
+
+test('a native page saved before adoption cannot replace the first requested import on reopen', async () => {
+    const chat = new FakeChat(5);
+    const model = analyst({ blank: true });
+    const first = await opened(chat, model);
+    await deliver(first.keeper, chat, { complete: false, messages: chat.raw.slice(-2) });
+    first.keeper.close();
+    const reopened = await opened(chat, model, { storage: first.storage });
+    await reopened.keeper.tick();
+    assert.deepEqual(chat.requests, []);
+    assert.deepEqual(model.calls, []);
+    await reopened.keeper.adopt({});
+    assert.deepEqual(chat.requests.map((request) => request.kind), ['history']);
+    assert.equal(reopened.keeper.view().read, 5);
+});
+
+test('a cancelled first import stays stopped across reopening and requires Pull to request history again', async () => {
+    const chat = new FakeChat(5);
+    const model = analyst({ blank: true });
+    const first = await opened(chat, model);
+    const release = chat.hold('history');
+    const adopting = first.keeper.adopt({});
+    await until(() => first.keeper.view().busy === 'Pulling');
+    first.keeper.pause();
+    assert.equal(first.keeper.view().busy, null);
+    assert.equal(first.keeper.view().stop.reason, 'Paused');
+    release();
+    await adopting;
+    first.keeper.close();
+    const reopened = await opened(chat, model, { storage: first.storage });
+    await reopened.keeper.tick();
+    await assert.rejects(reopened.keeper.pull(), /paused/i);
+    await reopened.keeper.resume();
+    await reopened.keeper.tick();
+    assert.equal(reopened.keeper.view().booked, true);
+    assert.equal(reopened.keeper.view().read, 0);
+    assert.deepEqual(model.calls, []);
+    assert.deepEqual(chat.requests.map((request) => request.kind), ['history']);
+    await reopened.keeper.pull();
+    await reopened.keeper.tick();
+    assert.equal(reopened.keeper.view().read, 5);
+    assert.deepEqual(chat.requests.map((request) => request.kind), ['history', 'history']);
 });
 
 test('adopting reads every settled message and saves after each stretch', async () => {
@@ -1158,9 +1319,11 @@ test('adopting reads every settled message and saves after each stretch', async 
     assert.equal(events.filter((event) => event.kind === 'Progress').length, 3);
 });
 
-test('a native edit during one stretch supplies current text to the following stretch without a boundary request', async () => {
+test('a conflicting passive row during reading cannot change the following Writer input', async () => {
     const chat = new FakeChat(83);
     const changed = 'The lamp is dark beside the ford.';
+    const originalText = chat.find(42).contents[0].text;
+    const original = ScribeIntake.read(chat.raw).messages.find((message) => message.id === 'MESSAGE-42');
     const model = analyst({ hold: (call) => {
         if (call.marks[0] === 1) {
             chat.edit(42, changed);
@@ -1175,9 +1338,10 @@ test('a native edit during one stretch supplies current text to the following st
     assert.equal(after.adopted, true);
     assert.equal(Object.keys(after.log.read).length, 83);
     assert.deepEqual(ranges(model), ['Story 1-40', 'Story 41-80', 'Story 81-83']);
-    assert.ok(keeper.view().calls.find((call) => call.input.includes('NEW MESSAGES (#41 to #80):')).input.includes(changed));
-    const current = ScribeIntake.read(chat.raw).messages.find((message) => message.id === 'MESSAGE-42');
-    assert.equal(after.fingerprints[current.id], current.fingerprint);
+    const input = keeper.view().calls.find((call) => call.input.includes('NEW MESSAGES (#41 to #80):')).input;
+    assert.ok(input.includes(originalText));
+    assert.equal(input.includes(changed), false);
+    assert.equal(after.fingerprints[original.id], original.fingerprint);
     assert.deepEqual(chat.requests.map((request) => request.kind), ['history']);
 });
 
@@ -1229,17 +1393,15 @@ test('catchUp joins a slow live read and saves every arriving source through the
     assert.equal(book.fingerprints[target.id], target.fingerprint);
 });
 
-test('catchUp only confirms the version in the in-flight refresh', async () => {
+test('catchUp keeps the saved version after observing conflicting text', async () => {
     const { chat, keeper, model } = await adopted({ count: 4 });
-    const old = keeper.view().messages.at(-1);
+    const saved = keeper.view().messages.at(-1);
     chat.edit(4, 'The lamp is lit.');
-    const current = ScribeIntake.read(chat.raw).messages.at(-1);
+    const conflicting = ScribeIntake.read(chat.raw).messages.at(-1);
     const polling = deliver(keeper, chat, { head: false, complete: false, messages: [chat.find(4)] });
-    const stale = keeper.catchUp(old);
-    const valid = keeper.catchUp(current);
-    assert.deepEqual(await Promise.all([stale, valid]), [false, true]);
+    assert.deepEqual(await Promise.all([keeper.catchUp(saved), keeper.catchUp(conflicting)]), [true, false]);
     await polling;
-    assert.deepEqual(ranges(model), ['Story 1-4', 'Story 4-4']);
+    assert.deepEqual(ranges(model), ['Story 1-4']);
 });
 
 test('joining an unrelated recent-page poll still verifies the requested historical version', async () => {
@@ -1367,7 +1529,7 @@ test('closing a room resolves a catchUp waiting on an outstanding pull', async (
     assert.equal(savedReads(storage), 4);
 });
 
-test('a poll during extraction rejects the replaced source before its read receipt is made visible', async () => {
+test('a passive same-ID response during extraction preserves the Writer input and receipt without another call', async () => {
     const held = gate();
     const storage = new FakeStorage();
     const observed = new Set();
@@ -1389,11 +1551,11 @@ test('a poll during extraction rejects the replaced source before its read recei
     held.release();
     await reading;
     await keeper.tick();
-    assert.deepEqual([...observed], [after.fingerprint]);
+    assert.deepEqual([...observed], [before.fingerprint]);
     assert.notEqual(before.fingerprint, after.fingerprint);
-    assert.equal(savedBook(storage).fingerprints[after.id], after.fingerprint);
+    assert.equal(savedBook(storage).fingerprints[before.id], before.fingerprint);
     assert.equal(keeper.view().writtenThrough, 5);
-    assert.deepEqual(ranges(model), ['Story 1-4', 'Story 5-5', 'Story 5-5']);
+    assert.deepEqual(ranges(model), ['Story 1-4', 'Story 5-5']);
 });
 
 test('catchUp cannot confirm a later saved message across disputed authorship', async () => {
@@ -1531,7 +1693,7 @@ test('a failed final save keeps 440 of 441 durable, retries once, then rereads o
     assert.equal(third.keeper.view().read, 441);
     const before = savedBook(storage);
     chat.edit(441, 'The lamp has gone dark.');
-    await deliver(third.keeper, chat);
+    await third.keeper.pull();
     await third.keeper.tick();
     const after = savedBook(storage);
     assert.deepEqual(ranges(edited), ['Story 441-441']);
@@ -1543,29 +1705,28 @@ test('a failed final save keeps 440 of 441 durable, retries once, then rereads o
     assert.equal(factsSaying(third.keeper, 'thirty')[0].pinned, true);
 });
 
-test('a reply event is sent for a new or changed newest message', async () => {
+test('a new suffix raises a reply event and a conflicting tail or changed saved row raises none', async () => {
     const chat = new FakeChat(100);
     const { keeper, events } = await opened(chat, analyst());
+    await keeper.adopt({});
     events.length = 0;
     chat.add(1);
     await deliver(keeper, chat);
     assert.deepEqual(plain(replies(events).map((event) => event.message.id)), ['MESSAGE-101']);
     events.length = 0;
-    chat.regenerate();
+    chat.remove(101).add(1);
     await deliver(keeper, chat);
-    assert.deepEqual(plain(replies(events).map((event) => event.message.id)), ['MESSAGE-102']);
-    events.length = 0;
-    chat.edit(102, 'The tale turns at the ford, line 102.');
-    await deliver(keeper, chat);
-    assert.deepEqual(plain(replies(events).map((event) => event.message.id)), ['MESSAGE-102']);
-    assert.equal(replies(events)[0].message.text.includes('turns at the ford'), true);
+    assert.equal(replies(events).length, 0);
+    chat.edit(100, 'The tale turns at the ford.');
+    await deliver(keeper, chat, { head: false, complete: false, messages: [chat.find(100)] });
+    assert.equal(replies(events).length, 0);
     events.length = 0;
     await keeper.tick();
     assert.equal(replies(events).length, 0);
     assert.equal(events.length, 0);
 });
 
-test('an edited message is read again', async () => {
+test('an explicit Pull refreshes a changed source and retains the player’s ruling', async () => {
     const held = gate();
     let rereading = false;
     const { chat, model, keeper, storage } = await reopenedWithLegacyAgeDispute({
@@ -1582,7 +1743,8 @@ test('an edited message is read again', async () => {
     assert.equal(keeper.view().state.conflicts.length, 0);
     chat.edit(20, 'The tale turns another way, line 20.');
     rereading = true;
-    const ticking = deliver(keeper, chat);
+    await keeper.pull();
+    const ticking = keeper.tick();
     await until(() => model.calls.length === 3);
     assert.equal(keeper.view().read, 19);
     assert.equal(savedReads(storage), 19);
@@ -1602,26 +1764,28 @@ test('an edited message is read again', async () => {
     assert.equal(pinned[0].status, 'InForce');
 });
 
-test('a deleted message is noticed in the newest page', async () => {
+test('a partial head with a different tail or missing saved row cannot trigger a Writer call or withdraw Book entries', async () => {
     const { chat, model, keeper, storage } = await adopted();
     const saves = bookSaves(storage);
-    chat.regenerate();
+    chat.remove(100).add(1);
     await deliver(keeper, chat, { complete: false, messages: chat.raw.slice(-31) });
     assert.equal(keeper.view().read, 100);
     assert.equal(keeper.view().total, 100);
-    assert.ok(bookSaves(storage) > saves);
-    assert.equal(model.calls.length, 4);
+    assert.equal(bookSaves(storage), saves);
+    assert.equal(model.calls.length, 3);
     chat.remove(90);
     await deliver(keeper, chat, { complete: false, messages: chat.raw.slice(-31) });
     const view = keeper.view();
-    assert.equal(view.total, 99);
-    assert.equal(view.read, 99);
-    assert.equal(savedReads(storage), 99);
+    assert.equal(view.total, 100);
+    assert.equal(view.read, 100);
+    assert.equal(savedReads(storage), 100);
     assert.equal(savedRead(storage, 'MESSAGE-80'), true);
     assert.equal(savedRead(storage, 'MESSAGE-81'), true);
-    assert.equal(savedRead(storage, 'MESSAGE-90'), false);
-    assert.equal(ScribeStore.read(storage, ROOM, ScribeStore.Kind.Campaign).messages.length, 99);
-    assert.equal(model.calls.length, 5);
+    assert.equal(savedRead(storage, 'MESSAGE-90'), true);
+    assert.equal(savedRead(storage, 'MESSAGE-100'), true);
+    assert.equal(savedRead(storage, 'MESSAGE-101'), false);
+    assert.equal(ScribeStore.read(storage, ROOM, ScribeStore.Kind.Campaign).messages.length, 100);
+    assert.equal(model.calls.length, 3);
 });
 
 test('messages played elsewhere are read in order', async () => {
@@ -1753,16 +1917,10 @@ test('the daily budget stops reading and a new day lifts it', async () => {
     assert.equal(Math.round(view.spentToday * 100), 4);
 });
 
-test('an empty stretch edited into a note stays unread at the budget and is filed once on the next day', async () => {
-    const chat = new FakeChat(2).edit(2, '');
+test('a note following a paid stretch stays unread at the budget and is filed once on the next day', async () => {
     const note = 'Mirelle keeps the clocktower logs.';
-    const model = analyst({ hold: (call) => {
-        if (call.pass === 'Story') {
-            chat.edit(2, '[Operator note] ' + note);
-            assert.equal(keeper.observe({ head: false, messages: chat.copy([chat.find(2)]) }), true);
-        }
-        return null;
-    } });
+    const chat = new FakeChat(2).edit(2, '[Operator note] ' + note);
+    const model = analyst();
     const { keeper, storage, clock } = await opened(chat, model);
     await keeper.adopt({ size: 1, budget: model.cost });
     assert.deepEqual(ranges(model), ['Story 1-1']);
@@ -1802,6 +1960,7 @@ test('a failed pull says why and tries again', async () => {
     const chat = new FakeChat(100);
     const storage = new FakeStorage();
     const first = await opened(chat, analyst(), { storage });
+    await first.keeper.adopt({});
     first.keeper.close();
     const before = storedText(storage, /:campaign/);
     chat.add(5);
@@ -1923,24 +2082,20 @@ test('one thing at a time', async () => {
     });
     const { keeper } = await opened(chat, model);
     const release = chat.hold('history');
-    const pulling = keeper.pull();
-    await until(() => chat.count('tab-1', 'history') === 2);
+    const adopting = keeper.adopt({});
+    await until(() => chat.count('tab-1', 'history') === 1);
     assert.equal(keeper.view().flight, 'Reading chat history from Zeta · 0 messages');
     await keeper.tick();
-    assert.equal(chat.count('tab-1', 'history'), 2);
+    assert.equal(chat.count('tab-1', 'history'), 1);
     assert.equal(chat.count('tab-1', 'newest'), 0);
     await assert.rejects(keeper.adopt({}), { message: PULLING });
     await assert.rejects(keeper.pull(), { message: PULLING });
     release();
-    await pulling;
-    assert.equal(keeper.view().flight, null);
-
-    const adopting = keeper.adopt({});
     await until(() => model.calls.length === 1);
     assert.equal(keeper.view().flight, 'Reading #1 to #40');
     await keeper.tick();
     assert.equal(chat.count('tab-1', 'newest'), 0);
-    assert.equal(chat.count('tab-1', 'history'), 2);
+    assert.equal(chat.count('tab-1', 'history'), 1);
     assert.equal(model.calls.length, 1);
     await assert.rejects(keeper.adopt({}), { message: READING });
     await assert.rejects(keeper.pull(), { message: READING });
@@ -2081,6 +2236,7 @@ test('messages out of order are refused', async () => {
     chat.retime(50, FakeChat.time(10));
     const model = analyst();
     const { keeper, storage } = await opened(chat, model);
+    await assert.rejects(keeper.adopt({}), { message: DISORDER });
     let view = keeper.view();
     assert.equal(view.problem, DISORDER);
     assert.equal(view.read, 0);
@@ -2090,7 +2246,7 @@ test('messages out of order are refused', async () => {
     assert.equal(view.problem, DISORDER);
     await assert.rejects(keeper.adopt({}), { message: DISORDER });
     assert.equal(model.calls.length, 0);
-    assert.equal(savedBook(storage), null);
+    assert.equal(savedBook(storage).adopted, false);
 });
 
 test('nothing loops', async () => {
@@ -2188,6 +2344,7 @@ test('an interrupted first import stays incomplete through reopening until an ex
     const chat = new FakeChat(120).cutShort('Failed', 31, 'Interrupted walk');
     const model = analyst();
     const retry = await opened(chat, model);
+    await assert.rejects(retry.keeper.adopt({}), /Interrupted walk/);
     assert.equal(retry.keeper.view().total, 31);
     assert.equal(retry.keeper.view().historyChecked, false);
     await assert.rejects(retry.keeper.adopt({}), /Interrupted walk/);
@@ -2261,6 +2418,7 @@ test('skipped messages are reported', async () => {
     const chat = new FakeChat(100);
     chat.skip(2);
     const { keeper, storage } = await opened(chat, analyst());
+    await assert.rejects(keeper.adopt({}), /2 messages could not be read/);
     let view = keeper.view();
     assert.equal(savedIds(storage).length, 100);
     assert.equal(view.total, 100);
@@ -2288,7 +2446,7 @@ test('the view tells what is unread and what was read last', async () => {
     const { keeper } = await opened(chat, model);
     let view = keeper.view();
     assert.equal(view.lastRead, null);
-    assert.deepEqual(plain(view.unread.map((message) => message.position)), numbers(1, 121));
+    assert.deepEqual(plain(view.unread), []);
     const adopting = keeper.adopt({});
     await until(() => model.calls.length === 2);
     keeper.pause();
@@ -2300,12 +2458,13 @@ test('the view tells what is unread and what was read last', async () => {
     assert.equal(view.unread[0].id, 'MESSAGE-41');
     assert.equal(view.unread[80].id, 'MESSAGE-121');
     assert.deepEqual(plain(view.lastRead), { id: 'MESSAGE-40', position: 40 });
+    const savedFingerprint = keeper.view().messages[19].fingerprint;
     chat.edit(20, 'The tale turns another way, line 20.');
     await assert.rejects(keeper.pull(), /paused/i);
     await deliver(keeper, chat, { head: false, complete: false, messages: [chat.find(20)] });
     assert.deepEqual(plain(keeper.view().lastRead), { id: 'MESSAGE-40', position: 40 });
     await keeper.resume();
-    assert.equal(keeper.view().messages[19].fingerprint, ScribeIntake.read(chat.raw).messages[19].fingerprint);
+    assert.equal(keeper.view().messages[19].fingerprint, savedFingerprint);
     assert.equal(keeper.view().read, 121);
 });
 
@@ -2416,7 +2575,7 @@ test("an injected claim replaces the store's", async () => {
     await keeper.tick();
     assert.equal(keeper.view().reader, true);
     assert.equal(keeper.view().phase, 'NoBook');
-    assert.equal(chat.count('tab-1', 'history'), 1);
+    assert.equal(chat.count('tab-1', 'history'), 0);
     holding = false;
     await keeper.tick();
     assert.equal(keeper.view().phase, 'Watching');
@@ -2663,7 +2822,7 @@ test('the history activity reports each Zeta callback count including one and 15
         },
     });
     keeper = openedRoom.keeper;
-    await keeper.pull();
+    await keeper.adopt({});
     chat.add(154);
     await keeper.pull();
     assert.ok(seen.includes('Reading chat history from Zeta · 0 messages'));
@@ -2786,13 +2945,14 @@ test('a pull that ends early withdraws nothing older', async () => {
     }
 });
 
-test('what is removed is decided by order', async () => {
+test('explicit history reconciliation handles tied or absent timestamps and a failed pull preserves the book', async () => {
     const shared = new FakeChat(100);
     shared.retime(69, FakeChat.time(70));
     const first = await adopted({ chat: shared });
-    shared.regenerate();
-    shared.regenerate();
-    await deliver(first.keeper, shared);
+    shared.remove(100).add(1);
+    shared.remove(101).add(1);
+    await first.keeper.pull();
+    await first.keeper.tick();
     assert.equal(savedIds(first.storage).includes('MESSAGE-69'), true);
     assert.equal(savedRead(first.storage, 'MESSAGE-69'), true);
     assert.equal(first.keeper.view().read, 100);
@@ -2801,7 +2961,8 @@ test('what is removed is decided by order', async () => {
     untimed.retime(85, null);
     const second = await adopted({ chat: untimed });
     untimed.remove(85);
-    await deliver(second.keeper, untimed);
+    await second.keeper.pull();
+    await second.keeper.tick();
     assert.equal(savedIds(second.storage).includes('MESSAGE-85'), false);
     assert.equal(savedRead(second.storage, 'MESSAGE-81'), true);
     assert.equal(savedRead(second.storage, 'MESSAGE-80'), true);
@@ -2822,7 +2983,7 @@ test('a removal is not lost by a crash', async () => {
     const { chat, keeper, storage, clock } = await adopted();
     storage.refuseSetsMatching(BOOK);
     chat.remove(90);
-    await deliver(keeper, chat);
+    await keeper.pull();
     assert.deepEqual(plain(ScribeStore.read(storage, ROOM, ScribeStore.Kind.Campaign).gone), ['MESSAGE-90']);
     assert.equal(savedRead(storage, 'MESSAGE-90'), true);
     keeper.close();
@@ -2839,6 +3000,7 @@ test('no reading on a chat known to be incomplete', async () => {
     chat.cutShort('Failed', 62, 'Zeta could not be reached');
     const model = analyst();
     const { keeper, clock } = await opened(chat, model);
+    await assert.rejects(keeper.adopt({}), { message: UNREACHED });
     assert.equal(keeper.view().total, 62);
     assert.equal(keeper.view().problem, UNREACHED);
     await assert.rejects(keeper.adopt({}), { message: UNREACHED });
@@ -2862,6 +3024,7 @@ test('no reading on a chat known to be incomplete', async () => {
     const early = new FakeChat(10);
     early.fail('history', new Error('No login seen yet'));
     const waiting = await opened(early, analyst());
+    await assert.rejects(waiting.keeper.adopt({}), { message: 'No login seen yet' });
     assert.equal(waiting.keeper.view().problem, 'No login seen yet');
     await assert.rejects(waiting.keeper.adopt({}), { message: UNJOINED });
 });
@@ -2870,6 +3033,7 @@ test('the last pull is shown', async () => {
     const chat = new FakeChat(100);
     chat.skip(1);
     const { keeper, clock } = await opened(chat, analyst());
+    await assert.rejects(keeper.adopt({}), /1 message could not be read/);
     let view = keeper.view();
     assert.deepEqual(plain(view.pulled), { end: 'NoCursor', count: 100, skipped: 1, at: START });
     assert.equal(view.problem, '1 message could not be read from the site.');
@@ -3076,6 +3240,8 @@ test('a stop survives a reload', async () => {
     assert.equal(resumed.keeper.view().read, 100);
     resumed.keeper.pause();
     assert.equal(resumed.keeper.view().stop.reason, 'Paused');
+    await assert.rejects(resumed.keeper.adopt({}), /paused/i);
+    await resumed.keeper.resume();
     held = gate();
     const restarting = resumed.keeper.adopt({});
     await until(() => model.calls.length === 4);
@@ -3748,10 +3914,12 @@ test('kept answers end with a confirmed save and with adopt', async () => {
     await keeper.adopt({});
     assert.equal(model.calls.length, 1);
     chat.edit(20, 'The tale turns another way, line 20.');
-    await deliver(keeper, chat);
+    await keeper.pull();
+    await keeper.tick();
     assert.equal(model.calls.length, 2);
     chat.edit(20, original);
-    await deliver(keeper, chat);
+    await keeper.pull();
+    await keeper.tick();
     assert.equal(model.calls.length, 3);
     assert.equal(keeper.view().read, 40);
 
@@ -4153,7 +4321,7 @@ test('the opening compares before it pulls', async () => {
     const { chat, keeper, storage, clock } = await adopted();
     storage.refuseSetsMatching(BOOK);
     chat.edit(90, 'The tale turns at the ford, line 90.');
-    await deliver(keeper, chat);
+    await keeper.pull();
     assert.equal(savedReads(storage), 100);
     keeper.close();
     storage.allow();
@@ -4426,6 +4594,7 @@ test('one id twice in a pull', async () => {
     const chat = new FakeChat(100);
     chat.twice(50);
     const { keeper, storage } = await opened(chat, analyst());
+    await keeper.adopt({});
     assert.equal(savedIds(storage).filter((id) => id === 'MESSAGE-50').length, 1);
     assert.equal(savedIds(storage).length, 100);
     assert.equal(keeper.view().total, 100);
@@ -4503,8 +4672,8 @@ test('a repeated cursor cannot authorize adoption until a manual Pull completes'
     chat.cutShort('RepeatedCursor', 62);
     const model = analyst();
     const { keeper } = await opened(chat, model);
-    assert.equal(keeper.view().total, 62);
     await assert.rejects(keeper.adopt({}), { message: STOPPED_EARLY });
+    assert.equal(keeper.view().total, 62);
     assert.deepEqual(model.calls, []);
     await keeper.pull();
     await keeper.adopt({});
@@ -4517,7 +4686,7 @@ test('a repeated cursor cannot authorize adoption until a manual Pull completes'
     const opening = await opened(failed, failedModel);
     await assert.rejects(opening.keeper.adopt({}), { message: UNREACHED });
     assert.equal(failedModel.calls.length, 0);
-    assert.equal(savedBook(opening.storage), null);
+    assert.equal(savedBook(opening.storage).adopted, false);
 });
 
 test('resume keeps what was paid for', async () => {
@@ -4659,20 +4828,25 @@ test('a resume that cannot clear the stop does not read', async () => {
     assert.equal(savedStop(storage), null);
 });
 
-test('a watcher notices an edited last message', async () => {
+test('the reader handles a changed canonical row once and the watching tab issues no model request', async () => {
     const first = await adopted();
-    const second = await opened(first.chat, analyst(), { storage: first.storage, clock: first.clock, tabId: 'tab-2' });
-    for (const change of ['edit', 'regenerate']) {
+    const watcher = analyst();
+    const second = await opened(first.chat, watcher, { storage: first.storage, clock: first.clock, tabId: 'tab-2' });
+    const calls = first.model.calls.length;
+    for (const change of ['same-ID row', 'different tail']) {
         second.events.length = 0;
-        if (change === 'edit') {
+        if (change === 'same-ID row') {
             first.chat.edit(100, 'The tale turns at the ford, line 100.');
         } else {
-            first.chat.regenerate();
+            first.chat.remove(100).add(1);
         }
         await deliver(first.keeper, first.chat);
         await second.keeper.tick();
         await second.keeper.tick();
-        assert.equal(second.events.length, 1, change);
+        assert.equal(replies(second.events).length, 0, change);
+        assert.equal(first.model.calls.length, calls + 1, change);
+        assert.equal(watcher.calls.length, 0, change);
+        assert.equal(second.keeper.view().messages.at(-1).id, 'MESSAGE-100', change);
     }
 });
 
@@ -4987,7 +5161,8 @@ test('the edition names the book', async () => {
     assert.equal(watcher.keeper.view().edition, 1, 'the settings, in a watching tab');
     model.broken = 'No key';
     chat.edit(20, 'The tale turns another way, line 20.');
-    await deliver(keeper, chat);
+    await keeper.pull();
+    await keeper.tick();
     assert.equal(keeper.view().read, 19);
     assert.equal(keeper.view().edition, 1, 'a withdrawn stretch');
     model.broken = null;
@@ -5014,6 +5189,8 @@ test('the edition names the book', async () => {
     assert.equal(unreadable.keeper.view().problem, UNREAD_STORAGE);
     assert.equal(unreadable.keeper.view().edition, 1, 'a reload while the book cannot be read');
     await unreadable.keeper.tick();
+    await assert.rejects(unreadable.keeper.adopt({}), /paused/i);
+    await unreadable.keeper.resume();
     await unreadable.keeper.adopt({});
     assert.equal(unreadable.keeper.view().edition, 2, 'started over');
     await watcher.keeper.tick();
@@ -5219,6 +5396,7 @@ test('the keeper tells when it starts and stops being busy, and not when nothing
         },
     });
     holder.keeper = keeper;
+    await keeper.adopt({});
     assert.equal(keeper.view().adoptBlock, null);
     assert.equal(keeper.view().busy, null);
     seen.length = 0;
@@ -5243,12 +5421,15 @@ test('adoptBlock names what adopt would refuse and changes nothing', async () =>
     const early = new FakeChat(10);
     early.fail('history', new Error('No login seen yet'));
     const blank = await opened(early, analyst());
+    assert.equal(blockOf(blank.keeper, blank.storage), null);
+    await assert.rejects(blank.keeper.adopt({}), { message: 'No login seen yet' });
     assert.equal(blockOf(blank.keeper, blank.storage), UNJOINED);
     await assert.rejects(blank.keeper.adopt({}), { message: UNJOINED });
 
     const cut = new FakeChat(300);
     cut.cutShort('Failed', 62, 'Zeta could not be reached');
     const partial = await opened(cut, analyst());
+    await assert.rejects(partial.keeper.adopt({}), { message: UNREACHED });
     assert.equal(blockOf(partial.keeper, partial.storage), UNREACHED);
     await assert.rejects(partial.keeper.adopt({}), { message: UNREACHED });
 
@@ -5279,6 +5460,7 @@ test('adoptBlock names what adopt would refuse and changes nothing', async () =>
     const disorder = new FakeChat(100);
     disorder.retime(50, FakeChat.time(10));
     const unsettled = await opened(disorder, analyst());
+    await assert.rejects(unsettled.keeper.adopt({}), { message: DISORDER });
     assert.equal(blockOf(unsettled.keeper, unsettled.storage), DISORDER);
     await assert.rejects(unsettled.keeper.adopt({}), { message: DISORDER });
 
@@ -5300,6 +5482,7 @@ test('adoptBlock names what adopt would refuse and changes nothing', async () =>
 
     const pullChat = new FakeChat(100);
     const pulling = await opened(pullChat, analyst());
+    await pulling.keeper.adopt({});
     const release = pullChat.hold('history');
     const pull = pulling.keeper.pull();
     await until(() => pullChat.count('tab-1', 'history') === 2);
@@ -5464,7 +5647,7 @@ test('a lease that is not held keeps the keeper watching, even with the claim', 
         await keeper.tick();
         assert.equal(keeper.view().reader, true);
         assert.equal(keeper.view().phase, 'NoBook');
-        assert.equal(chat.count('tab-1', 'history'), 1);
+        assert.equal(chat.count('tab-1', 'history'), 0);
         leading = false;
         await keeper.tick();
         assert.equal(keeper.view().reader, false);
@@ -5479,6 +5662,7 @@ test('a lease lost mid-reading loses the reader role at the next step', async ()
     const storage = new FakeStorage();
     let leading = true;
     const opening = gate();
+    const cancelled = [];
     let calls = 0;
     const model = analyst({
         /**
@@ -5491,6 +5675,10 @@ test('a lease lost mid-reading loses the reader role at the next step', async ()
     });
     const { keeper } = await opened(chat, model, {
         storage,
+        pauseCalls: (reason) => {
+            cancelled.push(reason);
+            opening.release();
+        },
         /**
          * @return {boolean}
          */
@@ -5502,12 +5690,35 @@ test('a lease lost mid-reading loses the reader role at the next step', async ()
     await keeper.tick();
     assert.equal(keeper.view().reader, false);
     assert.equal(keeper.view().phase, 'Watching');
-    opening.release();
+    keeper.releaseReader();
+    assert.deepEqual(cancelled, [WATCHING]);
+    assert.notEqual(savedStop(storage)?.reason, 'Paused');
     await adopting.catch(() => null);
     await settle();
     assert.equal(savedReads(storage), 40);
     assert.equal(model.calls.length, 2);
     assert.equal(keeper.view().phase, 'Watching');
+});
+
+test('a returning tab honors Resume performed by the tab that took over', async () => {
+    const chat = new FakeChat(4);
+    const model = analyst({ blank: true });
+    let owner = 'a';
+    const first = await opened(chat, model, { claim: () => owner === 'a' });
+    await first.keeper.adopt({});
+    first.keeper.pause();
+    owner = 'b';
+    first.keeper.releaseReader();
+    const second = await opened(chat, model, { tabId: 'b', storage: first.storage, claim: () => owner === 'b' });
+    assert.equal(second.keeper.view().stop.reason, 'Paused');
+    await second.keeper.resume();
+    owner = 'a';
+    second.keeper.releaseReader();
+    await first.keeper.tick();
+    await first.keeper.tick();
+    assert.equal(first.keeper.view().phase, 'Idle');
+    assert.notEqual(savedStop(first.storage)?.reason, 'Paused');
+    assert.deepEqual(chat.requests.map((request) => request.kind), ['history']);
 });
 
 test('the others spending counts toward the budget', async () => {

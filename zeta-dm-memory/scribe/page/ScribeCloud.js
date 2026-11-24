@@ -246,9 +246,10 @@ const ScribeCloud = Object.freeze({
      * @param {Object<string, string|number>} query
      * @param {string|object|null} body
      * @param {number} timeoutMs
+     * @param {AbortSignal|null} signal
      * @return {Promise<{ status: number, data: *, text: string, retryAfter: number }>}
      */
-    request(cloud, method, path, query, body, timeoutMs) {
+    request(cloud, method, path, query, body, timeoutMs, signal = null) {
         const settings = ScribeCloud.Settings;
         const transport = settings.Transport;
         const statuses = settings.Statuses;
@@ -286,6 +287,7 @@ const ScribeCloud = Object.freeze({
                         return;
                     }
                     finished = true;
+                    signal?.removeEventListener('abort', abort);
                     resolve({ status, data, text, retryAfter });
                 };
 
@@ -296,6 +298,15 @@ const ScribeCloud = Object.freeze({
                 const fail = (status) => {
                     finish(status, null, settings.Nothing, settings.NoDelay);
                 };
+                const abort = () => {
+                    fail(transport.Cancelled);
+                    handle?.abort?.();
+                };
+                if (signal?.aborted) {
+                    abort();
+                    return;
+                }
+                signal?.addEventListener('abort', abort, { once: true });
                 const headers = { [settings.Headers.Authorization]: `${settings.Bearer}${key}` };
                 const details = {
                     method,
@@ -846,21 +857,24 @@ const ScribeCloud = Object.freeze({
 
     /**
      * @param {object} cloud
+     * @param {string} room
+     * @param {AbortSignal|null} signal
      * @return {Promise<{ status: number, data: *, text: string, retryAfter: number }>}
      */
-    heads(cloud) {
+    heads(cloud, room = cloud.room, signal = null) {
         const settings = ScribeCloud.Settings;
         return ScribeCloud.request(
             cloud,
             settings.Methods.Get,
             settings.Paths.Heads,
             {
-                roomId: cloud.room,
+                roomId: room,
                 browser: ScribeStore.browserId(cloud.storage, cloud.random),
                 day: cloud.clock.today(),
             },
             null,
             settings.TimeoutMs,
+            signal,
         );
     },
 
@@ -1005,18 +1019,20 @@ const ScribeCloud = Object.freeze({
      * @param {object} cloud
      * @param {string} kind
      * @param {{ revision: number, parts: number }} head
+     * @param {string} room
+     * @param {AbortSignal|null} signal
      * @return {Promise<{ text: string|null, result: object|null }>}
      */
-    async download(cloud, kind, head) {
+    async download(cloud, kind, head, room = cloud.room, signal = null) {
         const settings = ScribeCloud.Settings;
         const epoch = cloud.epoch;
-        const held = cloud.texts.get(kind);
+        const held = room === cloud.room ? cloud.texts.get(kind) : undefined;
         if (held !== undefined && held.revision === head.revision) {
             return { text: held.text, result: null };
         }
         const pieces = [];
         for (let part = settings.FirstPart; part < head.parts; part++) {
-            const query = { roomId: cloud.room, kind, revision: head.revision, part };
+            const query = { roomId: room, kind, revision: head.revision, part };
             const result = await ScribeCloud.request(
                 cloud,
                 settings.Methods.Get,
@@ -1024,6 +1040,7 @@ const ScribeCloud = Object.freeze({
                 query,
                 null,
                 settings.PartTimeoutMs,
+                signal,
             );
             if (cloud.epoch !== epoch || result.status !== settings.Statuses.Ok) {
                 return { text: null, result };
@@ -1031,6 +1048,40 @@ const ScribeCloud = Object.freeze({
             pieces.push(result.text);
         }
         return { text: pieces.join(settings.Nothing), result: null };
+    },
+
+    /**
+     * @param {object} cloud
+     * @param {string} sourceRoomId
+     * @param {AbortSignal|null} signal
+     * @return {Promise<object|null>}
+     * @throws {Error}
+     */
+    async forkBook(cloud, sourceRoomId, signal = null) {
+        const settings = ScribeCloud.Settings;
+        const room = ScribeCloud.room(sourceRoomId);
+        if (!room || sourceRoomId === cloud.roomId || cloud.closed) {
+            throw new Error('The source room is unavailable.');
+        }
+        const response = await ScribeCloud.heads(cloud, room, signal);
+        if (response.status !== settings.Statuses.Ok || !Array.isArray(response.data?.heads)) {
+            throw new Error('The Worker could not read the saved Book for the selected room.');
+        }
+        const heads = response.data.heads.filter((item) => item?.kind === ScribeStore.Kind.Book);
+        if (!heads.length) {
+            return null;
+        }
+        const [head] = heads;
+        if (heads.length !== 1 || !Number.isSafeInteger(head.parts) || head.parts < 1 ||
+            head.parts > settings.MostParts || !Number.isSafeInteger(head.revision) || head.revision < 1) {
+            throw new Error(settings.Messages.Unreadable);
+        }
+        const result = await ScribeCloud.download(cloud, head.kind, head, room, signal);
+        const book = ScribeStore.decode(result.text);
+        if (!book || !ScribeKeeper.soundBook(book)) {
+            throw new Error('The saved source Book could not be downloaded or verified.');
+        }
+        return book.adopted ? book : null;
     },
 
     /**
@@ -1780,6 +1831,13 @@ const ScribeCloud = Object.freeze({
              * @return {Readonly<object>}
              */
             view: () => ScribeCloud.view(cloud),
+
+            /**
+             * @param {string} sourceRoomId
+             * @param {AbortSignal|null} signal
+             * @return {Promise<object|null>}
+             */
+            forkBook: (sourceRoomId, signal = null) => ScribeCloud.forkBook(cloud, sourceRoomId, signal),
 
             /**
              * @return {Promise<void>}

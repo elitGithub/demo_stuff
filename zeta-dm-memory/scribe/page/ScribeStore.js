@@ -515,6 +515,108 @@ const ScribeStore = Object.freeze({
     },
 
     /**
+     * @param {object} storage
+     * @param {string} roomId
+     * @param {object|null} campaign
+     * @param {object} book
+     * @param {Function} mayPublish
+     * @return {void}
+     * @throws {Error}
+     */
+    installFork(storage, roomId, campaign, book, mayPublish) {
+        const room = ScribeStore.room(roomId);
+        const writes = campaign ? [[ScribeStore.Kind.Campaign, campaign], [ScribeStore.Kind.Book, book]] : [[ScribeStore.Kind.Book, book]];
+        const previous = new Map(writes.map(([kind]) => {
+            const name = ScribeStore.name(ScribeStore.Settings.Types.Head, room, kind);
+            return [name, ScribeStore.fetch(storage, name)];
+        }));
+        const heads = new Map();
+        const added = new Map();
+        const retired = new Set();
+        const staged = {
+            get: (name, fallback) => heads.has(name) ? heads.get(name) : storage.get(name, fallback),
+            set: (name, value) => {
+                if (previous.has(name)) {
+                    heads.set(name, value);
+                    return;
+                }
+                const existing = ScribeStore.fetch(storage, name);
+                if (existing === null) {
+                    added.set(name, value);
+                    storage.set(name, value);
+                } else if (existing !== value) {
+                    throw new Error(ScribeStore.Settings.Messages.Overtaken);
+                }
+            },
+            list: () => storage.list(),
+            remove: (name) => retired.add(name),
+        };
+        const published = new Map();
+        let completed = false;
+        try {
+            for (const [kind, value] of writes) {
+                ScribeStore.write(staged, roomId, kind, value, mayPublish);
+            }
+            if ([...previous].some(([name, value]) => ScribeStore.fetch(storage, name) !== value)) {
+                throw new Error(ScribeStore.Settings.Messages.Overtaken);
+            }
+            for (const [name, value] of heads) {
+                if (mayPublish(published) !== true) {
+                    throw new Error(ScribeStore.Settings.Messages.AuthorityLost);
+                }
+                if (ScribeStore.fetch(storage, name) !== previous.get(name)) {
+                    throw new Error(ScribeStore.Settings.Messages.Overtaken);
+                }
+                published.set(name, value);
+                try {
+                    storage.set(name, value);
+                } catch (error) {
+                    if (ScribeStore.fetch(storage, name) !== value) {
+                        throw error;
+                    }
+                }
+                if (ScribeStore.fetch(storage, name) !== value) {
+                    throw new Error(ScribeStore.Settings.Messages.HeadNotKept);
+                }
+            }
+            if (mayPublish(published) !== true) {
+                throw new Error(ScribeStore.Settings.Messages.AuthorityLost);
+            }
+            completed = true;
+        } finally {
+            if (!completed) {
+                try {
+                    for (const name of [...published.keys()].reverse()) {
+                        if (ScribeStore.fetch(storage, name) === heads.get(name)) {
+                            const old = previous.get(name);
+                            if (old === null) {
+                                storage.remove(name);
+                            } else {
+                                storage.set(name, old);
+                            }
+                        }
+                    }
+                } finally {
+                    for (const [name, value] of added) {
+                        const {kind, part} = ScribeStore.describe(name);
+                        const headName = ScribeStore.name(ScribeStore.Settings.Types.Head, room, kind);
+                        const current = ScribeStore.headOf(ScribeStore.fetch(storage, headName));
+                        const inUse = current && part < current.parts && name === ScribeStore.partName(room, kind, current, part);
+                        if (!inUse && ScribeStore.fetch(storage, name) === value) {
+                            storage.remove(name);
+                        }
+                    }
+                }
+            }
+        }
+        for (const name of retired) {
+            try {
+                storage.remove(name);
+            } catch {}
+        }
+    },
+
+    /**
      * @param {string} text
      * @param {number} size
      * @return {string[]}

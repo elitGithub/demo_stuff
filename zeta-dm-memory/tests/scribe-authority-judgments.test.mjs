@@ -7,9 +7,9 @@ import CampaignBuilder from './support/CampaignBuilder.mjs';
 const bundle = readFileSync(new URL('../scribe/scribe.user.js', import.meta.url), 'utf8');
 const entry = bundle.indexOf('/** @file scribe/page/ScribeStart.js */');
 assert.ok(entry > 0);
-const { ScribeIntake, ScribeAnswer, ScribeLog, ScribeReplay, ScribePedant, ScribeLive, ScribeScene, ScribeMuse, ScribeReminder } =
+const { ScribeIntake, ScribeAnswer, ScribeLog, ScribeReplay, ScribePedant, ScribeLive, ScribeScene, ScribeMuse, ScribeReminder, BenchView } =
     vm.runInNewContext(bundle.slice(0, entry) +
-        'return { ScribeIntake, ScribeAnswer, ScribeLog, ScribeReplay, ScribePedant, ScribeLive, ScribeScene, ScribeMuse, ScribeReminder }; })();',
+        'return { ScribeIntake, ScribeAnswer, ScribeLog, ScribeReplay, ScribePedant, ScribeLive, ScribeScene, ScribeMuse, ScribeReminder, BenchView }; })();',
     { TextEncoder });
 
 function room(lines, filing = '') {
@@ -201,6 +201,53 @@ for (const legacy of [false, true]) {
         assert.equal(count(next), paid.size);
     });
 }
+
+for (const comparison of [
+    { subject: 'Frost', attribute: 'activity', values: ['stands', 'works'], question: 'Which account describes Frost at the gate?',
+        lines: ['Frost stands at the gate of the dragon stables.', 'Frost works at the gate of the dragon stables.'] },
+    { subject: 'Town', attribute: 'name', values: ['Talon', 'Harrow'], question: 'What is the town called?',
+        lines: ['The town is called Talon.', 'The town is called Harrow.'] },
+]) {
+    test('installed Checker does not create a ruling from the shared sentence pattern in ' + comparison.question, async () => {
+        const { subject, attribute, values, question, lines } = comparison;
+        const { book, messages } = room(lines);
+        for (const [index, message] of messages.entries()) {
+            const work = ScribeLog.checkWork(book, messages, true, message.id);
+            await ScribePedant.checkPassage({ ...work, targeted: true, ask: async (system, input) => {
+                const request = JSON.parse(input);
+                const source = { ref: request.target[0].ref, quote: lines[index] };
+                const claims = [{ source, subject, attribute, value: values[index], attribution: 'witnessed' }];
+                const findings = index === 0 ? [] : [{ kind: 'Contradiction', question, source, earlier: { ref: 'm1b1', quote: lines[0] } }];
+                return { text: JSON.stringify({ page: request.page, complete: true, claims, findings }) };
+            }, savePage: (page) => assert.ok(ScribeLog.saveCheck(book, messages, work, page)) });
+        }
+        const progress = ScribeLog.checkProgress(JSON.parse(JSON.stringify(book)), messages);
+        const [finding] = progress.findings;
+        assert.equal(progress.checkedThrough, 2);
+        assert.equal(finding.kind, 'Contradiction');
+        assert.equal(finding.actionable, false);
+        assert.equal(BenchView.checkerTitle(finding), 'No independently cited conflict');
+    });
+}
+
+test('installed Findings attributes an invented quote to the Checker after a valid block ref is saved and reopened', async () => {
+    const { book, messages, state } = room(['Frost opens the gate.']);
+    const work = ScribeLog.checkWork(book, messages, true, messages[0].id);
+    const invented = 'Frost sails to sea.';
+    await ScribePedant.checkPassage({ ...work, targeted: true, ask: async (system, input) => {
+        const request = JSON.parse(input);
+        return { text: JSON.stringify({ page: request.page, complete: true, claims: [], findings: [
+            { kind: 'Question', question: 'Did he sail?', source: { ref: request.target[0].ref, quote: invented } },
+        ] }) };
+    }, savePage: (page) => assert.ok(ScribeLog.saveCheck(book, messages, work, page)) });
+    const restored = ScribeLog.checkProgress(JSON.parse(JSON.stringify(book)), messages);
+    const [finding] = restored.findings;
+    assert.equal(finding.actionable, false);
+    assert.equal(finding.source.verified, false);
+    const [account] = BenchView.accounts(finding, state);
+    assert.equal(account.text, 'Checker wording for #1 (no linked passage) · ' + invented);
+    assert.equal(BenchView.citation(finding.source).text, account.text);
+});
 
 test('installed historical Checker persists its complete fenced verdict and keeps unlinked questions out of adjudication', async () => {
     const { book, messages } = room(['The bell rang.', 'Rain fell.']);

@@ -576,6 +576,19 @@ const BenchView = Object.freeze({
     },
 
     /**
+     * @param {object} citation
+     * @return {{label: string, text: string}}
+     */
+    citation(citation) {
+        if (citation.unlinked || citation.verified === false) {
+            const label = 'Checker wording for #' + citation.position + ' (no linked passage)';
+            return { label, text: label + ' · ' + (citation.quote ?? 'No source words supplied.') };
+        }
+        const label = '#' + citation.position + ' · ' + citation.speaker;
+        return { label, text: label + ' “' + citation.quote + '”' };
+    },
+
+    /**
      * @param {object} finding
      * @param {object} state
      * @return {{key:string,label:string,text:string}[]}
@@ -584,12 +597,8 @@ const BenchView = Object.freeze({
         const accounts = [];
         for (const key of ['source', 'earlier']) {
             const citation = finding[key];
-            if (citation?.unlinked) {
-                const label = 'Checker wording for #' + citation.position + ' (no linked passage)';
-                accounts.push({ key, label, text: label + ' · ' + (citation.quote ?? 'No source words supplied.') });
-            } else if (citation) {
-                const label = '#' + citation.position + ' · ' + citation.speaker;
-                accounts.push({ key, label, text: label + ' “' + citation.quote + '”' });
+            if (citation) {
+                accounts.push({ key, ...BenchView.citation(citation) });
             }
         }
         if (finding.record) {
@@ -610,7 +619,7 @@ const BenchView = Object.freeze({
                 try {
                     const citation = JSON.parse(filed.slice(prefix.length));
                     if (citation?.position && citation.speaker && citation.quote) {
-                        content.push('#' + citation.position + ' · ' + citation.speaker + ' “' + citation.quote + '”');
+                        content.push(BenchView.citation(citation).text);
                     }
                 } catch {
                     content.push(filed);
@@ -630,8 +639,8 @@ const BenchView = Object.freeze({
         if (ruling.action === 'choose') {
             const citation = ruling[ruling.account];
             return ruling.account === 'record' ? 'Kept the book entry' + (ruling.canonical ? ' · ' + ruling.canonical : '.') :
-                citation.unlinked ? 'Kept the Checker wording · ' + ruling.canonical :
-                    'Chose #' + citation.position + ' · ' + citation.speaker + ' “' + citation.quote + '”';
+                citation.unlinked || citation.verified === false ? 'Kept the Checker wording · ' + ruling.canonical :
+                    'Chose ' + BenchView.citation(citation).text;
         }
         return ruling.action === 'explain' ? ruling.explanation : 'Left open.';
     },

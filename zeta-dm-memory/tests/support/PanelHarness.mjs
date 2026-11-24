@@ -110,7 +110,7 @@ export default class PanelHarness {
 
     /**
      * @param {Object<string, object>} scripts
-     * @param {{ keeper: object, live: object, cloud?: object, width?: number, storage?: FakeStorage }} options
+     * @param {{ keeper: object, live: object, cloud?: object, width?: number, storage?: FakeStorage, reminders?: object }} options
      */
     constructor(scripts, options) {
         this.scripts = scripts;
@@ -128,6 +128,11 @@ export default class PanelHarness {
         this.handle = null;
         this.callDue = false;
         this.forceStops = 0;
+        this.reminders = options.reminders ?? {};
+        this.reminderDraft = null;
+        this.reminderPreview = null;
+        this.draftWrites = [];
+        this.draftRefusal = null;
     }
 
     /**
@@ -139,6 +144,30 @@ export default class PanelHarness {
             keeper: this.keeper,
             live: this.live,
             cloud: this.cloud,
+            readReminderDraft: () => this.live.readReminderDraft ? this.live.readReminderDraft() : this.reminderDraft,
+            writeReminderDraft: (text) => {
+                this.draftWrites.push(text);
+                if (this.draftRefusal !== null) {
+                    throw this.draftRefusal;
+                }
+                if (this.live.writeReminderDraft) {
+                    this.live.writeReminderDraft(text);
+                } else {
+                    this.reminderDraft = text;
+                }
+            },
+            generateReminder: async () => {
+                this.reminderPreview = await this.reminders.generateReminder();
+                return this.reminderPreview;
+            },
+            readReminderPreview: () => this.reminderPreview,
+            clearReminderPreview: (text) => {
+                if (text === this.reminderPreview) {
+                    this.reminderPreview = null;
+                }
+            },
+            reminderGeneration: () => this.reminders.generation?.() ?? null,
+            reminderGenerationError: () => this.reminders.generationError?.() ?? null,
             calls: Object.freeze({
                 /**
                  * @return {boolean}

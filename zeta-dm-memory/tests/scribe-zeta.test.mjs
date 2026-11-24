@@ -222,6 +222,99 @@ test('the room is read from the address', () => {
     }
 });
 
+test('a successful native clone records parent, child and selected message across the route change', async () => {
+    const page = FakeZeta.window('https://zeta-ai.io/en/rooms/parent');
+    const watch = ZetaSource.watch(page);
+    const cloned = deferred();
+    watch.onFork(cloned.resolve);
+    const url = API + '/v1/rooms/parent/clone';
+    const payload = { messageId: 'MESSAGE-at-split', title: 'Saved at 16:19' };
+    const original = new Request(url, { method: 'POST', body: JSON.stringify(payload) });
+    const pending = deferred();
+    page.answer = () => pending.promise;
+    const result = page.fetch(original);
+    assert.equal(result, pending.promise);
+    assert.deepEqual(await original.json(), payload);
+    page.location.href = 'https://zeta-ai.io/en/rooms/child';
+    const response = new Response(JSON.stringify({ id: 'child', lastMessage: { id: payload.messageId } }));
+    Object.defineProperty(response, 'url', { value: url });
+    pending.resolve(response);
+    assert.equal((await (await result).json()).id, 'child');
+    assert.deepEqual({ ...await cloned.promise }, { parentRoomId: 'parent', childRoomId: 'child', messageId: payload.messageId });
+    assert.equal(page.fetchCalls.length, 1);
+    watch.stop();
+});
+
+test('the fork observer excludes failures, redirects, unrelated requests and incomplete IDs', async () => {
+    const page = FakeZeta.window();
+    const watch = ZetaSource.watch(page);
+    const forks = [];
+    watch.onFork((fork) => forks.push(fork));
+    const url = API + '/v1/rooms/parent/clone';
+    for (const [method, target, request, status, response, redirected, final] of [
+        ['POST', url, {}, 200, { id: 'child' }, false, url],
+        ['POST', url, { messageId: '  ' }, 200, { id: 'child' }, false, url],
+        ['POST', url, { messageId: 'source' }, 200, {}, false, url],
+        ['POST', url, { messageId: 'source' }, 200, { id: '..' }, false, url],
+        ['POST', url, { messageId: 'source' }, 200, { id: 'parent' }, false, url],
+        ['POST', url, { messageId: 'source' }, 403, { id: 'child' }, false, url],
+        ['POST', url, { messageId: 'source' }, 200, { id: 'child' }, true, url],
+        ['POST', url, { messageId: 'source' }, 200, { id: 'child' }, false, API + '/v1/rooms/other/clone'],
+        ['PUT', url, { messageId: 'source' }, 200, { id: 'child' }, false, url],
+        ['POST', url + '/other', { messageId: 'source' }, 200, { id: 'child' }, false, url],
+    ]) {
+        const reply = new Response(JSON.stringify(response), { status });
+        Object.defineProperties(reply, { url: { value: final }, redirected: { value: redirected } });
+        page.answer = () => Promise.resolve(reply);
+        const result = await page.fetch(target, { method, body: JSON.stringify(request) });
+        await result.text();
+        await settle();
+    }
+    assert.deepEqual(forks, []);
+    watch.stop();
+});
+
+test('the explicit saved-room lookup reads this room and its plot list, preserving save names without fetching histories', async () => {
+    const requests = [];
+    const rows = [{ id: 'child', title: 'Saved at 16:19', plot: { id: 'plot' } },
+        { id: 'parent', title: '  My original  ', plot: { id: 'plot' } }];
+    const fetch = async (url) => {
+        requests.push(url);
+        return FakeZeta.reply(200, JSON.stringify(requests.length === 1 ? { id: 'child', plot: { id: 'plot' } } :
+            { rooms: rows, nextCursor: null }));
+    };
+    const result = await ZetaSource.savedRooms({ roomId: 'child', token: TOKEN, fetch, pause: rest });
+    assert.deepEqual(structuredClone(result), { rooms: rows.map(({ id, title }) => ({ id, title })), nextCursor: null });
+    assert.deepEqual(requests, [API + '/v1/rooms/child', API + '/v1/rooms/saved?plotId=plot&limit=20']);
+});
+
+test('saved-room lookup refuses incorrect room and plot bindings, incomplete room rows and an aborted request', async () => {
+    const room = { id: 'child', plot: { id: 'plot' } };
+    const good = { id: 'parent', title: 'Saved at 16:18', plot: { id: 'plot' } };
+    for (const [detail, saved] of [
+        [{ id: 'other', plot: room.plot }, { rooms: [good], nextCursor: null }],
+        [room, { rooms: [{ ...good, plot: { id: 'other' } }], nextCursor: null }],
+        [room, { rooms: [{ ...good, id: '' }], nextCursor: null }],
+        [room, { rooms: [{ ...good, id: '..' }], nextCursor: null }],
+        [room, { rooms: [{ ...good, title: null }], nextCursor: null }],
+        [room, { rooms: [good] }],
+    ]) {
+        let count = 0;
+        const fetch = async () => FakeZeta.reply(200, JSON.stringify(count++ ? saved : detail));
+        await assert.rejects(ZetaSource.savedRooms({ roomId: 'child', token: TOKEN, fetch, pause: rest }), { message: SHAPE });
+        assert.equal(count, detail.id === 'child' ? 2 : 1);
+    }
+    const stop = new AbortController();
+    let count = 0;
+    const fetch = async () => {
+        count++;
+        stop.abort();
+        return FakeZeta.reply(200, JSON.stringify(room));
+    };
+    await assert.rejects(ZetaSource.savedRooms({ roomId: 'child', token: TOKEN, fetch, pause: rest, signal: stop.signal }), { name: 'AbortError' });
+    assert.equal(count, 1);
+});
+
 test('Pause aborts a held history fetch, page delay and error retry before another request leaves', async () => {
     for (const held of ['fetch', 'cursor', 'retry']) {
         const controller = new AbortController();
@@ -252,7 +345,7 @@ test('Pause aborts a held history fetch, page delay and error retry before anoth
     }
 });
 
-test('native fetch and XHR deliver room-scoped final rows, including a swiped message, without consuming the response', async () => {
+test('the observer forwards the captured candidate edit, selected reply, head and create shapes and preserves the host response', async () => {
     const page = FakeZeta.window();
     const watcher = ZetaSource.watch(page);
     const reports = [];
@@ -285,14 +378,8 @@ test('native fetch and XHR deliver room-scoped final rows, including a swiped me
     };
     const changed = row('last', 2, 'They fly.');
     deliver(MESSAGES + '/last', changed);
-    assert.deepEqual(JSON.parse(JSON.stringify(reports[1].messages[0])), changed);
-    assert.equal(reports[1].head, false);
-    assert.equal(reports[1].complete, false);
     deliver(FIRST_PAGE + '&cursor=older', { messages: [first], nextCursor: null });
-    assert.equal(reports[2].head, false);
-    assert.equal(reports[2].complete, false);
     deliver(API + '/v1/rooms/abc', { id: 'abc', lastMessage: changed });
-    assert.equal(reports[3].messages[0].contents[0].text, 'They fly.');
     deliver(API + '/v1/rooms/abc', { id: 'other', lastMessage: changed });
     deliver(MESSAGES + '/last', { ...changed, roomId: 'other' });
     deliver(MESSAGES + '/last', { ...changed, id: 'other' });
@@ -300,24 +387,35 @@ test('native fetch and XHR deliver room-scoped final rows, including a swiped me
     deliver(FIRST_PAGE, { messages: [first, {}], nextCursor: null });
     deliver(MESSAGES + '/last', changed, 504);
     deliver(MESSAGES + '/last', changed, 200, 'https://example.org/sign-in');
-    assert.equal(reports.length, 4);
+    assert.equal(reports.length, 1);
     assert.deepEqual(traffic, []);
     deliver(MESSAGES + '/last', changed, 200, MESSAGES + '/last', 'PATCH');
-    assert.equal(reports[4].messages[0].contents[0].text, 'They fly.');
-    assert.equal(reports[4].created, undefined);
-    deliver(MESSAGES, changed, 201, MESSAGES, 'POST');
-    assert.equal(reports[5].created, true);
+    deliver(MESSAGES + '/last', changed, 200, MESSAGES + '/last', 'PUT');
+    deliver(MESSAGES + '/last', changed, 200, MESSAGES + '/last', 'POST');
     deliver(MESSAGES + '/last', {}, 200, MESSAGES + '/last', 'PATCH');
-    assert.equal(reports.length, 6);
     deliver(MESSAGES + '/last', { result: changed });
-    assert.equal(reports[6].messages[0].contents[0].text, 'They fly.');
     deliver(MESSAGES + '/last', { first: latest, second: changed });
-    assert.equal(reports.length, 7);
+    assert.equal(reports.length, 1);
+    deliver(MESSAGES, changed, 201, MESSAGES, 'POST');
+    assert.equal(reports[1].created, true);
     deliver(FIRST_PAGE, { messages: [changed, first, first], nextCursor: null });
-    assert.equal(reports[7].head, true);
-    assert.equal(reports[7].complete, false);
-    assert.equal(reports[7].ambiguous, true);
-    assert.deepEqual(ids(reports[7].messages), ['first', 'last']);
+    assert.equal(reports.length, 2);
+    const edited = { id: 'candidate-a', contents: changed.contents, edited: true };
+    const candidateUrl = MESSAGES + '/last/candidates/candidate-a';
+    deliver(candidateUrl, { ...edited, id: 'other' }, 200, candidateUrl, 'PUT');
+    deliver(candidateUrl, edited, 403, candidateUrl, 'PUT');
+    deliver(MESSAGES + '/last', { message: { ...changed, roomId: 'other' } }, 200, MESSAGES + '/last', 'PUT');
+    deliver(MESSAGES + '/last', { message: first }, 200, MESSAGES + '/last', 'PUT');
+    assert.equal(reports.length, 2);
+    deliver(candidateUrl, edited, 200, candidateUrl, 'PUT');
+    assert.equal(reports[2].candidate.id, edited.id);
+    assert.equal(reports[2].candidate.message, changed.id);
+    assert.deepEqual(structuredClone(reports[2].candidate.contents), edited.contents);
+    assert.equal(ZetaSource.validPage('abc', reports[2]), true);
+    deliver(MESSAGES + '/last', { message: changed }, 200, MESSAGES + '/last', 'PUT');
+    assert.equal(reports[3].replacement, true);
+    assert.deepEqual(structuredClone(reports[3].messages[0]), changed);
+    assert.equal(ZetaSource.validPage('abc', reports[3]), true);
     watcher.stop();
 });
 

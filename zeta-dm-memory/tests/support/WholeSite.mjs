@@ -164,7 +164,7 @@ export default class WholeSite {
      * @param {string} text
      * @return {void}
      */
-    edit(position, text) {
+    setRowText(position, text) {
         const before = this.messages[position - 1];
         this.messages[position - 1] = {
             ...before,

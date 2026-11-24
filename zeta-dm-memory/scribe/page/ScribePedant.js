@@ -690,6 +690,37 @@ const ScribePedant = Object.freeze({
         return new TextEncoder().encode(ScribePedant.LegacyCheckPrompt).length + 720;
     },
 
+    /**
+     * @param {object} page
+     * @return {object[]}
+     * @throws {Error}
+     */
+    divideComparison(page) {
+        const encoder = new TextEncoder();
+        const systemBytes = encoder.encode(ScribePedant.LegacyCheckPrompt).length;
+        const size = systemBytes + encoder.encode(page.input).length;
+        const ceiling = Math.max(ScribePedant.minimumPassageBytes(), Math.floor((size + systemBytes) / 2));
+        const impossible = () => Object.assign(new Error('Checker request limit is too small for this source and its references.'), { checkerContextFloor: true });
+        if (ceiling >= size) {
+            throw impossible();
+        }
+        const {target, written, evidence, ...identity} = page.request;
+        const shell = {...identity, page: page.id + '/ffffffff:0000000000000000', target: [], written: [], evidence: []};
+        let children;
+        try {
+            children = [...ScribePedant.comparisonPages(shell, target, written, evidence, ceiling, page.id + '/')];
+        } catch (error) {
+            if (String(error.message).includes('request limit')) {
+                throw impossible();
+            }
+            throw error;
+        }
+        if (children.some((child) => systemBytes + encoder.encode(child.input).length >= size)) {
+            throw impossible();
+        }
+        return children;
+    },
+
 
     /**
      * @param {object} page
@@ -969,7 +1000,7 @@ const ScribePedant = Object.freeze({
      * @return {Promise<object>}
      */
     async checkPassage(work) {
-        if (work.targeted) {
+        if (work.targeted && !work.legacyPartial) {
             return ScribePedant.incoming(work);
         }
         const saved = [...(work.completedPages ?? []), ...(work.completedSegments ?? [])];
@@ -987,6 +1018,21 @@ const ScribePedant = Object.freeze({
         const knownIds = [...completed.keys(), ...Object.keys(work.requests ?? {})];
         const encoder = new TextEncoder();
         const systemBytes = encoder.encode(ScribePedant.LegacyCheckPrompt).length;
+        if (work.legacyPartial) {
+            const unmatched = new Set(knownIds);
+            const match = (pages) => {
+                for (const page of pages) {
+                    unmatched.delete(page.id);
+                    if (knownIds.some((id) => id.startsWith(page.id + '/'))) {
+                        match(ScribePedant.divideComparison(page));
+                    }
+                }
+            };
+            match(plan);
+            if (unmatched.size) {
+                throw new Error('The saved Checker comparison could not be matched to its original passage. The passage remains pending.');
+            }
+        }
         const compact = (source) => source && ({ ref: 'm' + source.position + 'b' + source.blockNumber, quote: source.quote });
         const compare = async (group, parent = null) => {
             const pages = [];
@@ -1036,23 +1082,7 @@ const ScribePedant = Object.freeze({
                     }
                 }
                 if (answer === null) {
-                    if (ceiling >= size) {
-                        throw impossible();
-                    }
-                    const { target, written, evidence, ...identity } = page.request;
-                    const shell = { ...identity, page: page.id + '/ffffffff:0000000000000000', target: [], written: [], evidence: [] };
-                    let children;
-                    try {
-                        children = [...ScribePedant.comparisonPages(shell, target, written, evidence, ceiling, page.id + '/')];
-                    } catch (error) {
-                        if (String(error.message).includes('request limit')) {
-                            throw impossible();
-                        }
-                        throw error;
-                    }
-                    if (children.some((child) => systemBytes + encoder.encode(child.input).length >= size)) {
-                        throw impossible();
-                    }
+                    const children = ScribePedant.divideComparison(page);
                     const result = await compare(children, parent ?? page);
                     savedJudgments = { ...result, omissions: [], reviewRows: [] };
                     modelResponses = result.pages.flatMap((child) => child.modelResponses ?? []);

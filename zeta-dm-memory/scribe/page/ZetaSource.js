@@ -26,6 +26,7 @@ const ZetaSource = Object.freeze({
         FirstSuccess: 200,
         LastSuccess: 299,
         RoomsPath: '/v1/rooms/',
+        SavedRoomsLimit: 20,
         MessagesPath: '/messages',
         PlotsPath: '/v1/plots/',
         RoomsSegment: '/rooms/',
@@ -127,6 +128,15 @@ const ZetaSource = Object.freeze({
     },
 
     /**
+     * @param {*} value
+     * @return {boolean}
+     */
+    roomId(value) {
+        return typeof value === 'string' && value.trim() !== '' && value !== '.' && value !== '..' &&
+            ZetaSource.quietly(null, encodeURIComponent, value) !== null;
+    },
+
+    /**
      * @param {*} fallback
      * @param {Function} action
      * @param {...*} values
@@ -183,19 +193,27 @@ const ZetaSource = Object.freeze({
     hostRequest(state, url, method) {
         const path = url.pathname;
         const verb = String(method).toUpperCase();
-        const route = /^\/v1\/rooms\/([^/]+)\/messages(?:\/([^/]+))?$/.exec(path);
-        const details = state.onMessages && verb === 'GET' && /^\/v1\/rooms\/([^/]+)$/.exec(path);
-        if (details) {
-            return { path, method: verb, room: decodeURIComponent(details[1]), details: true };
+        const route = state.onMessages && /^\/v1\/rooms\/([^/]+)\/messages$/.exec(path);
+        if (route && (verb === 'POST' || verb === 'GET' && [...url.searchParams.keys()].every((key) => key === 'limit'))) {
+            return { path, method: verb, room: decodeURIComponent(route[1]) };
         }
-        if (state.onMessages && route && route[2] !== 'stream' &&
-            (verb === 'GET' || verb === 'POST' || route[2] && ['PUT', 'PATCH'].includes(verb))) {
-            const room = decodeURIComponent(route[1]);
-            const single = route[2] ? decodeURIComponent(route[2]) : null;
-            const head = verb === 'GET' && single === null && [...url.searchParams.keys()].every((key) => key === 'limit');
-            return { path, method: verb, room, single, head };
+        if (state.onMessages && verb === 'PUT') {
+            const edit = /^\/v1\/rooms\/([^/]+)\/messages\/([^/]+)(?:\/candidates\/([^/]+))?$/.exec(path);
+            if (edit) {
+                return { path, method: verb, room: decodeURIComponent(edit[1]), message: decodeURIComponent(edit[2]),
+                    candidate: edit[3] === undefined ? null : decodeURIComponent(edit[3]) };
+            }
         }
         return ZetaSource.traffic(path, verb);
+    },
+
+    /**
+     * @param {*} contents
+     * @return {boolean}
+     */
+    contents(contents) {
+        return Array.isArray(contents) && contents.every((block) => ZetaSource.isObject(block) &&
+            ZetaSource.filled(block.type) && (block.type !== 'TEXT' || typeof block.text === 'string'));
     },
 
     /**
@@ -207,8 +225,7 @@ const ZetaSource = Object.freeze({
         return ZetaSource.isObject(row) && ZetaSource.filled(row.id) &&
             (row.roomId === undefined || row.roomId === room) && ZetaSource.filled(row.sender?.type) &&
             typeof row.messageTime === 'string' && Number.isFinite(Date.parse(row.messageTime)) &&
-            Array.isArray(row.contents) && row.contents.every((block) => ZetaSource.isObject(block) &&
-                ZetaSource.filled(block.type) && (block.type !== 'TEXT' || typeof block.text === 'string'));
+            ZetaSource.contents(row.contents);
     },
 
     /**
@@ -220,6 +237,10 @@ const ZetaSource = Object.freeze({
         return ZetaSource.isObject(page) && typeof page.head === 'boolean' && typeof page.complete === 'boolean' &&
             (!page.complete || page.head) && Number.isFinite(page.observedAt) && page.observedAt > 0 &&
             Array.isArray(page.messages) && (page.created === undefined || page.created === true && !page.head && page.messages.length === 1) &&
+            (page.replacement === undefined || page.replacement === true && !page.head && !page.created && page.messages.length === 1) &&
+            (page.candidate === undefined || !page.head && !page.created && !page.replacement && !page.messages.length &&
+                ZetaSource.isObject(page.candidate) && ZetaSource.filled(page.candidate.message) && ZetaSource.filled(page.candidate.id) &&
+                ZetaSource.contents(page.candidate.contents)) &&
             (page.ambiguous === undefined || page.ambiguous === true && !page.complete) &&
             page.messages.every((row) => ZetaSource.canonical(room, row));
     },
@@ -243,21 +264,21 @@ const ZetaSource = Object.freeze({
             if (state.stopped || !ZetaSource.isObject(body)) {
                 return;
             }
-            if (traffic.details) {
-                if (body.id === traffic.room && ZetaSource.canonical(traffic.room, body.lastMessage)) {
-                    deliver({ messages: [body.lastMessage], head: false, complete: false, observedAt });
+            if (traffic.method === 'PUT') {
+                if (traffic.candidate !== null) {
+                    if (body.id === traffic.candidate && body.edited === true && ZetaSource.contents(body.contents)) {
+                        deliver({ messages: [], head: false, complete: false, observedAt,
+                            candidate: { message: traffic.message, id: body.id, contents: body.contents } });
+                    }
+                } else if (ZetaSource.canonical(traffic.room, body.message) && body.message.roomId === traffic.room &&
+                    body.message.id === traffic.message) {
+                    deliver({ messages: [body.message], head: false, complete: false, observedAt, replacement: true });
                 }
                 return;
             }
-            if (traffic.method === 'POST' || traffic.single !== null) {
-                let row = body;
-                if (traffic.single && !ZetaSource.canonical(traffic.room, body)) {
-                    const matches = Object.values(body).filter((value) => value?.id === traffic.single && ZetaSource.canonical(traffic.room, value));
-                    row = matches.length === 1 ? matches[0] : null;
-                }
-                if (ZetaSource.canonical(traffic.room, row) && (!traffic.single || row.id === traffic.single)) {
-                    deliver({ messages: [row], head: false, complete: false, observedAt,
-                        ...(traffic.method === 'POST' && !traffic.single ? { created: true } : {}) });
+            if (traffic.method === 'POST') {
+                if (ZetaSource.canonical(traffic.room, body)) {
+                    deliver({ messages: [body], head: false, complete: false, observedAt, created: true });
                 }
                 return;
             }
@@ -266,10 +287,43 @@ const ZetaSource = Object.freeze({
             }
             const messages = ZetaSource.ordered(body.messages);
             const cursor = body.nextCursor;
-            const head = traffic.head && (cursor === null || ZetaSource.filled(cursor) || Number.isFinite(cursor));
-            const ambiguous = messages.length !== body.messages.length;
-            deliver({ messages, head, complete: head && cursor === null && !ambiguous, observedAt,
-                ...(ambiguous ? { ambiguous: true } : {}) });
+            if (messages.length === body.messages.length && (cursor === null || ZetaSource.filled(cursor) || Number.isFinite(cursor))) {
+                deliver({ messages, head: true, complete: cursor === null, observedAt });
+            }
+        };
+    },
+
+    /**
+     * @param {object} state
+     * @param {object|null} traffic
+     * @param {*} input
+     * @param {*} init
+     * @return {Function|null}
+     */
+    forking(state, traffic, input, init) {
+        if (!state.onFork || traffic?.method !== 'POST') {
+            return null;
+        }
+        const match = /^\/v1\/rooms\/([^/]+)\/clone$/.exec(traffic.path);
+        if (!match) {
+            return null;
+        }
+        const parentRoomId = decodeURIComponent(match[1]);
+        let messageId;
+        if (typeof init?.body === 'string') {
+            messageId = JSON.parse(init.body)?.messageId;
+        } else if (init?.body == null && Object.prototype.toString.call(input) === ZetaSource.Settings.RequestTag) {
+            messageId = input.clone().json().then((body) => body?.messageId, () => null);
+        } else {
+            return null;
+        }
+        return async (response) => {
+            const selected = await messageId;
+            const childRoomId = response?.id;
+            if (!state.stopped && typeof selected === 'string' && selected.trim() !== '' &&
+                ZetaSource.roomId(parentRoomId) && ZetaSource.roomId(childRoomId) && childRoomId !== parentRoomId) {
+                state.onFork({ parentRoomId, childRoomId, messageId: selected });
+            }
         };
     },
 
@@ -823,7 +877,8 @@ const ZetaSource = Object.freeze({
                 const traffic = ZetaSource.quietly(null, ZetaSource.fetched, state, input, init);
                 const receipt = ZetaSource.quietly(null, ZetaSource.posting, state, traffic);
                 const stream = ZetaSource.quietly(null, ZetaSource.streaming, state, traffic);
-                const observe = ZetaSource.quietly(null, ZetaSource.observing, state, traffic);
+                const observe = ZetaSource.quietly(null, ZetaSource.forking, state, traffic, input, init) ??
+                    ZetaSource.quietly(null, ZetaSource.observing, state, traffic);
                 const result = originals.fetch.apply(this, arguments);
                 ZetaSource.quietly(null, ZetaSource.settled, state, result, traffic, receipt, stream, observe);
                 return result;
@@ -897,6 +952,12 @@ const ZetaSource = Object.freeze({
              * @return {void}
              */
             onMessages: (callback) => { state.onMessages = callback; },
+
+            /**
+             * @param {function({parentRoomId: string, childRoomId: string, messageId: string}): void} callback
+             * @return {void}
+             */
+            onFork: (callback) => { state.onFork = callback; },
 
             /**
              * @param {(traffic: Readonly<{ method: string, path: string }>) => void} callback
@@ -1179,6 +1240,36 @@ const ZetaSource = Object.freeze({
             }
         }
         return null;
+    },
+
+    /**
+     * @param {{ fetch: Function, token: string|null, roomId: string|null, pause: Function, signal?: AbortSignal }} request
+     * @return {Promise<{rooms: Array<{id: string, title: string}>, nextCursor: *}>}
+     * @throws {Error}
+     */
+    async savedRooms(request) {
+        const settings = ZetaSource.Settings;
+        ZetaSource.ready(request);
+        if (!ZetaSource.roomId(request.roomId)) {
+            throw ZetaSource.failure(settings.Messages.NoRoom, null, false);
+        }
+        const room = await ZetaSource.get(request, settings.RoomsPath + encodeURIComponent(request.roomId));
+        const plotId = ZetaSource.plotOf(room.body);
+        if (room.body?.id !== request.roomId || plotId === null) {
+            throw ZetaSource.failure(settings.Messages.Shape, room.status, false);
+        }
+        const query = new URLSearchParams({ plotId, limit: String(settings.SavedRoomsLimit) });
+        const { body, status } = await ZetaSource.get(request, settings.RoomsPath + 'saved?' + query);
+        if (!Array.isArray(body?.rooms) || !Object.hasOwn(body, 'nextCursor')) {
+            throw ZetaSource.failure(settings.Messages.Shape, status, false);
+        }
+        const rooms = body.rooms.map((saved) => {
+            if (!ZetaSource.roomId(saved?.id) || typeof saved.title !== 'string' || ZetaSource.plotOf(saved) !== plotId) {
+                throw ZetaSource.failure(settings.Messages.Shape, status, false);
+            }
+            return { id: saved.id, title: saved.title };
+        });
+        return { rooms, nextCursor: body.nextCursor };
     },
 
     /**

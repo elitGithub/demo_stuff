@@ -534,6 +534,7 @@ test('the list is the list', () => {
         'ScribeAnswer',
         'ScribeLog',
         'ScribeReplay',
+        'ScribeFork',
         'ScribeKnowledge',
         'ScribeAnalyzer',
         'ScribeGateway',
@@ -560,8 +561,8 @@ test('the list is the list', () => {
     ]) {
         wanted.push(`scribe/page/${name}.js`);
     }
-    assert.equal(wanted.length, 27);
-    assert.equal(ScribePack.Files.length, 27);
+    assert.equal(wanted.length, 28);
+    assert.equal(ScribePack.Files.length, 28);
     assert.equal(wanted.indexOf('scribe/page/ScribeFrame.js'), wanted.indexOf('scribe/page/ScribeSender.js') + 1);
     assert.equal(wanted.indexOf('scribe/page/ScribeCloud.js'), wanted.indexOf('scribe/page/ScribeStore.js') + 1);
     assert.equal(wanted.at(-1), 'scribe/page/ScribeStart.js');

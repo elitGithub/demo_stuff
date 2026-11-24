@@ -2021,11 +2021,17 @@ export const ScribeLogCore = Object.freeze({
   /**
    * @param {object} log
    * @param {object} state
-   * @param {{subjectId?: string | null, name: string, aliases?: readonly string[], kind?: string}} options
+   * @param {{subjectId?: string | null, name: string, aliases?: readonly string[], kind?: string, excludeSubjectIds?: Iterable<string> | null}} options
    * @returns {Readonly<{subjectId: string, changed: boolean}>}
    * @throws {Error}
    */
-  syncCharacterSubject(log, state, { subjectId = null, name, aliases = [], kind = ScribeCategory.SubjectKinds.Character }) {
+  syncCharacterSubject(log, state, {
+    subjectId = null,
+    name,
+    aliases = [],
+    kind = ScribeCategory.SubjectKinds.Character,
+    excludeSubjectIds = null,
+  }) {
     if (state.revision !== log.revision) {
       throw new Error(ScribeLogCore.Settings.StaleState);
     }
@@ -2044,6 +2050,17 @@ export const ScribeLogCore = Object.freeze({
     }
     if (!Array.isArray(aliases)) {
       throw new TypeError('aliases must be an array of strings.');
+    }
+    const excludedSet = new Set();
+    if (excludeSubjectIds !== null && excludeSubjectIds !== undefined) {
+      if (typeof excludeSubjectIds[Symbol.iterator] !== 'function') {
+        throw new TypeError('excludeSubjectIds must be null or an iterable of strings.');
+      }
+      for (const excludedId of excludeSubjectIds) {
+        if (typeof excludedId === 'string' && excludedId.trim().length > 0) {
+          excludedSet.add(excludedId.trim());
+        }
+      }
     }
 
     const normalisedName = ScribeText.normaliseName(trimmedName);
@@ -2080,7 +2097,7 @@ export const ScribeLogCore = Object.freeze({
       }
     } else {
       const unmergedSameKind = state.subjects.filter((subject) => {
-        return subject.mergedInto === null && subject.kind === kind;
+        return subject.mergedInto === null && subject.kind === kind && !excludedSet.has(subject.id);
       });
       const labelMatches = unmergedSameKind.filter((subject) => {
         return ScribeText.normaliseName(subject.label) === normalisedName;
@@ -2102,8 +2119,13 @@ export const ScribeLogCore = Object.freeze({
         if (aliasMatches.length === 1) {
           targetSubjectId = aliasMatches[0].id;
         } else {
-          targetSubjectId = ScribeLogCore.Settings.SubjectPrefix + log.nextSubject;
-          log.nextSubject += 1;
+          do {
+            targetSubjectId = ScribeLogCore.Settings.SubjectPrefix + log.nextSubject;
+            log.nextSubject += 1;
+          } while (
+            excludedSet.has(targetSubjectId) ||
+            ScribeLogCore.lookup(state.subjects, targetSubjectId) !== undefined
+          );
         }
       }
     }

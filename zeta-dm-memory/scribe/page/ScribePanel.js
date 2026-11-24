@@ -8,7 +8,6 @@ const ScribePanel = Object.freeze({
         NarrowWindow: 1100,
         RepeatMs: 1000,
         ClockMs: 1000,
-        StoryModelRoles: Object.freeze(['Story', 'Writer', 'Analyzer', 'Checker', 'Pedant', 'Scribe']),
         Hollow: Object.freeze(['Summary', 'Book', 'Timeline', 'Rulings']),
         RoomLength: 60,
         Replacement: '_',
@@ -115,6 +114,12 @@ const ScribePanel = Object.freeze({
             Clear: 'scribe-clear',
             ClearOutcome: 'scribe-clear-outcome',
             Reminder: 'scribe-reminder',
+            GenerateReminder: 'scribe-generate-reminder',
+            GenerateReminderOutcome: 'scribe-generate-reminder-outcome',
+            ReminderPreview: 'scribe-reminder-preview',
+            GeneratedReminder: 'scribe-generated-reminder',
+            UseGeneratedReminder: 'scribe-use-generated-reminder',
+            KeepCurrentReminder: 'scribe-keep-current-reminder',
             Edit: 'scribe-edit',
             EditCancel: 'scribe-edit-cancel',
             EditSave: 'scribe-edit-save',
@@ -140,6 +145,12 @@ const ScribePanel = Object.freeze({
             SaveSettings: 'scribe-save-settings',
             SettingsOutcome: 'scribe-settings-outcome',
             Adopt: 'scribe-adopt',
+            Fork: 'scribe-fork',
+            ForkOpen: 'scribe-fork-open',
+            ForkOrigin: 'scribe-fork-origin',
+            ForkPicker: 'scribe-fork-picker',
+            ForkSource: 'scribe-fork-source',
+            ForkOutcome: 'scribe-fork-outcome',
             Export: 'scribe-export',
             Pull: 'scribe-pull',
             HistoryRange: 'scribe-history-range',
@@ -177,15 +188,17 @@ const ScribePanel = Object.freeze({
             Clear: 'clear',
             Force: 'force',
             Reminder: 'reminder',
+            GenerateReminder: 'generate-reminder',
             Key: 'key',
             Settings: 'settings',
             Controls: 'controls',
             Next: 'next',
+            Fork: 'fork',
             Offer: 'offer',
             Tell: 'tell',
             Choice: 'choice',
         }),
-        HeaderOutlets: Object.freeze(['next', 'choice']),
+        HeaderOutlets: Object.freeze(['next', 'choice', 'fork']),
         Choices: Object.freeze({
             UseCloud: 'useCloud',
             KeepHere: 'keep',
@@ -464,6 +477,10 @@ const ScribePanel = Object.freeze({
             Present: 'present: ',
             NextHeading: 'With your next message',
             ReminderLabel: 'Reminder',
+            GenerateReminder: 'Generate reminder',
+            PreviewReady: 'Generated reminder ready to review.',
+            UseRetry: 'Reminder was not saved. The preview is still here. Click Use generated reminder to retry.',
+            EmptySend: 'Generate a reminder or enter one above before sending.',
             NothingWaiting: 'No reminder is waiting.',
             PreparedLater: 'Waiting for a reminder to be prepared.',
             EditHeld: 'Your edit goes once the book is ready.',
@@ -472,7 +489,6 @@ const ScribePanel = Object.freeze({
             EditCancel: 'Cancel',
             EditSave: 'Save',
             Force: 'Send a reminder with my next message',
-            Resend: 'Resend this reminder with my next message',
             Forced: 'Queued for your next message',
             Suggestion: 'Suggestion: ',
             Clear: 'Clear',
@@ -619,8 +635,8 @@ const ScribePanel = Object.freeze({
     }),
 
     /**
-     * @param {{ document: object, keeper: object, live: object, cloud: object, calls: { due: () => boolean, stop: () => void }, storage: object, confirm: (text: string) => boolean, download: (name: string, text: string) => void, clock: { now: () => number } }} environment
-     * @return {Readonly<{ redraw: () => void, unmount: () => void, host: object }>}
+     * @param {{ document: object, keeper: object, live: object, cloud: object, calls: { due: () => boolean, stop: () => void }, storage: object, forkOrigin?: () => {parentRoomId: string, messageId: string}|null, listForkRooms?: () => Promise<object>, recoverFork?: (sourceRoomId: string, messageId: string|null) => Promise<object>, generateReminder: () => Promise<string>, readReminderDraft: () => string|null, writeReminderDraft: (text: string) => void, readReminderPreview: () => string|null, clearReminderPreview: (text: string) => void, reminderGeneration: () => string|null, reminderGenerationError: () => string|null, confirm: (text: string) => boolean, download: (name: string, text: string) => void, clock: { now: () => number } }} environment
+     * @return {Readonly<{ redraw: () => void, redrawReminder: () => boolean, unmount: () => void, host: object }>}
      */
     mount(environment) {
         const settings = ScribePanel.Settings;
@@ -649,6 +665,19 @@ const ScribePanel = Object.freeze({
             keyProblem: environment.keyProblem,
             keyRecoveryProblem: environment.keyRecoveryProblem,
             saveKey: environment.saveKey,
+            forkOrigin: environment.forkOrigin,
+            listForkRooms: environment.listForkRooms,
+            recoverFork: environment.recoverFork,
+            forkRooms: [],
+            generateReminder: environment.generateReminder,
+            generatedReminder: null,
+            generationNotice: null,
+            readReminderDraft: environment.readReminderDraft,
+            writeReminderDraft: environment.writeReminderDraft,
+            readReminderPreview: environment.readReminderPreview,
+            clearReminderPreview: environment.clearReminderPreview,
+            reminderGeneration: environment.reminderGeneration,
+            reminderGenerationError: environment.reminderGenerationError,
             draftVersion: environment.keyVersion(),
             storage: environment.storage,
             confirm: environment.confirm,
@@ -709,11 +738,8 @@ const ScribePanel = Object.freeze({
             fixing: null,
             composing: false,
             editing: false,
-            resendId: null,
-            editShown: false,
+            displayedDraft: null,
             editStale: false,
-            editAgainst: undefined,
-            editSelection: null,
             editFrom: settings.Nothing,
             heldDraw: false,
             workedOut: null,
@@ -751,6 +777,10 @@ const ScribePanel = Object.freeze({
             redraw: () => {
                 ScribePanel.redraw(panel);
             },
+            /**
+             * @return {boolean}
+             */
+            redrawReminder: () => ScribePanel.redrawReminder(panel),
             /**
              * @return {void}
              */
@@ -1362,7 +1392,7 @@ const ScribePanel = Object.freeze({
     /**
      * @param {object} panel
      * @param {string} name
-     * @param {ReadonlyArray<*>} items
+     * @param {Array<*>|ReadonlyArray<*>} items
      * @param {(row: *, index: number) => object} build
      * @param {((item: object) => string)|null} identify
      * @param {number} size
@@ -1557,6 +1587,24 @@ const ScribePanel = Object.freeze({
         );
         forceStop.hidden = true;
         const problems = ScribePanel.own(panel, 'Problems', ScribePanel.make(panel, tags.Block, settings.Nothing, classes.Problem));
+        const fork = ScribePanel.own(panel, 'Fork', ScribePanel.make(panel, tags.Block, settings.Nothing));
+        const forkPicker = ScribePanel.select(panel, 'Which saved chat should I pull the Book from?', settings.Ids.ForkSource, false);
+        ScribePanel.own(panel, 'ForkSource', forkPicker.select);
+        ScribePanel.listen(panel, forkPicker.select, settings.Events.Change, () => {
+            const room = panel.forkRooms.find((item) => item.id === forkPicker.select.value);
+            if (room) {
+                return ScribePanel.pullFork(panel, room.id, null);
+            }
+        });
+        fork.append(
+            ScribePanel.own(panel, 'ForkOrigin', ScribePanel.make(panel, tags.Paragraph, settings.Nothing, classes.Meta)),
+            ScribePanel.own(panel, 'ForkOpen', ScribePanel.button(panel, 'Pull Book from saved chat', () => {
+                const origin = panel.forkOrigin();
+                return origin ? ScribePanel.pullFork(panel, origin.parentRoomId, origin.messageId) : ScribePanel.listForks(panel);
+            }, settings.Guard.Free, settings.Ids.ForkOpen)),
+            ScribePanel.own(panel, 'ForkPicker', forkPicker.label),
+            ScribePanel.outlet(panel, 'ForkOutcome', settings.Outlets.Fork),
+        );
         problems.setAttribute(attributes.Role, aria.Status);
         const compact = ScribePanel.own(panel, 'ProblemsCompact', ScribePanel.make(panel, tags.Span, settings.Nothing, classes.Problem));
         compact.setAttribute(attributes.Role, aria.Status);
@@ -1572,6 +1620,7 @@ const ScribePanel = Object.freeze({
             choice,
             ScribePanel.own(panel, 'Next', next),
             ScribePanel.outlet(panel, 'NextOutcome', settings.Outlets.Next),
+            fork,
             activity,
             ScribePanel.own(panel, 'Badge', ScribePanel.make(panel, tags.Span, settings.Nothing, classes.Badge)),
             ScribePanel.own(panel, 'Spend', ScribePanel.make(panel, tags.Span, settings.Nothing, classes.Spend)),
@@ -1952,6 +2001,11 @@ const ScribePanel = Object.freeze({
                 false,
             );
             ScribePanel.own(panel, 'Reminder', reminder.input);
+            reminder.input.addEventListener(settings.Events.Input, () => {
+                if (panel.editing) {
+                    ScribePanel.writeDraft(panel, reminder.input.value);
+                }
+            });
             const editing = ScribePanel.make(panel, settings.Tags.Block, settings.Nothing, settings.Classes.Actions);
             editing.append(
                 ScribePanel.own(
@@ -2003,6 +2057,36 @@ const ScribePanel = Object.freeze({
                 ScribePanel.outlet(panel, 'ReminderOutcome', settings.Outlets.Reminder),
                 editing,
             );
+            const generation = settings.Outlets.GenerateReminder;
+            const generate = ScribePanel.own(panel, 'GenerateReminder', ScribePanel.button(
+                panel, words.GenerateReminder, () => ScribePanel.perform(panel, {
+                    outlet: generation,
+                    call: () => panel.generateReminder(),
+                    question: null,
+                    done: words.PreviewReady,
+                    pending: 'Generating reminder…',
+                    book: false,
+                }), settings.Guard.Free, settings.Ids.GenerateReminder,
+            ));
+            next.append(generate, ScribePanel.outlet(panel, 'GenerateReminderOutcome', generation));
+            const preview = ScribePanel.own(panel, 'ReminderPreview', ScribePanel.group(panel, next, 'Generated reminder'));
+            const generated = ScribePanel.own(panel, 'GeneratedReminder',
+                ScribePanel.make(panel, settings.Tags.Preformatted, settings.Nothing, settings.Classes.Message));
+            const choice = ScribePanel.make(panel, settings.Tags.Block, settings.Nothing, settings.Classes.Actions);
+            const keep = ScribePanel.own(panel, 'KeepCurrentReminder', ScribePanel.button(
+                panel, 'Keep current reminder', async () => {
+                    panel.clearReminderPreview(panel.generatedReminder);
+                    ScribePanel.say(panel, generation, 'Kept the current reminder.');
+                    ScribePanel.redraw(panel);
+                    generate.focus();
+                }, settings.Guard.Free, settings.Ids.KeepCurrentReminder,
+            ));
+            const use = ScribePanel.own(panel, 'UseGeneratedReminder', ScribePanel.button(
+                panel, 'Use generated reminder', async () => ScribePanel.useGeneratedReminder(panel),
+                settings.Guard.Free, settings.Ids.UseGeneratedReminder, settings.Classes.Primary,
+            ));
+            choice.append(keep, use);
+            preview.append(generated, choice);
             ScribePanel.pager(panel, settings.Lists.Queued, next);
             const clearing = ScribePanel.make(panel, settings.Tags.Block, settings.Nothing, settings.Classes.Actions);
             clearing.append(
@@ -2019,12 +2103,13 @@ const ScribePanel = Object.freeze({
                             ScribePanel.perform(panel, {
                                 outlet: settings.Outlets.Clear,
                                 /**
-                                 * @return {void}
+                                 * @return {Promise<void>}
                                  */
-                                call: () => {
+                                call: async () => {
+                                    panel.writeReminderDraft(settings.Nothing);
+                                    panel.live.clear();
                                     panel.editing = false;
                                     ScribePanel.say(panel, settings.Outlets.Reminder, settings.Nothing);
-                                    panel.live.clear();
                                 },
                                 question: null,
                                 done: settings.Nothing,
@@ -2406,13 +2491,14 @@ const ScribePanel = Object.freeze({
                 }
             }
         }
-        panel.parts.Reminder.disabled = true;
-        panel.parts.Edit.disabled = true;
-        panel.parts.EditCancel.disabled = true;
-        panel.parts.EditSave.disabled = true;
+        ScribePanel.reminderEditor(panel, false);
+        panel.parts.GenerateReminder.disabled = true;
+        panel.parts.UseGeneratedReminder.disabled = true;
         panel.parts.Force.disabled = true;
         panel.parts.UseCloud.disabled = true;
         panel.parts.KeepHere.disabled = true;
+        panel.parts.ForkOpen.disabled = true;
+        panel.parts.ForkSource.disabled = true;
     },
 
     /**
@@ -2636,6 +2722,26 @@ const ScribePanel = Object.freeze({
         ScribePanel.write(parts.NextOutcome, said);
         parts.NextOutcome.hidden = said === settings.Nothing;
         panel.shown.add(settings.Outlets.Next);
+        const forkOutlet = settings.Outlets.Fork;
+        const forkOutcome = panel.outcomes.get(forkOutlet) ?? settings.Nothing;
+        const recovering = panel.pending.has(forkOutlet);
+        const eligible = view.canRecoverFork === true;
+        const origin = panel.forkOrigin?.() ?? null;
+        parts.Fork.hidden = !eligible && !recovering && !forkOutcome && !origin;
+        parts.ForkOrigin.hidden = origin === null;
+        if (origin) {
+            ScribePanel.write(parts.ForkOrigin, 'Forked from room ' + origin.parentRoomId + ' at message ' + origin.messageId);
+        }
+        parts.ForkOpen.hidden = !eligible && !recovering;
+        parts.ForkOpen.disabled = !eligible || recovering;
+        ScribePanel.write(parts.ForkOpen, origin ? 'Pull Book from fork origin' : 'Pull Book from saved chat');
+        parts.ForkPicker.hidden = !eligible || origin !== null || !panel.forkRooms.length;
+        parts.ForkSource.disabled = !eligible || recovering;
+        ScribePanel.write(parts.ForkOutcome, forkOutcome);
+        parts.ForkOutcome.hidden = !forkOutcome;
+        if (!parts.Fork.hidden) {
+            panel.shown.add(forkOutlet);
+        }
         const flying = view.flight !== null;
         parts.Activity.hidden = !flying;
         if (flying) {
@@ -2844,6 +2950,9 @@ const ScribePanel = Object.freeze({
         if (view.phase === phases.Loading || view.phase === phases.NoBook) {
             parts.Resume.disabled = true;
         }
+        if (!view.booked) {
+            parts.Pull.disabled = true;
+        }
         for (const [outlet, controls] of panel.waiting) {
             if (!panel.pending.has(outlet)) {
                 continue;
@@ -2968,7 +3077,8 @@ const ScribePanel = Object.freeze({
                 filed = true;
                 outcome = request.done;
             } catch (error) {
-                outcome = ScribePanel.refusal(error);
+                outcome = outlet === settings.Outlets.Force && ScribePanel.reason(error) === ScribeLive.Settings.Messages.EmptyEdit
+                    ? settings.Words.EmptySend : ScribePanel.refusal(error);
             }
         } finally {
             if (request.book) {
@@ -2994,6 +3104,63 @@ const ScribePanel = Object.freeze({
             ScribePanel.redraw(panel);
         }
         return filed;
+    },
+
+    /**
+     * @param {object} panel
+     * @return {Promise<boolean>}
+     */
+    async listForks(panel) {
+        const outlet = ScribePanel.Settings.Outlets.Fork;
+        const action = {
+            outlet, question: null, pending: 'Looking up saved chats…', done: '', book: true,
+            call: async () => {
+                const result = await panel.listForkRooms();
+                const roomId = panel.keeper.view().roomId;
+                panel.forkRooms = result.rooms.filter((room) => room.id !== roomId);
+                ScribePanel.options(panel, panel.parts.ForkSource, [
+                    ['', 'Choose a saved chat'],
+                    ...panel.forkRooms.map((room) => [room.id, room.id + ' — ' + room.title]),
+                ], '');
+                if (result.nextCursor) {
+                    action.done = 'Zeta returned a partial list of saved chats.';
+                } else if (!panel.forkRooms.length) {
+                    action.done = 'Zeta returned no other saved chats for this story.';
+                }
+            },
+        };
+        const listed = await ScribePanel.perform(panel, action);
+        if (listed && panel.forkRooms.length) {
+            panel.parts.ForkSource.focus();
+        }
+        return listed;
+    },
+
+    /**
+     * @param {object} panel
+     * @param {string} sourceRoomId
+     * @param {string|null} messageId
+     * @return {Promise<boolean>}
+     */
+    async pullFork(panel, sourceRoomId, messageId) {
+        const action = {
+            outlet: ScribePanel.Settings.Outlets.Fork, question: null,
+            pending: 'Verifying the shared messages and source Book…', done: '', book: true,
+            call: async () => {
+                const result = await panel.recoverFork(sourceRoomId, messageId);
+                if (!result.ok) {
+                    throw new Error(result.reason);
+                }
+                panel.forkRooms = [];
+                action.done = 'Recovered ' + result.read + (result.read === 1 ? ' message reading' : ' message readings') +
+                    ' from ' + sourceRoomId + '. Verified ' + result.shared + (result.shared === 1 ? ' shared message.' : ' shared messages.');
+            },
+        };
+        const recovered = await ScribePanel.perform(panel, action);
+        if (!recovered) {
+            panel.parts.ForkSource.value = '';
+        }
+        return recovered;
     },
 
     /**
@@ -3087,20 +3254,111 @@ const ScribePanel = Object.freeze({
 
     /**
      * @param {object} panel
+     * @param {boolean} canSave
      * @return {void}
      */
-    openEdit(panel) {
+    reminderEditor(panel, canSave) {
+        const parts = panel.parts;
+        parts.Reminder.disabled = false;
+        parts.Reminder.readOnly = !panel.editing;
+        parts.Edit.hidden = panel.editing;
+        parts.Edit.disabled = false;
+        parts.EditCancel.hidden = !panel.editing;
+        parts.EditCancel.disabled = false;
+        parts.EditSave.hidden = !panel.editing;
+        parts.EditSave.disabled = !canSave;
+    },
+
+    /**
+     * @param {object} panel
+     * @param {string} text
+     * @param {boolean} usingPreview
+     * @return {boolean}
+     */
+    writeDraft(panel, text, usingPreview = false) {
         const settings = ScribePanel.Settings;
-        const view = panel.live.view();
+        const outlet = usingPreview ? settings.Outlets.GenerateReminder : settings.Outlets.Reminder;
+        try {
+            panel.writeReminderDraft(text);
+        } catch (error) {
+            const message = usingPreview ? settings.Words.UseRetry : ScribePanel.refusal(error);
+            ScribePanel.fail(panel, outlet, message);
+            ScribePanel.write(panel.outlets.get(outlet), message);
+            return false;
+        }
+        panel.displayedDraft = text;
+        panel.editOffer = null;
+        if (panel.outcomes.has(outlet)) {
+            ScribePanel.say(panel, outlet, '');
+            ScribePanel.write(panel.outlets.get(outlet), '');
+        }
+        return true;
+    },
+
+    /**
+     * @param {object} panel
+     * @return {boolean}
+     */
+    redrawReminder(panel) {
+        if (!panel.mounted || !panel.open || panel.tab !== 'Findings') {
+            return true;
+        }
+        if (panel.composing) {
+            panel.heldDraw = true;
+            return true;
+        }
+        const settings = ScribePanel.Settings;
+        const parts = panel.parts;
+        try {
+            const draft = panel.readReminderDraft();
+            if (draft !== null && (draft !== panel.displayedDraft || !panel.editing)) {
+                if (parts.Reminder.value !== draft) {
+                    parts.Reminder.value = draft;
+                }
+                panel.editOffer = null;
+            }
+            panel.displayedDraft = draft;
+            const preview = panel.readReminderPreview();
+            if (preview !== panel.generatedReminder) {
+                panel.generatedReminder = preview;
+                ScribePanel.write(parts.GeneratedReminder, preview ?? settings.Nothing);
+            }
+            parts.ReminderPreview.hidden = preview === null;
+            const generation = panel.reminderGeneration();
+            const outlet = settings.Outlets.GenerateReminder;
+            const status = generation === 'other' ? 'Generating in another tab' :
+                generation === null ? panel.reminderGenerationError() : null;
+            const shown = panel.outcomes.get(outlet);
+            const closed = preview === null && [settings.Words.PreviewReady, settings.Words.UseRetry].includes(shown);
+            if (closed || status !== null || (panel.generationNotice !== null && shown === panel.generationNotice)) {
+                ScribePanel.say(panel, outlet, status ?? settings.Nothing);
+                ScribePanel.write(parts.GenerateReminderOutcome, status ?? settings.Nothing);
+            }
+            panel.generationNotice = status;
+            const pending = panel.pending.has(outlet) || generation !== null;
+            parts.GenerateReminder.disabled = pending;
+            parts.UseGeneratedReminder.disabled = pending;
+            parts.KeepCurrentReminder.disabled = pending;
+        } catch (error) {
+            ScribePanel.alarm(panel, ScribePanel.reason(error));
+            return false;
+        }
+        return true;
+    },
+
+    /**
+     * @param {object} panel
+     * @param {string|null} generated
+     * @return {void}
+     */
+    openEdit(panel, generated = null) {
+        const settings = ScribePanel.Settings;
         const shown = panel.parts.Reminder.value;
         panel.editing = true;
-        panel.editShown = shown !== settings.Nothing;
-        panel.editStale = view.stale === true;
-        panel.editAgainst = view.latest;
-        panel.editSelection = panel.displayedSelection;
-        panel.editOffer = panel.displayedOffer;
+        panel.editStale = panel.displayedStale;
+        panel.editOffer = generated === null && panel.displayedDraft === null ? panel.displayedOffer : null;
         panel.editFrom = shown;
-        panel.parts.Reminder.value = shown;
+        panel.parts.Reminder.value = generated ?? shown;
         ScribePanel.say(panel, settings.Outlets.Reminder, settings.Nothing);
         ScribePanel.redraw(panel);
         panel.parts.Reminder.focus();
@@ -3109,36 +3367,61 @@ const ScribePanel = Object.freeze({
     /**
      * @param {object} panel
      * @param {boolean} save
-     * @return {void}
+     * @return {Promise<void>}
      */
-    closeEdit(panel, save) {
+    async closeEdit(panel, save) {
         const settings = ScribePanel.Settings;
         const outlet = settings.Outlets.Reminder;
-        const changed = panel.editSelection !== null || panel.live.view().selected != null
-            ? panel.parts.Reminder.value !== panel.editFrom
-            : ScribeLive.line(panel.parts.Reminder.value) !== ScribeLive.line(panel.editFrom);
-        if (save && (changed || panel.editStale)) {
-            try {
-                panel.live.edit(panel.parts.Reminder.value, panel.editShown, panel.editAgainst, panel.editSelection);
-            } catch (error) {
-                ScribePanel.fail(panel, outlet, ScribePanel.refusal(error));
-                ScribePanel.redraw(panel);
-                return;
-            }
+        if (!panel.editing) {
+            return;
+        }
+        const text = panel.parts.Reminder.value;
+        const changed = text !== panel.editFrom;
+        if (save && (changed || panel.editStale) && text !== panel.displayedDraft && !ScribePanel.writeDraft(panel, text)) {
+            return;
         }
         panel.editing = false;
         ScribePanel.say(panel, outlet, settings.Nothing);
+        ScribePanel.clearForceError(panel);
+        ScribePanel.redraw(panel);
+        panel.parts.Edit.focus();
+    },
+
+    /**
+     * @param {object} panel
+     * @return {void}
+     */
+    clearForceError(panel) {
+        const settings = ScribePanel.Settings;
         const force = settings.Outlets.Force;
         const error = panel.outcomes.get(force);
-        if ([ScribeLive.Settings.Messages.EmptyEdit, ScribeLive.Settings.Messages.LongEdit].includes(error)) {
+        if ([settings.Words.EmptySend, ScribeLive.Settings.Messages.LongEdit].includes(error)) {
             ScribePanel.say(panel, force, settings.Nothing);
             if (panel.troubled === force && panel.trouble === error) {
                 panel.trouble = settings.Nothing;
                 panel.troubled = null;
             }
         }
-        ScribePanel.redraw(panel);
-        panel.parts.Edit.focus();
+    },
+
+    /**
+     * @param {object} panel
+     * @return {void}
+     */
+    useGeneratedReminder(panel) {
+        const settings = ScribePanel.Settings;
+        const outlet = settings.Outlets.GenerateReminder;
+        const candidate = panel.generatedReminder;
+        if (candidate === null || panel.pending.has(outlet)) {
+            return;
+        }
+        if (!ScribePanel.writeDraft(panel, candidate, true)) {
+            return;
+        }
+        panel.clearReminderPreview(candidate);
+        ScribePanel.clearForceError(panel);
+        ScribePanel.say(panel, outlet, 'Generated reminder is in the editor.');
+        ScribePanel.openEdit(panel, candidate);
     },
 
     /**
@@ -3149,21 +3432,19 @@ const ScribePanel = Object.freeze({
         const settings = ScribePanel.Settings;
         const words = settings.Words;
         const outlet = settings.Outlets.Force;
-        const resendId = panel.resendId;
-        const visible = panel.parts.Reminder.value;
-        const selectedText = resendId === null && (panel.editing || visible !== settings.Nothing) ? visible : null;
+        const selectedText = panel.parts.Reminder.value;
         const filed = await ScribePanel.perform(panel, {
             outlet,
             /**
              * @return {Promise<void>}
              */
-            call: () => panel.live.force(resendId, selectedText),
+            call: () => panel.live.force(null, selectedText),
             question: null,
             done: words.Forced,
             pending: words.Working,
             book: false,
         });
-        if (filed && selectedText !== null && panel.live.view().selected === selectedText && panel.parts.Reminder.value === selectedText) {
+        if (filed && panel.live.view().selected === selectedText && panel.parts.Reminder.value === selectedText) {
             panel.editing = false;
             ScribePanel.redraw(panel);
         }
@@ -4040,15 +4321,15 @@ const ScribePanel = Object.freeze({
             const queued = [];
             const parts = panel.parts;
             const blocked = live.forceBlock !== null;
-            const editing = panel.editing;
-            const unconfirmed = live.unconfirmed ?? null;
-            panel.resendId = unconfirmed?.id ?? null;
-            if (!editing) {
-                parts.Reminder.value = unconfirmed?.text ?? live.selected ?? live.ready ?? (live.stale ? live.draft : null) ?? settings.Nothing;
+            ScribePanel.redrawReminder(panel);
+            if (!panel.editing) {
+                if (panel.displayedDraft === null) {
+                    parts.Reminder.value = live.selected ?? live.editedText ?? live.ready ?? (live.stale ? live.draft : null) ?? settings.Nothing;
+                }
+                panel.displayedStale = live.stale;
                 panel.displayedSelection = live.selectionId ?? null;
-                panel.displayedOffer = unconfirmed?.id ?? panel.displayedSelection ?? live.offerId ?? null;
+                panel.displayedOffer = panel.displayedSelection ?? live.offerId ?? null;
             }
-            parts.Reminder.readOnly = !editing;
             let placeholder = words.NothingWaiting;
             if (live.ready === null && live.held !== null && !blocked) {
                 placeholder = live.held;
@@ -4060,15 +4341,8 @@ const ScribePanel = Object.freeze({
                 placeholder = words.PreparedLater;
             }
             parts.Reminder.setAttribute(settings.Attributes.Placeholder, placeholder);
-            parts.Reminder.disabled = blocked;
-            parts.Edit.hidden = editing;
-            parts.Edit.disabled = blocked || (unconfirmed !== null && live.selected == null);
-            parts.EditCancel.hidden = !editing;
-            parts.EditCancel.disabled = false;
-            parts.EditSave.hidden = !editing;
-            parts.EditSave.disabled = blocked;
+            ScribePanel.reminderEditor(panel, true);
             parts.Force.disabled = blocked;
-            ScribePanel.write(parts.Force, unconfirmed ? words.Resend : words.Force);
             ScribePanel.wait(panel, settings.Outlets.Force, parts.Force);
             parts.ForceReason.hidden = !blocked;
             ScribePanel.write(parts.ForceReason, blocked ? live.forceBlock : settings.Nothing);
@@ -4077,7 +4351,7 @@ const ScribePanel = Object.freeze({
             ScribePanel.write(parts.Held, held ?? settings.Nothing);
             const forceOutcome = panel.outcomes.get(settings.Outlets.Force);
             if ([words.Forced, words.PreparedLater].includes(forceOutcome) ||
-                (live.selected != null && !unconfirmed && !forceOutcome)) {
+                (live.selected != null && !forceOutcome)) {
                 const going = live.ready !== null || live.edited || (blocked && live.prepared);
                 let outcome = settings.Nothing;
                 if (live.forced) {
@@ -4202,7 +4476,7 @@ const ScribePanel = Object.freeze({
                     continue;
                 }
                 const citations = [finding.source, finding.earlier].filter(Boolean);
-                const notes = citations.map((citation) => '#' + citation.position + ' · ' + citation.speaker + ' “' + citation.quote + '”');
+                const notes = citations.map((citation) => BenchView.citation(citation).text);
                 if (finding.record) {
                     notes.push('Book entry: ' + finding.record.text);
                 }
@@ -4254,14 +4528,19 @@ const ScribePanel = Object.freeze({
                 schedule = ' Zeta expired the links to older messages. The next background history check is due at ' + time + ' (local time).';
             }
             const pending = [...PanelView.listed(view.pendingFiling)];
-            for (const item of PanelView.listed(view.checkerReview)) {
-                if (item.section === 'answer' && item.reason === 'Checker response') {
-                    continue;
-                }
-                pending.push({ ...item, kind: 'checker' });
-            }
-            for (const item of PanelView.listed(live.checkerRows)) {
-                if (!item.modelReading) {
+            const readings = [...PanelView.listed(view.modelReadings)];
+            const checkerAnswers = new Set(readings.filter((item) => item.role === 'Checker')
+                .map((item) => JSON.stringify([item.first, item.statement])));
+            for (const item of [...PanelView.listed(view.checkerReview), ...PanelView.listed(live.checkerRows)]) {
+                if (item.modelReading || (item.section === 'answer' && item.reason === 'Checker response')) {
+                    const key = JSON.stringify([item.position, item.statement]);
+                    if (!checkerAnswers.has(key)) {
+                        readings.push(item);
+                        checkerAnswers.add(key);
+                    }
+                } else if (item.section) {
+                    pending.push({ ...item, kind: 'checker' });
+                } else {
                     pending.push({ ...item, kind: 'checker', section: 'live answer',
                         reason: 'The model returned this statement without a matching link.' });
                 }
@@ -4276,9 +4555,15 @@ const ScribePanel = Object.freeze({
                     reasons[item.reason] ?? 'The model returned a row that still needs filing.';
                 const raw = item.section === 'answer' || item.section === 'live answer' || item.reason === 'format' ||
                     item.row?.startsWith('SCENES:');
-                const statements = raw ? [] : item.statement ? [item.statement] : item.statements ?? [];
-                const detail = [reason, ...statements.map((text) => ScribeStore.diagnostic(panel.storage, text))].join(' · ');
+                const statements = (item.statement ? [item.statement] : item.statements ?? [])
+                    .map((text) => ScribeStore.diagnostic(panel.storage, text));
+                const detail = [reason, ...(raw ? [] : statements)].join(' · ');
                 const row = ScribePanel.make(panel, settings.Tags.Item, '#' + item.position + (item.row ? ' · ' + item.row : '') + ' · ' + detail, settings.Classes.Row);
+                if (raw && statements.length) {
+                    row.append(ScribePanel.Rows.opening(panel, item, words.AnswerText,
+                        ScribePanel.key(settings.Sections.Lines, item.section, item.position, item.row, item.reason),
+                        ScribePanel.make(panel, settings.Tags.Preformatted, statements.join('\n'), settings.Classes.Message)));
+                }
                 const first = item.kind === 'story' ? panel.storyRetry : panel.inputRetry;
                 const key = item.kind + ':' + item.id;
                 if (first && first.first !== item.position && item.kind !== 'checker' && !retriable.has(key)) {
@@ -4333,12 +4618,25 @@ const ScribePanel = Object.freeze({
             ScribePanel.paged(
                 panel,
                 settings.Lists.Lines,
-                PanelView.each(view.lines, whole),
+                [...readings.reverse(), ...PanelView.each(view.lines, whole)],
                 /**
                  * @param {object} report
                  * @return {object}
                  */
-                (report) => ScribePanel.Rows.line(panel, report, mask),
+                (report) => {
+                    if (typeof report.statement !== 'string') {
+                        return ScribePanel.Rows.line(panel, report, mask);
+                    }
+                    const first = report.first ?? report.position;
+                    const last = report.last ?? first;
+                    const role = mask(report.role ?? 'Checker');
+                    const label = role + (first == null ? '' : ' · #' + first + (last === first ? '' : '–#' + last));
+                    const row = ScribePanel.make(panel, settings.Tags.Item, label, settings.Classes.Row);
+                    row.append(ScribePanel.Rows.opening(panel, report, words.AnswerText,
+                        ScribePanel.key(settings.Sections.Lines, role, first, last, report.statement.length),
+                        ScribePanel.make(panel, settings.Tags.Preformatted, mask(report.statement), settings.Classes.Message)));
+                    return row;
+                },
                 null,
             );
             ScribePanel.paged(
@@ -5428,10 +5726,7 @@ const ScribePanel = Object.freeze({
                      * @param {{ line: string, reason: string }} entry
                      * @return {string[]}
                      */
-                    (entry) => {
-                        const label = report.pass === ScribeAdoption.Pass.Story ? entry.block ?? report.pass : entry.line;
-                        return [PanelView.said(label) + words.Open + PanelView.said(entry.reason) + words.Close];
-                    },
+                    (entry) => [PanelView.said(entry.line) + words.Open + PanelView.said(entry.reason) + words.Close],
                 ),
                 ...PanelView.each(
                     refusedOperations,
@@ -5447,7 +5742,7 @@ const ScribePanel = Object.freeze({
                             operation.label,
                             operation.name,
                             operation.category,
-                            operation.category === 'appearance' || operation.type === ScribeAnswer.Type.Scene ? null : operation.text,
+                            operation.text,
                             ...PanelView.sides(operation),
                         ];
                         const text = parts
@@ -5507,22 +5802,14 @@ const ScribePanel = Object.freeze({
             if (record.stopped === true) {
                 const stopped = words.StoppedCall + PanelView.said(record.pass) + words.CostUnknown;
                 item.append(ScribePanel.make(panel, tags.Paragraph, stopped, settings.Classes.Unreadable));
-                return item;
+            } else if (record.readable) {
+                item.append(ScribePanel.make(panel, tags.Paragraph,
+                    words.CallOpen + PanelView.said(record.sequence) + words.Colon + PanelView.said(record.pass)));
+            } else {
+                item.append(ScribePanel.make(panel, tags.Paragraph,
+                    words.Unreadable + words.Colon + PanelView.said(record.pass), settings.Classes.Unreadable));
             }
-            const heading = record.readable
-                ? ScribePanel.make(
-                      panel,
-                      tags.Paragraph,
-                      words.CallOpen + PanelView.said(record.sequence) + words.Colon + PanelView.said(record.pass),
-                  )
-                : ScribePanel.make(
-                      panel,
-                      tags.Paragraph,
-                      words.Unreadable + words.Colon + PanelView.said(record.pass),
-                      settings.Classes.Unreadable,
-                  );
-            item.append(heading);
-            if (answer && !settings.StoryModelRoles.includes(pass)) {
+            if (answer) {
                 item.append(ScribePanel.Rows.opening(
                     panel,
                     source,
@@ -5559,12 +5846,12 @@ const ScribePanel = Object.freeze({
             if (typeof record.problem === settings.StringType) {
                 item.append(ScribePanel.make(panel, tags.Paragraph, ScribeStore.diagnostic(panel.storage, record.problem), settings.Classes.Meta));
             }
-            if (typeof record.answer === settings.StringType && !settings.StoryModelRoles.includes(record.role)) {
+            if (typeof record.answer === settings.StringType) {
                 item.append(
                     ScribePanel.Rows.opening(
                         panel,
                         record,
-                        words.CutAnswer,
+                        record.finish === 'length' ? words.CutAnswer : words.AnswerText,
                         ScribePanel.key(settings.Sections.LiveCalls, record.role, record.answer.length),
                         ScribePanel.make(panel, tags.Preformatted, ScribeStore.diagnostic(panel.storage, record.answer), settings.Classes.Message),
                     ),

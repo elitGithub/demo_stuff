@@ -102,6 +102,19 @@ test('a book paraphrase of its own source is a citation diagnostic on reload, ev
     assert.equal(ScribeLog.checkProgress(room.book, room.messages).checkedThrough, 1);
 });
 
+test('a generic question about matching flag sentences leaves the two accounts out of Rulings', () => {
+    const room = disputed(['The flag is red.', 'The flag is blue.']);
+    const point = { subject: 'Flag', attribute: 'color' };
+    room.certify(1, { ...point, value: 'red' });
+    room.certify(2, { ...point, value: 'blue' }, [{ kind: 'Question', question: 'Which flag color stands?',
+        source: room.source(2), earlier: room.source(1), record: null }]);
+    room.book.log = JSON.parse(JSON.stringify(room.book.log));
+    const [finding] = room.rows();
+    assert.equal(finding.actionable, false);
+    assert.equal(finding.diagnostic, true);
+    assert.throws(() => room.rule(finding, { action: 'choose', account: 'source' }), /changed/);
+});
+
 test('only the bound original quote can turn an earlier book entry into an opposing account', () => {
     const room = disputed(['The flag is blue.', 'The flag is red.'],
         '=== FACTS\nFlag | color | blue | #1');
@@ -110,7 +123,7 @@ test('only the bound original quote can turn an earlier book entry into an oppos
     room.certify(1, { subject: 'Flag', attribute: 'color', value: 'blue' });
     const variants = [null, { ...room.source(1), quote: 'The flag is gold.' }, room.source(1)];
     room.certify(2, { subject: 'Flag', attribute: 'color', value: 'red' }, variants.map((citation, index) => ({
-        kind: 'Contradiction', source, earlier: null, question: 'Which flag color stands? ' + index,
+        kind: 'Contradiction', source, earlier: null, question: 'Is the flag color blue or red? ' + index,
         record: { ref: 'h1', text: JSON.stringify(fact) + (citation ? '\nFiled citation: ' + JSON.stringify(citation) : '') },
     })));
     const [loose, invented, bound] = room.rows();
@@ -128,7 +141,7 @@ test('the same claim remains agreement across attributions, and an additional co
         const color = { subject: 'Flag', attribute: 'color' };
         room.certify(1, [{ ...claim, attribution: 'claimed' }, ...(colors ? [{ ...color, value: 'green' }] : [])]);
         room.certify(2, [{ ...claim, attribution: 'witnessed' }, ...(colors ? [{ ...color, value: 'red' }] : [])], [
-            { kind: 'Question', question: 'Which account stands?', source: room.source(2), earlier: room.source(1), record: null }]);
+            { kind: 'Question', question: 'Is the flag color green or red?', source: room.source(2), earlier: room.source(1), record: null }]);
         room.book.log = JSON.parse(JSON.stringify(room.book.log));
         assert.equal(room.rows()[0].actionable, colors);
     }
@@ -154,13 +167,13 @@ test('a verified operator ruling supplies an opposing value on its own point aft
     const room = disputed(['The flag is red.', 'The flag is blue.', 'The flag is gold.']);
     const point = { subject: 'Flag', attribute: 'color' };
     room.certify(1, { ...point, value: 'red' });
-    room.certify(2, { ...point, value: 'blue' }, [{ kind: 'Question', question: 'Which flag color stands?',
+    room.certify(2, { ...point, value: 'blue' }, [{ kind: 'Question', question: 'Is the flag color red or blue?',
         source: room.source(2), earlier: room.source(1), record: null }]);
     room.rule(room.rows()[0], { action: 'choose', account: 'source' });
     const work = ScribeLog.checkWork(room.book, room.messages);
     const { text, ...meta } = work.rulings.at(-1);
     const record = { ref: 'r1', text: JSON.stringify(meta) + '\n' + text };
-    room.certify(3, { ...point, value: 'gold' }, [{ kind: 'Contradiction', question: 'Has the flag color changed?',
+    room.certify(3, { ...point, value: 'gold' }, [{ kind: 'Contradiction', question: 'Is the flag color blue or gold?',
         source: room.source(3), earlier: null, record }]);
     room.book.log = JSON.parse(JSON.stringify(room.book.log));
     assert.deepEqual(Array.from(room.rows()[1].choices), ['source', 'record']);

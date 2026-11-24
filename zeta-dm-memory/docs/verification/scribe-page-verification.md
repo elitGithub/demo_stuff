@@ -1,5 +1,26 @@
 # Scribe page verification
 
+## Scribe 0.3.33 verification, 2026-11-24
+
+The installable `scribe/scribe.user.js` matched the tested file byte for byte. Its SHA-256 is `4226a09f46a69ec686098d5a1263c7a878460b61525735492d456b630a473c40`.
+
+- **Saving in either tab.** In two network-disabled Chromium tabs, an edit saved in the watching tab appeared in both. A refused Save displayed “Reminder was not saved. Your text is still here. Click Save to retry.” The text remained editable and the next explicit Save succeeded. Scribe issued zero history or model requests during these checks.
+- **Sending the saved reminder.** A two-tab replay of the installable file confirmed that changing readers after a failed Save did not apply the rejected edit. After Save, the next outgoing message carried the exact multiline reminder once. The reminder then cleared. When the edit was published but storage was temporarily unreadable, Save waited for confirmation.
+- **Pause and Resume.** Both Force stop and Progress → Pause aborted an active history request in Chromium. Reopening and pressing Resume issued zero history or model requests.
+- **Captured Zeta data.** Offline replays of the three named-room captures processed four, five and thirteen newest-page responses respectively, with zero additional history requests. Reopening the original 22-message export produced zero actionable rulings. Separate error captures provided the HTTP 429 and HTTP 400 cases documented below.
+
+The 32 Scribe test files ran 2,070 tests. Of those, 2,025 passed, 45 failed and zero were skipped. All 45 failing tests also failed by name in the 0.3.31 run. Verification in a live Zeta room with Scribe 0.3.33 enabled remains pending.
+
+## Scribe 0.3.32 verification, 2026-11-24
+
+- **Edit and regenerate.** In both Edit captures, the edited candidate already matched the first recorded chat page. The original visible wording is unavailable. The Regenerate capture contained 13 newest-page GETs with the same 31 message IDs in the same order. Six showed the old reply before streaming started and three still showed it after streaming started. A successful PUT then returned the replacement inside `message` under the original ID. Four subsequent pages matched it. Offline replay saved that replacement, made one stubbed Checker call and issued zero additional history requests.
+- **Errors.** The two separate error captures supplied HTTP 429 with `TOO_MANY_REQUEST` and HTTP 400 with `CHAT_ABUSED`. Tests exercised both responses through the packed script in the top page and chat frame. Neither capture establishes that its error occurred in the named test room.
+- **Book and Checker.** Replaying the 22-message export preserved both historical Writer questions. Zero appeared in Rulings, and all four Checker findings had no ruling action. A separate deterministic upgrade test resumed a partially completed 0.3.29 comparison. It retained 93 previously checked markers, sent the remaining 297, and repeated zero previously checked markers.
+- **Reminder and Progress.** Offline tests saved edited reminder text verbatim and used that text for Send while an earlier receipt was missing. Sending cleared the sent reminder. A late receipt preserved a newer edit. Progress exposed saved model answers, including read receipts and warnings.
+- **Browser and tabs.** In offline Chromium, Edit opened before adoption, Pause aborted the active history request, and Resume became available immediately. Reopening and resuming issued zero history requests. Separate two-tab tests verified that a confirmed change from the watching tab reached the reader after Resume and that changing readers canceled the former reader’s outstanding model request.
+
+These checks made zero live Zeta or paid model calls. Verification in a live room with this build enabled remains pending.
+
 ## Cross-tab OpenRouter key recovery, 2026-11-20
 
 **Simulated in Node.** Two rooms ran the delivered `scribe/scribe.user.js` against synthetic Tampermonkey storage, Zeta, OpenRouter and a Worker. The scenario ran twice, with the chat box in the frame and in the top document. Both the scene update and the story check received a 401 echoing the old credential. At a simulated width of 320 CSS pixels, the strip showed **OpenRouter key rejected**. The focused native **Scribe** button expanded the panel using a simulated Enter activation. One warning named both jobs, and **Progress** showed the provider reason with the credential replaced by `[key]`.
@@ -51,7 +72,7 @@ The engine's files on the same day: text 58, intake 51, answer 59, facts 69, sce
 
 Each part was attacked by a separate reviewer told to prove it wrong, its findings fixed, and the fixes checked again, in two to four rounds a part. Where a reviewer's attack scripts still existed after the last fix they were run again against the final code by the orchestrating assistant: for the suggestions helper, the pedant, the reminder, the boot, the send hook and the live part. For the keeper and the panel the reviewer itself re-ran its inputs against the final code and reported every fix holding.
 
-The whole walk packs the real sources in memory with `ScribePack.build` and runs that text in a Node VM over a fake page, a scripted site and a scripted model. No part of the scribe is replaced by a stand-in. Its steps: install on a page that is no chat; a chat opens; the key; adopt; a reload; a new reply; sending; a refused send followed by typing; a regenerated reply; an edited old message; a ruling; telling the scribe; a suggestion; a billed answer that fails; a second tab; pausing; starting the book over; leaving the chat; a search of every log line, every element's text, every request and every stored value for the key and the site's token; and a phone-width window with the panel never opened, and a hidden panel, where replies are still checked and the reminder still goes out.
+The whole walk runs the packed userscript in a Node VM with a scripted chat, page and model. It covers installation, adopting a room, reloads, new messages, sending, rulings, reminders, suggestions, model errors, multiple tabs, pausing, restarting the Book, leaving a room, credential exposure, and narrow or hidden panels. The fixture supplies each response. A separate offline replay used the operator’s Zeta network captures. In both edit captures, the candidate ID and text in the successful edit response matched the first recorded chat page. Those captures start after the edit was submitted. In the regeneration capture, Zeta returned new text for the same message ID when it selected the replacement. Four subsequent chat pages carried that text. Scribe saved the replacement and issued one Checker request to the local stub. Each replay made zero additional history requests.
 
 The first run of the walk passed 24 of 30 tests and showed five places where finished parts did not fit together (a reply checked against a book not yet read; the header's spending lagging; a paid question asked twice; a spent budget never said; a reply that arrived while paused never checked after a reload). All five were fixed in the sources, and the walk's own expectations were corrected where a later ruling made them wrong.
 
@@ -114,9 +135,9 @@ Stop at the first line that fails and note what the Progress tab and the browser
 
 - [ ] Disable Zeta DM Memory. Build with `node scribe/pack.mjs`, install `scribe/scribe.user.js`, allow only `openrouter.ai`.
 - [ ] Open a room. A panel appears. The console shows no error from the scribe.
-- [ ] The headline goes from pulling the chat to `No book for this chat yet` with the right message count. On the Progress tab note **Last pull**: count ____ and how it ended ____. (If a long chat's whole history ends with a repeated cursor instead of no cursor or an empty page, say so: one setting follows from it.)
+- [ ] Before adopting a new room, confirm that Scribe issues zero history requests.
 - [ ] Save the key. The panel says a key is saved.
-- [ ] On a short chat first: Adopt. Stretches are read, the header's spending rises, the headline ends at up to date. Cost: $____ for ____ messages.
+- [ ] In a short chat, press **Adopt this chat**. Confirm the first history pull starts. Record the message count and how the pull ended from **Progress → Last pull**. As Scribe reads the saved messages, check the spending in the header and the final read count.
 - [ ] Reload the page. No model call is made (the spending does not move) and the counts are the same.
 - [ ] Wait for a reply. Within some seconds the Findings tab shows a reminder under **With your next message**.
 - [ ] Type a message and press Enter. The message that appears in the chat ends with one `@: [Scribe] ...` line, your words unchanged before it, and it was sent once.
@@ -124,7 +145,7 @@ Stop at the first line that fails and note what the Progress tab and the browser
 - [ ] Shift+Enter still makes a new line. Ctrl+Enter does whatever it did before.
 - [ ] Send with the site's send button instead of Enter. The line is added once.
 - [ ] After the next reading of the book, the scribe's own lines are not in the book as story (Book tab: no fact quotes a `[Scribe]` line).
-- [ ] Regenerate a reply. Findings about the old text go; the new text is checked.
+- [ ] Compare the visible passage before and after a live edit with Scribe enabled. The saved edit captures establish the returned text. The original visible wording is still unverified.
 - [ ] Type in the panel's fields. Nothing you type there triggers a site shortcut or lands in the chat.
 - [ ] Open a second chat in a second tab of the same window. Both chats are read; the hidden one keeps going.
 - [ ] Open the same room in a second tab. It says another tab is reading. Hide the first tab: the second takes over.
@@ -147,7 +168,7 @@ Stop at the first line that fails and note what the Progress tab and the browser
 ## Known limits accepted in this build
 
 - A history that can never be pulled far enough to join the saved campaign holds the chat until a pull joins; the book is kept.
-- Opening messages deleted on the site, and an edit outside the newest page, are noticed only by a whole pull or not at all.
+- Live page responses can add new messages. Use an explicit history pull to reconcile previously saved passages.
 - With two visible windows on one chat the reader stays with the first.
 - If storage refuses writes, at most one model call's cost per page load can go unrecorded, and no further call is made until a write succeeds.
 - A reply the player answers before its check has started is not checked.

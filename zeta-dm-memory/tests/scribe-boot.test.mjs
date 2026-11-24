@@ -388,7 +388,18 @@ function standIns(timers) {
                 /**
                  * @return {{ phase: string, reader: boolean }}
                  */
-                view: () => ({ phase: record.phase, reader: record.reader, stop: record.stop }),
+                view: () => ({ phase: record.phase, reader: record.reader, booked: true, stop: record.stop }),
+                pause: () => {
+                    record.stop = { reason: 'Paused' };
+                    options.pauseCalls();
+                },
+                releaseReader: () => {
+                    if (record.reader) {
+                        record.reader = false;
+                        options.zeta.abort();
+                        options.pauseCalls('Another tab is reading this chat.');
+                    }
+                },
                 rekey: () => { record.rekeys = (record.rekeys ?? 0) + 1; },
                 /**
                  * @param {object} page
@@ -1437,7 +1448,10 @@ test('queued key notices reread once per value across navigation, sleep, and sto
     const storage = run.storage;
     const first = run.world.panels[0];
     const baseline = first.options.keyVersion();
-    assert.deepEqual([...storage.listeners.values()].map((entry) => entry.name), ['scribe:key', 'scribe:observations:harbour']);
+    const watched = (room) => ['scribe:key', 'scribe:observations:' + room,
+        ...['draft', 'draft-sent', 'preview', 'generating', 'result'].map((part) => 'scribe:reminder:' + room + ':' + part),
+        'scribe:head:' + room + ':live', 'scribe:fork:' + room];
+    assert.deepEqual([...storage.listeners.values()].map((entry) => entry.name), watched('harbour'));
     storage.queued = [];
     ScribeStore.setKey(storage, 'test-first');
     ScribeStore.setKey(storage, 'test-second');
@@ -1456,7 +1470,7 @@ test('queued key notices reread once per value across navigation, sleep, and sto
     go(run, '/rooms/quay');
     await pass(run, 1000);
     const second = run.world.panels.at(-1);
-    assert.deepEqual([...storage.listeners.values()].map((entry) => entry.name), ['scribe:key', 'scribe:observations:quay']);
+    assert.deepEqual([...storage.listeners.values()].map((entry) => entry.name), watched('quay'));
     ScribeStore.setKey(storage, 'test-third');
     storage.queued[0]();
     assert.equal(second.keyChanges, 1);
@@ -1492,7 +1506,7 @@ test('queued key notices reread once per value across navigation, sleep, and sto
 });
 
 for (const [helper, role] of [['keepers', 'Analyzer'], ['lives', 'Pedant']]) {
-    test(helper + ' select the saved key at dispatch, after gateway backoff and after Force stop', async () => {
+    test(helper + ' select the saved key at dispatch and after gateway backoff', async () => {
         const run = harness({ locks: new FakeLocks() });
         ScribeStore.setKey(run.storage, KEY);
         start(run);
@@ -1508,18 +1522,11 @@ for (const [helper, role] of [['keepers', 'Analyzer'], ['lives', 'Pedant']]) {
         await pass(run, 1);
         assert.equal(run.sent.calls.length, 2);
         assert.equal(run.sent.calls[1].details.headers.Authorization, 'Bearer backoff-test-key');
-        await pass(run, ScribeBoot.Settings.ForceAfterMs);
-        run.world.panels[0].options.calls.stop();
-        ScribeStore.setKey(run.storage, 'nudged-test-key');
-        await settle();
-        assert.equal(run.sent.calls.length, 3);
-        assert.equal(run.sent.calls[2].details.headers.Authorization, 'Bearer nudged-test-key');
-        assert.equal(JSON.parse(run.sent.calls[2].details.data).messages[1].content, USER + '\n\nAnswer now, without more thinking.');
         ScribeStore.setKey(run.storage, 'newer-than-valid-result');
-        answer(run.sent.calls[2], 200, completion('Keep this result.', 0.25));
+        answer(run.sent.calls[1], 200, completion('Keep this result.', 0.25));
         const result = await asking;
         assert.equal(result.text, 'Keep this result.');
-        assert.equal(result.stopped, 1);
+        assert.equal(result.stopped, 0);
         assert.equal(result.cost, 0.375);
         assert.equal(ScribeStore.spent(run.storage, 'harbour', DAY), helper === 'keepers' ? 0 : 0.375);
         assert.equal(ScribeStore.spent(run.storage, 'quay', DAY), 0);
@@ -1913,7 +1920,7 @@ test('stop ends everything', async () => {
     await settle();
     assert.equal(run.sent.calls.length, 1);
     await traffic(run);
-    assert.equal(run.timers.count > 2, true);
+    assert.ok(run.timers.count > 0);
     assert.equal(run.document.documentElement.hasAttribute('data-zeta-scribe'), true);
     boot.stop();
     assert.deepEqual(run.world.order, [...BUILT, 'detach harbour', 'unmount harbour', 'live close harbour', 'keeper close harbour']);
@@ -1971,7 +1978,11 @@ test('secrets stay out of the log', async () => {
     });
     assert.equal(run.sent.calls.length, 2);
     rejected.push((await failureOf(refusal)).message);
-    assert.equal(run.lines.length, 3);
+    assert.deepEqual([...new Set(run.lines)], [
+        'The scribe could not start: Zeta refused [hidden]',
+        'The check failed: The newest page failed for [hidden]',
+        'The panel could not be drawn: The panel saw [hidden]',
+    ]);
     assert.equal(run.lines[0], 'The scribe could not start: Zeta refused [hidden]');
     assert.equal(run.lines[1], 'The check failed: The newest page failed for [hidden]');
     assert.equal(run.lines[2], 'The panel could not be drawn: The panel saw [hidden]');
@@ -2028,11 +2039,11 @@ test('keys typed in the panel stay in the panel', async () => {
     run.environment.storage = noted(run.storage, ['get', 'set', 'remove', 'list', 'watch'], 'storage', note);
     start(run);
     await settle();
-    assert.deepEqual(touched.slice(0, 7), [...Array(5).fill('listener wrapped'), 'storage wrapped', 'storage wrapped']);
+    assert.deepEqual(touched.slice(0, 9), [...Array(7).fill('listener wrapped'), 'storage wrapped', 'storage wrapped']);
     assert.equal(touched.includes('timer wrapped'), true);
     assert.deepEqual(
         run.page.listeners.map((entry) => `${entry.type} ${entry.capture}`),
-        ['keydown true', 'keyup true', 'keypress true', 'message false', 'pageshow false'],
+        ['keydown true', 'keyup true', 'keypress true', 'message false', 'popstate false', 'pagehide false', 'pageshow false'],
     );
     const host = run.world.panels[0].host;
     const field = { name: 'the key field', parentNode: host };
@@ -2146,53 +2157,28 @@ test('a billed amount that cannot be written is kept', async () => {
     run.boot.stop();
 });
 
-test('Force stop shows at 4 minutes, ends the call and asks once more to answer now', async () => {
+test('Force stop immediately aborts the call and blocks dispatch even when an old response arrives', async () => {
     const run = harness();
     run.sent = requests({ aborting: false });
     run.environment.xmlHttpRequest = run.sent.xmlHttpRequest;
     start(run);
     await settle();
     ScribeStore.setKey(run.storage, KEY);
-    const panel = run.world.panels[0];
-    const calls = panel.options.calls;
-    const scene = run.world.lives[0].options.ask(ScribeBoot.Role.Scribe, SYSTEM, USER);
+    const calls = run.world.panels[0].options.calls;
+    const live = run.world.lives[0];
+    const asking = failureOf(live.options.ask(ScribeBoot.Role.Scribe, SYSTEM, USER));
     await settle();
     assert.equal(run.sent.calls.length, 1);
-    assert.equal(calls.due(), false);
-    await pass(run, 239999);
-    assert.equal(calls.due(), false);
-    const redraws = panel.redraws;
-    await pass(run, 1);
     assert.equal(calls.due(), true);
-    assert.equal(panel.redraws > redraws, true);
     calls.stop();
-    await settle();
     assert.equal(run.sent.calls[0].handle.aborts, 1);
-    assert.equal(run.sent.calls.length, 2);
-    const first = JSON.parse(run.sent.calls[0].details.data);
-    const second = JSON.parse(run.sent.calls[1].details.data);
-    assert.equal(second.messages[1].content, `${first.messages[1].content}\n\nAnswer now, without more thinking.`);
-    assert.deepEqual({ ...second, messages: [second.messages[0]] }, { ...first, messages: [first.messages[0]] });
-    assert.equal(calls.due(), false);
+    assert.equal((await asking).message, ScribeBoot.Settings.Messages.Paused);
     answer(run.sent.calls[0], 200, completion('A late answer.', 0.5));
-    await pass(run, 10000);
-    assert.equal(run.sent.calls.length, 2);
-    await pass(run, 229999);
+    await pass(run, 2 * ScribeBoot.Settings.TickMs);
+    assert.equal((await failureOf(live.options.ask(ScribeBoot.Role.Scribe, SYSTEM, USER))).message, ScribeBoot.Settings.Messages.Paused);
+    assert.equal(run.sent.calls.length, 1);
     assert.equal(calls.due(), false);
-    await pass(run, 1);
-    assert.equal(calls.due(), true);
-    calls.stop();
-    await settle();
-    assert.equal(run.sent.calls.length, 3);
-    const third = JSON.parse(run.sent.calls[2].details.data);
-    assert.equal(third.messages[1].content, second.messages[1].content);
-    answer(run.sent.calls[2], 200, completion('The scene.', 0.01));
-    const result = await scene;
-    assert.equal(result.text, 'The scene.');
-    assert.equal(result.cost, 0.01);
-    assert.equal(result.stopped, 2);
-    assert.equal(ScribeStore.spent(run.storage, 'harbour', DAY), 0.01);
-    assert.equal(calls.due(), false);
+    assert.equal(ScribeStore.spent(run.storage, 'harbour', DAY), 0);
     run.boot.stop();
 });
 
@@ -2229,7 +2215,7 @@ test('Pause terminates a gateway backoff and every concurrent room request even 
     answer(run.sent.calls[2], 200, completion('Old finding.', 0));
     answer(run.sent.calls[3], 200, completion('Current scene.', 0));
     assert.equal((await resumed).text, 'Current scene.');
-    await pass(run, 2 * ScribeBoot.Settings.ForceAfterMs);
+    await pass(run, 2 * ScribeBoot.Settings.TickMs);
     assert.equal(run.sent.calls.length, 4);
     run.boot.stop();
 });
@@ -2254,7 +2240,6 @@ test('historical checks reserve at dispatch, and a reservation failure, ambiguou
         const count = run.sent.calls.length;
         const call = run.sent.calls.at(-1);
         if (force) {
-            await pass(run, ScribeBoot.Settings.ForceAfterMs);
             run.world.panels[0].options.calls.stop();
             assert.equal(call.handle.aborts, 1);
         } else {
@@ -2268,19 +2253,17 @@ test('historical checks reserve at dispatch, and a reservation failure, ambiguou
     run.boot.stop();
 });
 
-test('a Force stop replacement queued before Pause cannot dispatch after a same-turn Resume', async () => {
+test('a stopped call cannot dispatch a replacement after the stopped state clears', async () => {
     const run = harness();
     start(run);
     await settle();
     ScribeStore.setKey(run.storage, KEY);
     const keeper = run.world.keepers[0];
     const reading = failureOf(keeper.options.ask('Analyzer', SYSTEM, USER));
-    await pass(run, ScribeBoot.Settings.ForceAfterMs);
+    await settle();
     const calls = run.world.panels[0].options.calls;
     assert.equal(calls.due(), true);
     calls.stop();
-    keeper.stop = { reason: 'Paused' };
-    keeper.options.pauseCalls();
     assert.equal(calls.due(), false);
     keeper.stop = null;
     assert.equal((await reading).message, ScribeBoot.Settings.Messages.Paused);
@@ -2325,41 +2308,32 @@ test('only a historical auth rejection without observed charges can be released 
     run.boot.stop();
 });
 
-test('one Force stop stops every call past 4 minutes and leaves a younger call running', async () => {
+test('one Force stop cancels all three room calls regardless of when they began', async () => {
     const run = harness();
     start(run);
     await settle();
     ScribeStore.setKey(run.storage, KEY);
     const calls = run.world.panels[0].options.calls;
-    const reading = run.world.keepers[0].options.ask(ScribeBoot.Role.Analyzer, SYSTEM, USER);
-    await pass(run, 30000);
-    const check = run.world.lives[0].options.ask(ScribeBoot.Role.Pedant, SYSTEM, USER);
-    await pass(run, 210000);
-    const scene = run.world.lives[0].options.ask(ScribeBoot.Role.Scribe, SYSTEM, USER);
-    await pass(run, 30000);
+    const reading = failureOf(run.world.keepers[0].options.ask(ScribeBoot.Role.Analyzer, SYSTEM, USER));
+    await pass(run, 100);
+    const check = failureOf(run.world.lives[0].options.ask(ScribeBoot.Role.Pedant, SYSTEM, USER));
+    await pass(run, 100);
+    const scene = failureOf(run.world.lives[0].options.ask(ScribeBoot.Role.Scribe, SYSTEM, USER));
+    await settle();
     assert.equal(run.sent.calls.length, 3);
     assert.equal(calls.due(), true);
     calls.stop();
-    await settle();
-    assert.deepEqual(run.sent.calls.slice(0, 3).map((call) => call.handle.aborts), [1, 1, 0]);
-    assert.equal(run.sent.calls.length, 5);
-    const resent = run.sent.calls.slice(3).map((call) => JSON.parse(call.details.data).messages[1].content);
-    assert.deepEqual(resent, [`${USER}\n\nAnswer now, without more thinking.`, `${USER}\n\nAnswer now, without more thinking.`]);
+    assert.deepEqual(run.sent.calls.map((call) => call.handle.aborts), [1, 1, 1]);
+    for (const error of await Promise.all([reading, check, scene])) {
+        assert.equal(error.message, ScribeBoot.Settings.Messages.Paused);
+    }
+    await pass(run, 2 * ScribeBoot.Settings.TickMs);
     assert.equal(calls.due(), false);
-    calls.stop();
-    await settle();
-    assert.equal(run.sent.calls.length, 5);
-    assert.equal(run.sent.calls[2].handle.aborts, 0);
-    answer(run.sent.calls[2], 200, completion('The scene.', 0.01));
-    answer(run.sent.calls[3], 200, completion('The reading.', 0.01));
-    answer(run.sent.calls[4], 200, completion('The check.', 0.01));
-    assert.equal((await reading).stopped, 1);
-    assert.equal((await check).stopped, 1);
-    assert.equal((await scene).stopped, 0);
+    assert.equal(run.sent.calls.length, 3);
     run.boot.stop();
 });
 
-test('Force stop sends nothing more once the day is spent, and the call ends with that refusal', async () => {
+test('Force stop ends the call even after the day is spent', async () => {
     const run = harness();
     start(run);
     await settle();
@@ -2369,14 +2343,12 @@ test('Force stop sends nothing more once the day is spent, and the call ends wit
     const scene = failureOf(run.world.lives[0].options.ask(ScribeBoot.Role.Scribe, SYSTEM, USER));
     await settle();
     ScribeStore.spend(run.storage, 'harbour', DAY, 1);
-    await pass(run, 240000);
     calls.stop();
     await settle();
     assert.equal(run.sent.calls.length, 1);
     assert.equal(run.sent.calls[0].handle.aborts, 1);
     const ended = await scene;
-    assert.equal(ended.message, "The day's budget is spent");
-    assert.equal(ended.stopped, 1);
+    assert.equal(ended.message, ScribeBoot.Settings.Messages.Paused);
     assert.equal(ScribeStore.spent(run.storage, 'harbour', DAY), 1);
     run.boot.stop();
 });
@@ -2396,13 +2368,11 @@ test('Force stop sends nothing more while spending is unrecorded, and the call e
     answer(run.sent.calls[2], 200, completion('Checked.', 2));
     await check;
     assert.equal((await failureOf(run.world.lives[0].options.ask(ScribeBoot.Role.Pedant, SYSTEM, USER))).message, UNRECORDED);
-    await pass(run, 240000);
     calls.stop();
     await settle();
     assert.equal(run.sent.calls.length, 3);
     for (const ended of [await reading, await scene]) {
-        assert.equal(ended.message, UNRECORDED);
-        assert.equal(ended.stopped, 1);
+        assert.equal(ended.message, ScribeBoot.Settings.Messages.Paused);
     }
     run.storage.allow();
     run.boot.stop();
@@ -2700,29 +2670,29 @@ test('neither this room nor another room schedules history polling after native 
     run.boot.stop();
 });
 
-test('native edited messages arriving before Keeper opens survive startup and a late old-room response is ignored', async () => {
+test('a head received before Keeper opens survives startup and a late old-room head is ignored', async () => {
     const run = harness();
     run.world.plans.push(HOLD);
     start(run);
     await settle();
-    const row = { id: 'same-id', roomId: 'harbour', sender: { type: 'CHARACTER' }, messageTime: FakeZeta.time(1),
-        contents: [{ type: 'TEXT', text: 'The revised reply.' }], edited: true };
+    const row = { id: 'first', roomId: 'harbour', sender: { type: 'CHARACTER' }, messageTime: FakeZeta.time(1),
+        contents: [{ type: 'TEXT', text: 'The first reply.' }] };
     const reply = () => {
-        const response = Response.json(row);
-        Object.defineProperty(response, 'url', { value: MESSAGES + '/same-id' });
+        const response = Response.json({ messages: [row], nextCursor: null });
+        Object.defineProperty(response, 'url', { value: MESSAGES });
         return response;
     };
     run.page.answer = async () => reply();
-    const host = await run.page.fetch(MESSAGES + '/same-id');
-    assert.equal((await host.json()).contents[0].text, 'The revised reply.');
+    const host = await run.page.fetch(MESSAGES);
+    assert.equal((await host.json()).messages[0].contents[0].text, 'The first reply.');
     await settle();
     const first = run.world.keepers[0];
     first.finish();
     await settle();
-    assert.deepEqual(Array.from(first.observations, (page) => page.messages[0].id), ['same-id']);
+    assert.deepEqual(Array.from(first.observations, (page) => page.messages[0].id), ['first']);
     let release;
     run.page.answer = () => new Promise((resolve) => { release = resolve; });
-    const old = run.page.fetch(MESSAGES + '/same-id');
+    const old = run.page.fetch(MESSAGES);
     go(run, '/rooms/ford');
     await pass(run, 1000);
     go(run, '/rooms/harbour');
@@ -2740,7 +2710,7 @@ test('only the current chat frame observation reaches its keeper', async () => {
     const { run, chat, keeper } = await bridged();
     run.environment.random = () => 'observation-token-for-this-room';
     await deliver(run, readyFrom(chat.window));
-    const page = { observedAt: START, head: false, complete: false, messages: [{ id: 'id', roomId: 'harbour',
+    const page = { observedAt: START, head: false, complete: false, created: true, messages: [{ id: 'id', roomId: 'harbour',
         messageTime: FakeZeta.time(1), sender: { type: 'CHARACTER' }, contents: [{ type: 'TEXT', text: 'New reply.' }] }] };
     const event = { origin: PINGPONG, source: chat.window, data: { zetaScribe: 1, kind: ScribeFrame.Bridge.Kind.Messages,
         seq: chat.window.posted.at(-1).seq, token: chat.window.observationToken, room: 'harbour', page } };
@@ -2758,7 +2728,7 @@ test('only the current chat frame observation reaches its keeper', async () => {
     run.boot.stop();
 });
 
-test('a watching tab transfers canonical edits privately to its reader, including a change awaiting handoff', async () => {
+test('a watching tab transfers message heads to the reader and retains them through handoff', async () => {
     const locks = new FakeLocks();
     const first = harness({ locks });
     const second = harness({ locks, storage: first.storage, timers: first.timers, world: first.world, tabId: 'tab-two' });
@@ -2769,32 +2739,31 @@ test('a watching tab transfers canonical edits privately to its reader, includin
     const [reader, watcher] = first.world.keepers;
     assert.equal(reader.reader, true);
     assert.equal(watcher.reader, false);
-    const route = MESSAGES + '/edited';
-    const edit = async (wording) => {
-        const message = { id: 'edited', roomId: 'harbour', sender: { type: 'CHARACTER' }, messageTime: FakeZeta.time(1),
-            contents: [{ type: 'TEXT', text: wording }], edited: true };
+    const report = async (id, wording) => {
+        const message = { id, roomId: 'harbour', sender: { type: 'CHARACTER' }, messageTime: FakeZeta.time(1),
+            contents: [{ type: 'TEXT', text: wording }] };
         second.page.answer = () => {
-            const response = Response.json(message);
-            Object.defineProperty(response, 'url', { value: route });
+            const response = Response.json({ messages: [message], nextCursor: null });
+            Object.defineProperty(response, 'url', { value: MESSAGES });
             return Promise.resolve(response);
         };
-        await second.page.fetch(route);
+        await second.page.fetch(MESSAGES);
         await settle();
     };
     const pending = () => first.storage.list().filter((name) => name.startsWith('scribe:observations:harbour:'));
     reader.stop = { reason: 'Paused' };
-    await edit('The corrected passage.');
-    assert.equal(reader.observations[0].messages[0].contents[0].text, 'The corrected passage.');
+    await report('first', 'The rider arrived.');
+    assert.equal(reader.observations[0].messages[0].contents[0].text, 'The rider arrived.');
     assert.equal(watcher.observations.length, 0);
     assert.equal(pending().length, 0);
     reader.refuseObservation = true;
-    await edit('The regenerated passage.');
+    await report('next', 'The gate opened.');
     assert.equal(pending().length, 1);
     assert.equal(reader.observations.length, 1);
     first.boot.stop();
     watcher.reader = true;
     watcher.options.notify({ kind: 'Changed' });
-    assert.equal(watcher.observations[0].messages[0].contents[0].text, 'The regenerated passage.');
+    assert.equal(watcher.observations[0].messages[0].contents[0].text, 'The gate opened.');
     assert.equal(pending().length, 0);
     await pass(second, 40000);
     assert.equal(watcher.observations.length, 1);
@@ -2802,6 +2771,38 @@ test('a watching tab transfers canonical edits privately to its reader, includin
     assert.equal(second.page.fetchCalls.length, 2);
     assert.equal(first.sent.calls.length + second.sent.calls.length, 0);
     second.boot.stop();
+});
+
+test('watcher reminder edits are written locally even with delayed notifications, and report a refused write', async () => {
+    const locks = new FakeLocks();
+    const first = harness({ locks });
+    const second = harness({ locks, storage: first.storage, timers: first.timers, world: first.world, tabId: 'tab-two' });
+    start(first);
+    await settle();
+    start(second);
+    await settle();
+    const watcher = first.world.lives[1].live;
+    const panel = first.world.panels[1].options;
+    const applied = [];
+    watcher.writeReminderDraft = (text) => {
+        if (text === 'refused') {
+            throw new Error('Storage refused the change.');
+        }
+        applied.push(text);
+    };
+    first.storage.queued = [];
+    panel.writeReminderDraft('  chosen text  ');
+    assert.deepEqual(applied, ['  chosen text  ']);
+    const callbacks = first.storage.queued;
+    first.storage.queued = null;
+    callbacks.forEach((callback) => callback());
+    assert.deepEqual(applied, ['  chosen text  ']);
+    assert.throws(() => panel.writeReminderDraft('refused'), /Reminder was not saved. Your text is still here/);
+    assert.deepEqual(first.storage.list().filter((key) => key.includes(':edit:')), []);
+    assert.equal(first.page.fetchCalls.length + second.page.fetchCalls.length, 0);
+    assert.equal(first.sent.calls.length + second.sent.calls.length, 0);
+    second.boot.stop();
+    first.boot.stop();
 });
 
 test('an owned history request is aborted on its native fetch and paused dispatch remains blocked', async () => {
@@ -2824,6 +2825,42 @@ test('an owned history request is aborted on its native fetch and paused dispatc
     run.boot.stop();
 });
 
+for (const departure of ['currententrychange', 'pagehide']) {
+    test(departure + ' aborts a history request and cancels model backoff before the route timer', async () => {
+        const run = harness();
+        const navigation = new EventTarget();
+        run.page.navigation = navigation;
+        start(run);
+        await settle();
+        ScribeStore.setKey(run.storage, KEY);
+        const { options } = run.world.keepers[0];
+        const asking = failureOf(options.ask(ScribeBoot.Role.Analyzer, SYSTEM, USER));
+        await settle();
+        answer(run.sent.calls[0], 503, '{"error":"unavailable"}');
+        await settle();
+        assert.ok(run.timers.delays.includes(ScribeBoot.Settings.PauseMs));
+        await run.page.fetch(API + '/v1/users/me', { headers: { Authorization: TOKEN } });
+        run.page.answer = () => new Promise(() => {});
+        const querying = failureOf(options.zeta.history(() => {}));
+        await settle();
+        const signal = run.page.fetchCalls.at(-1).values[1].signal;
+        if (departure === 'currententrychange') {
+            go(run, '/');
+            navigation.dispatchEvent(new Event(departure));
+        } else {
+            run.page.listeners.find((entry) => entry.type === 'pagehide').listener({ type: 'pagehide' });
+        }
+        assert.equal(signal.aborted, true);
+        assert.ok(!run.timers.delays.includes(ScribeBoot.Settings.PauseMs));
+        assert.equal((await querying).name, 'AbortError');
+        assert.equal((await asking).message, 'The chat has been left');
+        await pass(run, 2 * ScribeBoot.Settings.TickMs);
+        assert.equal(run.sent.calls.length, 1);
+        assert.equal(ScribeStore.spent(run.storage, 'harbour', DAY), 0);
+        run.boot.stop();
+    });
+}
+
 test('one boot per page', async () => {
     const run = harness();
     const first = start(run);
@@ -2833,7 +2870,7 @@ test('one boot per page', async () => {
     await pass(run, 3000);
     assert.equal(run.world.keepers.length, 1);
     assert.deepEqual(run.lines, ['The scribe is already running on this page']);
-    assert.equal(run.page.listeners.length, 5);
+    assert.equal(run.page.listeners.length, 7);
     second.stop();
     assert.equal(run.page.fetch === run.original, false);
     assert.equal(run.world.order.length, 4);
@@ -3102,8 +3139,10 @@ test('a failing waiting request backs off', async () => {
     run.boot.stop();
 });
 
-test('an answer billed after the ask settled is still counted', async () => {
+test('the provider charge returned despite a transport abort is still counted after leaving the room', async () => {
     const run = harness();
+    run.sent = requests({ aborting: false });
+    run.environment.xmlHttpRequest = run.sent.xmlHttpRequest;
     start(run);
     await settle();
     ScribeStore.setKey(run.storage, KEY);
@@ -3114,6 +3153,7 @@ test('an answer billed after the ask settled is still counted', async () => {
     await pass(run, 1000);
     assert.equal(await stateOf(scene), 'settled');
     assert.equal((await scene).message, 'The chat has been left');
+    assert.equal(run.sent.calls[0].handle.aborts, 1);
     answer(run.sent.calls[0], 200, completion('A scene for nobody.', 0.3));
     await settle();
     assert.equal(ScribeStore.spent(run.storage, 'harbour', DAY), 0.3);
@@ -4329,14 +4369,13 @@ test('the cloud opens before the keeper, ticks before it and closes with the ses
     assert.equal(fired, 0);
     await pass(run, 1);
     assert.equal(fired, 1);
+    assert.equal(cloud.options.reader(), true);
     run.storage.remove('scribe:claim:harbour');
     assert.equal(cloud.options.chosen(), false);
     ScribeStore.claim(run.storage, 'harbour', 'tab-one', run.timers.now());
     assert.equal(cloud.options.chosen(), true);
     ScribeStore.claim(run.storage, 'harbour', 'tab-two', run.timers.now() + 100000);
     assert.equal(cloud.options.chosen(), false);
-    assert.equal(cloud.options.reader(), true);
-    keeper.reader = false;
     assert.equal(cloud.options.reader(), false);
     assert.equal(cloud.options.busy(), false);
     assert.equal(cloud.options.reading(), false);

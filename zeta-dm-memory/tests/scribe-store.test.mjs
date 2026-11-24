@@ -387,6 +387,95 @@ test('the old generation is removed after the new one is in', () => {
     assertSame(ScribeStore.read(storage, 'tide', Kind.Book), third, 'after the sweep');
 });
 
+test('two refused fork imports leave the original room readable, with no new parts, and a third import succeeds', () => {
+    for (const hasBook of [false, true]) {
+        for (const failedWrite of ['part', 'head']) {
+            const storage = new FakeStorage();
+            const room = 'fork';
+            const before = sample('existing destination');
+            if (hasBook) {
+                ScribeStore.write(storage, room, Kind.Campaign, before);
+                ScribeStore.write(storage, room, Kind.Book, before);
+            }
+            ScribeStore.write(storage, 'source', Kind.Book, sample('parent'));
+            const initial = new Map(storage.values);
+            storage.refuseSetsMatching(new RegExp('^scribe:' + failedWrite + ':fork:book(?:$|:)'));
+            for (let attempt = 0; attempt < 2; attempt++) {
+                assert.throws(() => ScribeStore.installFork(storage, room, MEDIUM, LARGE, () => true));
+                assert.deepEqual(storage.values, initial);
+                assertSame(ScribeStore.read(storage, room, Kind.Campaign), hasBook ? before : null, 'campaign after failure');
+                assertSame(ScribeStore.read(storage, room, Kind.Book), hasBook ? before : null, 'Book after failure');
+            }
+            storage.allow();
+            ScribeStore.installFork(storage, room, MEDIUM, LARGE, () => true);
+            assertSame(ScribeStore.read(storage, room, Kind.Campaign), MEDIUM, 'campaign after retry');
+            assertSame(ScribeStore.read(storage, room, Kind.Book), LARGE, 'Book after retry');
+            assertSame(ScribeStore.read(storage, 'source', Kind.Book), sample('parent'), 'source left intact');
+        }
+    }
+});
+
+test('fork rollback preserves parts belonging to an overlapping writer with matching or different bytes', () => {
+    for (const same of [true, false]) {
+        const storage = new FakeStorage();
+        const room = 'fork';
+        const prior = sample('existing');
+        const candidate = sized('c', 525000);
+        const winner = same ? candidate : sized('w', 525000);
+        ScribeStore.write(storage, room, Kind.Book, prior);
+        ScribeStore.write(storage, room, Kind.Campaign, prior);
+        const stop = storage.watch(partOf(room, Kind.Book, 2, candidate, 0), () => {
+            stop();
+            ScribeStore.write(storage, room, Kind.Book, winner);
+        });
+        assert.throws(() => ScribeStore.installFork(storage, room, LARGE, candidate, () => true));
+        assertSame(ScribeStore.read(storage, room, Kind.Book), winner, 'overlapping Book');
+        assertSame(ScribeStore.read(storage, room, Kind.Campaign), prior, 'original campaign');
+        assert.deepEqual(partsOf(storage, room, Kind.Campaign), [partOf(room, Kind.Campaign, 1, prior, 0)]);
+        assert.deepEqual(partsOf(storage, room, Kind.Book), [partOf(room, Kind.Book, 2, winner, 0), partOf(room, Kind.Book, 2, winner, 1)]);
+    }
+});
+
+test('a takeover at the first published fork head stops the second write and restores the destination', () => {
+    for (const hasBook of [false, true]) {
+        const room = 'fork';
+        const storage = new FakeStorage();
+        if (hasBook) {
+            ScribeStore.write(storage, room, Kind.Campaign, sample('old campaign'));
+            ScribeStore.write(storage, room, Kind.Book, sample('old Book'));
+        }
+        const initial = new Map(storage.values);
+        let owns = true;
+        let bookWrites = 0;
+        const leave = storage.watch(headName(room, Kind.Campaign), () => { owns = false; });
+        const count = storage.watch(headName(room, Kind.Book), () => { bookWrites++; });
+        assert.throws(() => ScribeStore.installFork(storage, room, MEDIUM, LARGE, () => owns));
+        leave();
+        count();
+        assert.equal(bookWrites, 0);
+        assert.deepEqual(storage.values, initial);
+        ScribeStore.installFork(storage, room, MEDIUM, LARGE, () => true);
+        assertSame(ScribeStore.read(storage, room, Kind.Campaign), MEDIUM, 'successor campaign');
+        assertSame(ScribeStore.read(storage, room, Kind.Book), LARGE, 'successor Book');
+    }
+});
+
+test('a fork head accepted immediately before a failed readback is also rolled back', () => {
+    const storage = new FakeStorage();
+    const room = 'fork';
+    const set = storage.set.bind(storage);
+    storage.set = (name, value) => {
+        set(name, value);
+        if (name === headName(room, Kind.Book)) {
+            storage.refuseGetNumber(1);
+        }
+    };
+    assert.throws(() => ScribeStore.installFork(storage, room, MEDIUM, LARGE, () => true));
+    assert.deepEqual(names(storage), []);
+    assert.equal(ScribeStore.read(storage, room, Kind.Campaign), null);
+    assert.equal(ScribeStore.read(storage, room, Kind.Book), null);
+});
+
 test('a lost room lease after staging cannot publish its book or strand its parts', () => {
     for (const mode of ['false', 'throw', 'undefined']) {
         const storage = new FakeStorage();

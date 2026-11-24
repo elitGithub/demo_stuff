@@ -12,10 +12,7 @@ const ScribeBoot = Object.freeze({
         RetryMs: 10000,
         Attempts: 3,
         PauseMs: 2000,
-        ForceAfterMs: 240000,
         NoneStopped: 0,
-        NudgeOpen: '\n\n',
-        Nudge: 'Answer now, without more thinking.',
         LockWaitMs: 2000,
         LockRetryMs: 10000,
         ModelOrigin: 'https://openrouter.ai',
@@ -87,6 +84,8 @@ const ScribeBoot = Object.freeze({
             Paused: 'The book is paused',
             NoKey: 'No key',
             KeyStorage: 'Scribe could not read the saved OpenRouter key from local storage.',
+            ReminderNotSaved: 'Reminder was not saved. Your text is still here. Click Save to retry.',
+            ReminderNotGenerated: 'The reminder request could not be delivered to the reading tab.',
             Spent: "The day's budget is spent",
             Left: 'The chat has been left',
             Running: 'The scribe is already running on this page',
@@ -403,7 +402,7 @@ const ScribeBoot = Object.freeze({
      * @param {string} system
      * @param {string} user
      * @param {{ amount: number, settled: boolean }} bill
-     * @param {'keeper'|'live'} helper
+     * @param {'keeper'|'live'|'reminder'} helper
      * @param {Function|null} beforeDispatch
      * @return {Promise<{ text: string, tokensIn: number, tokensOut: number, reasoningTokens: number|null, finish: string, stopped: number }>}
      * @throws {Error}
@@ -415,31 +414,32 @@ const ScribeBoot = Object.freeze({
         if (!ScribeBoot.currentRoom(session)) {
             throw new Error(messages.Left);
         }
-        if (session.keeper?.view().stop?.reason === ScribeAdoption.Stop.Paused) {
+        const current = session.keeper?.view();
+        if (current?.stop?.reason === ScribeAdoption.Stop.Paused) {
             throw new Error(messages.Paused);
+        }
+        if (current && !current.booked) {
+            throw new Error(ScribeKeeper.Settings.Messages.NoBook);
         }
         const epoch = session.pauseEpoch;
         const model = ScribeBoot.setting(session, settings.Models[role]);
 
         const dispatchedKeys = new Set();
         const historicalCheck = role === ScribeBoot.Role.Pedant && helper === 'keeper';
+        const singleAttempt = historicalCheck || helper === 'reminder';
         const notes = historicalCheck || session.cloud === null ? null : session.cloud.notes();
         const noted = typeof notes === settings.StringType && notes !== settings.Nothing;
         const told = noted ? `${user}${settings.NotesOpen}${notes}` : user;
-        let asked = told;
-        let stopped = settings.NoneStopped;
         for (;;) {
             if (session.pauseEpoch !== epoch) {
                 throw new Error(messages.Paused);
             }
             const trial = {
-                startedAt: environment.clock.now(),
-                cancelled: false,
+                cancelled: null,
                 keyVersion: null,
                 stopper: new environment.pageWindow.AbortController(),
                 dispatchError: null,
                 halt: null,
-                leave: null,
             };
             const halted = new Promise(
                 /**
@@ -447,13 +447,13 @@ const ScribeBoot = Object.freeze({
                  * @return {void}
                  */
                 (resolve) => {
-                    trial.halt = (reason = null) => {
-                        trial.cancelled = true;
+                    trial.halt = (reason) => {
+                        if (trial.cancelled !== null) {
+                            return;
+                        }
+                        trial.cancelled = reason;
                         trial.stopper.abort();
-                        resolve(reason || historicalCheck ? { answer: null, error: new Error(reason ?? messages.Stopped) } : null);
-                    };
-                    trial.leave = () => {
-                        resolve({ answer: null, error: new Error(messages.Left) });
+                        resolve({ answer: null, error: new Error(reason) });
                     };
                 },
             );
@@ -476,8 +476,8 @@ const ScribeBoot = Object.freeze({
                 dispatchedKeys.add(session.boot.keyValue);
                 const response = await session.boot.request(url, options);
                 const text = await response.text();
-                if (trial.cancelled) {
-                    throw new Error(messages.Stopped);
+                if (trial.cancelled === messages.Paused) {
+                    throw new Error(trial.cancelled);
                 }
                 const cost = ScribeBoot.billed(text);
                 if (bill.settled) {
@@ -485,8 +485,13 @@ const ScribeBoot = Object.freeze({
                 } else {
                     bill.amount += cost;
                 }
+                if (trial.cancelled !== null) {
+                    throw new Error(trial.cancelled);
+                }
                 return { status: response.status, text: async () => text };
             };
+            session.running.add(trial);
+            ScribeBoot.redraw(session);
             const going = ScribeGateway.retry(
                 /**
                  * @return {Promise<object>}
@@ -511,7 +516,7 @@ const ScribeBoot = Object.freeze({
                         preparedVersion = session.boot.keyVersion;
                         wasUnreadable = session.boot.keyProblem;
                         const resuming = dispatchedKeys.size > 0 && previousVersion !== preparedVersion;
-                        if (historicalCheck || resuming || (dispatchedKeys.size === 0 && helper === 'live')) {
+                        if (singleAttempt || resuming || (dispatchedKeys.size === 0 && helper === 'live')) {
                             ScribeBoot.affordable(session, bill.amount);
                         } else {
                             ScribeBoot.solvent(session);
@@ -528,6 +533,9 @@ const ScribeBoot = Object.freeze({
                         if (view.stop?.reason === ScribeAdoption.Stop.Paused) {
                             throw new Error(messages.Paused);
                         }
+                        if (!view.booked) {
+                            throw new Error(ScribeKeeper.Settings.Messages.NoBook);
+                        }
                         key = ScribeBoot.modelKey(session);
                     } while (preparedVersion !== session.boot.keyVersion || wasUnreadable);
                     return ScribeGateway.call({
@@ -536,13 +544,13 @@ const ScribeBoot = Object.freeze({
                         reading: true,
                         model,
                         system,
-                        user: asked,
+                        user: told,
                         sleep: pause,
                         timeoutMs: null,
                         signal: trial.stopper.signal,
                     });
                 },
-                { attempts: historicalCheck ? 1 : settings.Attempts, pauseMs: settings.PauseMs, sleep: pause },
+                { attempts: singleAttempt ? 1 : settings.Attempts, pauseMs: settings.PauseMs, sleep: pause },
             ).then(
                 /**
                  * @param {object} answer
@@ -559,30 +567,9 @@ const ScribeBoot = Object.freeze({
                     return { answer: null, error: failure };
                 },
             );
-            session.running.add(trial);
-            ScribeBoot.later(
-                session,
-                settings.ForceAfterMs,
-                /**
-                 * @return {void}
-                 */
-                () => {
-                    if (session.running.has(trial)) {
-                        ScribeBoot.redraw(session);
-                    }
-                },
-                null,
-            );
             const outcome = await Promise.race([going, halted]);
             session.running.delete(trial);
-            if (environment.clock.now() - trial.startedAt >= settings.ForceAfterMs) {
-                ScribeBoot.redraw(session);
-            }
-            if (outcome === null) {
-                stopped++;
-                asked = `${told}${settings.NudgeOpen}${settings.Nudge}`;
-                continue;
-            }
+            ScribeBoot.redraw(session);
             if (outcome.error !== null) {
                 let error = outcome.error;
                 const unauthorized = error.status === 401 || error.providerCode === 401;
@@ -598,7 +585,7 @@ const ScribeBoot = Object.freeze({
                 } else if (unauthorized && trial.keyVersion !== null) {
                     try {
                         ScribeBoot.modelKey(session);
-                        if (trial.keyVersion !== session.boot.keyVersion) {
+                        if (helper !== 'reminder' && trial.keyVersion !== session.boot.keyVersion) {
                             continue;
                         }
                         const version = trial.keyVersion;
@@ -618,26 +605,11 @@ const ScribeBoot = Object.freeze({
                         }
                     }
                 }
-                error.stopped = stopped;
+                error.stopped = settings.NoneStopped;
                 throw error;
             }
-            return { ...outcome.answer, stopped };
+            return { ...outcome.answer, stopped: settings.NoneStopped };
         }
-    },
-
-    /**
-     * @param {object} session
-     * @return {Array<{ startedAt: number, halt: () => void }>}
-     */
-    overdue(session) {
-        const now = session.boot.environment.clock.now();
-        return [...session.running].filter(
-            /**
-             * @param {{ startedAt: number }} trial
-             * @return {boolean}
-             */
-            (trial) => !trial.cancelled && now - trial.startedAt >= ScribeBoot.Settings.ForceAfterMs,
-        );
     },
 
     /**
@@ -688,14 +660,15 @@ const ScribeBoot = Object.freeze({
      * @param {string} role
      * @param {string} system
      * @param {string} user
+     * @param {boolean} singleAttempt
      * @return {Promise<{ text: string, cost: number, tokensIn: number, tokensOut: number, reasoningTokens: number|null, finish: string, stopped: number }>}
      * @throws {Error}
      */
-    async counted(session, role, system, user) {
+    async counted(session, role, system, user, singleAttempt = false) {
         const settings = ScribeBoot.Settings;
         const bill = { amount: settings.NoSpending, settled: false };
         try {
-            const answer = await ScribeBoot.call(session, role, system, user, bill, 'live');
+            const answer = await ScribeBoot.call(session, role, system, user, bill, singleAttempt ? 'reminder' : 'live');
             return {
                 text: answer.text,
                 cost: bill.amount,
@@ -1376,6 +1349,162 @@ const ScribeBoot = Object.freeze({
     },
 
     /**
+     * @param {object} session
+     * @param {string} part
+     * @return {{id: string, tab?: string, reader?: string|null, preview?: string, error?: string|null}|null}
+     */
+    reminderValue(session, part) {
+        const key = ScribeStore.name('reminder', ScribeStore.room(session.roomId), part);
+        return ScribeStore.decode(ScribeStore.fetch(session.boot.environment.storage, key));
+    },
+
+    /**
+     * @param {object} session
+     * @return {Promise<string>}
+     * @throws {Error}
+     */
+    async generateReminder(session) {
+        const messages = ScribeBoot.Settings.Messages;
+        if (!ScribeBoot.currentRoom(session)) {
+            throw new Error(messages.Left);
+        }
+        if (session.keeper.view().stop?.reason === ScribeAdoption.Stop.Paused) {
+            throw new Error(messages.Paused);
+        }
+        if (ScribeBoot.reminderValue(session, 'generating')) {
+            throw new Error('A reminder is already being generated for this room.');
+        }
+        const { storage, tabId } = session.boot.environment;
+        const id = crypto.randomUUID();
+        const key = ScribeLive.reminderKey(session.roomId, 'generating');
+        return new Promise((resolve, reject) => {
+            const leave = () => {
+                session.reminderWaits.delete(leave);
+                session.inspectGeneration = null;
+                reject(new Error(messages.Left));
+            };
+            const inspect = () => {
+                let completed;
+                let result;
+                try {
+                    if (ScribeBoot.reminderValue(session, 'generating')?.id === id) {
+                        return;
+                    }
+                    completed = ScribeBoot.reminderValue(session, 'preview');
+                    result = ScribeBoot.reminderValue(session, 'result');
+                } catch {
+                    return;
+                }
+                session.reminderWaits.delete(leave);
+                session.inspectGeneration = null;
+                if (completed?.id === id) {
+                    resolve(completed.preview);
+                } else {
+                    reject(new Error(result?.id === id ? result.error : messages.ReminderNotGenerated));
+                }
+            };
+            session.reminderWaits.set(leave, inspect);
+            session.inspectGeneration = inspect;
+            try {
+                storage.set(key, JSON.stringify({ id, tab: tabId, reader: null }));
+                ScribeBoot.serveGeneration(session);
+                inspect();
+            } catch (error) {
+                session.reminderWaits.delete(leave);
+                session.inspectGeneration = null;
+                reject(error);
+            }
+        });
+    },
+
+    /**
+     * @param {object} session
+     * @return {void}
+     */
+    serveGeneration(session) {
+        if (!session.live || !ScribeBoot.currentRoom(session)) {
+            return;
+        }
+        const marker = ScribeBoot.reminderValue(session, 'generating');
+        if (!marker?.id || !session.keeper.view().reader || !ScribeBoot.chosen(session)) {
+            return;
+        }
+        const { storage, tabId } = session.boot.environment;
+        const key = ScribeLive.reminderKey(session.roomId, 'generating');
+        if (session.generationWork) {
+            if (marker.id !== session.generationWork.id) {
+                ScribeLive.storeReminderValue(storage, key, JSON.stringify(session.generationWork));
+            }
+            return;
+        }
+        const { id } = marker;
+        session.generationWork = { ...marker, reader: tabId };
+        const finish = (error = null) => {
+            let failedResult;
+            try {
+                if (ScribeBoot.reminderValue(session, 'generating')?.id === id) {
+                    ScribeLive.storeReminderValue(storage, ScribeLive.reminderKey(session.roomId, 'result'),
+                        JSON.stringify({ id, error: error ? ScribeStore.diagnostic(storage, ScribeBoot.words(error)) : null }));
+                }
+            } catch (resultError) {
+                failedResult = {error: resultError};
+            }
+            try {
+                if (ScribeBoot.reminderValue(session, 'generating')?.id === id) {
+                    let removeError;
+                    try {
+                        storage.remove(key);
+                    } catch (error) {
+                        removeError = error;
+                    }
+                    if (ScribeBoot.reminderValue(session, 'generating')?.id === id) {
+                        storage.set(key, null);
+                        if (ScribeBoot.reminderValue(session, 'generating')?.id === id) {
+                            throw removeError ?? new Error('The reminder generation marker could not be cleared.');
+                        }
+                    }
+                }
+            } finally {
+                session.generationWork = null;
+            }
+            if (failedResult) {
+                throw failedResult.error;
+            }
+        };
+        if (marker.reader) {
+            finish(new Error(ScribeBoot.Settings.Messages.NotReader));
+            return;
+        }
+        try {
+            ScribeLive.storeReminderValue(storage, key, JSON.stringify(session.generationWork));
+        } catch (error) {
+            finish(error);
+            return;
+        }
+        Promise.resolve(session.live.generateReminder()).then((preview) => {
+            const current = ScribeBoot.reminderValue(session, 'generating');
+            if (current?.id !== id || current.reader !== tabId) {
+                throw new Error(ScribeBoot.Settings.Messages.NotReader);
+            }
+            try {
+                ScribeLive.storeReminderValue(storage, ScribeLive.reminderKey(session.roomId, 'preview'), JSON.stringify({ id, preview }));
+            } catch (error) {
+                throw Object.assign(new Error('The generated reminder could not be saved for this room.'), { cause: error });
+            }
+        }).then(() => finish(), finish).catch((error) => ScribeBoot.say(session.boot, ScribeBoot.words(error)));
+    },
+
+    /**
+     * @param {object} session
+     * @return {void}
+     */
+    redrawReminder(session) {
+        /** @type {{redrawReminder?: () => boolean}|null} */
+        const panel = session.panel;
+        session.reminderRefreshFailed = panel?.redrawReminder?.() === false;
+    },
+
+    /**
      * @param {object} boot
      * @param {object} intake
      * @return {void}
@@ -1405,12 +1534,18 @@ const ScribeBoot = Object.freeze({
             intake.reader = true;
             const prefix = intake.signal + ':';
             const records = [];
+            const edits = [];
             for (const key of storage.list()) {
                 if (key.startsWith(prefix)) {
                     const text = storage.get(key, null);
                     if (typeof text === 'string') {
                         const page = ZetaSource.quietly(null, JSON.parse, text);
-                        if (ZetaSource.validPage(session.roomId, page)) {
+                        if (key.startsWith(prefix + 'edit:')) {
+                            if (typeof page?.text === 'string' && typeof page.shown === 'boolean' &&
+                                (page.selectionId === null || typeof page.selectionId === 'string') && Number.isFinite(page.observedAt)) {
+                                edits.push({ key, page });
+                            }
+                        } else if (ZetaSource.validPage(session.roomId, page)) {
                             records.push({ key, page });
                         }
                     }
@@ -1422,6 +1557,23 @@ const ScribeBoot = Object.freeze({
                     storage.remove(key);
                 }
             }
+            const owns = () => ScribeBoot.currentRoom(session) && ScribeBoot.chosen(session) && session.keeper.view().reader;
+            edits.sort((left, right) => left.page.observedAt - right.page.observedAt);
+            for (const { key, page } of edits) {
+                if (!session.live || !owns()) {
+                    break;
+                }
+                try {
+                    session.live.writeReminderDraft(page.text);
+                } catch {
+                    if (owns()) {
+                        storage.set(key, JSON.stringify({ error: ScribeBoot.Settings.Messages.ReminderNotSaved }));
+                    }
+                    continue;
+                }
+                storage.remove(key);
+            }
+            ScribeBoot.serveGeneration(session);
         } catch {
             ScribeBoot.say(boot, 'Scribe could not transfer an observed chat change between tabs.');
         } finally {
@@ -1593,6 +1745,12 @@ const ScribeBoot = Object.freeze({
     tick(session) {
         const keeper = session.keeper;
         ScribeBoot.relay(session.boot, session.boot.intake);
+        if (session.reminderRefreshFailed) {
+            ScribeBoot.redrawReminder(session);
+        }
+        for (const inspect of session.reminderWaits.values()) {
+            inspect();
+        }
         session.gapping = true;
         session.owed = false;
         ScribeBoot.later(
@@ -1728,7 +1886,11 @@ const ScribeBoot = Object.freeze({
         if (session.release !== null) {
             const release = session.release;
             session.release = null;
-            release();
+            try {
+                session.keeper?.releaseReader();
+            } finally {
+                release();
+            }
         }
     },
 
@@ -1994,7 +2156,7 @@ const ScribeBoot = Object.freeze({
     },
 
     /**
-     * @param {object} session
+     * @param {object & {forkController: AbortController|null, stopForkOrigin?: (() => void)|null}} session
      * @return {void}
      */
     close(session) {
@@ -2004,7 +2166,20 @@ const ScribeBoot = Object.freeze({
         session.closed = true;
         session.ticking = false;
         session.historyRequest?.abort();
+        session.forkController?.abort();
+        session.stopForkOrigin?.();
         session.stopRelay?.();
+        session.stopLiveHead?.();
+        for (const stop of session.roomReminderWatches) {
+            stop();
+        }
+        for (const stop of session.reminderSignals.values()) {
+            stop();
+        }
+        for (const leave of session.reminderWaits.keys()) {
+            leave();
+        }
+        session.stopClaim?.();
         if (session.interval !== null) {
             timers.clearInterval(session.interval);
             session.interval = null;
@@ -2015,7 +2190,7 @@ const ScribeBoot = Object.freeze({
         }
         session.timers.clear();
         for (const trial of session.running) {
-            trial.leave();
+            trial.halt(settings.Messages.Left);
         }
         session.held = null;
         for (const part of settings.Parts) {
@@ -2046,6 +2221,89 @@ const ScribeBoot = Object.freeze({
                 ended();
             }
         }
+    },
+
+    /**
+     * @param {object} session
+     * @return {{parentRoomId: string, childRoomId: string, messageId: string}|null}
+     */
+    forkOrigin(session) {
+        const key = ScribeStore.name('fork', ScribeStore.room(session.roomId));
+        /** @type {{parentRoomId: string, childRoomId: string, messageId: string}|null} */
+        const origin = ScribeStore.decode(ScribeStore.fetch(session.boot.environment.storage, key));
+        return origin?.childRoomId === session.roomId && typeof origin.parentRoomId === 'string' &&
+            origin.parentRoomId !== session.roomId && typeof origin.messageId === 'string' ? origin : null;
+    },
+
+    /**
+     * @param {object} session
+     * @param {Function} fetch
+     * @param {Function} action
+     * @return {Promise<object>}
+     * @throws {Error}
+     */
+    async forkAction(session, fetch, action) {
+        const messages = ScribeBoot.Settings.Messages;
+        if (!ScribeBoot.currentRoom(session)) {
+            throw new Error(messages.Left);
+        }
+        const view = session.keeper.view();
+        if (view.stop?.reason === ScribeAdoption.Stop.Paused) {
+            throw new Error(messages.Paused);
+        }
+        if (!view.reader || !ScribeBoot.chosen(session)) {
+            throw new Error(messages.NotReader);
+        }
+        if (session.forkController || view.busy) {
+            throw new Error('Another room action is in progress.');
+        }
+        const controller = new session.boot.environment.pageWindow.AbortController();
+        session.forkController = controller;
+        ScribeBoot.redraw(session);
+        try {
+            const result = await action({
+                roomId: session.roomId, fetch, token: ScribeBoot.token(session.boot), signal: controller.signal,
+                pause: (ms) => ScribeBoot.pause(session, ms, controller.signal),
+            });
+            controller.signal.throwIfAborted();
+            return result;
+        } finally {
+            session.forkController = null;
+            if (ScribeBoot.currentRoom(session)) {
+                ScribeBoot.redraw(session);
+            }
+        }
+    },
+
+    /**
+     * @param {object} session
+     * @param {string} sourceRoomId
+     * @param {{fetch: Function, token: string|null, signal: AbortSignal, roomId: string, pause: (ms: number) => Promise<void>}} request
+     * @return {Promise<object>}
+     * @throws {Error}
+     */
+    async forkSource(session, sourceRoomId, request) {
+        const storage = session.boot.environment.storage;
+        const kinds = ScribeStore.Kind;
+        let book = ScribeStore.read(storage, sourceRoomId, kinds.Book);
+        if (!book?.adopted) {
+            book = await session.cloud.forkBook(sourceRoomId, request.signal);
+        }
+        request.signal.throwIfAborted();
+        if (!book?.adopted) {
+            throw new Error('No adopted Book was found for this saved chat.');
+        }
+        const campaign = ScribeStore.read(storage, sourceRoomId, kinds.Campaign);
+        let messages = campaign?.messages;
+        if (!campaign?.completeHistory || campaign.needsHistory || !Array.isArray(messages) || !messages.length) {
+            /** @type {{messages: object[], completeHistory?: boolean, problem: string|null}} */
+            const history = await ZetaSource.history({ ...request, roomId: sourceRoomId });
+            if (history.completeHistory !== true) {
+                throw new Error(history.problem ?? 'The source chat history is incomplete.');
+            }
+            messages = history.messages;
+        }
+        return { book, messages };
     },
 
     /**
@@ -2162,6 +2420,7 @@ const ScribeBoot = Object.freeze({
                         }
                         const controller = new environment.pageWindow.AbortController();
                         session.historyRequest = controller;
+                        ScribeBoot.redraw(session);
                         try {
                             return await ZetaSource.history({
                                 fetch, token: ScribeBoot.token(boot), roomId: session.roomId, onPage,
@@ -2170,6 +2429,7 @@ const ScribeBoot = Object.freeze({
                         } finally {
                             if (session.historyRequest === controller) {
                                 session.historyRequest = null;
+                                ScribeBoot.redraw(session);
                             }
                         }
                     },
@@ -2177,7 +2437,10 @@ const ScribeBoot = Object.freeze({
                     /**
                      * @return {void}
                      */
-                    abort: () => session.historyRequest?.abort(),
+                    abort: () => {
+                        session.historyRequest?.abort();
+                        session.forkController?.abort();
+                    },
                 }),
 
                 /**
@@ -2188,13 +2451,13 @@ const ScribeBoot = Object.freeze({
                  */
                 ask: (role, system, user) => ScribeBoot.ask(session, role, system, user),
                 askChecker: (system, user, beforeDispatch) => ScribeBoot.ask(session, ScribeBoot.Role.Pedant, system, user, beforeDispatch),
-                pauseCalls: () => {
+                pauseCalls: (reason = messages.Paused) => {
                     session.pauseEpoch++;
                     /** @type {{pause?: () => void}|null} */
                     const live = session.live;
                     live?.pause?.();
                     for (const trial of session.running) {
-                        trial.halt(messages.Paused);
+                        trial.halt(reason);
                     }
                 },
                 checkPassage: (request) => ScribePedant.checkPassage(request),
@@ -2263,6 +2526,22 @@ const ScribeBoot = Object.freeze({
                 return;
             }
             session.keeper = keeper;
+            if (!session.locking) {
+                const name = ScribeStore.name(ScribeStore.Settings.Types.Claim, ScribeStore.room(session.roomId));
+                const checkOwner = () => {
+                    if (!session.closed) {
+                        ScribeBoot.attempt(boot, messages.NotChecked, () => {
+                            const owner = ScribeStore.claimOf(ScribeStore.fetch(environment.storage, name));
+                            if (owner && owner.tabId !== environment.tabId) {
+                                keeper.releaseReader();
+                            }
+                        });
+                    }
+                };
+                session.stopClaim = environment.storage.watch(name, checkOwner);
+                checkOwner();
+            }
+            /** @type {{readReminderDraft: () => string|null, writeReminderDraft: (text: string) => void, [method: string]: Function}} */
             const live = ScribeLive.open({
                 keeper,
                 storage: environment.storage,
@@ -2272,9 +2551,10 @@ const ScribeBoot = Object.freeze({
                  * @param {string} role
                  * @param {string} system
                  * @param {string} user
+                 * @param {boolean} singleAttempt
                  * @return {Promise<{ text: string, cost: number }>}
                  */
-                ask: (role, system, user) => ScribeBoot.counted(session, role, system, user),
+                ask: (role, system, user, singleAttempt = false) => ScribeBoot.counted(session, role, system, user, singleAttempt),
                 clock: environment.clock,
 
                 /**
@@ -2301,7 +2581,40 @@ const ScribeBoot = Object.freeze({
             session.live = live;
             if (ScribeBoot.currentRoom(session) && boot.intake?.room === session.roomId) {
                 const intake = boot.intake;
-                session.stopRelay = environment.storage.watch(intake.signal, () => ScribeBoot.relay(boot, intake));
+                session.stopRelay = environment.storage.watch(intake.signal, () => {
+                    const key = environment.storage.get(intake.signal, null);
+                    if (ScribeBoot.currentRoom(session) && keeper.view().reader && typeof key === 'string' &&
+                        key.startsWith(intake.signal + ':edit:') && environment.storage.get(key, null) === 'null' &&
+                        !session.reminderSignals.has(key)) {
+                        const stop = environment.storage.watch(key, () => {
+                            stop();
+                            session.reminderSignals.delete(key);
+                            ScribeBoot.relay(boot, intake);
+                        });
+                        session.reminderSignals.set(key, stop);
+                    }
+                    ScribeBoot.relay(boot, intake);
+                });
+                for (const part of ['draft', 'draft-sent', 'preview', 'generating', 'result']) {
+                    const key = ScribeStore.name('reminder', ScribeStore.room(session.roomId), part);
+                    const stop = environment.storage.watch(key, () => {
+                        if (!ScribeBoot.currentRoom(session)) {
+                            return;
+                        }
+                        if (part === 'generating') {
+                            ScribeBoot.serveGeneration(session);
+                            session.inspectGeneration?.();
+                        }
+                        ScribeBoot.redrawReminder(session);
+                    });
+                    session.roomReminderWatches.push(stop);
+                }
+                const liveHead = ScribeStore.name(ScribeStore.Settings.Types.Head, ScribeStore.room(session.roomId), ScribeStore.Kind.Live);
+                session.stopLiveHead = environment.storage.watch(liveHead, () => {
+                    if (ScribeBoot.currentRoom(session) && !keeper.view().reader) {
+                        session.panel?.redraw();
+                    }
+                });
                 ScribeBoot.relay(boot, intake);
             }
             if (session.held !== null) {
@@ -2316,12 +2629,44 @@ const ScribeBoot = Object.freeze({
                     () => live.reply(message),
                 );
             }
+            const refreshOrigin = () => {
+                if (ScribeBoot.currentRoom(session)) {
+                    session.forkOrigin = ScribeBoot.forkOrigin(session);
+                    ScribeBoot.redraw(session);
+                }
+            };
+            session.stopForkOrigin = environment.storage.watch(ScribeStore.name('fork', ScribeStore.room(session.roomId)), refreshOrigin);
+            session.forkOrigin = ScribeBoot.forkOrigin(session);
             session.panel = ScribePanel.mount({
                 document: environment.document,
                 keyVersion: () => boot.keyVersion,
                 keyProblem: () => boot.keyProblem,
                 keyRecoveryProblem: () => session.keyRecoveryProblem,
                 saveKey: (typed, version) => ScribeBoot.saveKey(session, typed, version),
+                forkOrigin: () => session.forkOrigin,
+                listForkRooms: () => ScribeBoot.forkAction(session, fetch, (request) => ZetaSource.savedRooms(request)),
+                recoverFork: (sourceRoomId, messageId) => ScribeBoot.forkAction(session, fetch, (request) =>
+                    keeper.recoverFork(sourceRoomId, messageId, () => ScribeBoot.forkSource(session, sourceRoomId, request))),
+                readReminderDraft: () => live.readReminderDraft(),
+                writeReminderDraft: (text) => {
+                    try {
+                        live.writeReminderDraft(text);
+                    } catch (error) {
+                        throw Object.assign(new Error(messages.ReminderNotSaved), { cause: error });
+                    }
+                },
+                readReminderPreview: () => ScribeBoot.reminderValue(session, 'preview')?.preview ?? null,
+                clearReminderPreview: (preview) => {
+                    if (ScribeBoot.reminderValue(session, 'preview')?.preview === preview) {
+                        environment.storage.remove(ScribeLive.reminderKey(session.roomId, 'preview'));
+                    }
+                },
+                reminderGeneration: () => {
+                    const marker = ScribeBoot.reminderValue(session, 'generating');
+                    return marker ? (marker.tab === environment.tabId ? 'here' : 'other') : null;
+                },
+                reminderGenerationError: () => ScribeBoot.reminderValue(session, 'result')?.error ?? null,
+                generateReminder: () => ScribeBoot.generateReminder(session),
                 keeper,
                 live,
                 cloud: session.cloud,
@@ -2329,15 +2674,15 @@ const ScribeBoot = Object.freeze({
                     /**
                      * @return {boolean}
                      */
-                    due: () => ScribeBoot.overdue(session).length > ScribeBoot.Settings.NoneStopped,
+                    due: () => Boolean(session.historyRequest && !session.historyRequest.signal.aborted) ||
+                        Boolean(session.forkController && !session.forkController.signal.aborted) ||
+                        [...session.running].some((trial) => !trial.cancelled),
 
                     /**
                      * @return {void}
                      */
                     stop: () => {
-                        for (const trial of ScribeBoot.overdue(session)) {
-                            trial.halt();
-                        }
+                        keeper.pause();
                     },
                 }),
                 storage: environment.storage,
@@ -2437,15 +2782,15 @@ const ScribeBoot = Object.freeze({
      */
     follow(boot) {
         const environment = boot.environment;
+        if (boot.suspended || boot.stopped) {
+            return;
+        }
         try {
             ScribeBoot.token(boot);
             const roomId = ZetaSource.room(environment.pageWindow.location.pathname);
             if (boot.intake?.room !== roomId) {
                 boot.intake = roomId === null ? null : { room: roomId, pages: [], reader: false, relaying: false,
                     signal: ScribeStore.name('observations', ScribeStore.room(roomId)) };
-            }
-            if (environment.document.body === null) {
-                return;
             }
             const current = boot.session;
             if ((current === null ? null : current.roomId) === roomId) {
@@ -2459,7 +2804,7 @@ const ScribeBoot = Object.freeze({
                 boot.session = null;
                 ScribeBoot.close(current);
             }
-            if (roomId !== null) {
+            if (roomId !== null && environment.document.body !== null) {
                 const session = {
                     boot,
                     roomId,
@@ -2481,7 +2826,16 @@ const ScribeBoot = Object.freeze({
                     reservedDelivery: null,
                     panel: null,
                     running: new Set(),
+                    reminderWaits: new Map(),
+                    reminderSignals: new Map(),
+                    roomReminderWatches: [],
+                    generationWork: null,
+                    /** @type {(() => void)|null} */
+                    inspectGeneration: null,
                     historyRequest: null,
+                    forkController: null,
+                    forkOrigin: null,
+                    stopForkOrigin: null,
                     pauseEpoch: 0,
                     sender: null,
                     held: null,
@@ -2534,6 +2888,7 @@ const ScribeBoot = Object.freeze({
             keyVersion: 0,
             keyProblem: false,
             stopped: false,
+            suspended: false,
             request: null,
             session: null,
             intake: null,
@@ -2602,7 +2957,26 @@ const ScribeBoot = Object.freeze({
             }
         };
         environment.document.addEventListener(settings.VisibilityEvent, visibility);
-        environment.pageWindow.addEventListener('pageshow', visibility);
+        const follow = () => ScribeBoot.follow(boot);
+        const pageHidden = () => {
+            boot.suspended = true;
+            if (boot.session) {
+                const session = boot.session;
+                boot.session = null;
+                ScribeBoot.close(session);
+            }
+        };
+        const pageShown = () => {
+            boot.suspended = false;
+            follow();
+            visibility();
+        };
+        const navigation = environment.pageWindow.navigation;
+        const routeTarget = navigation ?? environment.pageWindow;
+        const routeEvent = navigation ? 'currententrychange' : 'popstate';
+        routeTarget.addEventListener(routeEvent, follow);
+        environment.pageWindow.addEventListener('pagehide', pageHidden);
+        environment.pageWindow.addEventListener('pageshow', pageShown);
         boot.visibility = visibility;
         ScribeBoot.keyed(boot);
         boot.keySubscription = environment.storage.watch(ScribeStore.name(ScribeStore.Settings.Key), () => ScribeBoot.refreshKey(boot));
@@ -2644,6 +3018,18 @@ const ScribeBoot = Object.freeze({
         );
         boot.request = ScribeBoot.request(environment.xmlHttpRequest);
         if (boot.watcher !== null) {
+            boot.watcher.onFork?.((origin) => ScribeBoot.attempt(boot, 'The fork origin could not be saved. ', () => {
+                const key = ScribeStore.name('fork', ScribeStore.room(origin.childRoomId));
+                const value = JSON.stringify(origin);
+                environment.storage.set(key, value);
+                if (ScribeStore.fetch(environment.storage, key) !== value) {
+                    throw new Error('Storage did not retain the origin.');
+                }
+                if (boot.session?.roomId === origin.childRoomId) {
+                    boot.session.forkOrigin = origin;
+                    ScribeBoot.redraw(boot.session);
+                }
+            }));
             boot.watcher.onMessages((room) => ScribeBoot.nativeMessages(boot, room));
             boot.watcher.onStream?.((room, message) => ScribeBoot.observe(boot, room, message));
             boot.watcher.onPost((room) => {
@@ -2687,7 +3073,9 @@ const ScribeBoot = Object.freeze({
                 }
                 if (boot.visibility !== null) {
                     environment.document.removeEventListener(settings.VisibilityEvent, boot.visibility);
-                    environment.pageWindow.removeEventListener('pageshow', boot.visibility);
+                    routeTarget.removeEventListener(routeEvent, follow);
+                    environment.pageWindow.removeEventListener('pagehide', pageHidden);
+                    environment.pageWindow.removeEventListener('pageshow', pageShown);
                     boot.visibility = null;
                 }
                 if (boot.listener !== null) {

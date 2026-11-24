@@ -2,6 +2,8 @@ import assert from 'node:assert/strict';
 import declaredJudgments from './support/DeclaredJudgments.mjs';
 import { readFileSync } from 'node:fs';
 import test from 'node:test';
+import vm from 'node:vm';
+import { ScribePack } from '../scribe/pack.mjs';
 import CampaignBuilder from './support/CampaignBuilder.mjs';
 import FakeChat from './support/FakeChat.mjs';
 import CitedStory from './support/CitedStory.mjs';
@@ -168,7 +170,7 @@ function liveView(findings = [], changes = {}) {
 
 /**
  * @param {object} log
- * @param {{ keeper?: object, live?: object, width?: number, storage?: FakeStorage }} options
+ * @param {{ keeper?: object, live?: object, width?: number, storage?: FakeStorage, reminders?: object }} options
  * @return {PanelHarness}
  */
 function mounted(log, options = {}) {
@@ -178,6 +180,7 @@ function mounted(log, options = {}) {
         cloud: options.cloud,
         width: options.width,
         storage: options.storage,
+        reminders: options.reminders,
     }).mount();
 }
 
@@ -1225,6 +1228,9 @@ test('findings act through the live part', async () => {
         'Edit',
         'Cancel',
         'Save',
+        'Generate reminder',
+        'Keep current reminder',
+        'Use generated reminder',
         'Clear',
         'Send a reminder with my next message',
         'Suggest one',
@@ -1235,7 +1241,7 @@ test('findings act through the live part', async () => {
     assert.equal(panel.byId('scribe-badge').hidden, true);
 });
 
-test('the box is read-only and shows what will go; Edit opens it, Cancel changes nothing, Save passes the text once', async () => {
+test('input writes the shared text once and closing the editor with Cancel or Save retains it without queueing', async () => {
     const ready = '[Scribe] Mirelle has grey eyes.';
     const panel = mounted(findingsBook(), { live: liveView([], { ready }) });
     await panel.tab('Findings');
@@ -1272,7 +1278,8 @@ test('the box is read-only and shows what will go; Edit opens it, Cancel changes
     await panel.flush();
     assert.deepEqual(panel.live.called('edit'), []);
     assert.equal(box.readOnly, true);
-    assert.equal(box.value, ready);
+    assert.equal(box.value, 'typed and abandoned');
+    assert.deepEqual(panel.draftWrites, ['typed and abandoned']);
     assert.deepEqual([edit.hidden, cancel.hidden, save.hidden], [false, true, true]);
 
     edit.click();
@@ -1283,14 +1290,217 @@ test('the box is read-only and shows what will go; Edit opens it, Cancel changes
     assert.equal(box.value, '[Scribe] Mirelle has grey eyes!');
     save.click();
     await panel.flush();
-    assert.deepEqual(plain(panel.live.called('edit')), [['[Scribe] Mirelle has grey eyes!', true]]);
+    assert.deepEqual(panel.draftWrites, ['typed and abandoned', '[Scribe] Mirelle has grey eyes!']);
     assert.equal(box.readOnly, true);
     assert.deepEqual([edit.hidden, cancel.hidden, save.hidden], [false, true, true]);
     panel.live.current = liveView([], { ready: '[Scribe] Mirelle has grey eyes!', edited: true });
     panel.redraw();
     assert.equal(box.value, '[Scribe] Mirelle has grey eyes!');
     assert.deepEqual(panel.live.called('clear'), []);
-    assert.equal(panel.live.called('edit').length, 1);
+    assert.deepEqual(panel.live.calls, []);
+});
+
+test('empty Send explains how to generate; Use fills the shared editable text and only explicit Send queues it', async () => {
+    const candidate = 'Remember the ferry.\n<opaque story text>';
+    const response = Promise.withResolvers();
+    let generations = 0;
+    const panel = mounted(findingsBook(), { reminders: {
+        generateReminder: () => {
+            generations++;
+            return response.promise;
+        },
+    } });
+    const sendAttempts = [];
+    panel.live.force = async (resend, text) => {
+        sendAttempts.push([resend, text]);
+        if (!text) {
+            throw new Error(scripts.ScribeLive.Settings.Messages.EmptyEdit);
+        }
+        panel.live.current = liveView([], { selected: text, ready: text, forced: true });
+    };
+    await panel.tab('Findings');
+    const field = panel.byId('scribe-reminder');
+    assert.equal(field.value, '');
+    assert.equal(panel.byId('scribe-reminder-preview').hidden, true);
+    panel.click('scribe-force');
+    await panel.flush();
+    assert.deepEqual(sendAttempts, [[null, '']]);
+    assert.equal(generations, 0);
+    assert.match(panel.text('scribe-force-outcome'), /Generate a reminder or enter one/);
+    panel.click('scribe-generate-reminder');
+    panel.click('scribe-generate-reminder');
+    assert.equal(generations, 1);
+    assert.equal(panel.byId('scribe-generate-reminder').disabled, true);
+    assert.match(panel.text('scribe-generate-reminder-outcome'), /Generating/);
+    response.resolve(candidate);
+    await panel.flush();
+    assert.equal(panel.byId('scribe-reminder-preview').hidden, false);
+    assert.equal(panel.text('scribe-generated-reminder'), candidate);
+    assert.equal(panel.byId('scribe-generated-reminder').children.length, 0);
+    assert.equal(panel.byId('scribe-generate-reminder-outcome').getAttribute('role'), 'status');
+    assert.equal(field.value, '');
+    assert.deepEqual(panel.draftWrites, []);
+    panel.click('scribe-use-generated-reminder');
+    await panel.flush();
+    assert.deepEqual(panel.draftWrites, [candidate]);
+    assert.equal(field.value, candidate);
+    assert.equal(panel.text('scribe-force-outcome'), '');
+    assert.equal(field.readOnly, false);
+    assert.equal(panel.text('scribe-generate-reminder-outcome'), 'Generated reminder is in the editor.');
+    assert.equal(panel.byId('scribe-reminder-preview').hidden, true);
+    assert.deepEqual(sendAttempts, [[null, '']]);
+    panel.click('scribe-edit-save');
+    await panel.flush();
+    assert.deepEqual(panel.draftWrites, [candidate]);
+    assert.deepEqual(panel.live.calls, []);
+    panel.click('scribe-force');
+    await panel.flush();
+    assert.deepEqual(sendAttempts, [[null, ''], [null, candidate]]);
+    assert.equal(panel.reminderDraft, candidate);
+    panel.reminderDraft = '';
+    panel.handle.redrawReminder();
+    assert.equal(field.value, '');
+    assert.equal(generations, 1);
+    assert.deepEqual(panel.keeper.calls, []);
+});
+
+test('generation while a Checker runs keeps the room controls usable, the queued text and the open edit', async () => {
+    const response = Promise.withResolvers();
+    const queued = 'The reminder already queued.';
+    const panel = mounted(findingsBook(), {
+        keeper: { flight: 'Checking message #605', busy: scripts.ScribeKeeper.Busy.Checking },
+        live: liveView([], { selected: queued, ready: queued, forced: true }),
+        reminders: { generateReminder: () => response.promise },
+    });
+    panel.callDue = true;
+    await panel.tab('Findings');
+    panel.click('scribe-edit');
+    const field = panel.byId('scribe-reminder');
+    field.value = 'My unsaved revision';
+    panel.click('scribe-generate-reminder');
+    assert.equal(panel.byId('scribe-force-stop').hidden, false);
+    assert.equal(panel.byId('scribe-force-stop').disabled, false);
+    await panel.tab('Progress');
+    assert.equal(panel.byId('scribe-pause').disabled, false);
+    await panel.tab('Findings');
+    field.value += ' continued while generating.';
+    response.resolve('New candidate.');
+    await panel.flush();
+    assert.equal(field.value, 'My unsaved revision continued while generating.');
+    assert.equal(field.readOnly, false);
+    panel.click('scribe-keep-current-reminder');
+    await panel.flush();
+    assert.equal(panel.byId('scribe-reminder-preview').hidden, true);
+    assert.equal(field.value, 'My unsaved revision continued while generating.');
+    assert.equal(panel.live.view().selected, queued);
+    assert.equal(field.readOnly, false);
+    assert.deepEqual(panel.live.calls, []);
+    assert.deepEqual(panel.keeper.calls, []);
+});
+
+test('the watching tab keeps both versions on failed Use and follows later shared inputs and delivery', async () => {
+    let generationError = true;
+    const candidate = 'A separate generated suggestion.';
+    const panel = mounted(findingsBook(), {
+        keeper: { phase: Phase.Watching, reader: false },
+        live: liveView([], { selected: 'Queued earlier', selectionId: 'queued-1' }),
+        reminders: {
+            generateReminder: async () => {
+                if (generationError) {
+                    throw new Error('Model request stopped.');
+                }
+                return candidate;
+            },
+        },
+    });
+    await panel.tab('Findings');
+    panel.click('scribe-edit');
+    const field = panel.byId('scribe-reminder');
+    field.value = 'Draft in the watching tab';
+    panel.click('scribe-generate-reminder');
+    await panel.flush();
+    assert.equal(panel.text('scribe-generate-reminder-outcome'), 'Model request stopped.');
+    assert.equal(panel.byId('scribe-reminder-preview').hidden, true);
+    assert.equal(field.value, 'Draft in the watching tab');
+    generationError = false;
+    panel.click('scribe-generate-reminder');
+    await panel.flush();
+    panel.draftRefusal = new Error('Room reminder could not be saved.');
+    panel.click('scribe-use-generated-reminder');
+    await panel.flush();
+    assert.equal(panel.text('scribe-reminder-outcome'), '');
+    assert.equal(panel.text('scribe-generate-reminder-outcome'),
+        'Reminder was not saved. The preview is still here. Click Use generated reminder to retry.');
+    assert.equal(field.value, 'Draft in the watching tab');
+    assert.equal(field.readOnly, false);
+    assert.equal(panel.text('scribe-generated-reminder'), candidate);
+    assert.equal(panel.live.view().selected, 'Queued earlier');
+    panel.draftRefusal = null;
+    panel.click('scribe-use-generated-reminder');
+    await panel.flush();
+    assert.equal(panel.byId('scribe-reminder-preview').hidden, true);
+    assert.equal(field.value, candidate);
+    panel.live.current = liveView([], { lastDelivery: 'queued-1', settledOffers: ['queued-1'] });
+    panel.redraw();
+    assert.equal(field.value, candidate);
+    panel.reminderDraft = 'Changed in the reading tab';
+    panel.handle.redrawReminder();
+    assert.equal(field.value, 'Changed in the reading tab');
+    field.value = 'A more recent draft in the watching tab';
+    field.dispatchEvent({ type: 'input' });
+    assert.equal(panel.reminderDraft, field.value);
+    assert.equal(field.readOnly, false);
+    assert.deepEqual(panel.draftWrites, [candidate, candidate, field.value]);
+    assert.deepEqual(panel.live.calls, []);
+});
+
+test('a room generation update in another tab refreshes only the reminder controls', async () => {
+    let generating = 'other';
+    let failure = null;
+    let readable = true;
+    const panel = mounted(findingsBook(), { reminders: {
+        generation: () => {
+            if (!readable) {
+                throw new Error('The generation status could not be read.');
+            }
+            return generating;
+        },
+        generationError: () => failure,
+        generateReminder: () => assert.fail('Another tab already requested this reminder.'),
+    } });
+    await panel.tab('Findings');
+    panel.keeper.view = () => assert.fail('A room draft notification rebuilt the Book panel.');
+    assert.equal(panel.text('scribe-generate-reminder-outcome'), 'Generating in another tab');
+    assert.equal(panel.byId('scribe-generate-reminder').disabled, true);
+    panel.click('scribe-generate-reminder');
+    generating = null;
+    failure = 'The reading tab could not store the preview.';
+    readable = false;
+    assert.equal(panel.handle.redrawReminder(), false);
+    readable = true;
+    assert.equal(panel.handle.redrawReminder(), true);
+    assert.equal(panel.text('scribe-generate-reminder-outcome'), failure);
+    assert.equal(panel.byId('scribe-generate-reminder').disabled, false);
+    failure = null;
+    panel.reminderPreview = 'Completed after the requesting tab left.';
+    panel.handle.redrawReminder();
+    assert.equal(panel.text('scribe-generate-reminder-outcome'), '');
+    assert.equal(panel.byId('scribe-reminder-preview').hidden, false);
+    assert.equal(panel.text('scribe-generated-reminder'), panel.reminderPreview);
+    assert.equal(panel.byId('scribe-reminder').value, '');
+    assert.deepEqual(panel.draftWrites, []);
+});
+
+test('a preview consumed in another tab clears the requesting tab’s review instruction', async () => {
+    const panel = mounted(findingsBook(), { reminders: { generateReminder: async () => 'A room preview.' } });
+    await panel.tab('Findings');
+    panel.click('scribe-generate-reminder');
+    await panel.flush();
+    assert.equal(panel.text('scribe-generate-reminder-outcome'), 'Generated reminder ready to review.');
+    panel.reminderPreview = null;
+    panel.handle.redrawReminder();
+    assert.equal(panel.byId('scribe-reminder-preview').hidden, true);
+    assert.equal(panel.text('scribe-generate-reminder-outcome'), '');
 });
 
 test('a refused save is said under the box, the box stays open and the typed text stays', async () => {
@@ -1300,7 +1510,7 @@ test('a refused save is said under the box, the box stays open and the typed tex
     const words = 'A reminder may be at most 2,000 bytes; nothing was saved.';
     panel.click('scribe-edit');
     await panel.flush();
-    panel.live.refusal = new Error(words);
+    panel.draftRefusal = new Error(words);
     box.value = 'x'.repeat(3000);
     panel.click('scribe-edit-save');
     await panel.flush();
@@ -1310,16 +1520,17 @@ test('a refused save is said under the box, the box stays open and the typed tex
     assert.equal(panel.byId('scribe-edit-save').hidden, false);
     panel.redraw();
     assert.equal(box.value, 'x'.repeat(3000));
-    panel.live.refusal = null;
+    panel.draftRefusal = null;
     box.value = 'short';
     panel.click('scribe-edit-save');
     await panel.flush();
     assert.equal(panel.text('scribe-reminder-outcome'), '');
     assert.equal(box.readOnly, true);
-    assert.equal(panel.live.called('edit').length, 2);
+    assert.equal(panel.draftWrites.length, 2);
+    assert.deepEqual(panel.live.calls, []);
 });
 
-test('Save tells the edit whether a line was shown when Edit was pressed', async () => {
+test('Save writes an explicit empty draft only when the displayed text changed', async () => {
     const empty = mounted(findingsBook(), { live: liveView() });
     await empty.tab('Findings');
     const box = empty.byId('scribe-reminder');
@@ -1354,7 +1565,8 @@ test('Save tells the edit whether a line was shown when Edit was pressed', async
     shown.byId('scribe-reminder').value = '';
     shown.click('scribe-edit-save');
     await shown.flush();
-    assert.deepEqual(plain(shown.live.called('edit')), [['', true]]);
+    assert.deepEqual(shown.draftWrites, ['']);
+    assert.deepEqual(shown.live.calls, []);
 
     const arriving = mounted(findingsBook(), { live: liveView() });
     await arriving.tab('Findings');
@@ -1389,7 +1601,7 @@ test('Save with the prefilled text unchanged is a Cancel, and focus returns to E
     panel.byId('scribe-edit-save').focus();
     panel.click('scribe-edit-save');
     await panel.flush();
-    assert.deepEqual(plain(panel.live.called('edit')), []);
+    assert.deepEqual(panel.draftWrites, [`  ${ready}  `]);
 
     panel.click('scribe-edit');
     await panel.flush();
@@ -1397,7 +1609,8 @@ test('Save with the prefilled text unchanged is a Cancel, and focus returns to E
     panel.byId('scribe-edit-save').focus();
     panel.click('scribe-edit-save');
     await panel.flush();
-    assert.deepEqual(plain(panel.live.called('edit')), [['[Scribe] Changed.', true]]);
+    assert.deepEqual(panel.draftWrites, [`  ${ready}  `, '[Scribe] Changed.']);
+    assert.deepEqual(panel.live.calls, []);
     assert.equal(panel.root.activeElement, panel.byId('scribe-edit'));
 
     panel.click('scribe-edit');
@@ -1414,11 +1627,12 @@ test('Clear takes the refusal line away with the box', async () => {
     const words = 'A reminder may be at most 2,000 bytes; nothing was saved.';
     panel.click('scribe-edit');
     await panel.flush();
-    panel.live.refusal = new Error(words);
+    panel.draftRefusal = new Error(words);
     panel.byId('scribe-reminder').value = 'x'.repeat(3000);
     panel.click('scribe-edit-save');
     await panel.flush();
     assert.equal(panel.text('scribe-reminder-outcome'), words);
+    panel.draftRefusal = null;
     panel.click('scribe-clear');
     await panel.flush();
     assert.equal(panel.text('scribe-reminder-outcome'), '');
@@ -1480,6 +1694,33 @@ test('Findings snapshots the displayed text before an action redraw and preserve
     assert.equal(field.readOnly, true);
     assert.equal(field.value, edit);
     assert.equal(panel.text('scribe-force-outcome'), 'Queued for your next message');
+});
+
+test('Send uses the literal textarea while an older send lacks a receipt', async () => {
+    const unconfirmed = { id: 'earlier', text: 'The previous reminder' };
+    const panel = mounted(findingsBook(), { live: liveView([], { unconfirmed }) });
+    const sent = [];
+    panel.live.force = async (resend, text) => {
+        sent.push([resend, text]);
+    };
+    await panel.tab('Findings');
+    const field = panel.byId('scribe-reminder');
+    assert.equal(field.value, '');
+    assert.equal(panel.text('scribe-force'), 'Send a reminder with my next message');
+    panel.click('scribe-force');
+    await panel.flush();
+    assert.deepEqual(sent, [[null, '']]);
+    panel.click('scribe-edit');
+    await panel.flush();
+    assert.equal(field.readOnly, false);
+    const typed = '  my reminder\nunchanged  ';
+    field.value = typed;
+    panel.live.current = liveView([], { unconfirmed, latest: { id: 'new', fingerprint: 'new text' }, ready: 'replacement' });
+    panel.redraw();
+    assert.equal(field.value, typed);
+    panel.click('scribe-force');
+    await panel.flush();
+    assert.deepEqual(sent, [[null, ''], [null, typed]]);
 });
 
 test('while the box is open Clear closes it and the force button still works', async () => {
@@ -1659,7 +1900,7 @@ test('a forced reminder that becomes ready after the force reads as going with t
     assert.equal(panel.text('scribe-force-outcome'), '');
 });
 
-test('the box and the force button follow the force block, with its reason', async () => {
+test('Edit opens the textarea and accepts an edit when the book blocks sending', async () => {
     const reason = 'No book yet: adopt this chat first.';
     const panel = mounted(findingsBook(), { live: liveView([], { forceBlock: reason }) });
     await panel.tab('Findings');
@@ -1667,8 +1908,8 @@ test('the box and the force button follow the force block, with its reason', asy
     const force = panel.byId('scribe-force');
     const why = panel.byId('scribe-force-reason');
     const edit = panel.byId('scribe-edit');
-    assert.equal(box.disabled, true);
-    assert.equal(edit.disabled, true);
+    assert.equal(box.disabled, false);
+    assert.equal(edit.disabled, false);
     assert.equal(force.disabled, true);
     assert.equal(why.hidden, false);
     assert.equal(why.textContent, reason);
@@ -1676,8 +1917,9 @@ test('the box and the force button follow the force block, with its reason', asy
     edit.click();
     await panel.flush();
     assert.deepEqual(panel.live.called('force'), []);
-    assert.equal(panel.byId('scribe-edit').hidden, false);
-    assert.equal(box.readOnly, true);
+    assert.equal(panel.byId('scribe-edit').hidden, true);
+    assert.equal(box.readOnly, false);
+    box.value = 'My unsent reminder.';
     panel.live.current = liveView([], { forceBlock: null });
     panel.redraw();
     assert.equal(box.disabled, false);
@@ -1685,23 +1927,24 @@ test('the box and the force button follow the force block, with its reason', asy
     assert.equal(force.disabled, false);
     assert.equal(why.hidden, true);
     assert.equal(why.textContent, '');
-    edit.click();
-    await panel.flush();
     const save = panel.byId('scribe-edit-save');
     assert.equal(save.disabled, false);
     panel.live.current = liveView([], { forceBlock: reason });
     panel.redraw();
-    assert.equal(save.disabled, true);
+    assert.equal(save.disabled, false);
     assert.equal(panel.byId('scribe-edit-cancel').disabled, false);
     assert.equal(box.readOnly, false);
-    panel.click('scribe-edit-cancel');
+    assert.equal(box.value, 'My unsent reminder.');
+    save.click();
     await panel.flush();
+    assert.deepEqual(panel.draftWrites, ['My unsent reminder.']);
+    assert.deepEqual(panel.live.calls, []);
     assert.equal(box.readOnly, true);
     panel.live.current = liveView([], { forceBlock: null });
     panel.redraw();
     panel.live.current = liveView([], { forceBlock: 'The book has not finished its first reading.' });
     panel.redraw();
-    assert.equal(box.disabled, true);
+    assert.equal(box.disabled, false);
     assert.equal(why.textContent, 'The book has not finished its first reading.');
 });
 
@@ -1757,6 +2000,9 @@ test('everything is locked while the keeper is busy', async () => {
             'Edit',
             'Cancel',
             'Save',
+            'Generate reminder',
+            'Keep current reminder',
+            'Use generated reminder',
             'Clear',
             'Send a reminder with my next message',
             'Suggest one',
@@ -1818,7 +2064,7 @@ test('everything is locked while the keeper is busy', async () => {
     assert.equal(empty.byId('scribe-pause').disabled, false);
 });
 
-test('a watching tab can save the shared key while room changes stay locked', async () => {
+test('a watching tab can edit the reminder and save the shared key', async () => {
     const log = rulingsBook();
     const panel = mounted(log, {
         keeper: { phase: Phase.Watching, reader: false },
@@ -1841,20 +2087,34 @@ test('a watching tab can save the shared key while room changes stay locked', as
     assert.equal(panel.actionsWhere('Book', true).length, 14);
     await panel.tab('Findings');
     assert.equal(panel.rows('findings').length, 3);
-    assert.deepEqual(panel.actionsWhere('Findings', false), ['Cancel', 'Rule it...']);
+    assert.deepEqual(panel.actionsWhere('Findings', false), [
+        'Edit', 'Cancel', 'Save', 'Generate reminder', 'Keep current reminder', 'Use generated reminder', 'Rule it...',
+    ]);
     assert.deepEqual(panel.actionsWhere('Findings', true).sort(), [
         'Clear',
         'Dismiss',
         'Dismiss',
         'Dismiss',
-        'Edit',
-        'Save',
         'Send a reminder with my next message',
         'Suggest one',
         'They were told',
     ]);
-    assert.equal(panel.byId('scribe-reminder').disabled, true);
+    assert.equal(panel.byId('scribe-reminder').disabled, false);
     assert.equal(panel.text('scribe-force-reason'), 'Another tab is reading this chat');
+    panel.click('scribe-edit');
+    const field = panel.byId('scribe-reminder');
+    field.value = 'The edited first draft.';
+    field.dispatchEvent({ type: 'input' });
+    assert.equal(panel.reminderDraft, 'The edited first draft.');
+    panel.reminderDraft = 'The reading tab edited the same reminder.';
+    panel.handle.redrawReminder();
+    assert.equal(field.value, panel.reminderDraft);
+    field.value = 'The latest edit in the watching tab.';
+    panel.click('scribe-edit-save');
+    await panel.flush();
+    assert.equal(panel.reminderDraft, 'The latest edit in the watching tab.');
+    assert.equal(field.readOnly, true);
+    assert.deepEqual(panel.live.calls, []);
     await panel.tab('Progress');
     assert.deepEqual(panel.actionsWhere('Progress', false), ['Export']);
     assert.deepEqual(panel.actionsWhere('Progress', true).sort(), [
@@ -1976,7 +2236,10 @@ test('hostile text is text', async () => {
     assert.equal(panel.byId('scribe-list-findings').textContent.includes(hostile(4)), true);
     assert.equal(panel.byId('scribe-reminder').value, hostile(9));
     await panel.tab('Progress');
-    assert.equal(panel.byId('scribe-list-calls').textContent.includes(hostile(5)), false);
+    /** @type {import('./support/PanelElement.mjs').default} */
+    const answerDetails = panel.byId('scribe-list-calls').descendants().find((element) => element.tagName === 'DETAILS');
+    assert.equal(answerDetails.open, false);
+    assert.equal(answerDetails.children[1].textContent, hostile(5));
     assert.equal(panel.byId('scribe-list-calls').textContent.includes('Unreadable answer: Story'), true);
     await panel.tab('Timeline');
     assert.equal(panel.byId('scribe-list-timeline').textContent.includes(hostile(3)), true);
@@ -3777,7 +4040,7 @@ test('the page follows the row to any page', async () => {
     assert.equal(answerOf(41).value, 'Halvard rang it at dawn');
 });
 
-test('an unreadable view locks the controls', async () => {
+test('an unreadable view keeps local reminder editing usable and locks writes', async () => {
     const log = disputedBook();
     const panel = mounted(log, { live: liveView([contradiction()]) });
     const reading = panel.keeper.view.bind(panel.keeper);
@@ -3790,7 +4053,7 @@ test('an unreadable view locks the controls', async () => {
     };
     for (const [name, free] of [
         ['Rulings', []],
-        ['Findings', ['Rule it...']],
+        ['Findings', ['Edit', 'Cancel', 'Keep current reminder', 'Rule it...']],
     ]) {
         panel.keeper.view = reading;
         await panel.tab(name);
@@ -4707,31 +4970,79 @@ async function pullingAgain(setup) {
     return { ticking, release };
 }
 
-test('the first pull hides Adopt under its headline, and a routine poll never does', async () => {
+test('saving and reopening a reminder before adoption shows the persisted textarea verbatim', async () => {
+    const { harness, keeper } = await realKeeper(0);
+    harness.handle.unmount();
+    const context = vm.createContext({ TextEncoder, crypto });
+    for (const path of ScribePack.Files) {
+        if (path.endsWith('/ScribeStart.js')) {
+            break;
+        }
+        const url = new URL('../' + path, import.meta.url);
+        vm.runInContext(readFileSync(url, 'utf8'), context, { filename: url.pathname });
+    }
+    const live = vm.runInContext('ScribeLive', context).open({
+        keeper, storage: harness.storage, roomId: 'harbour', clock: harness.clock,
+        notify: () => harness.redraw(),
+        ask: () => assert.fail('Editing a local reminder dispatched a model request.'),
+        story: () => assert.fail('Editing a local reminder requested the story.'),
+        profile: () => assert.fail('Editing a local reminder requested the profile.'),
+    });
+    harness.live = live;
+    harness.mount();
+    try {
+        assert.equal(keeper.view().phase, Phase.NoBook);
+        assert.equal(keeper.view().reader, true);
+        await harness.tab('Findings');
+        harness.click('scribe-edit');
+        await harness.flush();
+        const field = harness.byId('scribe-reminder');
+        assert.equal(field.readOnly, false, harness.text('scribe-trouble'));
+        assert.equal(harness.byId('scribe-edit-save').disabled, false, harness.text('scribe-trouble'));
+        const text = '  My exact reminder.\nStill mine.  ';
+        field.value = text;
+        harness.click('scribe-edit-save');
+        await harness.flush();
+        assert.equal(harness.text('scribe-reminder-outcome'), '');
+        assert.equal(harness.text('scribe-trouble'), '');
+        assert.equal(live.readReminderDraft(), text);
+        assert.equal(live.view().ready, null);
+        assert.equal(field.readOnly, true);
+        assert.equal(field.value, text);
+        harness.click('scribe-edit');
+        await harness.flush();
+        assert.equal(field.readOnly, false);
+        assert.equal(field.value, text);
+    } finally {
+        harness.handle.unmount();
+        live.close();
+        keeper.close();
+    }
+});
+
+test('idle ticks leave Adopt available and only its click starts the first history pull', async () => {
     const first = await realKeeper(13, 'history');
-    const { harness, keeper } = first;
-    assert.equal(keeper.view().adoptBlock, pulling);
-    assert.equal(keeper.view().busy, 'Pulling');
-    assert.equal(harness.byId('scribe-next').hidden, true);
-    assert.equal(harness.text('scribe-headline'), 'Reading chat history from Zeta · 0 messages');
-    assert.equal(harness.byId('scribe-next-outcome').hidden, true);
-    first.release();
-    await harness.flush();
-    assert.equal(harness.byId('scribe-next').disabled, false);
-    assert.equal(harness.text('scribe-next-outcome'), '');
+    const { harness, keeper, chat } = first;
     for (let turn = 0; turn < 3; turn++) {
         await keeper.tick();
+        await harness.flush();
         assert.equal(keeper.view().busy, null);
         assert.equal(harness.byId('scribe-next').hidden, false);
         assert.equal(harness.byId('scribe-next').disabled, false);
         assert.equal(harness.text('scribe-next-outcome'), '');
-        assert.equal(first.chat.count('tab-1', 'history'), 1);
-        assert.equal(first.chat.count('tab-1', 'newest'), 0);
-        await harness.flush();
-        assert.equal(harness.byId('scribe-next').hidden, false);
-        assert.equal(harness.byId('scribe-next').disabled, false);
-        assert.equal(harness.text('scribe-next-outcome'), '');
+        assert.equal(chat.count('tab-1', 'history'), 0);
+        assert.equal(chat.count('tab-1', 'newest'), 0);
     }
+    harness.click('scribe-next');
+    await harness.flush();
+    assert.equal(chat.count('tab-1', 'history'), 1);
+    assert.equal(keeper.view().busy, 'Pulling');
+    assert.equal(harness.text('scribe-headline'), 'Reading chat history from Zeta · 0 messages');
+    first.release();
+    await harness.flush();
+    await keeper.tick();
+    assert.equal(chat.count('tab-1', 'history'), 1);
+    assert.equal(chat.count('tab-1', 'newest'), 0);
 });
 
 test('a redraw after an idle tick keeps the header Adopt shown and enabled with no line', async () => {
@@ -4769,44 +5080,43 @@ test('a press on Adopt after an idle tick starts adoption from saved history', a
 });
 
 test('every Book-guarded control is locked during a manual pull and a refusal clears after it', async () => {
-    for (const withBook of [false, true]) {
-        const gate = { release: null };
-        const waiting = new Promise((resolve) => {
-            gate.release = resolve;
-        });
-        const setup = await realKeeper(13, null, (keeper) => ({
-            ...keeper,
-            configure: async (given) => {
-                await waiting;
-                return keeper.configure(given);
-            },
-        }));
-        const { harness, keeper } = setup;
-        if (withBook) {
-            await keeper.adopt({});
-            await harness.flush();
-        }
-        await harness.tab('Settings');
-        assert.equal(harness.byId('scribe-save-settings').disabled, false);
-        harness.click('scribe-save-settings');
-        await harness.flush();
-        const poll = await pullingAgain(setup);
-        assert.equal(harness.byId('scribe-save-settings').disabled, true);
-        gate.release();
-        await harness.flush();
-        assert.equal(harness.text('scribe-settings-outcome'), pulling);
-        poll.release();
-        await poll.ticking;
-        await harness.flush();
-        assert.equal(harness.text('scribe-settings-outcome'), '');
-        assert.equal(harness.byId('scribe-save-settings').disabled, false);
-        const quiet = await pullingAgain(setup);
-        assert.equal(harness.byId('scribe-save-settings').disabled, true);
-        quiet.release();
-        await quiet.ticking;
-        await harness.flush();
-        assert.equal(harness.byId('scribe-save-settings').disabled, false);
-    }
+    const gate = { release: null };
+    const waiting = new Promise((resolve) => {
+        gate.release = resolve;
+    });
+    const setup = await realKeeper(13, null, (keeper) => ({
+        ...keeper,
+        configure: async (given) => {
+            await waiting;
+            return keeper.configure(given);
+        },
+    }));
+    const { harness, keeper } = setup;
+    assert.equal(harness.byId('scribe-pull').disabled, true);
+    await assert.rejects(keeper.pull(), /No book has been started/);
+    assert.equal(setup.chat.count('tab-1', 'history'), 0);
+    await keeper.adopt({});
+    await harness.flush();
+    await harness.tab('Settings');
+    assert.equal(harness.byId('scribe-save-settings').disabled, false);
+    harness.click('scribe-save-settings');
+    await harness.flush();
+    const poll = await pullingAgain(setup);
+    assert.equal(harness.byId('scribe-save-settings').disabled, true);
+    gate.release();
+    await harness.flush();
+    assert.equal(harness.text('scribe-settings-outcome'), pulling);
+    poll.release();
+    await poll.ticking;
+    await harness.flush();
+    assert.equal(harness.text('scribe-settings-outcome'), '');
+    assert.equal(harness.byId('scribe-save-settings').disabled, false);
+    const quiet = await pullingAgain(setup);
+    assert.equal(harness.byId('scribe-save-settings').disabled, true);
+    quiet.release();
+    await quiet.ticking;
+    await harness.flush();
+    assert.equal(harness.byId('scribe-save-settings').disabled, false);
 });
 
 test('a refusal stored while settled survives a routine poll on any outlet', async () => {
@@ -5381,7 +5691,7 @@ test('problem classification keeps service, provider reason, finish and retry st
     }
 });
 
-test('live calls show token counts and a cut-off error without the raw response', async () => {
+test('a cut-off Checker call exposes its saved response under the token counts and error', async () => {
     const log = readTo(ScribeLog.create(), 40);
     const calls = [
         Object.freeze({
@@ -5410,17 +5720,24 @@ test('live calls show token counts and a cut-off error without the raw response'
     assert.equal(texts[0].startsWith('Pedant: in 900, out 4,000, reasoning 3,100, finish length'), false, texts[0]);
     assert.equal(texts[0].startsWith('Pedant: in 900, out 4000, reasoning 3100, finish length'), true, texts[0]);
     assert.equal(texts[0].includes('answer was cut off'), true);
-    assert.equal(texts[0].includes('w'.repeat(2000)), false);
+    const details = panel.rows('liveCalls')[0].children.find((element) => element.tagName === 'DETAILS');
+    assert.equal(details.open, false);
+    assert.equal(details.children[0].textContent, 'The start of the cut answer');
+    assert.equal(details.children[1].textContent, 'w'.repeat(2000));
+    details.open = true;
+    details.dispatchEvent({ type: 'toggle' });
+    panel.redraw();
+    assert.equal(panel.rows('liveCalls')[0].children.find((element) => element.tagName === 'DETAILS').open, true);
     assert.equal(texts[1], 'Scribe: in 10, out 20, finish stop');
 });
 
-test('saved Checker appearance and Writer scene prose stay out of Progress while the verified leak and filing errors remain', async () => {
+test('Progress keeps Checker and Writer answers under disclosures while listing the filing errors', async () => {
     const look = 'A yellow coat embroidered with cranes.';
     const mixed = '=== NOW\nMirelle | wearing | ' + look + '\n=== LEAKS\nF2 | Mirelle | you ran from the siege';
     const scene = 'The lamplight ripples on the quay.';
     const log = findingsBook();
     const panel = mounted(log, { keeper: {
-        modelReadings: [{ role: 'Checker', statement: mixed }, { role: 'Scribe', statement: scene }],
+        modelReadings: [{ role: 'Checker', first: 2, last: 2, statement: mixed }, { role: 'Scribe', first: 2, last: 2, statement: scene }],
         checkerReview: [
             { section: 'answer', reason: 'Checker response', position: 2, statement: mixed },
             { section: 'answer', reason: 'The Checker did not identify this comparison page.', position: 2, statement: mixed },
@@ -5430,11 +5747,17 @@ test('saved Checker appearance and Writer scene prose stay out of Progress while
     }, live: liveView([leak()], { checkerRows: [{ modelReading: true, position: 2, statement: mixed }],
         calls: [{ role: 'Pedant', finish: 'stop', answer: mixed }, { role: 'Scribe', finish: 'stop', answer: scene }] }) });
     await panel.tab('Progress');
-    const progress = ['lines', 'calls', 'liveCalls', 'filing'].map((key) => panel.text('scribe-list-' + key)).join('\n');
-    assert.ok(!progress.includes(look));
-    assert.ok(!progress.includes(scene));
-    assert.match(progress, /did not identify this comparison page/);
-    assert.match(progress, /SCENES:1/);
+    for (const [list, answers] of Object.entries({ lines: [mixed, scene], calls: [scene], liveCalls: [mixed, scene], filing: [mixed, scene] })) {
+        const rows = panel.rows(list);
+        const disclosed = rows.flatMap((row) => row.descendants().filter((element) => element.tagName === 'DETAILS'));
+        assert.equal(disclosed.length, answers.length, list);
+        assert.ok(disclosed.every((detail) => !detail.open && detail.children[0].textContent === 'The answer'), list);
+        assert.deepEqual(disclosed.map((detail) => detail.children[1].textContent).sort(), answers.sort(), list);
+        const blocks = rows.flatMap((row) => row.descendants().filter((element) => element.tagName === 'PRE'));
+        assert.deepEqual(blocks, disclosed.map((detail) => detail.children[1]), list);
+    }
+    assert.match(panel.text('scribe-list-filing'), /did not identify this comparison page/);
+    assert.match(panel.text('scribe-list-filing'), /SCENES:1/);
     assert.equal(panel.keeper.current.modelReadings[0].statement, mixed);
     await panel.tab('Findings');
     assert.match(panel.text('scribe-list-findings'), /Mirelle uses that Halvard, background: deserted at the siege/);
@@ -5468,7 +5791,7 @@ test('legacy live-call fields are masked on display with either key or an unread
     ]);
 });
 
-test('Force stop shows only while a call has run four minutes, and pressing it stops that call', async () => {
+test('Force stop is available as soon as a call is active, and pressing it stops that call', async () => {
     const panel = mounted(readTo(ScribeLog.create(), 40));
     assert.equal(panel.byId('scribe-force-stop').hidden, true);
     panel.callDue = true;
@@ -5576,9 +5899,9 @@ test('a refused contradiction shows its numbers and quotes in Progress', async (
     assert.equal(text.includes('Contradiction | #45 "kept it" | #5 "held it" | Two spans (Citation)'), true, text);
 });
 
-test('an edit written before the latest reply stays shown, says why, and goes when saved again unchanged', async () => {
+test('a legacy stale reminder can be saved to the shared textarea without queueing', async () => {
     const log = readTo(ScribeLog.create(), 40);
-    const held = 'Your edit was written before the latest reply; Save it again to send it.';
+    const held = scripts.ScribeLive.Settings.Messages.EditStale;
     const panel = mounted(log, {
         live: liveView([], { ready: null, edited: true, stale: true, draft: '[Scribe] Mine.', held }),
     });
@@ -5591,7 +5914,8 @@ test('an edit written before the latest reply stays shown, says why, and goes wh
     assert.equal(panel.byId('scribe-reminder').value, '[Scribe] Mine.');
     panel.click('scribe-edit-save');
     await panel.flush();
-    assert.deepEqual(panel.live.calls.at(-1), { name: 'edit', args: ['[Scribe] Mine.', true] });
+    assert.deepEqual(panel.draftWrites, ['[Scribe] Mine.']);
+    assert.deepEqual(panel.live.calls, []);
 });
 
 test('saving a key asks the keeper to lift a failed reading', async () => {

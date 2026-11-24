@@ -82,7 +82,7 @@ const ScribeLive = Object.freeze({
             StoryEmpty: 'the writer returned no recap text',
             StoryDeclined: 'the writer declined to produce a recap',
             Untold: 'The story recap is unavailable. See Progress for details.',
-            EditStale: 'Your edit was written before the latest reply; Save it again to send it.',
+            EditStale: 'Your edit was written before the latest reply. Click “Send a reminder with my next message” to use it.',
             Crowded: 'No reminder: your message leaves no room for it.',
             SelectionCrowded: 'Your message left no room for the full reminder. It is still queued.',
             AttemptUnsaved: 'The send attempt could not be saved. Your message goes alone and the reminder stays queued.',
@@ -93,9 +93,6 @@ const ScribeLive = Object.freeze({
             StoryUnread: "The story's characters could not be read, so every character counts as custom: ",
             ProfileUnread: 'The chat profile could not be read, so it is left out of the calls: ',
             Budget: "The day's budget is spent: replies are not checked and no new reminder is made until tomorrow.",
-            Awaiting:
-                'Awaiting confirmation: your last message may have carried this reminder. You can wait for confirmation or choose to resend it.',
-            LegacyAwaiting: 'The old save has no delivery receipt for this reminder. It will stay here until the chat confirms delivery or you choose to resend it.',
         }),
         NothingAppended: Object.freeze({
             ready: null,
@@ -391,13 +388,8 @@ const ScribeLive = Object.freeze({
      * @return {string|null}
      */
     edited(value) {
-        const settings = ScribeLive.Settings;
-        const sound =
-            ScribeLive.isText(value) &&
-            ScribeLive.line(value) === value &&
-            !ScribeLive.hollow(value) &&
-            Array.from(value).length <= settings.LongestEdit;
-        return sound ? value : null;
+        return ScribeLive.isText(value) && ScribeLive.line(value) === value &&
+            ScribeLive.selectionError(value) === null ? value : null;
     },
 
     /**
@@ -541,22 +533,87 @@ const ScribeLive = Object.freeze({
     },
 
     /**
+     * @param {string} room
+     * @param {string} part
+     * @return {string}
+     */
+    reminderKey(room, part) {
+        return ScribeStore.name('reminder', ScribeStore.room(room), part);
+    },
+
+    /**
+     * @param {object} storage
+     * @param {string} key
+     * @param {string} text
+     * @return {void}
+     * @throws {Error}
+     */
+    storeReminderValue(storage, key, text) {
+        try {
+            storage.set(key, text);
+        } catch (error) {
+            if (storage.get(key, null) !== text) {
+                throw error;
+            }
+        }
+        if (storage.get(key, null) !== text) {
+            throw new Error(ScribeStore.Settings.Messages.SaveFailed);
+        }
+    },
+
+    /**
+     * @param {object} live
+     * @return {{text: string, revision: string}|null}
+     */
+    sharedDraft(live) {
+        /** @type {{revision?: string, text?: string}|null} */
+        const draft = ScribeStore.decode(ScribeStore.fetch(live.storage, ScribeLive.reminderKey(live.roomId, 'draft')));
+        if (typeof draft?.text !== 'string' || typeof draft.revision !== 'string') {
+            return null;
+        }
+        if (draft.revision === live.record.confirmedDraft ||
+            draft.revision === live.storage.get(ScribeLive.reminderKey(live.roomId, 'draft-sent'), null)) {
+            return { revision: draft.revision, text: '' };
+        }
+        return draft;
+    },
+
+    /**
      * @param {object} live
      * @param {string} text
      * @return {void}
      * @throws {Error}
      */
-    select(live, text) {
+    writeDraft(live, text) {
+        if (ScribeLive.sharedDraft(live)?.text === text) {
+            return;
+        }
+        ScribeLive.storeReminderValue(live.storage, ScribeLive.reminderKey(live.roomId, 'draft'),
+            JSON.stringify({ revision: crypto.randomUUID(), text }));
+    },
+
+    /**
+     * @param {object} live
+     * @param {string} text
+     * @param {object} record
+     * @return {void}
+     * @throws {Error}
+     */
+    select(live, text, record = live.record) {
         const error = ScribeLive.selectionError(text);
         if (error !== null) {
             throw new Error(error);
         }
-        const record = live.record;
-        if (record.selection?.text === text) {
+        const draft = ScribeLive.sharedDraft(live);
+        const draftRevision = draft?.text === text ? draft.revision : null;
+        if (record.selection?.text === text && ScribeLive.unconfirmed(live) === null) {
+            if (record !== live.record || draftRevision !== (record.selection.draftRevision ?? null)) {
+                ScribeLive.persistReminder(live, { ...record, selection: { ...record.selection, draftRevision } });
+            }
             return;
         }
         const next = { ...record, delivery: null, forced: true, preparing: false };
-        next.selection = { id: ScribeLive.mint(live, next).id, text };
+        next.selection = { id: ScribeLive.mint(live, next).id, text, ...(draftRevision ? { draftRevision } : {}) };
         if (record.draft !== null && (record.draft === text || record.draftOwner === record.selection?.id ||
             (record.selection === null && ScribeLive.lines(live).ready === null))) {
             next.draftOwner = next.selection.id;
@@ -570,14 +627,6 @@ const ScribeLive = Object.freeze({
         live.crowded = false;
         live.preparationFailure = null;
         ScribeLive.announce(live);
-    },
-
-    /**
-     * @param {string} line
-     * @return {boolean}
-     */
-    hollow(line) {
-        return line.slice(ScribeIntake.Settings.OwnMarker.length).trim() === ScribeLive.Settings.Nothing;
     },
 
     /**
@@ -639,6 +688,7 @@ const ScribeLive = Object.freeze({
             edited: null,
             editedFor: null,
             draft: null,
+            confirmedDraft: null,
             draftOwner: null,
             editedOwner: null,
             selection: null,
@@ -695,6 +745,10 @@ const ScribeLive = Object.freeze({
             return;
         }
         const record = live.record;
+        if (ScribeLive.isTexts(saved.appliedReminderEdits)) {
+            const prefix = ScribeStore.name('observations', ScribeStore.room(live.roomId)) + ':edit:';
+            record.appliedReminderEdits = saved.appliedReminderEdits.filter((key) => key.startsWith(prefix));
+        }
         record.checkerStamp = ScribeLive.isText(saved.checkerStamp) ? saved.checkerStamp : null;
         record.now = ScribeLive.scene(saved.now);
         record.reminded = ScribeLive.scene(saved.reminded);
@@ -712,7 +766,10 @@ const ScribeLive = Object.freeze({
         record.basis = composed
             ? { revision: basis.revision, first: [...basis.first], notes: basis.notes, story: basis.story }
             : null;
-        record.edited = ScribeLive.edited(saved.edited);
+        record.delivery = ScribeLive.delivery(saved.delivery);
+        const savedEdit = record.delivery !== null && saved.editedOwner === record.delivery.id &&
+            ScribeLive.isText(saved.edited) && ScribeLive.selectionError(saved.edited) === null;
+        record.edited = savedEdit ? saved.edited : ScribeLive.edited(saved.edited);
         const written = saved.editedFor;
         const against =
             record.edited !== null &&
@@ -721,20 +778,22 @@ const ScribeLive = Object.freeze({
             ScribeLive.isText(written.fingerprint);
         record.editedFor = against ? { id: written.id, fingerprint: written.fingerprint } : null;
         record.draft = ScribeLive.isText(saved.draft) && ScribeLive.selectionError(saved.draft) === null
-            ? saved.draft : (against ? null : record.edited);
-        record.edited = against ? record.edited : null;
+            ? saved.draft : (against || savedEdit ? null : record.edited);
+        record.confirmedDraft = typeof saved.confirmedDraft === 'string' ? saved.confirmedDraft : null;
+        record.edited = against || savedEdit ? record.edited : null;
+        record.editedOwner = savedEdit ? record.delivery.id : null;
         record.forced = saved.forced === true;
         record.preparing = saved.preparing === true;
         live.owed ||= record.preparing;
         record.sends = Number.isSafeInteger(saved.sends) && saved.sends >= settings.NoSends ? saved.sends : settings.NoSends;
         record.serial =
             Number.isSafeInteger(saved.serial) && saved.serial >= settings.NoSerial ? saved.serial : settings.NoSerial;
-        record.delivery = ScribeLive.delivery(saved.delivery);
         record.previousPost = ScribeLive.validPost(saved.previousPost) ? saved.previousPost : null;
         const selection = saved.selection;
         if (record.delivery && selection?.id === record.delivery.id &&
             ScribeLive.isText(selection.text) && ScribeLive.selectionError(selection.text) === null) {
-            record.selection = { id: selection.id, text: selection.text };
+            record.selection = { id: selection.id, text: selection.text,
+                ...(typeof selection.draftRevision === 'string' ? { draftRevision: selection.draftRevision } : {}) };
             record.draftOwner = (saved.draftOwner === selection.id || record.draft === selection.text) ? selection.id : null;
             record.editedOwner = record.edited !== null ? selection.id : null;
         }
@@ -914,7 +973,7 @@ const ScribeLive = Object.freeze({
      * @throws {Error}
      */
     persistReminder(live, next) {
-        ScribeStore.write(live.storage, live.roomId, ScribeStore.Kind.Live, next);
+        ScribeStore.write(live.storage, live.roomId, ScribeStore.Kind.Live, next, live.editAuthority ?? null);
         Object.assign(live.record, next);
     },
 
@@ -1148,35 +1207,22 @@ const ScribeLive = Object.freeze({
         const stamp = ScribeLive.checkerStamp(view.state, view.messages);
         if (view.historyChecked !== false && record.checkerStamp !== stamp) {
             record.checkerStamp = stamp;
-            if (record.selection !== null || record.edited !== null || record.ready !== null || live.recounting !== null) {
-                record.draft = record.edited ?? record.draft ?? record.selection?.text ?? null;
-                record.draftOwner = null;
-                record.edited = null;
-                record.editedOwner = null;
-                record.editedFor = null;
-                record.selection = null;
+            if (record.ready !== null || live.recounting !== null) {
                 record.ready = null;
                 record.led = [];
                 record.basis = null;
-                record.preparing = ScribeLive.due(record, view);
+                record.preparing = record.edited === null && record.selection === null && ScribeLive.due(record, view);
                 live.owed = record.preparing;
                 live.issue++;
                 live.preparationFailure = null;
-                if (record.posts.some((post) => post.reminder === record.delivery?.id && !post.confirmed)) {
+                if (record.edited === null && record.selection === null &&
+                    record.posts.some((post) => post.reminder === record.delivery?.id && !post.confirmed)) {
                     record.delivery = null;
                     live.awaiting = false;
                 }
             }
             record.story = null;
             record.untold = null;
-            moved = true;
-        }
-        if (record.edited !== null && !ScribeLive.written(record, view)) {
-            record.draft = record.edited;
-            record.draftOwner = record.editedOwner;
-            record.edited = null;
-            record.editedOwner = null;
-            record.editedFor = null;
             moved = true;
         }
         const reply = ScribeLive.answered(view);
@@ -1245,14 +1291,23 @@ const ScribeLive = Object.freeze({
      * @param {string} offered
      * @param {string} carried
      * @param {string|null} id
+     * @param {string|null} draftRevision
      * @return {void}
      */
-    delivered(live, offered, carried, id) {
+    delivered(live, offered, carried, id, draftRevision = live.record.selection?.draftRevision) {
         const settings = ScribeLive.Settings;
         const record = live.record;
         const state = live.keeper.view().state;
         const led = record.led;
         const said = new Set(ScribeText.words(carried));
+        if (draftRevision && ScribeLive.sharedDraft(live)?.revision === draftRevision) {
+            record.confirmedDraft = draftRevision;
+            try {
+                ScribeLive.storeReminderValue(live.storage, ScribeLive.reminderKey(live.roomId, 'draft-sent'), draftRevision);
+            } catch (error) {
+                live.problem = ScribeLive.words(error);
+            }
+        }
         if (id !== null) {
             record.settled = [...record.settled, id].slice(-settings.SettledKept);
             if (id !== record.delivery?.id) {
@@ -1585,9 +1640,10 @@ const ScribeLive = Object.freeze({
      * @param {object} live
      * @param {string} role
      * @param {{ failure: string|null, retryable?: boolean }} noted
+     * @param {boolean} singleAttempt
      * @return {function(string, string): Promise<{ text: string, cost: * }>}
      */
-    asker(live, role, noted) {
+    asker(live, role, noted, singleAttempt = false) {
         const epoch = live.epoch;
         /**
          * @param {string} system
@@ -1604,7 +1660,7 @@ const ScribeLive = Object.freeze({
             const keys = ScribeStore.diagnosticKeys(live.storage);
             let answer;
             try {
-                answer = await live.ask(role, system, user);
+                answer = await live.ask(role, system, user, singleAttempt);
             } catch (error) {
                 if (live.epoch !== epoch) {
                     throw error;
@@ -1989,6 +2045,37 @@ const ScribeLive = Object.freeze({
             story,
         });
         return { composed, basis };
+    },
+
+    /**
+     * @param {object} live
+     * @return {Promise<string>}
+     * @throws {Error}
+     */
+    async generateReminder(live) {
+        const settings = ScribeLive.Settings;
+        const refused = ScribeLive.refusal(live);
+        if (refused !== null) {
+            throw new Error(refused);
+        }
+        const epoch = live.epoch;
+        const view = live.keeper.view();
+        const { now, findings, notes } = live.record;
+        const input = ScribeReminder.storyInput(view.state, now, ScribeLive.storyCorrections(view, now), ScribeReminder.sharedRulings(view));
+        const ask = ScribeLive.asker(live, settings.Roles.Scribe, { failure: null }, true);
+        const answer = await ask(ScribeReminder.StoryPrompt, input);
+        if (!ScribeLive.current(live, epoch)) {
+            throw new Error(settings.Messages.Stopped);
+        }
+        const recap = ScribeReminder.recap(answer.text);
+        if (!recap?.text) {
+            throw new Error(recap?.status === 'declined' ? settings.Messages.StoryDeclined : settings.Messages.StoryEmpty);
+        }
+        return ScribeReminder.compose({
+            state: view.state, now, player: view.player, unread: view.unread,
+            notes: ScribeLive.standing(notes, view), characters: live.cast?.characters ?? null,
+            first: ScribeLive.first(findings, view.state), story: recap.text,
+        }).text;
     },
 
     /**
@@ -2639,25 +2726,11 @@ const ScribeLive = Object.freeze({
             throw new Error(blocked);
         }
         const record = live.record;
-        const held = ScribeLive.unconfirmed(live);
-        if (resendId !== null || held !== null) {
-            if (held === null || resendId !== held.id) {
-                return;
-            }
-            const delivery = { ...record.delivery };
-            if (delivery.prior) {
-                delivery.prior = { ...delivery.prior, released: true };
-            }
-            const posts = record.posts.map((post) => post.reminder === held.id && !post.confirmed ?
-                { ...post, retryAllowed: true } : post);
-            ScribeLive.persistReminder(live, { ...record, delivery, posts, forced: true, preparing: false,
-                selection: { id: held.id, text: held.text } });
-            live.awaiting = false;
-            ScribeLive.announce(live);
-            return;
-        }
         if (selectedText !== null) {
             ScribeLive.select(live, selectedText);
+            return;
+        }
+        if (resendId !== null) {
             return;
         }
         const view = live.keeper.view();
@@ -2811,8 +2884,8 @@ const ScribeLive = Object.freeze({
             return !existing.confirmed && existing.reminder === lines.reminder && existing.attempt === lines.attempt &&
                 existing.submission === (lines.submission ?? null) && existing.ready === lines.ready;
         }
-        if (lines.manual && (!record.selection || record.selection.id !== lines.reminder || record.delivery?.attempt !== lines.attempt ||
-            record.selection.text !== lines.ready || (!lines.retained && ScribeLive.unconfirmed(live) !== null))) {
+        if (lines.manual && (record.delivery?.id !== lines.reminder || record.delivery?.attempt !== lines.attempt ||
+            (record.selection?.text ?? record.edited) !== lines.ready || (!lines.retained && ScribeLive.unconfirmed(live) !== null))) {
             return false;
         }
         if (!lines.manual && lines.ready && lines.reminder) {
@@ -2823,6 +2896,7 @@ const ScribeLive = Object.freeze({
         }
         const listed = live.keeper.view().messages;
         const newest = Array.isArray(listed) ? listed.at(ScribeLive.Settings.Last) : undefined;
+        const draftRevision = previous ? previous.draftRevision : (record.selection?.id === lines.reminder ? record.selection?.draftRevision : null);
         const post = {
             key: lines.key,
             submission: lines.submission ?? null,
@@ -2836,6 +2910,7 @@ const ScribeLive = Object.freeze({
             carried: lines.carried ?? lines.ready,
             suggestion: previous ? (lines.previousSuggestion ? previous.suggestion : null) : lines.suggestion,
             reminder: previous?.reminder ?? lines.reminder,
+            ...(draftRevision ? { draftRevision } : {}),
             attempt: previous?.attempt ?? lines.attempt,
             confirmed: false,
         };
@@ -2952,13 +3027,14 @@ const ScribeLive = Object.freeze({
         const view = live.keeper.view();
         const record = live.record;
         const renewed = record.edition !== null && view.edition > record.edition;
-        if (!view.reader || view.trusted !== true || renewed || record.checkerStamp !== ScribeLive.checkerStamp(view.state, view.messages)) {
+        if (!view.reader || view.trusted !== true || renewed ||
+            (record.edited === null && record.selection === null && record.checkerStamp !== ScribeLive.checkerStamp(view.state, view.messages))) {
             return nothing;
         }
         const waiting = ScribeLive.due(record, view) && ScribeLive.fresh(live, view) ? record.ready : null;
         const current = view.readerCurrent && ScribeLive.behind(record.now, view) === null;
         const awaiting = ScribeLive.unconfirmed(live) !== null;
-        const typed = !awaiting && record.edited !== null && ScribeLive.written(record, view);
+        const typed = !awaiting && record.edited !== null;
         const prepared = current && !awaiting ? waiting : null;
         const selected = awaiting ? null : record.selection;
         const ready = selected?.text ?? (typed ? record.edited : prepared);
@@ -2976,7 +3052,7 @@ const ScribeLive = Object.freeze({
         return Object.freeze({
             ready,
             ...(previous ? { previous: previous.carried, previousSuggestion: previous.suggestion } : {}),
-            ...(selected ? { manual: true } : {}),
+            ...(selected || typed ? { manual: true } : {}),
             suggestion: record.suggestion,
             ends: Object.freeze(selected || typed || prepared === null ? [] : ScribeReminder.ends(prepared)),
             reminder: named ? delivery.id : null,
@@ -3062,7 +3138,8 @@ const ScribeLive = Object.freeze({
         const current = named && delivery !== null && delivery.id === lines.reminder && delivery.attempt === lines.attempt;
         const matches = named ? current : lines.ready !== null && lines.ready === (record.edited ?? record.ready);
         if (carried && (matches || (lines.key && named && !record.settled.includes(lines.reminder)))) {
-            ScribeLive.delivered(live, lines.ready, lines.carried ?? lines.ready, named ? lines.reminder : null);
+            const draftRevision = lines.draftRevision ?? (current ? record.selection?.draftRevision : null);
+            ScribeLive.delivered(live, lines.ready, lines.carried ?? lines.ready, named ? lines.reminder : null, draftRevision ?? null);
         } else if (carried && !named && !lines.key) {
             record.forced = false;
             record.sends = settings.NoSends;
@@ -3238,69 +3315,61 @@ const ScribeLive = Object.freeze({
     },
 
     /**
-     * @param {{ editedFor: { id: string, fingerprint: string }|null }} record
-     * @param {Readonly<object>} keeperView
-     * @return {boolean}
-     */
-    written(record, keeperView) {
-        const reply = ScribeLive.answered(keeperView);
-        const against = record.editedFor;
-        if (reply === undefined) {
-            return against === null;
-        }
-        return against !== null && against.id === reply.id && against.fingerprint === reply.fingerprint;
-    },
-
-    /**
      * @param {object} live
      * @param {string} text
      * @param {boolean|null} shown
-     * @param {{ id: string, fingerprint: string }|null|undefined} against
      * @param {string|null} selectionId
+     * @param {string|null} request
      * @return {void}
      * @throws {Error}
      */
-    edit(live, text, shown, against, selectionId = null) {
-        const settings = ScribeLive.Settings;
+    edit(live, text, shown, selectionId = null, request = null) {
         if (!ScribeLive.active(live)) {
-            return;
-        }
-        const record = live.record;
-        if (record.selection !== null || (selectionId !== null && record.settled.includes(selectionId))) {
-            const blocked = ScribeLive.forceBlock(live);
-            if (blocked !== null) {
-                throw new Error(blocked);
+            if (request !== null) {
+                throw new Error(ScribeStore.Settings.Messages.AuthorityLost);
             }
-            ScribeLive.select(live, text);
             return;
         }
-        const line = ScribeLive.line(text);
-        if (ScribeLive.hollow(line)) {
+        if (request !== null && live.record.appliedReminderEdits?.includes(request)) {
+            return;
+        }
+        const record = request === null ? live.record : { ...live.record, appliedReminderEdits: [
+            ...(live.record.appliedReminderEdits ?? []).filter((key) => live.storage.get(key, null) !== null), request,
+        ] };
+        const error = ScribeLive.selectionError(text);
+        if (error === ScribeLive.Settings.Messages.EmptyEdit) {
+            if (record.selection !== null || (selectionId !== null && record.settled.includes(selectionId))) {
+                throw new Error(error);
+            }
             if (shown ?? ScribeLive.lines(live).ready !== null) {
-                ScribeLive.skip(live);
-                record.draft = null;
-                ScribeLive.changed(live);
+                const previous = live.record;
+                live.record = { ...record, posts: record.posts.map((post) => ({ ...post })) };
+                try {
+                    ScribeLive.skip(live);
+                    live.record.draft = null;
+                    ScribeLive.persistReminder(live, live.record);
+                } catch (failure) {
+                    live.record = previous;
+                    throw failure;
+                }
+                ScribeLive.announce(live);
+            } else if (request !== null) {
+                ScribeLive.persistReminder(live, record);
             }
             return;
         }
-        if (Array.from(line).length > settings.LongestEdit) {
-            throw new Error(settings.Messages.LongEdit);
+        if (error !== null) {
+            throw new Error(error);
         }
-        const reply = ScribeLive.answered(live.keeper.view());
-        const latest = reply === undefined ? null : { id: reply.id, fingerprint: reply.fingerprint };
-        const opened = against === undefined ? latest : against;
-        const same =
-            opened === null || latest === null
-                ? opened === latest
-                : opened.id === latest.id && opened.fingerprint === latest.fingerprint;
-        record.edited = same ? line : null;
-        record.editedFor = same ? latest : null;
-        record.draft = same ? null : line;
-        record.led = [];
-        if (same) {
-            ScribeLive.mint(live);
+        if (record.selection !== null || (selectionId !== null && record.settled.includes(selectionId))) {
+            ScribeLive.select(live, text, record);
+            return;
         }
-        ScribeLive.changed(live);
+        const next = { ...record, edited: text, editedFor: null, draft: null, draftOwner: null, editedOwner: null,
+            led: [], delivery: null };
+        next.editedOwner = ScribeLive.mint(live, next).id;
+        ScribeLive.persistReminder(live, next);
+        ScribeLive.announce(live);
     },
 
     /**
@@ -3691,7 +3760,7 @@ const ScribeLive = Object.freeze({
         }
         const unconfirmed = ScribeLive.unconfirmed(live);
         const awaiting = unconfirmed !== null;
-        const typed = !awaiting && record.edited !== null && ScribeLive.written(record, keeperView);
+        const typed = !awaiting && record.edited !== null;
         const declined = record.untold?.reason === messages.StoryDeclined;
         const noRecap = declined || record.untold?.reason === messages.StoryEmpty;
         const pending = noRecap && record.selection === null && !typed && ScribeLive.due(record, keeperView) &&
@@ -3703,11 +3772,9 @@ const ScribeLive = Object.freeze({
         const untold = record.untold !== null && !declined && record.ready === null ? messages.Untold : null;
         const draft = typed || record.selection !== null ? null : (record.draft ?? record.edited);
         let held = null;
-        if (awaiting) {
-            held = unconfirmed.legacy ? messages.LegacyAwaiting : messages.Awaiting;
-        } else if (draft !== null) {
+        if (draft !== null) {
             held = messages.EditStale;
-        } else if (!typed && record.selection === null) {
+        } else if (!awaiting && !typed && record.selection === null) {
             held = ScribeLive.behind(record.now, keeperView) ?? untold ?? (live.crowded ? messages.Crowded : null);
         } else if (live.crowded) {
             held = record.selection ? messages.SelectionCrowded : messages.Crowded;
@@ -3726,6 +3793,7 @@ const ScribeLive = Object.freeze({
             offerId: offer.reminder ?? null,
             settledOffers: Object.freeze([...record.settled]),
             selected: record.selection?.text ?? null,
+            editedText: record.edited,
             selectionId: record.selection?.id ?? null,
             lastDelivery: record.settled.at(settings.Last) ?? null,
             draft,
@@ -3930,10 +3998,18 @@ const ScribeLive = Object.freeze({
              * @param {string} text
              * @param {boolean|null} shown
              * @param {{ id: string, fingerprint: string }|null|undefined} against
+             * @param {string|null} selectionId
+             * @param {string|null} request
+             * @param {Function|null} mayPublish
              * @return {void}
              */
-            edit: (text, shown = null, against = undefined, selectionId = null) => {
-                ScribeLive.edit(live, text, shown, against, selectionId);
+            edit: (text, shown = null, against = undefined, selectionId = null, request = null, mayPublish = null) => {
+                live.editAuthority = mayPublish;
+                try {
+                    ScribeLive.edit(live, text, shown, selectionId, request);
+                } finally {
+                    live.editAuthority = null;
+                }
             },
 
             /**
@@ -3942,6 +4018,22 @@ const ScribeLive = Object.freeze({
              * @return {Promise<void>}
              */
             force: (resendId = null, selectedText = null) => ScribeLive.force(live, resendId, selectedText),
+
+            /**
+             * @return {Promise<string>}
+             */
+            generateReminder: () => ScribeLive.generateReminder(live),
+
+            /**
+             * @return {string|null}
+             */
+            readReminderDraft: () => ScribeLive.sharedDraft(live)?.text ?? null,
+
+            /**
+             * @param {string} text
+             * @return {void}
+             */
+            writeReminderDraft: (text) => ScribeLive.writeDraft(live, text),
 
             /**
              * @return {(entry: object) => boolean}

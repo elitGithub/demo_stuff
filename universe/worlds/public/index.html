@@ -1,0 +1,46 @@
+<!DOCTYPE html>
+<html lang="en">
+<head>
+  <meta charset="utf-8">
+  <meta name="viewport" content="width=device-width, initial-scale=1">
+  <meta name="worlds-csrf" content="__CSRF_TOKEN__">
+  <title>Worlds</title>
+  <link rel="stylesheet" href="/styles.css">
+  <script type="module" src="/app.mjs"></script>
+</head>
+<body>
+  <div id="app" class="app-shell">
+    <header id="top-bar" class="top-bar">
+      <div class="top-bar-group top-bar-campaign">
+        <span class="brand-mark">Worlds</span>
+        <label class="sr-only" for="campaign-select">Campaign</label>
+        <select id="campaign-select" class="field-control campaign-select" aria-label="Active campaign"></select>
+        <button id="load-more-campaigns-btn" type="button" class="btn btn-secondary btn-compact is-hidden">Load more</button>
+        <button id="new-campaign-btn" type="button" class="btn btn-secondary btn-compact">New</button>
+        <button id="edit-campaign-btn" type="button" class="btn btn-secondary btn-compact" disabled>Edit</button>
+      </div>
+      <div class="top-bar-group top-bar-status">
+        <button id="scene-pill" type="button" class="scene-pill is-hidden" aria-label="Active scene details"></button>
+        <span id="spend-badge" class="status-pill" title="Today UTC spend">$0.00</span>
+        <span id="sync-badge" class="status-pill">Local only</span>
+        <button id="sync-save-btn" type="button" class="btn btn-secondary btn-compact">Save to Cloud</button>
+        <button id="inspector-toggle-btn" type="button" class="btn btn-primary btn-compact" aria-controls="inspector-drawer" aria-expanded="false">
+          <span>Inspector</span>
+          <span id="findings-badge" class="count-badge is-hidden">0</span>
+        </button>
+      </div>
+    </header>
+    <div id="spend-warning-banner" class="alert-banner is-warning is-hidden" role="status" aria-live="polite"></div>
+    <div id="global-status-banner" class="alert-banner is-hidden" role="status" aria-live="polite"></div>
+    <div class="workspace-grid">
+      <main id="story-pane" class="story-pane">
+        <section id="chat-view" class="chat-view" aria-label="Story transcript"></section>
+        <section id="composer-bar" class="composer-bar" aria-label="Turn composer"></section>
+      </main>
+      <div id="drawer-backdrop" class="drawer-backdrop is-hidden" aria-hidden="true"></div>
+      <aside id="inspector-drawer" class="inspector-drawer" aria-label="Campaign inspector"></aside>
+    </div>
+    <div id="modal-root" class="modal-root"></div>
+  </div>
+</body>
+</html>

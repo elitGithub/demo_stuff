@@ -101,7 +101,8 @@
   --shadow-md: 0 8px 24px rgba(0, 0, 0, 0.35);
   --shadow-lg: 0 18px 48px rgba(0, 0, 0, 0.52);
 
-  --transition-fast: 150ms ease;
+  --transition-fast-duration: 150ms;
+  --transition-fast: var(--transition-fast-duration) ease;
 }
 
 *,
@@ -730,12 +731,15 @@ textarea.field-control {
   border-left: 1px solid var(--border-strong);
   box-shadow: var(--shadow-lg);
   transform: translateX(100%);
-  transition: transform var(--transition-fast);
+  visibility: hidden;
+  transition: transform var(--transition-fast), visibility 0s linear var(--transition-fast-duration);
   z-index: 40;
 }
 
 .inspector-drawer.is-open {
   transform: translateX(0);
+  visibility: visible;
+  transition: transform var(--transition-fast), visibility 0s linear 0s;
 }
 
 .drawer-header {
@@ -1124,6 +1128,7 @@ textarea.field-control {
     width: auto;
     min-height: 0;
     transform: none;
+    visibility: visible;
     box-shadow: none;
     z-index: 10;
   }
@@ -1149,6 +1154,7 @@ textarea.field-control {
     animation-duration: 0.01ms !important;
     animation-iteration-count: 1 !important;
     transition-duration: 0.01ms !important;
+    transition-delay: 0s !important;
     scroll-behavior: auto !important;
   }
 }

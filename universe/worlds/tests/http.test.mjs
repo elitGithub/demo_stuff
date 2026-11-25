@@ -2461,9 +2461,117 @@ describe('Model availability over HTTP', () => {
     assert.equal(fs.existsSync(context.env.config.secretsPath), false);
     const settings = (await send(context, 'GET', '/api/settings')).json;
     assert.equal(settings.publicOdds, 8);
-    assert.equal(settings.scribeInterval, 10);
+    assert.equal(settings.scribeInterval, 1);
     assert.equal(settings.models.main, '');
     assert.equal(settings.models.scribe, '');
+  });
+
+  it('PUT /api/settings validates maxRepliesPerCharacter and replyReserve and GET shows the new defaults', async () => {
+    const context = await startModelServer({ catalogOptions: { answerProvider: deadAnswer } });
+
+    const fresh = (await send(context, 'GET', '/api/settings')).json;
+    assert.equal(fresh.scribeInterval, 1);
+    assert.equal(fresh.maxRepliesPerCharacter, 1);
+    assert.equal(fresh.replyReserve, 3000);
+
+    const accepted = await send(context, 'PUT', '/api/settings', { maxRepliesPerCharacter: 2, replyReserve: 3000 });
+    assert.equal(accepted.status, 200);
+    assert.equal(accepted.json.maxRepliesPerCharacter, 2);
+    assert.equal(accepted.json.replyReserve, 3000);
+
+    for (const invalidValue of [0, 1.5, '3', null, -1]) {
+      for (const key of ['maxRepliesPerCharacter', 'replyReserve']) {
+        const refused = await send(context, 'PUT', '/api/settings', { [key]: invalidValue });
+        assert.equal(refused.status, 400);
+        assert.match(refused.json.error, new RegExp(key));
+      }
+    }
+    const tooMany = await send(context, 'PUT', '/api/settings', { maxRepliesPerCharacter: 6 });
+    assert.equal(tooMany.status, 400);
+    assert.match(tooMany.json.error, /maxRepliesPerCharacter/);
+    const maximum = await send(context, 'PUT', '/api/settings', { maxRepliesPerCharacter: 5 });
+    assert.equal(maximum.status, 200);
+    assert.equal(maximum.json.maxRepliesPerCharacter, 5);
+    const bigReserve = await send(context, 'PUT', '/api/settings', { replyReserve: 100000 });
+    assert.equal(bigReserve.status, 200);
+    await send(context, 'PUT', '/api/settings', { maxRepliesPerCharacter: 2, replyReserve: 3000 });
+    const afterRefusals = (await send(context, 'GET', '/api/settings')).json;
+    assert.equal(afterRefusals.maxRepliesPerCharacter, 2);
+    assert.equal(afterRefusals.replyReserve, 3000);
+  });
+
+  it('character routes take a card, name the bad field in a 400, and refuse the old persona keys', async () => {
+    const context = await startModelServer({ catalogOptions: { answerProvider: deadAnswer } });
+    const campaign = (await send(context, 'POST', '/api/campaigns', { title: 'Card Routes' })).json;
+    const charactersPath = `/api/campaigns/${campaign.id}/characters`;
+
+    const created = await send(context, 'POST', charactersPath, {
+      slug: 'cardy',
+      name: 'Cardy',
+      card: { hair: 'red', speechExamples: ['Hm.'] },
+    });
+    assert.equal(created.status, 201);
+    assert.equal(created.json.card.hair, 'red');
+    assert.deepEqual(created.json.card.speechExamples, ['Hm.']);
+    assert.equal(Object.hasOwn(created.json, 'persona'), false);
+
+    const badHair = await send(context, 'POST', charactersPath, { slug: 'bad', name: 'Bad', card: { hair: 5 } });
+    assert.equal(badHair.status, 400);
+    assert.match(badHair.json.error, /hair/);
+    const badExamples = await send(context, 'PATCH', `${charactersPath}/${created.json.id}`, {
+      card: { speechExamples: 'Hello.' },
+    });
+    assert.equal(badExamples.status, 400);
+    assert.match(badExamples.json.error, /speechExamples/);
+
+    const baselineRequests = context.fake.providerRequests.length;
+    const badCardWithOverride = await send(context, 'POST', charactersPath, {
+      slug: 'checked',
+      name: 'Checked',
+      modelOverride: 'flaky/model',
+      card: { hair: 5 },
+    });
+    assert.equal(badCardWithOverride.status, 400);
+    assert.match(badCardWithOverride.json.error, /hair/);
+    const badPatchWithOverride = await send(context, 'PATCH', `${charactersPath}/${created.json.id}`, {
+      modelOverride: 'flaky/model',
+      card: { eyes: 7 },
+    });
+    assert.equal(badPatchWithOverride.status, 400);
+    assert.equal(context.fake.providerRequests.length, baselineRequests);
+
+    const clientFiled = await send(context, 'PATCH', `${charactersPath}/${created.json.id}`, {
+      card: { filedFactIds: { hair: 'F1' } },
+    });
+    assert.equal(clientFiled.status, 400);
+    assert.match(clientFiled.json.error, /filedFactIds/);
+    const clientFiledCreate = await send(context, 'POST', charactersPath, {
+      slug: 'filed',
+      name: 'Filed',
+      card: { filedFactIds: {} },
+    });
+    assert.equal(clientFiledCreate.status, 400);
+    assert.match(clientFiledCreate.json.error, /filedFactIds/);
+
+    const partial = await send(context, 'PATCH', `${charactersPath}/${created.json.id}`, {
+      card: { eyes: 'green' },
+    });
+    assert.equal(partial.status, 200);
+    assert.equal(partial.json.card.eyes, 'green');
+    assert.equal(partial.json.card.hair, 'red');
+    assert.deepEqual(partial.json.card.speechExamples, ['Hm.']);
+
+    for (const oldKey of ['persona', 'voiceNotes']) {
+      const refusedCreate = await send(context, 'POST', charactersPath, { slug: 'old', name: 'Old', [oldKey]: 'x' });
+      assert.equal(refusedCreate.status, 400);
+      assert.match(refusedCreate.json.error, new RegExp(oldKey));
+      const refusedPatch = await send(context, 'PATCH', `${charactersPath}/${created.json.id}`, { [oldKey]: 'x' });
+      assert.equal(refusedPatch.status, 400);
+      assert.match(refusedPatch.json.error, new RegExp(oldKey));
+    }
+    const listed = (await send(context, 'GET', charactersPath)).json.items;
+    assert.equal(listed.length, 1);
+    assert.equal(listed[0].card.hair, 'red');
   });
 
   it('PUT /api/settings saves an unchecked model with a warning and an unchanged slot sends no request', async () => {
@@ -2657,10 +2765,10 @@ describe('Model availability over HTTP', () => {
     const afterCreates = context.fake.providerRequests.length;
     const maya = served.json;
     const patchPath = `${charactersPath}/${maya.id}`;
-    const unchanged = await send(context, 'PATCH', patchPath, { modelOverride: ' ok/model ', persona: 'Sharp.' });
+    const unchanged = await send(context, 'PATCH', patchPath, { modelOverride: ' ok/model ', card: { personalitySummary: 'Sharp.' } });
     assert.equal(unchanged.status, 200);
     assert.deepEqual(unchanged.json.warnings, []);
-    const noOverrideKey = await send(context, 'PATCH', patchPath, { persona: 'Sharper.' });
+    const noOverrideKey = await send(context, 'PATCH', patchPath, { card: { personalitySummary: 'Sharper.' } });
     assert.equal(noOverrideKey.status, 200);
     assert.deepEqual(noOverrideKey.json.warnings, []);
     assert.equal(context.fake.providerRequests.length, afterCreates);

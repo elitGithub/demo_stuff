@@ -904,6 +904,42 @@ function createDrawerHarness() {
   return { drawer, drawerEl, documentRef, shell };
 }
 
+/**
+ * @param {string} styleSource
+ * @returns {Array<{selector: string, atRules: Array<string>, body: string}>}
+ * @throws {Error}
+ */
+function parseCssRules(styleSource) {
+  const cssText = styleSource.replace(/\/\*[\s\S]*?\*\//g, '');
+  const rules = [];
+  const frames = [];
+  let preludeStart = 0;
+  for (let index = 0; index < cssText.length; index += 1) {
+    const character = cssText[index];
+    if (character === '{') {
+      const prelude = cssText.slice(preludeStart, index).trim().replace(/\s+/g, ' ');
+      const atRules = frames.filter((frame) => frame.isAtRule).map((frame) => frame.prelude);
+      frames.push({ prelude, isAtRule: prelude.startsWith('@'), atRules, bodyStart: index + 1 });
+      preludeStart = index + 1;
+    } else if (character === '}') {
+      if (frames.length === 0) {
+        throw new Error(`Unbalanced closing brace at offset ${index}.`);
+      }
+      const frame = frames.pop();
+      if (!frame.isAtRule) {
+        rules.push({ selector: frame.prelude, atRules: frame.atRules, body: cssText.slice(frame.bodyStart, index) });
+      }
+      preludeStart = index + 1;
+    } else if (character === ';') {
+      preludeStart = index + 1;
+    }
+  }
+  if (frames.length > 0) {
+    throw new Error('Unbalanced opening brace at the end of the stylesheet.');
+  }
+  return rules;
+}
+
 describe('Static Screen-Law, Security, and Code-Law Audit across public/**', () => {
   it('verifies zero inline styles, zero raw colors in html/mjs, zero innerHTML, zero emojis, and complete CSS tokens', () => {
     const publicFiles = listFilesRecursively(PublicDirPath);
@@ -1297,7 +1333,7 @@ describe('DOM XSS escaping, Screen-Law button order, and interactive workflows',
           slug: 'lize',
           name: xssImg,
           tier: 'main',
-          persona: xssScript,
+          card: { personalitySummary: xssScript },
           avatarToken: 'rose',
           avatarInitials: 'LZ',
           isPlayer: false,
@@ -2145,6 +2181,49 @@ describe('Browser model catalog: boot, races, dropdowns, status lines, alerts an
     assert.equal(directorPicker.value, '');
   });
 
+  it('sends only the two textarea card fields on edit, never filedFactIds, persona or voiceNotes', async () => {
+    const storedCard = {
+      hair: 'red',
+      speechExamples: ['Well, then.'],
+      filedFactIds: { hair: 'F1' },
+      personalitySummary: 'Old summary.',
+      speakingStyle: 'Old style.',
+    };
+    const { modalRoot, savedPayloads } = createModalHarness({
+      character: { id: 'char-1', name: 'Maya', slug: 'maya', tier: 'main', card: storedCard },
+    });
+    assert.equal(modalRoot.querySelector('#char-persona-input').value, 'Old summary.');
+    assert.equal(modalRoot.querySelector('#char-voice-input').value, 'Old style.');
+
+    const personaInput = modalRoot.querySelector('#char-persona-input');
+    personaInput.value = 'New summary.';
+    await personaInput.dispatchEvent('input');
+    await modalRoot.querySelector('form').dispatchEvent('submit');
+
+    assert.equal(savedPayloads.length, 1);
+    assert.deepEqual(savedPayloads[0].card, {
+      personalitySummary: 'New summary.',
+      speakingStyle: 'Old style.',
+    });
+    assert.equal(Object.hasOwn(savedPayloads[0], 'persona'), false);
+    assert.equal(Object.hasOwn(savedPayloads[0], 'voiceNotes'), false);
+    assert.equal(storedCard.personalitySummary, 'Old summary.');
+  });
+
+  it('sends a card with only the two textarea fields when a new character is created', async () => {
+    const { modalRoot, savedPayloads } = createModalHarness();
+    const nameInput = modalRoot.querySelector('#char-name-input');
+    nameInput.value = 'Newcomer';
+    await nameInput.dispatchEvent('input');
+    const voiceInput = modalRoot.querySelector('#char-voice-input');
+    voiceInput.value = 'Slow and low.';
+    await voiceInput.dispatchEvent('input');
+    await modalRoot.querySelector('form').dispatchEvent('submit');
+
+    assert.equal(savedPayloads.length, 1);
+    assert.deepEqual(savedPayloads[0].card, { personalitySummary: '', speakingStyle: 'Slow and low.' });
+  });
+
   it('shows the four status line texts, the loading state, and the warning and danger alerts in Settings and in the Character modal', async () => {
     const { drawer, drawerEl, documentRef, shell } = createDrawerHarness();
     const modalRoot = shell.querySelector('#modal-root');
@@ -2251,6 +2330,50 @@ describe('Browser model catalog: boot, races, dropdowns, status lines, alerts an
     assert.deepEqual(listAlertTexts(drawerEl, 'is-warning'), []);
   });
 
+  it('keeps the shown Settings warnings through Clear saved key in the real app while the clear still saves and updates the top bar, and clears them only on a Settings Save that returns none', async () => {
+    const warningText = 'The director slot model vendor/model-001 could not be checked: HTTP 500.';
+    let nextWarnings = [warningText];
+    const harness = createBrowserHarness({
+      settingsPutHandler: (request) => {
+        const isClear = request.body.openRouterApiKey === null;
+        return {
+          status: 200,
+          body: {
+            ...buildBrowserSettings(),
+            ...request.body,
+            apiKey: isClear ? { configured: false, source: 'none' } : { configured: true, source: 'secrets' },
+            dailyWarnUsd: isClear ? 0 : null,
+            warnings: nextWarnings,
+          },
+        };
+      },
+    });
+    const { shell } = harness;
+    await harness.app.init();
+    const drawerEl = shell.querySelector('#inspector-drawer');
+    const spendBanner = shell.querySelector('#spend-warning-banner');
+    await findButton(drawerEl, 'Settings').dispatchEvent('click');
+    await waitUntil(() => listMetaTexts(drawerEl).includes('OpenRouter models: 2 · Cached 2026-11-25T12:00:00.000Z'));
+
+    await drawerEl.querySelector('form').dispatchEvent('submit');
+    assert.deepEqual(listAlertTexts(drawerEl, 'is-warning'), [warningText]);
+    assert.equal(spendBanner.classList.contains('is-hidden'), true);
+
+    nextWarnings = [];
+    await findButton(drawerEl, 'Clear saved key').dispatchEvent('click');
+    const putRequests = harness.requests.filter((request) => request.method === 'PUT');
+    assert.equal(putRequests.length, 2);
+    assert.equal(putRequests[1].body.openRouterApiKey, null);
+    assert.deepEqual(listAlertTexts(drawerEl, 'is-warning'), [warningText]);
+    assert.ok(drawerEl.textContent.includes('Saved key override cleared.'));
+    assert.ok(drawerEl.textContent.includes('Not configured'));
+    assert.equal(spendBanner.classList.contains('is-hidden'), false);
+
+    await drawerEl.querySelector('form').dispatchEvent('submit');
+    assert.deepEqual(listAlertTexts(drawerEl, 'is-warning'), []);
+    assert.deepEqual(harness.unexpected, []);
+  });
+
   it('scrolls the first save warning into view after a warned save in Settings and in the Character modal, and does not scroll after a save without warnings', async () => {
     const settingsWarnings = ['First settings warning.', 'Second settings warning.'];
     const characterWarnings = ['First character warning.', 'Second character warning.'];
@@ -2355,8 +2478,17 @@ describe('Browser model catalog: boot, races, dropdowns, status lines, alerts an
   it('keeps focus and caret in a Settings text field, and only focus on a number field and the Pedant checkbox, across async catalog updates', () => {
     const { drawer, drawerEl, documentRef, shell } = createDrawerHarness();
     const updates = [
+      /**
+       * @returns {void}
+       */
       () => drawer.setModelCatalogLoading(true),
+      /**
+       * @returns {void}
+       */
       () => drawer.setModelCatalog(buildCatalog(2)),
+      /**
+       * @returns {void}
+       */
       () => drawer.setModelCatalogError('OpenRouter is unreachable.'),
     ];
 
@@ -2409,9 +2541,30 @@ describe('Browser model catalog: boot, races, dropdowns, status lines, alerts an
     ];
     const focusOnlyFieldIds = ['char-tier-select', 'char-player-checkbox', 'char-model-picker'];
     const catalogUpdates = [
-      ['setModelCatalogLoading', (modal) => modal.setModelCatalogLoading(true)],
-      ['setModelCatalog', (modal) => modal.setModelCatalog(buildCatalog(3))],
-      ['setModelCatalogError', (modal) => modal.setModelCatalogError('OpenRouter is unreachable.')],
+      [
+        'setModelCatalogLoading',
+        /**
+         * @param {CharacterModal} modal
+         * @returns {void}
+         */
+        (modal) => modal.setModelCatalogLoading(true),
+      ],
+      [
+        'setModelCatalog',
+        /**
+         * @param {CharacterModal} modal
+         * @returns {void}
+         */
+        (modal) => modal.setModelCatalog(buildCatalog(3)),
+      ],
+      [
+        'setModelCatalogError',
+        /**
+         * @param {CharacterModal} modal
+         * @returns {void}
+         */
+        (modal) => modal.setModelCatalogError('OpenRouter is unreachable.'),
+      ],
     ];
 
     const opened = createModalHarness();
@@ -2489,7 +2642,7 @@ describe('Browser model catalog: boot, races, dropdowns, status lines, alerts an
 
   it('shows only the filtered matches in the Character modal, selects the empty option and keeps the saved ID when the filter hides it, with the option text of ruling 21', async () => {
     const { modalRoot, savedPayloads } = createModalHarness({
-      character: { id: 'char-1', name: 'Maya', slug: 'maya', tier: 'main', modelOverride: 'vendor/model-001' },
+      character: { id: 'char-1', name: 'Maya', slug: 'maya', tier: 'main', modelOverride: 'vendor/model-001', card: { personalitySummary: '', speakingStyle: '' } },
       catalog: buildCatalog(75),
     });
     const picker = modalRoot.querySelector('#char-model-picker');
@@ -2518,6 +2671,9 @@ describe('Browser model catalog: boot, races, dropdowns, status lines, alerts an
 
     filterInput.value = 'model-07';
     await filterInput.dispatchEvent('input');
+    picker.value = 'vendor/model-070';
+    await picker.dispatchEvent('change');
+    assert.equal(modalRoot.querySelector('#char-model-input').value, 'vendor/model-070');
     picker.value = '';
     await picker.dispatchEvent('change');
     assert.equal(modalRoot.querySelector('#char-model-input').value, '');
@@ -2609,8 +2765,17 @@ describe('Browser model catalog: boot, races, dropdowns, status lines, alerts an
     settingsBody.scrollTop = 640;
 
     for (const applyUpdate of [
+      /**
+       * @returns {void}
+       */
       () => drawer.setModelCatalogLoading(true),
+      /**
+       * @returns {void}
+       */
       () => drawer.setModelCatalog(buildCatalog(3)),
+      /**
+       * @returns {void}
+       */
       () => drawer.setModelCatalogError('OpenRouter is unreachable.'),
     ]) {
       applyUpdate();
@@ -2618,6 +2783,323 @@ describe('Browser model catalog: boot, races, dropdowns, status lines, alerts an
       assert.notEqual(refreshedBody, settingsBody);
       assert.equal(refreshedBody.scrollTop, 640);
     }
+  });
+
+  /**
+   * @returns {Promise<{harness: object, drawerEl: object, toggleButton: object, refreshAnswers: Array<{resolve: (value: any) => void}>}>}
+   * @throws {Error}
+   */
+  async function openSettingsApp() {
+    const refreshAnswers = [];
+    const harness = createBrowserHarness({
+      refreshHandler: () => {
+        const answer = createDeferred();
+        refreshAnswers.push(answer);
+        return answer.promise;
+      },
+    });
+    await harness.app.init();
+    const drawerEl = harness.shell.querySelector('#inspector-drawer');
+    const toggleButton = harness.shell.querySelector('#inspector-toggle-btn');
+    await toggleButton.dispatchEvent('click');
+    await findButton(drawerEl, 'Settings').dispatchEvent('click');
+    const firstRender = drawerEl.querySelector('#settings-model-filter');
+    await waitUntil(() => drawerEl.querySelector('#settings-model-filter') !== firstRender);
+    await waitUntil(() => listMetaTexts(drawerEl).includes('OpenRouter models: 2 · Cached 2026-11-25T12:00:00.000Z'));
+    return { harness, drawerEl, toggleButton, refreshAnswers };
+  }
+
+  it('hides the closed drawer in the stylesheet below 960 px after its slide-out and keeps the docked drawer visible from 960 px', () => {
+    const stylesCss = fs.readFileSync(path.join(PublicDirPath, 'styles.css'), 'utf8');
+    const wideBlock = '@media (min-width: 960px)';
+    const rules = parseCssRules(stylesCss);
+
+    const rootRules = rules.filter((rule) => rule.selector === ':root' && rule.atRules.length === 0);
+    assert.equal(rootRules.length, 1);
+    const durationDeclaration = /--transition-fast-duration\s*:/;
+    const durationRules = rules.filter((rule) => durationDeclaration.test(rule.body));
+    assert.deepEqual(durationRules, [rootRules[0]]);
+    assert.equal(rootRules[0].body.match(/--transition-fast-duration\s*:/g).length, 1);
+    const durationMatch = /--transition-fast-duration:\s*(\d+)ms;/.exec(rootRules[0].body);
+    assert.notEqual(durationMatch, null);
+    assert.ok(Number(durationMatch[1]) > 0);
+    assert.match(rootRules[0].body, /--transition-fast:\s*var\(--transition-fast-duration\) ease;/);
+
+    const hiddenRules = rules.filter((rule) => rule.selector === '.inspector-drawer' && rule.atRules.length === 0);
+    assert.equal(hiddenRules.length, 1);
+    assert.match(hiddenRules[0].body, /visibility:\s*hidden;/);
+    const hiddenTransition = /transition:\s*([^;]+);/.exec(hiddenRules[0].body);
+    assert.notEqual(hiddenTransition, null);
+    assert.ok(hiddenTransition[1].includes('transform var(--transition-fast)'));
+    assert.ok(hiddenTransition[1].includes('visibility 0s linear var(--transition-fast-duration)'));
+
+    const openRules = rules.filter((rule) => rule.selector === '.inspector-drawer.is-open' && rule.atRules.length === 0);
+    assert.equal(openRules.length, 1);
+    assert.match(openRules[0].body, /visibility:\s*visible;/);
+    assert.match(openRules[0].body, /transition:[^;]*visibility 0s linear 0s/);
+
+    const wideRules = rules.filter((rule) => {
+      return rule.selector === '.inspector-drawer' && rule.atRules.length === 1 && rule.atRules[0] === wideBlock;
+    });
+    assert.equal(wideRules.length, 1);
+    assert.match(wideRules[0].body, /visibility:\s*visible;/);
+
+    const transitionShorthand = /(^|[\s;])transition\s*:/g;
+    const transitionLonghand = /(^|[\s;])transition-[a-z-]+\s*:/;
+    for (const topRule of [hiddenRules[0], openRules[0]]) {
+      assert.equal(topRule.body.match(transitionShorthand).length, 1, topRule.selector);
+      assert.doesNotMatch(topRule.body, transitionLonghand, topRule.selector);
+    }
+
+    const allowedDrawerRules = [hiddenRules[0], openRules[0], wideRules[0]];
+    const drawerRules = rules.filter((rule) => {
+      return rule.selector.includes('.inspector-drawer') || rule.selector.includes('#inspector-drawer');
+    });
+    const otherDrawerRules = drawerRules.filter((rule) => !allowedDrawerRules.includes(rule));
+    assert.ok(otherDrawerRules.length > 0);
+    for (const otherRule of otherDrawerRules) {
+      assert.doesNotMatch(otherRule.body, /(^|[\s;])(visibility|transition(-[a-z-]+)?)\s*:/, otherRule.selector);
+    }
+
+    const reducedRules = rules.filter((rule) => {
+      return rule.selector === '*, *::before, *::after'
+        && rule.atRules.length === 1
+        && rule.atRules[0] === '@media (prefers-reduced-motion: reduce)';
+    });
+    assert.equal(reducedRules.length, 1);
+    assert.match(reducedRules[0].body, /transition-delay:\s*0s !important;/);
+  });
+
+  it('keeps focus and caret in the Settings filter when Escape closes the drawer on a wide screen', async () => {
+    const { harness, drawerEl, toggleButton } = await openSettingsApp();
+    const { documentRef } = harness;
+    const filterField = drawerEl.querySelector('#settings-model-filter');
+    filterField.focus();
+    filterField.selectionStart = 2;
+    filterField.selectionEnd = 2;
+    assert.equal(toggleButton.getAttribute('aria-expanded'), 'true');
+    assert.equal(drawerEl.classList.contains('is-open'), true);
+
+    await documentRef.dispatchKeydown('Escape');
+
+    assert.equal(toggleButton.getAttribute('aria-expanded'), 'false');
+    assert.equal(drawerEl.classList.contains('is-open'), false);
+    assert.equal(documentRef.activeElement, filterField);
+    assert.equal(filterField.selectionStart, 2);
+  });
+
+  it('returns focus to Refresh when the load ends after Escape closed the drawer on a wide screen', async () => {
+    const { harness, drawerEl, toggleButton, refreshAnswers } = await openSettingsApp();
+    const { documentRef } = harness;
+    const refreshButton = drawerEl.querySelector('#settings-refresh-models');
+    refreshButton.focus();
+    const pendingClick = refreshButton.dispatchEvent('click');
+    await waitUntil(() => refreshAnswers.length === 1);
+    assert.equal(documentRef.activeElement, documentRef.body);
+
+    await documentRef.dispatchKeydown('Escape');
+    assert.equal(toggleButton.getAttribute('aria-expanded'), 'false');
+    assert.equal(drawerEl.classList.contains('is-open'), false);
+    refreshAnswers[0].resolve({ status: 200, body: buildCatalog(3) });
+    await pendingClick;
+
+    assert.equal(documentRef.activeElement, drawerEl.querySelector('#settings-refresh-models'));
+  });
+
+  it('keeps focus and caret on a catalog update and returns focus to Refresh for a drawer that was never opened, as on a wide screen', async () => {
+    const { drawer, drawerEl, documentRef } = createDrawerHarness();
+    assert.equal(drawer.isOpen(), false);
+
+    const filterField = drawerEl.querySelector('#settings-model-filter');
+    filterField.focus();
+    filterField.selectionStart = 2;
+    filterField.selectionEnd = 2;
+    drawer.setModelCatalog(buildCatalog(3));
+    const restoredFilter = drawerEl.querySelector('#settings-model-filter');
+    assert.notEqual(restoredFilter, filterField);
+    assert.equal(documentRef.activeElement, restoredFilter);
+    assert.equal(restoredFilter.selectionStart, 2);
+
+    const refreshButton = drawerEl.querySelector('#settings-refresh-models');
+    refreshButton.focus();
+    await refreshButton.dispatchEvent('click');
+    drawer.setModelCatalogLoading(true);
+    drawer.setModelCatalog(buildCatalog(3));
+    assert.equal(documentRef.activeElement, drawerEl.querySelector('#settings-refresh-models'));
+  });
+
+  it('keeps focus on every Settings drawer button, the header Close, the five tabs, Apply suggested defaults, Clear saved key, Cancel and Save, across each catalog update', () => {
+    const tabIds = ['scene', 'cast', 'memory', 'findings', 'settings'];
+    const buttonIds = [
+      'drawer-close',
+      ...tabIds.map((tabId) => `drawer-tab-${tabId}`),
+      'settings-apply-defaults',
+      'settings-clear-key',
+      'settings-cancel',
+      'settings-save',
+    ];
+    const catalogUpdates = [
+      [
+        'setModelCatalogLoading',
+        /**
+         * @param {InspectorDrawer} drawer
+         * @returns {void}
+         */
+        (drawer) => drawer.setModelCatalogLoading(true),
+      ],
+      [
+        'setModelCatalog',
+        /**
+         * @param {InspectorDrawer} drawer
+         * @returns {void}
+         */
+        (drawer) => drawer.setModelCatalog(buildCatalog(3)),
+      ],
+      [
+        'setModelCatalogError',
+        /**
+         * @param {InspectorDrawer} drawer
+         * @returns {void}
+         */
+        (drawer) => drawer.setModelCatalogError('OpenRouter is unreachable.'),
+      ],
+    ];
+    const { drawer, drawerEl, documentRef } = createDrawerHarness();
+    drawer.setSettings({ ...buildBrowserSettings(), apiKey: { configured: true, source: 'secrets' } });
+
+    for (const [updateName, applyUpdate] of catalogUpdates) {
+      for (const buttonId of buttonIds) {
+        const label = `${updateName} on ${buttonId}`;
+        const button = drawerEl.querySelector(`#${buttonId}`);
+        assert.notEqual(button, null, label);
+        button.focus();
+        assert.equal(documentRef.activeElement, button, label);
+        applyUpdate(drawer);
+        const restored = drawerEl.querySelector(`#${buttonId}`);
+        assert.notEqual(restored, button, label);
+        assert.equal(documentRef.activeElement, restored, label);
+      }
+    }
+  });
+
+  it('keeps focus on the Character modal Close, Cancel, Save and avatar buttons across each catalog update', () => {
+    const avatarTokens = ['sage', 'rose', 'amber', 'slate', 'plum', 'teal', 'indigo', 'coral'];
+    const buttonIds = [
+      'char-modal-close',
+      'char-modal-cancel',
+      'char-modal-save',
+      ...avatarTokens.map((token) => `char-avatar-${token}`),
+    ];
+    const catalogUpdates = [
+      [
+        'setModelCatalogLoading',
+        /**
+         * @param {CharacterModal} modal
+         * @returns {void}
+         */
+        (modal) => modal.setModelCatalogLoading(true),
+      ],
+      [
+        'setModelCatalog',
+        /**
+         * @param {CharacterModal} modal
+         * @returns {void}
+         */
+        (modal) => modal.setModelCatalog(buildCatalog(3)),
+      ],
+      [
+        'setModelCatalogError',
+        /**
+         * @param {CharacterModal} modal
+         * @returns {void}
+         */
+        (modal) => modal.setModelCatalogError('OpenRouter is unreachable.'),
+      ],
+    ];
+    const { modal, modalRoot, documentRef } = createModalHarness();
+
+    for (const [updateName, applyUpdate] of catalogUpdates) {
+      for (const buttonId of buttonIds) {
+        const label = `${updateName} on ${buttonId}`;
+        const button = modalRoot.querySelector(`#${buttonId}`);
+        assert.notEqual(button, null, label);
+        button.focus();
+        assert.equal(documentRef.activeElement, button, label);
+        applyUpdate(modal);
+        const restored = modalRoot.querySelector(`#${buttonId}`);
+        assert.notEqual(restored, button, label);
+        assert.equal(documentRef.activeElement, restored, label);
+      }
+    }
+  });
+
+  /**
+   * @param {{documentRef: object, shell: object, containerElement: object, refreshSelector: string, setLoading: () => void, setCatalog: () => void, setError: () => void}} options
+   * @returns {Promise<void>}
+   * @throws {Error}
+   */
+  async function verifyRefreshReturnFlag({ documentRef, shell, containerElement, refreshSelector, setLoading, setCatalog, setError }) {
+    const refreshButton = containerElement.querySelector(refreshSelector);
+    refreshButton.focus();
+    await refreshButton.dispatchEvent('click');
+    setLoading();
+    setCatalog();
+    assert.equal(documentRef.activeElement, containerElement.querySelector(refreshSelector));
+    for (const [endName, endLoad] of [['catalog', setCatalog], ['error', setError]]) {
+      setLoading();
+      assert.equal(documentRef.activeElement, documentRef.body, endName);
+      endLoad();
+      assert.equal(documentRef.activeElement, documentRef.body, endName);
+    }
+
+    const outsideField = documentRef.createElement('input');
+    outsideField.id = 'outside-field';
+    shell.append(outsideField);
+    for (const [endName, endLoad] of [['catalog', setCatalog], ['error', setError]]) {
+      await containerElement.querySelector(refreshSelector).dispatchEvent('click');
+      setLoading();
+      outsideField.focus();
+      endLoad();
+      assert.equal(documentRef.activeElement, outsideField, endName);
+      assert.equal(containerElement.contains(documentRef.activeElement), false, endName);
+    }
+  }
+
+  it('never pulls in focus that sits outside the container on a Refresh return, and returns focus once per click, in Settings and in the Character modal', async () => {
+    const drawerHarness = createDrawerHarness();
+    await verifyRefreshReturnFlag({
+      documentRef: drawerHarness.documentRef,
+      shell: drawerHarness.shell,
+      containerElement: drawerHarness.drawerEl,
+      refreshSelector: '#settings-refresh-models',
+      setLoading: () => drawerHarness.drawer.setModelCatalogLoading(true),
+      setCatalog: () => drawerHarness.drawer.setModelCatalog(buildCatalog(3)),
+      setError: () => drawerHarness.drawer.setModelCatalogError('OpenRouter is unreachable.'),
+    });
+
+    const modalHarness = createModalHarness();
+    await verifyRefreshReturnFlag({
+      documentRef: modalHarness.documentRef,
+      shell: modalHarness.shell,
+      containerElement: modalHarness.modalRoot,
+      refreshSelector: '#char-refresh-models',
+      setLoading: () => modalHarness.modal.setModelCatalogLoading(true),
+      setCatalog: () => modalHarness.modal.setModelCatalog(buildCatalog(3)),
+      setError: () => modalHarness.modal.setModelCatalogError('OpenRouter is unreachable.'),
+    });
+  });
+
+  it('clears the pending Settings Refresh flag when the load ends while another tab is active', async () => {
+    const { drawer, drawerEl, documentRef } = createDrawerHarness();
+    await drawerEl.querySelector('#settings-refresh-models').dispatchEvent('click');
+    drawer.setModelCatalogLoading(true);
+    drawer.setTab('scene');
+    drawer.setModelCatalog(buildCatalog(3));
+    drawer.setTab('settings');
+    drawer.setModelCatalogLoading(true);
+    drawer.setModelCatalogError('later error');
+    assert.equal(documentRef.activeElement, documentRef.body);
+    assert.equal(drawerEl.contains(documentRef.activeElement), false);
   });
 
   /**

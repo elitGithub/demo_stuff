@@ -4,6 +4,8 @@ import os from 'node:os';
 import path from 'node:path';
 import { DatabaseSync } from 'node:sqlite';
 import { after, describe, it } from 'node:test';
+import { CharacterCard } from '../src/store/CharacterCard.mjs';
+import { SchemaUpgrades } from '../src/store/SchemaUpgrades.mjs';
 import { AvatarToken } from '../src/store/enums/AvatarToken.mjs';
 import { CharacterTier } from '../src/store/enums/CharacterTier.mjs';
 import { FindingKind } from '../src/store/enums/FindingKind.mjs';
@@ -84,9 +86,11 @@ describe('SqliteStore settings and campaigns', () => {
         models: { director: '', composer: '', main: '', recurring: '', scribe: '' },
         publicOdds: 8,
         privateOdds: 30,
-        scribeInterval: 10,
+        scribeInterval: 1,
         pedantEnabled: true,
         dailyWarnUsd: null,
+        maxRepliesPerCharacter: 1,
+        replyReserve: 3000,
       });
 
       const updated = store.updateSettings({
@@ -124,6 +128,17 @@ describe('SqliteStore settings and campaigns', () => {
       assert.throws(() => store.updateSettings({ dailyWarnUsd: Number.NaN }), RangeError);
       assert.throws(() => store.updateSettings({ dailyWarnUsd: -0.01 }), RangeError);
       assert.throws(() => store.updateSettings({ models: { unknown: 'x' } }), RangeError);
+      for (const invalidValue of [0, 1.5, '3', null, -2]) {
+        assert.throws(() => store.updateSettings({ maxRepliesPerCharacter: invalidValue }), RangeError);
+        assert.throws(() => store.updateSettings({ replyReserve: invalidValue }), RangeError);
+      }
+      const reply = store.updateSettings({ maxRepliesPerCharacter: 2, replyReserve: 4096 });
+      assert.equal(reply.maxRepliesPerCharacter, 2);
+      assert.equal(reply.replyReserve, 4096);
+      assert.equal(store.updateSettings({ maxRepliesPerCharacter: 5 }).maxRepliesPerCharacter, 5);
+      assert.throws(() => store.updateSettings({ maxRepliesPerCharacter: 6 }), RangeError);
+      assert.equal(store.updateSettings({ replyReserve: 1000000 }).replyReserve, 1000000);
+      assert.equal(store.getSettings().maxRepliesPerCharacter, 5);
     } finally {
       store.close();
     }
@@ -1117,5 +1132,621 @@ describe('SqliteStore findings, spend aggregation, and vacuumInto', () => {
     } finally {
       store.close();
     }
+  });
+});
+
+const VERSION_ZERO_FIXTURE = `
+CREATE TABLE campaigns (
+  id TEXT PRIMARY KEY,
+  title TEXT NOT NULL CHECK (length(trim(title)) > 0),
+  premise TEXT NOT NULL DEFAULT '',
+  style_notes TEXT NOT NULL DEFAULT '',
+  player_character_id TEXT REFERENCES characters(id) ON DELETE SET NULL,
+  scene_state_json TEXT NOT NULL,
+  encounter_public_odds INTEGER NOT NULL DEFAULT 8 CHECK (encounter_public_odds >= 0),
+  encounter_private_odds INTEGER NOT NULL DEFAULT 30 CHECK (encounter_private_odds >= 0),
+  scribe_interval INTEGER NOT NULL DEFAULT 10 CHECK (scribe_interval >= 0),
+  created_at TEXT NOT NULL,
+  updated_at TEXT NOT NULL
+);
+
+CREATE TABLE characters (
+  id TEXT PRIMARY KEY,
+  campaign_id TEXT NOT NULL REFERENCES campaigns(id) ON DELETE CASCADE,
+  slug TEXT NOT NULL CHECK (length(slug) > 0),
+  scribe_subject_id TEXT,
+  name TEXT NOT NULL CHECK (length(trim(name)) > 0),
+  aliases_json TEXT NOT NULL DEFAULT '[]',
+  is_player INTEGER NOT NULL DEFAULT 0 CHECK (is_player IN (0, 1)),
+  tier TEXT NOT NULL CHECK (tier IN ('main', 'recurring')),
+  model_override TEXT,
+  persona TEXT NOT NULL DEFAULT '',
+  voice_notes TEXT NOT NULL DEFAULT '',
+  avatar_token TEXT NOT NULL CHECK (avatar_token IN ('sage', 'rose', 'amber', 'slate', 'plum', 'teal', 'indigo', 'coral')),
+  avatar_initials TEXT NOT NULL CHECK (length(trim(avatar_initials)) > 0),
+  archived INTEGER NOT NULL DEFAULT 0 CHECK (archived IN (0, 1)),
+  created_at TEXT NOT NULL,
+  updated_at TEXT NOT NULL,
+  UNIQUE (campaign_id, slug)
+);
+
+CREATE TABLE turns (
+  id TEXT PRIMARY KEY,
+  campaign_id TEXT NOT NULL REFERENCES campaigns(id) ON DELETE CASCADE,
+  seq INTEGER NOT NULL CHECK (seq > 0),
+  role TEXT NOT NULL CHECK (role IN ('user', 'assistant')),
+  mode TEXT NOT NULL CHECK (mode IN ('normal', 'narrator', 'encounter')),
+  raw_text TEXT NOT NULL,
+  ooc_nudge TEXT,
+  scene_number INTEGER NOT NULL CHECK (scene_number >= 1),
+  witness_ids_json TEXT NOT NULL DEFAULT '[]',
+  scene_state_before_json TEXT,
+  scene_state_after_json TEXT,
+  director_plan_json TEXT,
+  truncated INTEGER NOT NULL DEFAULT 0 CHECK (truncated IN (0, 1)),
+  created_at TEXT NOT NULL,
+  UNIQUE (campaign_id, seq)
+);
+
+CREATE TABLE spend_log (
+  id TEXT PRIMARY KEY,
+  campaign_id TEXT REFERENCES campaigns(id) ON DELETE SET NULL,
+  turn_id TEXT REFERENCES turns(id) ON DELETE SET NULL,
+  stage TEXT NOT NULL CHECK (stage IN ('director', 'mind', 'composer', 'scribe', 'pedant', 'muse')),
+  model TEXT NOT NULL CHECK (length(trim(model)) > 0),
+  prompt_tokens INTEGER NOT NULL DEFAULT 0 CHECK (prompt_tokens >= 0),
+  completion_tokens INTEGER NOT NULL DEFAULT 0 CHECK (completion_tokens >= 0),
+  cost_usd REAL CHECK (cost_usd IS NULL OR cost_usd >= 0),
+  created_at TEXT NOT NULL
+);
+`;
+
+const VERSION_ZERO_CAMPAIGN_ID = 'campaign-old';
+const VERSION_ZERO_TIMESTAMP = '2026-01-01T00:00:00.000Z';
+
+/**
+ * @param {string} extraSql
+ * @returns {string}
+ * @throws {Error}
+ */
+function buildVersionZeroDatabase(extraSql = '') {
+  const tempDir = fs.mkdtempSync(path.join(os.tmpdir(), 'worlds-store-upgrade-test-'));
+  tempDirs.push(tempDir);
+  const dbPath = path.join(tempDir, 'old.sqlite');
+  const rawDb = new DatabaseSync(dbPath);
+  try {
+    rawDb.exec(VERSION_ZERO_FIXTURE);
+    rawDb.prepare(
+      `INSERT INTO campaigns (id, title, scene_state_json, created_at, updated_at)
+       VALUES (?, 'Old Campaign', '{}', ?, ?)`,
+    ).run(VERSION_ZERO_CAMPAIGN_ID, VERSION_ZERO_TIMESTAMP, VERSION_ZERO_TIMESTAMP);
+    const insertCharacter = rawDb.prepare(
+      `INSERT INTO characters (
+        id, campaign_id, slug, name, tier, persona, voice_notes, avatar_token, avatar_initials, created_at, updated_at
+      ) VALUES (?, ?, ?, ?, 'main', ?, ?, 'sage', 'OL', ?, ?)`,
+    );
+    insertCharacter.run(
+      'char-old-1', VERSION_ZERO_CAMPAIGN_ID, 'old-one', 'Old One', 'Wary scout.', 'Terse.',
+      VERSION_ZERO_TIMESTAMP, VERSION_ZERO_TIMESTAMP,
+    );
+    insertCharacter.run(
+      'char-old-2', VERSION_ZERO_CAMPAIGN_ID, 'old-two', 'Old Two', '', 'Warm and blunt.',
+      VERSION_ZERO_TIMESTAMP, VERSION_ZERO_TIMESTAMP,
+    );
+    rawDb.prepare(
+      `INSERT INTO spend_log (id, campaign_id, stage, model, prompt_tokens, completion_tokens, created_at)
+       VALUES ('spend-old', ?, 'mind', 'old/model', 900, 50, ?)`,
+    ).run(VERSION_ZERO_CAMPAIGN_ID, VERSION_ZERO_TIMESTAMP);
+    if (extraSql.length > 0) {
+      rawDb.exec(extraSql);
+    }
+  } finally {
+    rawDb.close();
+  }
+  return dbPath;
+}
+
+/**
+ * @param {string} dbPath
+ * @returns {number}
+ * @throws {Error}
+ */
+function readUserVersion(dbPath) {
+  const rawDb = new DatabaseSync(dbPath);
+  try {
+    return Number(rawDb.prepare('PRAGMA user_version').get().user_version);
+  } finally {
+    rawDb.close();
+  }
+}
+
+describe('SqliteStore schema upgrades', () => {
+  it('upgrades a version-0 database and keeps every row', () => {
+    const dbPath = buildVersionZeroDatabase();
+    assert.equal(readUserVersion(dbPath), 0);
+
+    const firstOpen = new SqliteStore(dbPath);
+    try {
+      const characters = firstOpen.listCharacters(VERSION_ZERO_CAMPAIGN_ID).items;
+      assert.deepEqual(characters.map((character) => character.slug), ['old-one', 'old-two']);
+      assert.equal(characters[0].card.personalitySummary, 'Wary scout.');
+      assert.equal(characters[0].card.speakingStyle, 'Terse.');
+      assert.equal(characters[1].card.personalitySummary, '');
+      assert.equal(characters[1].card.speakingStyle, 'Warm and blunt.');
+      assert.equal(characters[0].card.hair, '');
+      assert.deepEqual(characters[0].card.speechExamples, []);
+      assert.equal(Object.hasOwn(characters[0], 'persona'), false);
+      assert.equal(Object.hasOwn(characters[0], 'voiceNotes'), false);
+      assert.equal(firstOpen.lowestCharsPerToken('old/model'), null);
+      assert.equal(firstOpen.getCampaign(VERSION_ZERO_CAMPAIGN_ID).title, 'Old Campaign');
+    } finally {
+      firstOpen.close();
+    }
+    assert.equal(readUserVersion(dbPath), 1);
+
+    const rawDb = new DatabaseSync(dbPath);
+    try {
+      const spendColumns = rawDb.prepare('PRAGMA table_info(spend_log)').all().map((column) => column.name);
+      assert.ok(spendColumns.includes('prompt_chars'));
+      const spendRows = rawDb.prepare('SELECT id, prompt_chars, prompt_tokens FROM spend_log').all();
+      assert.deepEqual(spendRows.map((row) => ({ ...row })), [{ id: 'spend-old', prompt_chars: null, prompt_tokens: 900 }]);
+      const legacy = rawDb.prepare('SELECT persona, voice_notes FROM characters WHERE id = ?').get('char-old-1');
+      assert.equal(legacy.persona, 'Wary scout.');
+      assert.equal(legacy.voice_notes, 'Terse.');
+    } finally {
+      rawDb.close();
+    }
+
+    const secondOpen = new SqliteStore(dbPath);
+    try {
+      const characters = secondOpen.listCharacters(VERSION_ZERO_CAMPAIGN_ID).items;
+      assert.equal(characters.length, 2);
+      assert.equal(characters[0].card.personalitySummary, 'Wary scout.');
+      assert.equal(secondOpen.getLocalChangeSeq(), 0);
+    } finally {
+      secondOpen.close();
+    }
+    assert.equal(readUserVersion(dbPath), 1);
+  });
+
+  it('rolls the whole upgrade back when the fill step fails and succeeds once the data is repaired', () => {
+    const dbPath = buildVersionZeroDatabase("UPDATE characters SET persona = x'0102' WHERE id = 'char-old-2'");
+    assert.throws(() => new SqliteStore(dbPath), /personalitySummary/);
+    assert.equal(readUserVersion(dbPath), 0);
+    const rawDb = new DatabaseSync(dbPath);
+    try {
+      const characterColumns = rawDb.prepare('PRAGMA table_info(characters)').all().map((column) => column.name);
+      assert.equal(characterColumns.includes('card_json'), false);
+      const spendColumns = rawDb.prepare('PRAGMA table_info(spend_log)').all().map((column) => column.name);
+      assert.equal(spendColumns.includes('prompt_chars'), false);
+      assert.equal(rawDb.prepare('SELECT COUNT(*) AS total FROM characters').get().total, 2);
+      rawDb.exec("UPDATE characters SET persona = 'Fixed.' WHERE id = 'char-old-2'");
+    } finally {
+      rawDb.close();
+    }
+    const store = new SqliteStore(dbPath);
+    try {
+      assert.equal(store.getCharacter(VERSION_ZERO_CAMPAIGN_ID, 'char-old-2').card.personalitySummary, 'Fixed.');
+    } finally {
+      store.close();
+    }
+    assert.equal(readUserVersion(dbPath), 1);
+  });
+
+  it('opens a database whose schema was applied but whose version write never happened', () => {
+    const tempDir = fs.mkdtempSync(path.join(os.tmpdir(), 'worlds-store-interrupted-test-'));
+    tempDirs.push(tempDir);
+    const dbPath = path.join(tempDir, 'interrupted.sqlite');
+    const schemaSql = fs.readFileSync(new URL('../src/store/schema.sql', import.meta.url), 'utf8');
+    const rawDb = new DatabaseSync(dbPath);
+    try {
+      rawDb.exec(schemaSql);
+      rawDb.prepare(
+        `INSERT INTO campaigns (id, title, scene_state_json, created_at, updated_at)
+         VALUES ('c-1', 'Kept', '{}', ?, ?)`,
+      ).run(VERSION_ZERO_TIMESTAMP, VERSION_ZERO_TIMESTAMP);
+    } finally {
+      rawDb.close();
+    }
+    assert.equal(readUserVersion(dbPath), 0);
+
+    const store = new SqliteStore(dbPath);
+    try {
+      assert.equal(store.getCampaign('c-1').title, 'Kept');
+    } finally {
+      store.close();
+    }
+    assert.equal(readUserVersion(dbPath), 1);
+  });
+
+  it('upgrades a version-0 database that has characters but no spend_log', () => {
+    const dbPath = buildVersionZeroDatabase('DROP TABLE spend_log');
+    const store = new SqliteStore(dbPath);
+    try {
+      assert.equal(store.listCharacters(VERSION_ZERO_CAMPAIGN_ID).total, 2);
+      store.recordSpend({ stage: SpendStage.Mind, model: 'm/a', promptChars: 30, promptTokens: 10 });
+      assert.equal(store.lowestCharsPerToken('m/a'), 3);
+    } finally {
+      store.close();
+    }
+    assert.equal(readUserVersion(dbPath), 1);
+  });
+
+  it('never overwrites a card that was already written when an upgrade runs again', () => {
+    const dbPath = buildVersionZeroDatabase();
+    const first = new SqliteStore(dbPath);
+    first.updateCharacter(VERSION_ZERO_CAMPAIGN_ID, 'char-old-1', { card: { hair: 'red', personalitySummary: 'Edited.' } });
+    first.close();
+
+    const rawDb = new DatabaseSync(dbPath);
+    try {
+      rawDb.exec('PRAGMA user_version = 0');
+    } finally {
+      rawDb.close();
+    }
+    const second = new SqliteStore(dbPath);
+    try {
+      const character = second.getCharacter(VERSION_ZERO_CAMPAIGN_ID, 'char-old-1');
+      assert.equal(character.card.hair, 'red');
+      assert.equal(character.card.personalitySummary, 'Edited.');
+    } finally {
+      second.close();
+    }
+    assert.equal(readUserVersion(dbPath), 1);
+  });
+
+  it('refuses a database that is newer than this app and says so with both version numbers', () => {
+    const tempDir = fs.mkdtempSync(path.join(os.tmpdir(), 'worlds-store-newer-test-'));
+    tempDirs.push(tempDir);
+    const dbPath = path.join(tempDir, 'newer.sqlite');
+    const rawDb = new DatabaseSync(dbPath);
+    try {
+      rawDb.exec('PRAGMA journal_mode = DELETE');
+      rawDb.exec('PRAGMA user_version = 99');
+    } finally {
+      rawDb.close();
+    }
+    assert.throws(() => new SqliteStore(dbPath), /version 99 is newer than this app supports \(1\)/);
+    assert.equal(readUserVersion(dbPath), 99);
+    const inspector = new DatabaseSync(dbPath);
+    try {
+      assert.equal(inspector.prepare('PRAGMA journal_mode').get().journal_mode, 'delete');
+    } finally {
+      inspector.close();
+    }
+  });
+
+  it('creates nothing when schema.sql fails on a fresh file', () => {
+    const tempDir = fs.mkdtempSync(path.join(os.tmpdir(), 'worlds-store-atomic-test-'));
+    tempDirs.push(tempDir);
+    const dbPath = path.join(tempDir, 'atomic.sqlite');
+    const rawDb = new DatabaseSync(dbPath);
+    try {
+      rawDb.exec('CREATE TABLE beats (id TEXT PRIMARY KEY)');
+    } finally {
+      rawDb.close();
+    }
+    assert.throws(() => new SqliteStore(dbPath), /turn_id/);
+    const inspector = new DatabaseSync(dbPath);
+    try {
+      const tableNames = inspector
+        .prepare("SELECT name FROM sqlite_master WHERE type = 'table' ORDER BY name")
+        .all()
+        .map((row) => row.name);
+      assert.deepEqual(tableNames, ['beats']);
+    } finally {
+      inspector.close();
+    }
+    assert.equal(readUserVersion(dbPath), 0);
+  });
+
+  it('leaves no open handle after a failed open', () => {
+    const dbPath = buildVersionZeroDatabase("UPDATE characters SET persona = x'0102' WHERE id = 'char-old-2'");
+    const tempDir = path.dirname(dbPath);
+    for (let attempt = 0; attempt < 20; attempt += 1) {
+      assert.throws(() => new SqliteStore(dbPath), /personalitySummary/);
+    }
+    assert.deepEqual(fs.readdirSync(tempDir).filter((name) => name.endsWith('-wal')), []);
+    const writer = new DatabaseSync(dbPath);
+    try {
+      writer.exec("UPDATE campaigns SET title = 'After failures'");
+      assert.equal(writer.prepare('SELECT title FROM campaigns').get().title, 'After failures');
+    } finally {
+      writer.close();
+    }
+  });
+
+  it('a fresh database declares scribe_interval with default 1 and the newest columns', () => {
+    const tempDir = fs.mkdtempSync(path.join(os.tmpdir(), 'worlds-store-schema-test-'));
+    tempDirs.push(tempDir);
+    const dbPath = path.join(tempDir, 'schema.sqlite');
+    new SqliteStore(dbPath).close();
+    const rawDb = new DatabaseSync(dbPath);
+    try {
+      const campaignColumns = rawDb.prepare('PRAGMA table_info(campaigns)').all();
+      assert.equal(campaignColumns.find((column) => column.name === 'scribe_interval').dflt_value, '1');
+      const characterColumns = rawDb.prepare('PRAGMA table_info(characters)').all().map((column) => column.name);
+      assert.ok(characterColumns.includes('card_json'));
+      const spendColumns = rawDb.prepare('PRAGMA table_info(spend_log)').all().map((column) => column.name);
+      assert.ok(spendColumns.includes('prompt_chars'));
+    } finally {
+      rawDb.close();
+    }
+  });
+
+  it('a fresh database starts at the latest version', () => {
+    const tempDir = fs.mkdtempSync(path.join(os.tmpdir(), 'worlds-store-fresh-test-'));
+    tempDirs.push(tempDir);
+    const dbPath = path.join(tempDir, 'fresh.sqlite');
+    const store = new SqliteStore(dbPath);
+    try {
+      assert.equal(store.getSettings().scribeInterval, 1);
+      const campaign = store.createCampaign({ title: 'Fresh' });
+      assert.equal(campaign.scribeInterval, 1);
+      const character = store.createCharacter(campaign.id, { slug: 'fresh-one', name: 'Fresh One' });
+      assert.deepEqual(character.card.toObject(), CharacterCard.empty().toObject());
+    } finally {
+      store.close();
+    }
+    assert.equal(readUserVersion(dbPath), SchemaUpgrades.Latest);
+    assert.equal(SchemaUpgrades.Latest, 1);
+    assert.deepEqual(SchemaUpgrades.steps.map((step) => step.version), [1]);
+    assert.equal(Object.isFrozen(SchemaUpgrades.steps), true);
+
+    const reopened = new SqliteStore(dbPath);
+    reopened.close();
+    assert.equal(readUserVersion(dbPath), SchemaUpgrades.Latest);
+  });
+});
+
+describe('CharacterCard and character card storage', () => {
+  it('CharacterCard.fromObject refuses a number in hair and a string speechExamples', () => {
+    assert.throws(() => CharacterCard.fromObject({ hair: 5 }), (error) => {
+      return error instanceof TypeError && /hair/.test(error.message);
+    });
+    assert.throws(() => CharacterCard.fromObject({ speechExamples: 'Hello there.' }), (error) => {
+      return error instanceof TypeError && /speechExamples/.test(error.message);
+    });
+    assert.throws(() => CharacterCard.fromObject({ speechExamples: ['ok', 3] }), TypeError);
+    assert.throws(() => CharacterCard.fromObject({ persona: 'old key' }), /persona/);
+    assert.throws(() => CharacterCard.fromObject(null), TypeError);
+    assert.throws(() => CharacterCard.fromObject([]), TypeError);
+    assert.throws(() => CharacterCard.fromObject({ filedFactIds: { hair: 7 } }), /filedFactIds\.hair/);
+    assert.throws(() => CharacterCard.fromObject({ filedFactIds: { traits: 'F1' } }), /traits/);
+    assert.throws(() => CharacterCard.fromObject(JSON.parse('{"__proto__": {"x": "y"}}')), /__proto__/);
+  });
+
+  it('CharacterCard refuses sparse arrays, a direct bad constructor call, and non-plain objects', () => {
+    const sparse = [];
+    sparse[1] = 'a';
+    assert.throws(() => CharacterCard.fromObject({ speechExamples: sparse }), TypeError);
+    let hairReads = 0;
+    const shifting = {
+      get hair() {
+        hairReads += 1;
+        return hairReads === 1 ? 'red' : 5;
+      },
+    };
+    const readOnce = CharacterCard.fromObject(shifting);
+    assert.equal(readOnce.hair, 'red');
+    assert.equal(hairReads, 1);
+    let examplesReads = 0;
+    const shiftingExamples = {
+      get speechExamples() {
+        examplesReads += 1;
+        return examplesReads === 1 ? ['a'] : [5];
+      },
+    };
+    assert.deepEqual(CharacterCard.fromObject(shiftingExamples).speechExamples, ['a']);
+
+    let entryReads = 0;
+    const shiftingEntries = [];
+    Object.defineProperty(shiftingEntries, 0, {
+      enumerable: true,
+      get() {
+        entryReads += 1;
+        return entryReads === 1 ? 'a' : 5;
+      },
+    });
+    assert.deepEqual(CharacterCard.fromObject({ speechExamples: shiftingEntries }).speechExamples, ['a']);
+    assert.equal(entryReads, 1);
+
+    let filedReads = 0;
+    const shiftingFiled = {
+      get hair() {
+        filedReads += 1;
+        return filedReads === 1 ? 'F1' : 5;
+      },
+    };
+    assert.deepEqual(CharacterCard.fromObject({ filedFactIds: shiftingFiled }).filedFactIds, { hair: 'F1' });
+    assert.equal(filedReads, 1);
+
+    assert.throws(
+      () => CharacterCard.fromObject({ filedFactIds: { [Symbol('hair')]: 'F1' } }),
+      (error) => error instanceof TypeError && /filedFactIds/.test(error.message),
+    );
+    assert.throws(() => new CharacterCard({ hair: 5 }), (error) => error instanceof TypeError && /hair/.test(error.message));
+    assert.throws(() => new CharacterCard({ speechExamples: [1] }), TypeError);
+    assert.throws(() => new CharacterCard({ filedFactIds: { hair: '' } }), TypeError);
+    assert.throws(() => new CharacterCard(null), TypeError);
+    assert.throws(() => CharacterCard.fromObject(new Date()), TypeError);
+    assert.throws(() => CharacterCard.fromObject(new Map()), TypeError);
+    assert.throws(() => CharacterCard.fromObject(new (class Holder { hair = 'red'; })()), TypeError);
+    assert.throws(() => CharacterCard.fromObject({ filedFactIds: new Map() }), TypeError);
+    assert.equal(CharacterCard.fromObject(Object.create(null)).hair, '');
+  });
+
+  it('CharacterCard is frozen, round-trips through toObject, and empty() has every field', () => {
+    const card = CharacterCard.fromObject({
+      hair: 'red',
+      speechExamples: ['Hm.'],
+      filedFactIds: { hair: 'F1' },
+    });
+    assert.equal(Object.isFrozen(card), true);
+    assert.equal(Object.isFrozen(card.speechExamples), true);
+    assert.equal(Object.isFrozen(card.filedFactIds), true);
+    assert.deepEqual(CharacterCard.fromObject(card.toObject()).toObject(), card.toObject());
+    const emptyObject = CharacterCard.empty().toObject();
+    for (const field of CharacterCard.TextFields) {
+      assert.equal(emptyObject[field], '');
+    }
+    assert.deepEqual(emptyObject.speechExamples, []);
+    assert.deepEqual(emptyObject.filedFactIds, {});
+    assert.equal(CharacterCard.TextFields.length, 21);
+    assert.deepEqual(
+      [...CharacterCard.AppearanceFields],
+      ['age', 'hair', 'eyes', 'height', 'body', 'face', 'features'],
+    );
+  });
+
+  it('stores the card on create and update and keeps untouched cards on other patches', () => {
+    const store = new SqliteStore(':memory:');
+    try {
+      const campaign = store.createCampaign({ title: 'Cards' });
+      const created = store.createCharacter(campaign.id, {
+        slug: 'card-one',
+        name: 'Card One',
+        card: { hair: 'red', speechExamples: ['Well, then.'] },
+      });
+      assert.equal(created.card.hair, 'red');
+      assert.deepEqual(created.card.speechExamples, ['Well, then.']);
+
+      const renamed = store.updateCharacter(campaign.id, created.id, { name: 'Card Prime' });
+      assert.equal(renamed.card.hair, 'red');
+
+      const merged = store.updateCharacter(campaign.id, created.id, { card: { eyes: 'green' } });
+      assert.equal(merged.card.eyes, 'green');
+      assert.equal(merged.card.hair, 'red');
+      assert.deepEqual(merged.card.speechExamples, ['Well, then.']);
+
+      const filed = store.setCardFiledFactIds(campaign.id, created.id, { hair: 'F9' });
+      assert.deepEqual(filed.card.filedFactIds, { hair: 'F9' });
+      assert.equal(filed.card.eyes, 'green');
+      const partial = store.updateCharacter(campaign.id, created.id, {
+        card: { hair: 'black', filedFactIds: { eyes: 'F1' } },
+      });
+      assert.equal(partial.card.hair, 'black');
+      assert.equal(partial.card.eyes, 'green');
+      assert.deepEqual(partial.card.filedFactIds, { hair: 'F9' });
+      const skipped = store.updateCharacter(campaign.id, created.id, {
+        card: { hair: undefined, eyes: 'grey' },
+      });
+      assert.equal(skipped.card.hair, 'black');
+      assert.equal(skipped.card.eyes, 'grey');
+      let faceReads = 0;
+      const shiftingPatch = {
+        get face() {
+          faceReads += 1;
+          return faceReads === 1 ? undefined : 'wide';
+        },
+      };
+      const faceKept = store.updateCharacter(campaign.id, created.id, { card: shiftingPatch });
+      assert.equal(faceReads, 1);
+      assert.equal(faceKept.card.face, '');
+      store.updateCharacter(campaign.id, created.id, { card: { face: 'narrow' } });
+      faceReads = 0;
+      const faceStillKept = store.updateCharacter(campaign.id, created.id, { card: shiftingPatch });
+      assert.equal(faceStillKept.card.face, 'narrow');
+      for (const invalidCard of [null, 5, 'text', []]) {
+        assert.throws(() => store.updateCharacter(campaign.id, created.id, { card: invalidCard }), TypeError);
+      }
+      const cleared = store.updateCharacter(campaign.id, created.id, { card: { speechExamples: [] } });
+      assert.deepEqual(cleared.card.speechExamples, []);
+      assert.equal(cleared.card.hair, 'black');
+
+      assert.throws(() => store.setCardFiledFactIds(campaign.id, created.id, { traits: 'F1' }), /traits/);
+      assert.throws(() => store.setCardFiledFactIds(campaign.id, created.id, { hair: 4 }), /filedFactIds\.hair/);
+      assert.throws(() => store.setCardFiledFactIds(campaign.id, created.id, 'F1'), TypeError);
+      for (const invalidFiled of [undefined, null, []]) {
+        assert.throws(() => store.setCardFiledFactIds(campaign.id, created.id, invalidFiled), TypeError);
+      }
+      assert.deepEqual(store.getCharacter(campaign.id, created.id).card.filedFactIds, { hair: 'F9' });
+      const emptied = store.setCardFiledFactIds(campaign.id, created.id, {});
+      assert.deepEqual(emptied.card.filedFactIds, {});
+      store.setCardFiledFactIds(campaign.id, created.id, { hair: 'F9' });
+      assert.equal(store.setCardFiledFactIds(campaign.id, 'missing-id', { hair: 'F1' }), null);
+      assert.deepEqual(store.getCharacter(campaign.id, created.id).card.filedFactIds, { hair: 'F9' });
+
+      assert.throws(() => store.createCharacter(campaign.id, { slug: 'bad', name: 'Bad', card: { hair: 5 } }), /hair/);
+      assert.throws(
+        () => store.createCharacter(campaign.id, { slug: 'old', name: 'Old', persona: 'x' }),
+        (error) => error instanceof TypeError && /persona/.test(error.message),
+      );
+      assert.throws(() => store.createCharacter(campaign.id, { slug: 'old', name: 'Old', voiceNotes: 'x' }), TypeError);
+      assert.equal(store.listCharacters(campaign.id).total, 1);
+      assert.throws(() => store.updateCharacter(campaign.id, created.id, { card: 'text' }), TypeError);
+      assert.equal(store.getCharacter(campaign.id, created.id).card.eyes, 'grey');
+    } finally {
+      store.close();
+    }
+  });
+
+  it('updateCharacter refuses persona and voiceNotes', () => {
+    const store = new SqliteStore(':memory:');
+    try {
+      const campaign = store.createCampaign({ title: 'Refusals' });
+      const character = store.createCharacter(campaign.id, { slug: 'refuser', name: 'Refuser' });
+      assert.throws(() => store.updateCharacter(campaign.id, character.id, { persona: 'Sharp.' }), /persona/);
+      assert.throws(() => store.updateCharacter(campaign.id, character.id, { voiceNotes: 'Dry.' }), /voiceNotes/);
+      assert.equal(store.getCharacter(campaign.id, character.id).card.personalitySummary, '');
+    } finally {
+      store.close();
+    }
+  });
+});
+
+describe('SqliteStore measured characters per token', () => {
+  it('lowestCharsPerToken returns the minimum ratio and ignores rows without prompt_chars or with zero prompt_chars', () => {
+    const store = new SqliteStore(':memory:');
+    try {
+      assert.equal(store.lowestCharsPerToken('model/a'), null);
+      assert.equal(store.lowestCharsPerTokenOverall(), null);
+      const spendRows = [
+        { model: 'model/a', promptChars: 4000, promptTokens: 1000 },
+        { model: 'model/a', promptChars: 3000, promptTokens: 1000 },
+        { model: 'model/a', promptChars: null, promptTokens: 500 },
+        { model: 'model/a', promptChars: 100, promptTokens: 0 },
+        { model: 'model/a', promptChars: 0, promptTokens: 800 },
+        { model: 'model/b', promptChars: 1000, promptTokens: 1000 },
+        { model: 'model/c', promptChars: 0, promptTokens: 100 },
+      ];
+      for (const spendRow of spendRows) {
+        store.recordSpend({ stage: SpendStage.Mind, ...spendRow });
+      }
+      assert.equal(store.lowestCharsPerToken('model/a'), 3);
+      assert.equal(store.lowestCharsPerToken('model/b'), 1);
+      assert.equal(store.lowestCharsPerToken('model/c'), null);
+      assert.equal(store.lowestCharsPerToken('model/none'), null);
+      assert.equal(store.lowestCharsPerTokenOverall(), 1);
+      assert.throws(() => store.lowestCharsPerToken(''), RangeError);
+    } finally {
+      store.close();
+    }
+  });
+
+  it('recordSpend stores promptChars, defaults it to null, and refuses bad values', () => {
+    const store = new SqliteStore(':memory:');
+    try {
+      const stored = store.recordSpend({ stage: SpendStage.Composer, model: 'model/a', promptChars: 12, promptTokens: 4 });
+      assert.equal(stored.promptChars, 12);
+      const unmeasured = store.recordSpend({ stage: SpendStage.Composer, model: 'model/a', promptTokens: 4 });
+      assert.equal(unmeasured.promptChars, null);
+      for (const invalidValue of [-1, 1.5, '12']) {
+        assert.throws(
+          () => store.recordSpend({ stage: SpendStage.Composer, model: 'model/a', promptChars: invalidValue }),
+          RangeError,
+        );
+      }
+      assert.equal(store.lowestCharsPerToken('model/a'), 3);
+    } finally {
+      store.close();
+    }
+  });
+
+  it('labels the Mind stage Brain and the Composer stage Narrator while keeping stored values', () => {
+    assert.equal(SpendStage.label('mind'), 'Brain');
+    assert.equal(SpendStage.label('composer'), 'Narrator');
+    assert.equal(SpendStage.Mind, 'mind');
+    assert.equal(SpendStage.Composer, 'composer');
   });
 });

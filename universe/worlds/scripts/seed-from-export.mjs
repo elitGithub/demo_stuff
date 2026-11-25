@@ -8,6 +8,7 @@ import { ScribeKnowledge } from '../src/scribe/ScribeKnowledge.mjs';
 import { ScribeLogCore } from '../src/scribe/ScribeLogCore.mjs';
 import { ScribeReplay } from '../src/scribe/ScribeReplay.mjs';
 import { ScribeText } from '../src/scribe/ScribeText.mjs';
+import { CharacterCard } from '../src/store/CharacterCard.mjs';
 import { SqliteStore } from '../src/store/SqliteStore.mjs';
 import { AvatarToken } from '../src/store/enums/AvatarToken.mjs';
 import { CharacterTier } from '../src/store/enums/CharacterTier.mjs';
@@ -33,7 +34,6 @@ const MAX_TITLE_LENGTH = 120;
 const MAX_BASE_SLUG_LENGTH = 42;
 const MAX_SLUG_LENGTH = 48;
 const TOP_MENTIONED_MAIN_COUNT = 3;
-const PERSONA_FACT_COUNT = 4;
 const BLOCKING_DAMAGE = Object.freeze(['book', 'campaign']);
 const CAMPAIGN_PAGE_LIMIT = 50;
 const Flag = Object.freeze({
@@ -518,23 +518,12 @@ export class ZetaSeeder {
         slugSuffix += 1;
       }
       usedSlugs.add(uniqueSlug);
-      const persona = facts
-        .filter((fact) => {
-          return fact.subject === subject.id
-            && !fact.reported
-            && !fact.hidden
-            && fact.category !== ScribeCategory.Settings.RelationCategory;
-        })
-        .slice(0, PERSONA_FACT_COUNT)
-        .map((fact) => `${fact.category}: ${fact.text}`)
-        .join('; ');
       characters.push({
         subjectId: subject.id,
         name: subject.name,
         aliases: subject.aliases,
         slug: uniqueSlug,
         avatarToken: AVATAR_TOKENS[characters.length % AVATAR_TOKENS.length],
-        persona,
         isPlayer: false,
         tier: CharacterTier.Recurring,
       });
@@ -933,7 +922,7 @@ export class ZetaSeeder {
             isPlayer: character.isPlayer,
             tier: character.tier,
             avatarToken: character.avatarToken,
-            persona: character.persona,
+            card: CharacterCard.empty(),
           });
           createdCharacters.push(created);
           if (created.isPlayer) {

@@ -15,6 +15,10 @@ export class CharacterModal {
 
   static #TierDefaultPlaceholder = 'Use tier default (no override)';
   static #RefreshButtonId = 'char-refresh-models';
+  static #CloseButtonId = 'char-modal-close';
+  static #CancelButtonId = 'char-modal-cancel';
+  static #SaveButtonId = 'char-modal-save';
+  static #AvatarButtonIdPrefix = 'char-avatar-';
   static #ScrollSelector = '.modal-card';
 
   #modalRoot;
@@ -143,11 +147,12 @@ export class CharacterModal {
    * @returns {void}
    */
   #renderCatalogUpdate() {
-    const isLoadEnd = !this.#state.catalogLoading;
-    const returnFocusId = isLoadEnd && this.#state.refreshFocusPending ? CharacterModal.#RefreshButtonId : '';
-    if (isLoadEnd) {
-      this.#state.refreshFocusPending = false;
-    }
+    const refreshReturn = FocusKeeper.takeRefreshReturn({
+      isLoading: this.#state.catalogLoading,
+      isPending: this.#state.refreshFocusPending,
+      refreshButtonId: CharacterModal.#RefreshButtonId,
+    });
+    this.#state.refreshFocusPending = refreshReturn.isPending;
     FocusKeeper.keep({
       documentRef: this.#documentRef,
       containerElement: this.#modalRoot,
@@ -155,13 +160,14 @@ export class CharacterModal {
       renderFn: () => {
         this.#render({ focusName: false });
       },
-      returnFocusId,
+      returnFocusId: refreshReturn.returnFocusId,
     });
   }
 
   /**
-   * @param {{name?: string, slug?: string, aliases?: Array<string>, tier?: string, isPlayer?: boolean, modelOverride?: string | null, persona?: string, voiceNotes?: string, avatarToken?: string, avatarInitials?: string} | null} character
-   * @returns {{name: string, slug: string, aliasesText: string, tier: string, isPlayer: boolean, modelOverride: string, persona: string, voiceNotes: string, avatarToken: string, avatarInitials: string}}
+   * @param {{name?: string, slug?: string, aliases?: Array<string>, tier?: string, isPlayer?: boolean, modelOverride?: string | null, card: {personalitySummary: string, speakingStyle: string}, avatarToken?: string, avatarInitials?: string} | null} character
+   * @returns {{name: string, slug: string, aliasesText: string, tier: string, isPlayer: boolean, modelOverride: string, personalitySummary: string, speakingStyle: string, avatarToken: string, avatarInitials: string}}
+   * @throws {TypeError}
    */
   static #buildValues(character) {
     const isEdit = character !== null;
@@ -172,8 +178,8 @@ export class CharacterModal {
       tier: isEdit && character.tier === 'recurring' ? 'recurring' : 'main',
       isPlayer: isEdit ? Boolean(character.isPlayer) : false,
       modelOverride: isEdit && typeof character.modelOverride === 'string' ? character.modelOverride : '',
-      persona: isEdit ? String(character.persona ?? '') : '',
-      voiceNotes: isEdit ? String(character.voiceNotes ?? '') : '',
+      personalitySummary: isEdit ? character.card.personalitySummary : '',
+      speakingStyle: isEdit ? character.card.speakingStyle : '',
       avatarToken: isEdit && typeof character.avatarToken === 'string' ? character.avatarToken : 'slate',
       avatarInitials: isEdit && typeof character.avatarInitials === 'string' ? character.avatarInitials : '',
     };
@@ -215,6 +221,7 @@ export class CharacterModal {
     titleHeading.textContent = isEdit ? 'Edit Character' : 'Add Character';
 
     const closeButton = this.#documentRef.createElement('button');
+    closeButton.id = CharacterModal.#CloseButtonId;
     closeButton.type = 'button';
     closeButton.className = 'btn btn-ghost btn-compact';
     closeButton.textContent = 'Close';
@@ -453,6 +460,7 @@ export class CharacterModal {
     for (const tokenEntry of CharacterModal.#AvatarTokens) {
       const isSelected = state.values.avatarToken === tokenEntry.value;
       const optionButton = this.#documentRef.createElement('button');
+      optionButton.id = `${CharacterModal.#AvatarButtonIdPrefix}${tokenEntry.value}`;
       optionButton.type = 'button';
       optionButton.className = isSelected ? 'token-option is-active' : 'token-option';
       optionButton.setAttribute('role', 'radio');
@@ -482,11 +490,11 @@ export class CharacterModal {
     personaInput.id = 'char-persona-input';
     personaInput.className = 'field-control';
     personaInput.rows = 3;
-    personaInput.value = state.values.persona;
+    personaInput.value = state.values.personalitySummary;
     personaInput.disabled = state.busy;
     personaInput.placeholder = 'Background, personality, goals, and secrets';
     personaInput.addEventListener('input', () => {
-      state.values.persona = personaInput.value;
+      state.values.personalitySummary = personaInput.value;
     });
     body.append(this.#createField('Persona', personaInput));
 
@@ -494,11 +502,11 @@ export class CharacterModal {
     voiceInput.id = 'char-voice-input';
     voiceInput.className = 'field-control';
     voiceInput.rows = 2;
-    voiceInput.value = state.values.voiceNotes;
+    voiceInput.value = state.values.speakingStyle;
     voiceInput.disabled = state.busy;
     voiceInput.placeholder = 'Speech rhythm, habits, and diction';
     voiceInput.addEventListener('input', () => {
-      state.values.voiceNotes = voiceInput.value;
+      state.values.speakingStyle = voiceInput.value;
     });
     body.append(this.#createField('Voice notes', voiceInput));
 
@@ -527,6 +535,7 @@ export class CharacterModal {
     actions.className = 'modal-footer-actions';
 
     const cancelButton = this.#documentRef.createElement('button');
+    cancelButton.id = CharacterModal.#CancelButtonId;
     cancelButton.type = 'button';
     cancelButton.className = 'btn btn-secondary';
     cancelButton.textContent = 'Cancel';
@@ -538,6 +547,7 @@ export class CharacterModal {
     });
 
     const saveButton = this.#documentRef.createElement('button');
+    saveButton.id = CharacterModal.#SaveButtonId;
     saveButton.type = 'submit';
     saveButton.className = state.busy ? 'btn btn-primary is-loading' : 'btn btn-primary';
     saveButton.textContent = state.busy ? 'Saving...' : 'Save';
@@ -594,8 +604,10 @@ export class CharacterModal {
         tier: state.values.tier,
         isPlayer: state.values.isPlayer,
         modelOverride: trimmedOverride.length > 0 ? trimmedOverride : null,
-        persona: state.values.persona,
-        voiceNotes: state.values.voiceNotes,
+        card: {
+          personalitySummary: state.values.personalitySummary,
+          speakingStyle: state.values.speakingStyle,
+        },
         avatarToken: state.values.avatarToken,
       };
       if (trimmedInitials.length > 0) {
@@ -677,7 +689,7 @@ export class CharacterModal {
     ModelCatalogView.populateSelect({
       documentRef: this.#documentRef,
       selectElement,
-      catalog: this.#state?.modelCatalog ?? null,
+      catalog: this.#state.modelCatalog,
       currentValue,
       filterQuery,
       emptyOptionText: CharacterModal.#TierDefaultPlaceholder,

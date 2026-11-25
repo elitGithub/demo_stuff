@@ -2,6 +2,8 @@ import { randomUUID } from 'node:crypto';
 import fs from 'node:fs';
 import path from 'node:path';
 import { DatabaseSync } from 'node:sqlite';
+import { CharacterCard } from './CharacterCard.mjs';
+import { SchemaUpgrades } from './SchemaUpgrades.mjs';
 import { AvatarToken } from './enums/AvatarToken.mjs';
 import { CharacterTier } from './enums/CharacterTier.mjs';
 import { FindingKind } from './enums/FindingKind.mjs';
@@ -11,6 +13,8 @@ import { SpeakerType } from './enums/SpeakerType.mjs';
 import { SpendStage } from './enums/SpendStage.mjs';
 import { TurnMode } from './enums/TurnMode.mjs';
 import { TurnRole } from './enums/TurnRole.mjs';
+
+const MAX_REPLIES_PER_CHARACTER = 5;
 
 export class SqliteStore {
   #db;
@@ -29,12 +33,38 @@ export class SqliteStore {
       fs.mkdirSync(path.dirname(path.resolve(dbPath)), { recursive: true });
     }
     this.#db = new DatabaseSync(dbPath);
-    this.#db.exec('PRAGMA journal_mode = WAL;');
-    this.#db.exec('PRAGMA foreign_keys = ON;');
-    this.#db.exec('PRAGMA busy_timeout = 5000;');
-    const schemaPath = new URL('./schema.sql', import.meta.url);
-    const schemaSql = fs.readFileSync(schemaPath, 'utf8');
-    this.#db.exec(schemaSql);
+    try {
+      this.#db.exec('PRAGMA busy_timeout = 5000;');
+      const storedVersion = Number(this.#db.prepare('PRAGMA user_version').get().user_version);
+      if (storedVersion > SchemaUpgrades.Latest) {
+        throw new Error(
+          `Database schema version ${storedVersion} is newer than this app supports (${SchemaUpgrades.Latest}).`,
+        );
+      }
+      this.#db.exec('PRAGMA journal_mode = WAL;');
+      this.#db.exec('PRAGMA foreign_keys = ON;');
+      const schemaPath = new URL('./schema.sql', import.meta.url);
+      const schemaSql = fs.readFileSync(schemaPath, 'utf8');
+      const existedBefore = this.#db.prepare(
+        "SELECT 1 AS present FROM sqlite_master WHERE type = 'table' AND name = 'characters'",
+      ).get() !== undefined;
+      this.#runTransaction(() => {
+        this.#db.exec(schemaSql);
+        if (existedBefore) {
+          for (const step of SchemaUpgrades.steps) {
+            if (step.version > storedVersion) {
+              step.apply(this.#db);
+            }
+          }
+        }
+        if (storedVersion < SchemaUpgrades.Latest) {
+          this.#db.exec(`PRAGMA user_version = ${SchemaUpgrades.Latest}`);
+        }
+      });
+    } catch (error) {
+      this.close();
+      throw error;
+    }
   }
 
   /**
@@ -75,7 +105,8 @@ export class SqliteStore {
   }
 
   /**
-   * @returns {{models: {director: string, composer: string, main: string, recurring: string, scribe: string}, publicOdds: number, privateOdds: number, scribeInterval: number, pedantEnabled: boolean, dailyWarnUsd: number | null}}
+   * @returns {{models: {director: string, composer: string, main: string, recurring: string, scribe: string}, publicOdds: number, privateOdds: number, scribeInterval: number, pedantEnabled: boolean, dailyWarnUsd: number | null, maxRepliesPerCharacter: number, replyReserve: number}}
+   * @throws {SyntaxError}
    */
   getSettings() {
     const defaults = {
@@ -88,9 +119,11 @@ export class SqliteStore {
       },
       publicOdds: 8,
       privateOdds: 30,
-      scribeInterval: 10,
+      scribeInterval: 1,
       pedantEnabled: true,
       dailyWarnUsd: null,
+      maxRepliesPerCharacter: 1,
+      replyReserve: 3000,
     };
     const rows = this.#db.prepare('SELECT key, value_json FROM settings').all();
     for (const row of rows) {
@@ -112,7 +145,7 @@ export class SqliteStore {
 
   /**
    * @param {Record<string, unknown>} patch
-   * @returns {{models: {director: string, composer: string, main: string, recurring: string, scribe: string}, publicOdds: number, privateOdds: number, scribeInterval: number, pedantEnabled: boolean, dailyWarnUsd: number | null}}
+   * @returns {{models: {director: string, composer: string, main: string, recurring: string, scribe: string}, publicOdds: number, privateOdds: number, scribeInterval: number, pedantEnabled: boolean, dailyWarnUsd: number | null, maxRepliesPerCharacter: number, replyReserve: number}}
    * @throws {Error}
    */
   updateSettings(patch) {
@@ -126,6 +159,8 @@ export class SqliteStore {
       'scribeInterval',
       'pedantEnabled',
       'dailyWarnUsd',
+      'maxRepliesPerCharacter',
+      'replyReserve',
     ]);
     const allowedModelSlots = new Set(['director', 'composer', 'main', 'recurring', 'scribe']);
     const patchEntries = Object.entries(patch);
@@ -166,6 +201,16 @@ export class SqliteStore {
           }
         } else if (patchKey === 'publicOdds' || patchKey === 'privateOdds' || patchKey === 'scribeInterval') {
           this.#validateNonNegativeInt(patchValue, patchKey);
+          updates.push([patchKey, JSON.stringify(patchValue)]);
+        } else if (patchKey === 'maxRepliesPerCharacter') {
+          if (!Number.isInteger(patchValue) || patchValue < 1 || patchValue > MAX_REPLIES_PER_CHARACTER) {
+            throw new RangeError(`${patchKey} must be an integer from 1 to ${MAX_REPLIES_PER_CHARACTER}.`);
+          }
+          updates.push([patchKey, JSON.stringify(patchValue)]);
+        } else if (patchKey === 'replyReserve') {
+          if (!Number.isInteger(patchValue) || patchValue < 1) {
+            throw new RangeError(`${patchKey} must be an integer of at least 1.`);
+          }
           updates.push([patchKey, JSON.stringify(patchValue)]);
         } else if (patchKey === 'pedantEnabled') {
           if (typeof patchValue !== 'boolean') {
@@ -566,14 +611,12 @@ export class SqliteStore {
     if (typeof archived !== 'boolean') {
       throw new TypeError('archived must be a boolean.');
     }
-    const persona = dto.persona === undefined ? '' : dto.persona;
-    if (typeof persona !== 'string') {
-      throw new TypeError('persona must be a string.');
+    for (const removedKey of ['persona', 'voiceNotes']) {
+      if (Object.hasOwn(dto, removedKey)) {
+        throw new TypeError(`Unsupported character field: ${removedKey}`);
+      }
     }
-    const voiceNotes = dto.voiceNotes === undefined ? '' : dto.voiceNotes;
-    if (typeof voiceNotes !== 'string') {
-      throw new TypeError('voiceNotes must be a string.');
-    }
+    const card = dto.card === undefined ? CharacterCard.empty() : CharacterCard.fromObject(dto.card);
     let modelOverride = null;
     if (dto.modelOverride !== undefined && dto.modelOverride !== null) {
       if (typeof dto.modelOverride !== 'string') {
@@ -595,9 +638,9 @@ export class SqliteStore {
       this.#db.prepare(
         `INSERT INTO characters (
           id, campaign_id, slug, scribe_subject_id, name, aliases_json, is_player,
-          tier, model_override, persona, voice_notes, avatar_token, avatar_initials,
+          tier, model_override, card_json, avatar_token, avatar_initials,
           archived, created_at, updated_at
-        ) VALUES (?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?)`,
+        ) VALUES (?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?)`,
       ).run(
         characterId,
         campaignId,
@@ -608,8 +651,7 @@ export class SqliteStore {
         isPlayer ? 1 : 0,
         tier,
         modelOverride,
-        persona,
-        voiceNotes,
+        JSON.stringify(card.toObject()),
         avatarToken,
         avatarInitials,
         archived ? 1 : 0,
@@ -643,8 +685,7 @@ export class SqliteStore {
       'isPlayer',
       'tier',
       'modelOverride',
-      'persona',
-      'voiceNotes',
+      'card',
       'avatarToken',
       'avatarInitials',
       'archived',
@@ -710,19 +751,21 @@ export class SqliteStore {
           throw new TypeError('modelOverride must be a string or null.');
         }
       }
-      let persona = existing.persona;
-      if (patch.persona !== undefined) {
-        if (typeof patch.persona !== 'string') {
-          throw new TypeError('persona must be a string.');
+      let card = existing.card;
+      if (patch.card !== undefined) {
+        const patchCard = patch.card;
+        if (!(patchCard instanceof CharacterCard) && !CharacterCard.isPlainObject(patchCard)) {
+          throw new TypeError('card must be an object.');
         }
-        persona = patch.persona;
-      }
-      let voiceNotes = existing.voiceNotes;
-      if (patch.voiceNotes !== undefined) {
-        if (typeof patch.voiceNotes !== 'string') {
-          throw new TypeError('voiceNotes must be a string.');
+        const snapshot = Object.fromEntries(Object.keys(patchCard).map((cardKey) => [cardKey, patchCard[cardKey]]));
+        const validatedPatch = CharacterCard.fromObject(snapshot);
+        const mergedCard = existing.card.toObject();
+        for (const cardKey of Object.keys(snapshot)) {
+          if (cardKey !== 'filedFactIds' && snapshot[cardKey] !== undefined) {
+            mergedCard[cardKey] = validatedPatch[cardKey];
+          }
         }
-        voiceNotes = patch.voiceNotes;
+        card = CharacterCard.fromObject(mergedCard);
       }
       let avatarToken = existing.avatarToken;
       if (patch.avatarToken !== undefined) {
@@ -746,7 +789,7 @@ export class SqliteStore {
       this.#db.prepare(
         `UPDATE characters
          SET slug = ?, scribe_subject_id = ?, name = ?, aliases_json = ?, is_player = ?,
-             tier = ?, model_override = ?, persona = ?, voice_notes = ?, avatar_token = ?,
+             tier = ?, model_override = ?, card_json = ?, avatar_token = ?,
              avatar_initials = ?, archived = ?, updated_at = ?
          WHERE campaign_id = ? AND id = ?`,
       ).run(
@@ -757,8 +800,7 @@ export class SqliteStore {
         isPlayer ? 1 : 0,
         tier,
         modelOverride,
-        persona,
-        voiceNotes,
+        JSON.stringify(card.toObject()),
         avatarToken,
         avatarInitials,
         archived ? 1 : 0,
@@ -766,6 +808,41 @@ export class SqliteStore {
         campaignId,
         characterId,
       );
+      this.#bumpChangeSeq();
+      const updatedRow = this.#db.prepare(
+        'SELECT * FROM characters WHERE campaign_id = ? AND id = ?',
+      ).get(campaignId, characterId);
+      return this.#mapCharacter(updatedRow);
+    });
+  }
+
+  /**
+   * @param {string} campaignId
+   * @param {string} characterId
+   * @param {Record<string, string>} filedFactIds
+   * @returns {object | null}
+   * @throws {Error}
+   */
+  setCardFiledFactIds(campaignId, characterId, filedFactIds) {
+    this.#validateNonEmptyString(campaignId, 'campaignId');
+    this.#validateNonEmptyString(characterId, 'characterId');
+    if (!CharacterCard.isPlainObject(filedFactIds)) {
+      throw new TypeError('filedFactIds must be an object.');
+    }
+    return this.#runTransaction(() => {
+      const existingRow = this.#db.prepare(
+        'SELECT * FROM characters WHERE campaign_id = ? AND id = ?',
+      ).get(campaignId, characterId);
+      if (existingRow === undefined) {
+        return null;
+      }
+      const card = CharacterCard.fromObject({
+        ...this.#mapCharacter(existingRow).card.toObject(),
+        filedFactIds,
+      });
+      this.#db.prepare(
+        'UPDATE characters SET card_json = ?, updated_at = ? WHERE campaign_id = ? AND id = ?',
+      ).run(JSON.stringify(card.toObject()), new Date().toISOString(), campaignId, characterId);
       this.#bumpChangeSeq();
       const updatedRow = this.#db.prepare(
         'SELECT * FROM characters WHERE campaign_id = ? AND id = ?',
@@ -1774,8 +1851,8 @@ export class SqliteStore {
   }
 
   /**
-   * @param {{campaignId?: string | null, turnId?: string | null, stage: string, model: string, promptTokens?: number, completionTokens?: number, costUsd?: number | null, createdAt?: string}} dto
-   * @returns {{id: string, campaignId: string | null, turnId: string | null, stage: string, model: string, promptTokens: number, completionTokens: number, costUsd: number | null, createdAt: string}}
+   * @param {{campaignId?: string | null, turnId?: string | null, stage: string, model: string, promptChars?: number | null, promptTokens?: number, completionTokens?: number, costUsd?: number | null, createdAt?: string}} dto
+   * @returns {{id: string, campaignId: string | null, turnId: string | null, stage: string, model: string, promptChars: number | null, promptTokens: number, completionTokens: number, costUsd: number | null, createdAt: string}}
    * @throws {Error}
    */
   recordSpend(dto) {
@@ -1793,6 +1870,10 @@ export class SqliteStore {
     SpendStage.label(dto.stage);
     this.#validateNonEmptyString(dto.model, 'model');
     const model = dto.model.trim();
+    const promptChars = dto.promptChars === undefined ? null : dto.promptChars;
+    if (promptChars !== null) {
+      this.#validateNonNegativeInt(promptChars, 'promptChars');
+    }
     const promptTokens = dto.promptTokens === undefined ? 0 : dto.promptTokens;
     this.#validateNonNegativeInt(promptTokens, 'promptTokens');
     const completionTokens = dto.completionTokens === undefined ? 0 : dto.completionTokens;
@@ -1828,15 +1909,16 @@ export class SqliteStore {
       }
       this.#db.prepare(
         `INSERT INTO spend_log (
-          id, campaign_id, turn_id, stage, model, prompt_tokens,
+          id, campaign_id, turn_id, stage, model, prompt_chars, prompt_tokens,
           completion_tokens, cost_usd, created_at
-        ) VALUES (?, ?, ?, ?, ?, ?, ?, ?, ?)`,
+        ) VALUES (?, ?, ?, ?, ?, ?, ?, ?, ?, ?)`,
       ).run(
         spendId,
         campaignId,
         turnId,
         dto.stage,
         model,
+        promptChars,
         promptTokens,
         completionTokens,
         costUsd,
@@ -1849,12 +1931,40 @@ export class SqliteStore {
         turnId,
         stage: dto.stage,
         model,
+        promptChars,
         promptTokens,
         completionTokens,
         costUsd,
         createdAt,
       };
     });
+  }
+
+  /**
+   * @param {string} model
+   * @returns {number | null}
+   * @throws {RangeError}
+   */
+  lowestCharsPerToken(model) {
+    this.#validateNonEmptyString(model, 'model');
+    const row = this.#db.prepare(
+      `SELECT MIN(prompt_chars * 1.0 / prompt_tokens) AS ratio
+       FROM spend_log
+       WHERE model = ? AND prompt_chars > 0 AND prompt_tokens > 0`,
+    ).get(model.trim());
+    return row.ratio;
+  }
+
+  /**
+   * @returns {number | null}
+   */
+  lowestCharsPerTokenOverall() {
+    const row = this.#db.prepare(
+      `SELECT MIN(prompt_chars * 1.0 / prompt_tokens) AS ratio
+       FROM spend_log
+       WHERE prompt_chars > 0 AND prompt_tokens > 0`,
+    ).get();
+    return row.ratio;
   }
 
   /**
@@ -2206,6 +2316,7 @@ export class SqliteStore {
   /**
    * @param {Record<string, unknown>} row
    * @returns {object}
+   * @throws {Error}
    */
   #mapCharacter(row) {
     return {
@@ -2218,8 +2329,7 @@ export class SqliteStore {
       isPlayer: row.is_player === 1,
       tier: row.tier,
       modelOverride: row.model_override,
-      persona: row.persona,
-      voiceNotes: row.voice_notes,
+      card: CharacterCard.fromObject(JSON.parse(row.card_json)),
       avatarToken: row.avatar_token,
       avatarInitials: row.avatar_initials,
       archived: row.archived === 1,

@@ -15,7 +15,7 @@ export class OpenRouterClient {
   #appReferer;
 
   /**
-   * @param {{apiKeyProvider: () => string | null | undefined | Promise<string | null | undefined>, fetchImpl?: typeof fetch, baseUrl?: string, retryOptions?: {wait?: (delayMs: number, signal?: AbortSignal | null) => Promise<void>, notify?: (info: {attempt: number, maxRetries: number, delayMs: number, reason: string}) => void | Promise<void>, delaysMs?: ReadonlyArray<number>}, onSpend?: ((dto: {campaignId: string | null, turnId: null, stage: string, model: string, promptTokens: number, completionTokens: number, costUsd: number | null}) => {id?: string} | null | undefined | Promise<{id?: string} | null | undefined>) | null, appTitle?: string, appReferer?: string, replyLog?: import('./ReplyLog.mjs').ReplyLog | null}} options
+   * @param {{apiKeyProvider: () => string | null | undefined | Promise<string | null | undefined>, fetchImpl?: typeof fetch, baseUrl?: string, retryOptions?: {wait?: (delayMs: number, signal?: AbortSignal | null) => Promise<void>, notify?: (info: {attempt: number, maxRetries: number, delayMs: number, reason: string}) => void | Promise<void>, delaysMs?: ReadonlyArray<number>}, onSpend?: ((dto: {campaignId: string | null, turnId: null, stage: string, model: string, promptChars: number, promptTokens: number, completionTokens: number, costUsd: number | null}) => {id?: string} | null | undefined | Promise<{id?: string} | null | undefined>) | null, appTitle?: string, appReferer?: string, replyLog?: import('./ReplyLog.mjs').ReplyLog | null}} options
    * @throws {TypeError | RangeError}
    */
   constructor(options = {}) {
@@ -260,6 +260,7 @@ export class OpenRouterClient {
       campaignId: prepared.campaignId,
       stage: prepared.stage,
       model: prepared.model,
+      promptChars: prepared.promptChars,
       usage: completionResult.usage,
     });
 
@@ -660,6 +661,7 @@ export class OpenRouterClient {
               campaignId: prepared.campaignId,
               stage: prepared.stage,
               model: prepared.model,
+              promptChars: prepared.promptChars,
               usage,
             });
           }
@@ -695,6 +697,7 @@ export class OpenRouterClient {
       campaignId: prepared.campaignId,
       stage: prepared.stage,
       model: prepared.model,
+      promptChars: prepared.promptChars,
       usage: streamResult.usage,
     });
 
@@ -710,7 +713,7 @@ export class OpenRouterClient {
   /**
    * @param {Record<string, unknown>} requestOptions
    * @param {boolean} isStream
-   * @returns {Promise<{url: string, apiKey: string, model: string, stage: string, campaignId: string | null, signal: AbortSignal | null, onDelta: ((delta: string) => void | Promise<void>) | null, notify: ((info: {attempt: number, maxRetries: number, delayMs: number, reason: string}) => Promise<void>) | undefined, headers: Record<string, string>, payload: Record<string, unknown>}>}
+   * @returns {Promise<{url: string, apiKey: string, model: string, stage: string, campaignId: string | null, promptChars: number, signal: AbortSignal | null, onDelta: ((delta: string) => void | Promise<void>) | null, notify: ((info: {attempt: number, maxRetries: number, delayMs: number, reason: string}) => Promise<void>) | undefined, headers: Record<string, string>, payload: Record<string, unknown>}>}
    * @throws {Error}
    */
   async #prepareRequest(requestOptions, isStream) {
@@ -802,6 +805,7 @@ export class OpenRouterClient {
     const apiKey = rawApiKey;
 
     const normalizedModel = model.trim();
+    const promptChars = normalizedMessages.reduce((total, entry) => total + entry.content.length, 0);
     const payload = {
       model: normalizedModel,
       messages: normalizedMessages,
@@ -845,6 +849,7 @@ export class OpenRouterClient {
       model: normalizedModel,
       stage,
       campaignId: normalizedCampaignId,
+      promptChars,
       signal: signal ?? null,
       onDelta: isStream ? onDelta : null,
       notify,
@@ -965,10 +970,11 @@ export class OpenRouterClient {
   }
 
   /**
-   * @param {{campaignId: string | null, stage: string, model: string, usage: {promptTokens: number, completionTokens: number, costUsd: number | null}}} spendInput
+   * @param {{campaignId: string | null, stage: string, model: string, promptChars: number, usage: {promptTokens: number, completionTokens: number, costUsd: number | null}}} spendInput
    * @returns {Promise<string | null>}
+   * @throws {Error}
    */
-  async #recordSpend({ campaignId, stage, model, usage }) {
+  async #recordSpend({ campaignId, stage, model, promptChars, usage }) {
     if (this.#onSpend === null) {
       return null;
     }
@@ -977,6 +983,7 @@ export class OpenRouterClient {
       turnId: null,
       stage,
       model,
+      promptChars,
       promptTokens: usage.promptTokens,
       completionTokens: usage.completionTokens,
       costUsd: usage.costUsd,

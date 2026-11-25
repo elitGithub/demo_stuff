@@ -150,8 +150,8 @@ export const NarratorComposer = Object.freeze({
       .map((character) => {
         const modeLabel = presentIdSet.has(character.id) ? 'present' : 'remote';
         const roleLabel = character.id === campaign.playerCharacterId ? 'player' : 'npc';
-        const voicePart = typeof character.voiceNotes === 'string' && character.voiceNotes.trim().length > 0
-          ? ` | voice: ${character.voiceNotes.trim()}`
+        const voicePart = character.card.speakingStyle.trim().length > 0
+          ? ` | voice: ${character.card.speakingStyle.trim()}`
           : '';
         return `- ${character.name} (slug: ${character.slug}, ${roleLabel}, ${modeLabel})${voicePart}`;
       });

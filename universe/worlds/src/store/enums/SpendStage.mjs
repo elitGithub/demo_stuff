@@ -17,10 +17,10 @@ export const SpendStage = Object.freeze({
         return 'Director';
       }
       case 'mind': {
-        return 'Mind';
+        return 'Brain';
       }
       case 'composer': {
-        return 'Composer';
+        return 'Narrator';
       }
       case 'scribe': {
         return 'Scribe';

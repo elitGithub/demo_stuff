@@ -508,11 +508,13 @@ export class WorldsApp {
             this.#refreshMemory(campaignId),
           ]);
         },
-        onSaveSettings: async (patch) => {
+        onSaveSettings: async (patch, { replaceWarnings = true } = {}) => {
           const updatedSettings = await this.#api.updateSettings(patch);
           this.#settings = updatedSettings;
           this.#inspectorDrawer.setSettings(updatedSettings);
-          this.#inspectorDrawer.setSettingsWarnings(updatedSettings.warnings);
+          if (replaceWarnings) {
+            this.#inspectorDrawer.setSettingsWarnings(updatedSettings.warnings);
+          }
           this.#renderTopBar();
         },
         onRefreshModels: () => this.#loadModels(true),

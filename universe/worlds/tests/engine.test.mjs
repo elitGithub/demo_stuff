@@ -160,8 +160,7 @@ function createWorldFixture({
     aliases: ['Scout Frost'],
     isPlayer: true,
     tier: CharacterTier.Main,
-    persona: 'Wary caravan scout.',
-    voiceNotes: 'Terse and observant.',
+    card: { personalitySummary: 'Wary caravan scout.', speakingStyle: 'Terse and observant.' },
     avatarToken: AvatarToken.Slate,
   });
   const lize = store.createCharacter(campaign.id, {
@@ -171,8 +170,7 @@ function createWorldFixture({
     aliases: ['Lady Lize'],
     isPlayer: false,
     tier: CharacterTier.Main,
-    persona: 'Sharp-eyed quartermaster.',
-    voiceNotes: 'Measured and wry.',
+    card: { personalitySummary: 'Sharp-eyed quartermaster.', speakingStyle: 'Measured and wry.' },
     avatarToken: AvatarToken.Rose,
   });
   const viola = store.createCharacter(campaign.id, {
@@ -182,8 +180,7 @@ function createWorldFixture({
     aliases: [],
     isPlayer: false,
     tier: CharacterTier.Main,
-    persona: 'Apothecary keeping secret ledgers.',
-    voiceNotes: 'Quiet and precise.',
+    card: { personalitySummary: 'Apothecary keeping secret ledgers.', speakingStyle: 'Quiet and precise.' },
     avatarToken: AvatarToken.Plum,
   });
   const collette = store.createCharacter(campaign.id, {
@@ -193,8 +190,7 @@ function createWorldFixture({
     aliases: ['Cook Collette'],
     isPlayer: false,
     tier: CharacterTier.Recurring,
-    persona: 'Cheerful camp cook.',
-    voiceNotes: 'Warm and blunt.',
+    card: { personalitySummary: 'Cheerful camp cook.', speakingStyle: 'Warm and blunt.' },
     avatarToken: AvatarToken.Amber,
   });
   const mirra = store.createCharacter(campaign.id, {
@@ -204,8 +200,7 @@ function createWorldFixture({
     aliases: [],
     isPlayer: false,
     tier: CharacterTier.Main,
-    persona: 'Cart driver.',
-    voiceNotes: 'Steady.',
+    card: { personalitySummary: 'Cart driver.', speakingStyle: 'Steady.' },
     avatarToken: AvatarToken.Teal,
   });
   const kira = store.createCharacter(campaign.id, {
@@ -215,8 +210,7 @@ function createWorldFixture({
     aliases: [],
     isPlayer: false,
     tier: CharacterTier.Recurring,
-    persona: 'Outrider.',
-    voiceNotes: 'Brisk.',
+    card: { personalitySummary: 'Outrider.', speakingStyle: 'Brisk.' },
     avatarToken: AvatarToken.Indigo,
   });
   const maya = store.createCharacter(campaign.id, {
@@ -226,8 +220,7 @@ function createWorldFixture({
     aliases: [],
     isPlayer: false,
     tier: CharacterTier.Recurring,
-    persona: 'Messenger.',
-    voiceNotes: 'Urgent.',
+    card: { personalitySummary: 'Messenger.', speakingStyle: 'Urgent.' },
     avatarToken: AvatarToken.Coral,
   });
 

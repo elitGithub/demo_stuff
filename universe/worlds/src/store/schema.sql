@@ -19,7 +19,7 @@ CREATE TABLE IF NOT EXISTS campaigns (
   scene_state_json TEXT NOT NULL,
   encounter_public_odds INTEGER NOT NULL DEFAULT 8 CHECK (encounter_public_odds >= 0),
   encounter_private_odds INTEGER NOT NULL DEFAULT 30 CHECK (encounter_private_odds >= 0),
-  scribe_interval INTEGER NOT NULL DEFAULT 10 CHECK (scribe_interval >= 0),
+  scribe_interval INTEGER NOT NULL DEFAULT 1 CHECK (scribe_interval >= 0),
   created_at TEXT NOT NULL,
   updated_at TEXT NOT NULL
 );
@@ -36,6 +36,7 @@ CREATE TABLE IF NOT EXISTS characters (
   model_override TEXT,
   persona TEXT NOT NULL DEFAULT '',
   voice_notes TEXT NOT NULL DEFAULT '',
+  card_json TEXT NOT NULL DEFAULT '{}',
   avatar_token TEXT NOT NULL CHECK (avatar_token IN ('sage', 'rose', 'amber', 'slate', 'plum', 'teal', 'indigo', 'coral')),
   avatar_initials TEXT NOT NULL CHECK (length(trim(avatar_initials)) > 0),
   archived INTEGER NOT NULL DEFAULT 0 CHECK (archived IN (0, 1)),
@@ -106,6 +107,7 @@ CREATE TABLE IF NOT EXISTS spend_log (
   turn_id TEXT REFERENCES turns(id) ON DELETE SET NULL,
   stage TEXT NOT NULL CHECK (stage IN ('director', 'mind', 'composer', 'scribe', 'pedant', 'muse')),
   model TEXT NOT NULL CHECK (length(trim(model)) > 0),
+  prompt_chars INTEGER,
   prompt_tokens INTEGER NOT NULL DEFAULT 0 CHECK (prompt_tokens >= 0),
   completion_tokens INTEGER NOT NULL DEFAULT 0 CHECK (completion_tokens >= 0),
   cost_usd REAL CHECK (cost_usd IS NULL OR cost_usd >= 0),

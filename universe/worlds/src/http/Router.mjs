@@ -7,6 +7,7 @@ import { ScribeKnowledge } from '../scribe/ScribeKnowledge.mjs';
 import { ScribeLogCore } from '../scribe/ScribeLogCore.mjs';
 import { ScribeReplay } from '../scribe/ScribeReplay.mjs';
 import { ScribeText } from '../scribe/ScribeText.mjs';
+import { CharacterCard } from '../store/CharacterCard.mjs';
 import { FindingStatus } from '../store/enums/FindingStatus.mjs';
 import { TurnMode } from '../store/enums/TurnMode.mjs';
 import { RateLimiter } from './RateLimiter.mjs';
@@ -338,7 +339,17 @@ export class Router {
             const body = await Security.readJsonBody(request);
             this.#assertAllowedKeys(
               body,
-              ['models', 'publicOdds', 'privateOdds', 'scribeInterval', 'pedantEnabled', 'dailyWarnUsd', 'openRouterApiKey'],
+              [
+                'models',
+                'publicOdds',
+                'privateOdds',
+                'scribeInterval',
+                'pedantEnabled',
+                'dailyWarnUsd',
+                'maxRepliesPerCharacter',
+                'replyReserve',
+                'openRouterApiKey',
+              ],
               'settings',
             );
 
@@ -643,14 +654,14 @@ export class Router {
                 'isPlayer',
                 'tier',
                 'modelOverride',
-                'persona',
-                'voiceNotes',
+                'card',
                 'avatarToken',
                 'avatarInitials',
                 'archived',
               ],
               'character',
             );
+            this.#assertClientCard(body.card);
             if (body.slug === 'narrator') {
               throw this.#createHttpError(400, 'Character slug "narrator" is reserved.');
             }
@@ -716,14 +727,14 @@ export class Router {
                 'isPlayer',
                 'tier',
                 'modelOverride',
-                'persona',
-                'voiceNotes',
+                'card',
                 'avatarToken',
                 'avatarInitials',
                 'archived',
               ],
               'character',
             );
+            this.#assertClientCard(body.card);
             if (body.slug === 'narrator') {
               throw this.#createHttpError(400, 'Character slug "narrator" is reserved.');
             }
@@ -1400,6 +1411,21 @@ export class Router {
       if (!allowedSet.has(key)) {
         throw this.#createHttpError(400, `Unsupported ${contextLabel} field: ${key}`);
       }
+    }
+  }
+
+  /**
+   * @param {unknown} card
+   * @returns {void}
+   * @throws {Error}
+   */
+  #assertClientCard(card) {
+    if (card === undefined) {
+      return;
+    }
+    CharacterCard.fromObject(card);
+    if (Object.hasOwn(card, 'filedFactIds')) {
+      throw this.#createHttpError(400, 'card.filedFactIds is not accepted from clients.');
     }
   }
 

@@ -2,12 +2,14 @@ import { FocusKeeper } from './FocusKeeper.mjs';
 import { ModelCatalogView } from './ModelCatalogView.mjs';
 
 export class InspectorDrawer {
+  static #SettingsTabId = 'settings';
+
   static #Tabs = Object.freeze([
     { id: 'scene', label: 'Scene' },
     { id: 'cast', label: 'Cast' },
     { id: 'memory', label: 'Memory' },
     { id: 'findings', label: 'Findings' },
-    { id: 'settings', label: 'Settings' },
+    { id: InspectorDrawer.#SettingsTabId, label: 'Settings' },
   ]);
 
   static #MemorySections = Object.freeze([
@@ -28,6 +30,12 @@ export class InspectorDrawer {
 
   static #FilterPlaceholder = 'Filter OpenRouter models...';
   static #RefreshButtonId = 'settings-refresh-models';
+  static #CloseButtonId = 'drawer-close';
+  static #TabButtonIdPrefix = 'drawer-tab-';
+  static #ApplyDefaultsButtonId = 'settings-apply-defaults';
+  static #ClearKeyButtonId = 'settings-clear-key';
+  static #CancelButtonId = 'settings-cancel';
+  static #SaveButtonId = 'settings-save';
   static #ScrollSelector = '.drawer-body';
 
   #drawerElement;
@@ -116,7 +124,7 @@ export class InspectorDrawer {
       models: { director: '', composer: '', main: '', recurring: '', scribe: '' },
       publicOdds: '8',
       privateOdds: '30',
-      scribeInterval: '10',
+      scribeInterval: '1',
       pedantEnabled: true,
       dailyWarnUsd: '',
       openRouterApiKey: '',
@@ -315,19 +323,17 @@ export class InspectorDrawer {
     this.#settingsData.serverSettings = settings;
     this.#settingsData.draft = {
       models: {
-        director: String(settings?.models?.director ?? ''),
-        composer: String(settings?.models?.composer ?? ''),
-        main: String(settings?.models?.main ?? ''),
-        recurring: String(settings?.models?.recurring ?? ''),
-        scribe: String(settings?.models?.scribe ?? ''),
+        director: settings.models.director,
+        composer: settings.models.composer,
+        main: settings.models.main,
+        recurring: settings.models.recurring,
+        scribe: settings.models.scribe,
       },
-      publicOdds: String(settings?.publicOdds ?? 8),
-      privateOdds: String(settings?.privateOdds ?? 30),
-      scribeInterval: String(settings?.scribeInterval ?? 10),
-      pedantEnabled: settings?.pedantEnabled !== false,
-      dailyWarnUsd: settings?.dailyWarnUsd !== null && settings?.dailyWarnUsd !== undefined
-        ? String(settings.dailyWarnUsd)
-        : '',
+      publicOdds: String(settings.publicOdds),
+      privateOdds: String(settings.privateOdds),
+      scribeInterval: String(settings.scribeInterval),
+      pedantEnabled: settings.pedantEnabled,
+      dailyWarnUsd: settings.dailyWarnUsd === null ? '' : String(settings.dailyWarnUsd),
       openRouterApiKey: '',
     };
     this.#settingsData.error = '';
@@ -396,6 +402,7 @@ export class InspectorDrawer {
     title.textContent = 'Inspector';
 
     const closeButton = this.#buildButton('Close', {
+      id: InspectorDrawer.#CloseButtonId,
       variant: 'ghost',
       compact: true,
       onClick: () => {
@@ -412,6 +419,7 @@ export class InspectorDrawer {
     for (const tab of InspectorDrawer.#Tabs) {
       const isSelected = this.#activeTab === tab.id;
       const tabButton = this.#documentRef.createElement('button');
+      tabButton.id = `${InspectorDrawer.#TabButtonIdPrefix}${tab.id}`;
       tabButton.type = 'button';
       tabButton.className = isSelected ? 'tab-btn is-active' : 'tab-btn';
       tabButton.setAttribute('role', 'tab');
@@ -896,12 +904,12 @@ export class InspectorDrawer {
               modelMeta.textContent = `Model override: ${character.modelOverride}`;
               card.append(modelMeta);
             }
-            if (typeof character.persona === 'string' && character.persona.trim().length > 0) {
+            if (character.card.personalitySummary.trim().length > 0) {
               const personaEl = this.#documentRef.createElement('p');
               personaEl.className = 'item-copy';
-              personaEl.textContent = character.persona.length > 180
-                ? `${character.persona.slice(0, 177)}...`
-                : character.persona;
+              personaEl.textContent = character.card.personalitySummary.length > 180
+                ? `${character.card.personalitySummary.slice(0, 177)}...`
+                : character.card.personalitySummary;
               card.append(personaEl);
             }
 
@@ -1668,7 +1676,7 @@ export class InspectorDrawer {
         break;
       }
 
-      case 'settings': {
+      case InspectorDrawer.#SettingsTabId: {
         const settingsForm = this.#documentRef.createElement('form');
         settingsForm.className = 'inspector-section';
         settingsForm.noValidate = true;
@@ -1695,6 +1703,7 @@ export class InspectorDrawer {
         catalogButtons.className = 'action-row-split';
 
         const applyDefaultsBtn = this.#buildButton('Apply suggested defaults', {
+          id: InspectorDrawer.#ApplyDefaultsButtonId,
           variant: 'secondary',
           compact: true,
           disabled: busy || !catalog?.defaults,
@@ -1714,6 +1723,7 @@ export class InspectorDrawer {
         });
 
         const refreshModelsBtn = this.#buildButton(ModelCatalogView.RefreshLabel, {
+          id: InspectorDrawer.#RefreshButtonId,
           variant: 'secondary',
           compact: true,
           busy: this.#settingsData.modelCatalogLoading,
@@ -1724,7 +1734,6 @@ export class InspectorDrawer {
             return this.#callbacks.onRefreshModels();
           },
         });
-        refreshModelsBtn.id = InspectorDrawer.#RefreshButtonId;
         catalogButtons.append(applyDefaultsBtn, refreshModelsBtn);
         catalogBar.append(catalogButtons);
 
@@ -1909,6 +1918,7 @@ export class InspectorDrawer {
         clearKeyRow.className = 'action-row-end';
         clearKeyRow.append(
           this.#buildButton('Clear saved key', {
+            id: InspectorDrawer.#ClearKeyButtonId,
             variant: 'secondary',
             compact: true,
             busy: this.#settingsData.clearingKey,
@@ -1923,7 +1933,7 @@ export class InspectorDrawer {
               this.#settingsData.success = '';
               this.render();
               try {
-                await this.#callbacks.onSaveSettings({ openRouterApiKey: null });
+                await this.#callbacks.onSaveSettings({ openRouterApiKey: null }, { replaceWarnings: false });
                 this.#settingsData.success = 'Saved key override cleared.';
               } catch (clearError) {
                 this.#settingsData.error = clearError instanceof Error ? clearError.message : String(clearError);
@@ -1955,6 +1965,7 @@ export class InspectorDrawer {
         settingsFooter.className = 'action-row-end';
         settingsFooter.append(
           this.#buildButton('Cancel', {
+            id: InspectorDrawer.#CancelButtonId,
             variant: 'secondary',
             disabled: busy,
             onClick: () => {
@@ -1965,6 +1976,7 @@ export class InspectorDrawer {
             },
           }),
           this.#buildButton('Save', {
+            id: InspectorDrawer.#SaveButtonId,
             variant: 'primary',
             type: 'submit',
             busy: this.#settingsData.saving,
@@ -2070,12 +2082,13 @@ export class InspectorDrawer {
 
   /**
    * @param {string} text
-   * @param {{variant?: 'primary' | 'secondary' | 'ghost' | 'danger', compact?: boolean, busy?: boolean, busyLabel?: string, disabled?: boolean, type?: 'button' | 'submit', onClick?: (() => void | Promise<void>) | null}} [options]
+   * @param {{id?: string, variant?: 'primary' | 'secondary' | 'ghost' | 'danger', compact?: boolean, busy?: boolean, busyLabel?: string, disabled?: boolean, type?: 'button' | 'submit', onClick?: (() => void | Promise<void>) | null}} [options]
    * @returns {HTMLButtonElement}
    */
   #buildButton(
     text,
     {
+      id = '',
       variant = 'secondary',
       compact = false,
       busy = false,
@@ -2086,6 +2099,9 @@ export class InspectorDrawer {
     } = {},
   ) {
     const button = this.#documentRef.createElement('button');
+    if (id.length > 0) {
+      button.id = id;
+    }
     button.type = type;
     const classes = ['btn'];
     if (variant === 'danger') {
@@ -2240,12 +2256,13 @@ export class InspectorDrawer {
    * @returns {void}
    */
   #renderCatalogUpdate() {
-    const isLoadEnd = !this.#settingsData.modelCatalogLoading;
-    const returnFocusId = isLoadEnd && this.#settingsData.refreshFocusPending ? InspectorDrawer.#RefreshButtonId : '';
-    if (isLoadEnd) {
-      this.#settingsData.refreshFocusPending = false;
-    }
-    if (this.#activeTab !== 'settings') {
+    const refreshReturn = FocusKeeper.takeRefreshReturn({
+      isLoading: this.#settingsData.modelCatalogLoading,
+      isPending: this.#settingsData.refreshFocusPending,
+      refreshButtonId: InspectorDrawer.#RefreshButtonId,
+    });
+    this.#settingsData.refreshFocusPending = refreshReturn.isPending;
+    if (this.#activeTab !== InspectorDrawer.#SettingsTabId) {
       return;
     }
     FocusKeeper.keep({
@@ -2255,7 +2272,7 @@ export class InspectorDrawer {
       renderFn: () => {
         this.render();
       },
-      returnFocusId,
+      returnFocusId: refreshReturn.returnFocusId,
     });
   }
 }

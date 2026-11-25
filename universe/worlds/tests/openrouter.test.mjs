@@ -700,6 +700,7 @@ describe('OpenRouterClient.stream', () => {
       turnId: null,
       stage: 'composer',
       model: 'openrouter/composer',
+      promptChars: 15,
       promptTokens: 40,
       completionTokens: 12,
       costUsd: null,
@@ -937,6 +938,82 @@ describe('OpenRouterClient.stream', () => {
     assert.equal(fetchCallsWithUsage, 1);
     assert.equal(spendCalls.length, 1);
     assert.equal(spendCalls[0].costUsd, 0.004);
+    assert.equal(spendCalls[0].promptChars, 'Drop after usage'.length);
+  });
+
+  it('reports promptChars as the summed message lengths for complete, stream, and stream failure after usage', async () => {
+    const spendCalls = [];
+    const messages = [
+      { role: 'system', content: 'Rules: be brief.' },
+      { role: 'user', content: 'Café — 世界' },
+      { role: 'assistant', content: '' },
+    ];
+    const expectedChars = 'Rules: be brief.'.length + 'Café — 世界'.length;
+    const { wait } = createRecordedWait();
+    const clientOptions = {
+      apiKeyProvider: () => 'sk-or-chars',
+      retryOptions: { wait },
+      onSpend: (dto) => {
+        spendCalls.push(dto);
+        return { id: `spend-${spendCalls.length}` };
+      },
+    };
+
+    let completeAttempts = 0;
+    const completeClient = new OpenRouterClient({
+      ...clientOptions,
+      fetchImpl: async () => {
+        completeAttempts += 1;
+        if (completeAttempts === 1) {
+          return new Response(JSON.stringify({ error: { message: 'Temporary 503' } }), {
+            status: 503,
+            headers: { 'Content-Type': 'application/json' },
+          });
+        }
+        return new Response(
+          JSON.stringify({
+            choices: [{ message: { content: 'Done' }, finish_reason: 'stop' }],
+            usage: { prompt_tokens: 9, completion_tokens: 1 },
+          }),
+          { status: 200, headers: { 'Content-Type': 'application/json' } },
+        );
+      },
+    });
+    await completeClient.complete({ model: 'm/a', messages, stage: SpendStage.Director });
+    assert.equal(spendCalls.length, 1);
+    assert.equal(spendCalls[0].promptChars, expectedChars);
+
+    const streamClient = new OpenRouterClient({
+      ...clientOptions,
+      fetchImpl: async () => new Response(
+        createChunkedStream([
+          'data: {"choices":[{"delta":{"content":"Hi"}}]}\n\n',
+          'data: {"choices":[],"usage":{"prompt_tokens":9,"completion_tokens":1}}\n\n',
+          'data: [DONE]\n\n',
+        ]),
+        { status: 200, headers: { 'Content-Type': 'text/event-stream' } },
+      ),
+    });
+    await streamClient.stream({ model: 'm/a', messages, stage: SpendStage.Mind });
+    assert.equal(spendCalls.length, 2);
+    assert.equal(spendCalls[1].promptChars, expectedChars);
+
+    const failingClient = new OpenRouterClient({
+      ...clientOptions,
+      fetchImpl: async () => new Response(
+        createChunkedStream(
+          ['data: {"choices":[{"delta":{"content":"Chunk"}}],"usage":{"prompt_tokens":9,"completion_tokens":1}}\n\n'],
+          { failAfterIndex: 1 },
+        ),
+        { status: 200, headers: { 'Content-Type': 'text/event-stream' } },
+      ),
+    });
+    await assert.rejects(
+      () => failingClient.stream({ model: 'm/a', messages, stage: SpendStage.Mind }),
+      /Stream connection dropped/,
+    );
+    assert.equal(spendCalls.length, 3);
+    assert.equal(spendCalls[2].promptChars, expectedChars);
   });
 
   it('aborts cleanly on pre-aborted signal or mid-stream abort without recording unreceived spend', async () => {

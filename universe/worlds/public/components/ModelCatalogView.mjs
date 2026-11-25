@@ -16,13 +16,13 @@ export class ModelCatalogView {
   }
 
   /**
-   * @param {{openrouter?: Array<object>} | null} catalog
+   * @param {{openrouter: Array<object>} | null} catalog
    * @param {unknown} filterQuery
    * @returns {Array<{id: string, name?: string, contextLength?: number, promptCostPerMillion?: number, completionCostPerMillion?: number, isModerated?: boolean}>}
    */
   static matchingModels(catalog, filterQuery) {
     const normalizedFilter = ModelCatalogView.#normalizeFilter(filterQuery);
-    const models = Array.isArray(catalog?.openrouter) ? catalog.openrouter : [];
+    const models = catalog === null ? [] : catalog.openrouter;
     if (normalizedFilter.length === 0) {
       return models;
     }
@@ -72,7 +72,7 @@ export class ModelCatalogView {
   }
 
   /**
-   * @param {{documentRef: Document, selectElement: HTMLSelectElement, catalog: {openrouter?: Array<object>} | null, currentValue: string, filterQuery: unknown, emptyOptionText: string, hiddenOptionText: string}} options
+   * @param {{documentRef: Document, selectElement: HTMLSelectElement, catalog: {openrouter: Array<object>} | null, currentValue: string, filterQuery: unknown, emptyOptionText: string, hiddenOptionText: string}} options
    * @returns {void}
    */
   static populateSelect({
@@ -86,7 +86,7 @@ export class ModelCatalogView {
   }) {
     const isFiltered = ModelCatalogView.#normalizeFilter(filterQuery).length > 0;
     const matching = ModelCatalogView.matchingModels(catalog, filterQuery);
-    const totalCount = Array.isArray(catalog?.openrouter) ? catalog.openrouter.length : 0;
+    const totalCount = catalog === null ? 0 : catalog.openrouter.length;
     const hasExactOption = matching.some((model) => model.id === currentValue);
     const isSavedValueHidden = isFiltered && currentValue.length > 0 && !hasExactOption;
 

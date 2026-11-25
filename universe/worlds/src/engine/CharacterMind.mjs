@@ -197,8 +197,8 @@ export const CharacterMind = Object.freeze({
         'CHARACTER IDENTITY:',
         `Name: ${character.name}`,
         `Tier: ${character.tier}`,
-        `Persona: ${typeof character.persona === 'string' && character.persona.trim().length > 0 ? character.persona.trim() : '(none)'}`,
-        `Voice notes: ${typeof character.voiceNotes === 'string' && character.voiceNotes.trim().length > 0 ? character.voiceNotes.trim() : '(none)'}`,
+        `Persona: ${character.card.personalitySummary.trim().length > 0 ? character.card.personalitySummary.trim() : '(none)'}`,
+        `Voice notes: ${character.card.speakingStyle.trim().length > 0 ? character.card.speakingStyle.trim() : '(none)'}`,
       ].join('\n'),
       [
         'CURRENT SCENE:',

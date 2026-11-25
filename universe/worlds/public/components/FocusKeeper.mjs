@@ -39,6 +39,17 @@ export class FocusKeeper {
   }
 
   /**
+   * @param {{isLoading: boolean, isPending: boolean, refreshButtonId: string}} options
+   * @returns {{returnFocusId: string, isPending: boolean}}
+   */
+  static takeRefreshReturn({ isLoading, isPending, refreshButtonId }) {
+    return {
+      returnFocusId: !isLoading && isPending ? refreshButtonId : '',
+      isPending: isLoading ? isPending : false,
+    };
+  }
+
+  /**
    * @param {HTMLElement} element
    * @returns {void}
    */

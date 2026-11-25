@@ -12,6 +12,7 @@ import { ScribeKnowledge } from '../src/scribe/ScribeKnowledge.mjs';
 import { ScribeLogCore } from '../src/scribe/ScribeLogCore.mjs';
 import { ScribeReplay } from '../src/scribe/ScribeReplay.mjs';
 import { ScribeText } from '../src/scribe/ScribeText.mjs';
+import { CharacterCard } from '../src/store/CharacterCard.mjs';
 import { CharacterTier } from '../src/store/enums/CharacterTier.mjs';
 import { SceneType } from '../src/store/enums/SceneType.mjs';
 import { SqliteStore } from '../src/store/SqliteStore.mjs';
@@ -535,8 +536,10 @@ test('ZetaSeeder seeds campaign, cast and an Operator-only Scribe book that repl
     assert.ok(corin.aliases.includes('Night Watchman'));
     assert.ok(corin.aliases.includes('Old Corin'));
     assert.ok(tamsin.aliases.includes('Lantern Keeper'));
-    assert.equal(corin.persona, 'eyes: amber');
-    assert.equal(bramwell.persona, '');
+    for (const character of castPage.items) {
+      assert.deepEqual(character.card.toObject(), CharacterCard.empty().toObject());
+    }
+    assert.equal(Object.hasOwn(corin, 'persona'), false);
     assert.equal(corin.tier, CharacterTier.Main);
     assert.equal(tamsin.tier, CharacterTier.Main);
     assert.equal(bramwell.tier, CharacterTier.Main);

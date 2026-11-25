@@ -5651,16 +5651,21 @@ function localText(storage, kind) {
     return REFERENCE.ScribeStore.snapshot(storage, ROOM, kind)?.text ?? null;
 }
 
-for (const route of ['an observed clone', 'the saved-chat picker', 'the Worker Book on another PC']) {
+for (const route of ['an observed clone', 'a stale cached clone', 'a missing cached passage', 'a divergent clone',
+    'the saved-chat picker', 'the Worker Book on another PC']) {
     test(`the installed fork recovery pulls the selected Book only on request with ${route}`, async () => {
-        const observed = route === 'an observed clone';
         const remote = route === 'the Worker Book on another PC';
+        const observed = !remote && route !== 'the saved-chat picker';
+        const stale = route === 'a stale cached clone';
+        const missing = route === 'a missing cached passage';
+        const divergent = route === 'a divergent clone';
         const walk = world();
         const child = 'harbour-fork';
         const title = 'Saved at 2026-11-16 17:17';
         const gapped = !observed && !remote;
         const shared = gapped ? 60 : 30;
-        for (const [room, length] of [[ROOM, shared + 1], [child, shared]]) {
+        const forkLength = divergent ? shared + 2 : shared;
+        for (const [room, length] of [[ROOM, forkLength + 1], [child, forkLength]]) {
             const history = campaign(length);
             for (const [index, row] of history.messages.entries()) {
                 row.roomId = room;
@@ -5668,6 +5673,9 @@ for (const route of ['an observed clone', 'the saved-chat picker', 'the Worker B
                 row.candidateId = 'candidate-' + index;
                 if (room === child) {
                     row.id = 'child-' + row.id;
+                    if (divergent && index === shared) {
+                        row.contents[0].text += ' The fork took another turn.';
+                    }
                 }
             }
             walk.site.open(room, history);
@@ -5680,9 +5688,12 @@ for (const route of ['an observed clone', 'the saved-chat picker', 'the Worker B
             tab = install(walk, '/', WIDE, {storage: destination, locks: new FakeLocks()});
             tab.ready();
         } else {
-            tab = await opened(walk);
-            await saveKey(walk, tab);
-            await adopt(walk, tab, '2');
+            tab = await adoptedInWorker(walk);
+        }
+        if (!remote) {
+            const destinationRows = walk.site.messagesIn(child);
+            REFERENCE.ScribeStore.write(destination, child, 'campaign', {completeHistory: true, gone: [],
+                messages: gapped ? destinationRows.slice(0, -2) : destinationRows});
         }
         if (gapped) {
             const book = stored(walk, 'book');
@@ -5694,7 +5705,9 @@ for (const route of ['an observed clone', 'the saved-chat picker', 'the Worker B
         REFERENCE.ScribeStore.setKey(walk.storage, '');
         const list = [];
         const original = walk.site.respond.bind(walk.site);
-        const selected = walk.site.messages[shared - 1].id;
+        const selected = walk.site.messages[forkLength - 1].id;
+        const lastShared = walk.site.messages[shared - 1].id;
+        const firstDifference = walk.site.messages[shared].id;
         let finishClone;
         let cloning;
         walk.site.respond = (receiver, url, options) => {
@@ -5737,12 +5750,27 @@ for (const route of ['an observed clone', 'the saved-chat picker', 'the Worker B
             await until(walk, 'the Worker to confirm the fork has no Book', () =>
                 tab.panel.headline().startsWith('No book on this PC or in the Worker'), 2 * TICK_MS);
             assert.equal(REFERENCE.ScribeStore.read(destination, ROOM, 'book'), null);
+            const initialCampaign = REFERENCE.ScribeStore.read(destination, child, 'campaign');
+            assert.equal(initialCampaign?.completeHistory, undefined);
+            assert.equal(initialCampaign?.messages.length ?? 0, 0);
         }
         assert.ok(!REFERENCE.ScribeStore.read(destination, child, 'book')?.adopted);
         assert.deepEqual(list, []);
         assert.equal(walk.site.pageRequests().length, pulls);
         if (observed) {
             assert.match(tab.panel.text('scribe-fork-origin'), new RegExp(ROOM + ' at message ' + selected));
+            if (stale || missing) {
+                const cached = stored(walk, 'campaign');
+                if (stale) {
+                    cached.messages[1].contents[0].text += ' An obsolete version.';
+                } else {
+                    cached.messages = cached.messages.filter((row) => row.id !== selected);
+                }
+                REFERENCE.ScribeStore.write(walk.storage, ROOM, 'campaign', cached);
+            }
+        }
+        const parentCampaign = localText(walk.storage, 'campaign');
+        if (observed) {
             tab.panel.click('scribe-fork-open');
         } else {
             tab.panel.click('scribe-fork-open');
@@ -5793,20 +5821,74 @@ for (const route of ['an observed clone', 'the saved-chat picker', 'the Worker B
             }
         }
         await until(walk, 'the verified Book to be filed', () => tab.panel.text('scribe-fork-outcome').includes('Recovered'), 2 * TICK_MS);
-        assert.equal(tab.panel.text('scribe-fork-outcome'), 'Recovered 30 message readings from harbour. Verified ' + shared + ' shared messages.');
+        const cutoff = divergent ? ' Stopped before selected passage ' + selected + ': passage #' + (shared + 1) +
+            ' (' + firstDifference + ') — message content differs.' : '';
+        assert.equal(tab.panel.text('scribe-fork-outcome'), 'Recovered ' + shared + ' message readings from harbour. Verified ' + shared + ' shared messages.' + cutoff);
+        const parentPages = walk.site.pageRequests().slice(pulls).filter((row) => new URL(row.url).pathname === '/v1/rooms/' + ROOM + '/messages');
+        assert.equal(parentPages.length, 0);
+        const forkPages = walk.site.pageRequests().slice(pulls).filter((row) => new URL(row.url).pathname === '/v1/rooms/' + child + '/messages');
+        assert.equal(forkPages.length, 1);
         const recovered = REFERENCE.ScribeStore.read(destination, child, 'book');
         assert.equal(recovered.adopted, true);
-        assert.deepEqual({...recovered.fork}, {sourceRoomId: ROOM, sourceMessageId: selected, messageId: 'child-' + selected});
-        assert.ok(recovered.log.read['child-' + selected]);
+        assert.deepEqual({...recovered.fork}, {sourceRoomId: ROOM, sourceMessageId: lastShared, messageId: 'child-' + lastShared});
+        assert.ok(recovered.log.read['child-' + lastShared]);
+        if (divergent) {
+            assert.equal(recovered.log.read['child-' + firstDifference], undefined);
+            assert.equal(recovered.log.read['child-' + selected], undefined);
+        }
         if (gapped) {
-            assert.ok(!recovered.log.read['child-MESSAGE-30']);
+            assert.ok(recovered.log.read['child-MESSAGE-30']);
             assert.ok(recovered.log.read['child-MESSAGE-31']);
         }
         assert.equal(localText(walk.storage, 'book'), source);
+        assert.equal(localText(walk.storage, 'campaign'), parentCampaign);
         assert.equal(walk.model.calls.length, calls);
         assert.equal(list.length, observed ? 0 : 1);
         if (remote) {
             assert.equal(walk.worker.textOf(CLOUD_ROOM, 'book'), source);
+            const recoveredCampaign = REFERENCE.ScribeStore.read(destination, child, 'campaign');
+            assert.equal(recoveredCampaign.completeHistory, true);
+            assert.equal(recoveredCampaign.messages.length, forkLength);
+            assert.equal(recoveredCampaign.observations, undefined);
+        }
+    });
+}
+
+for (const action of ['choose', 'pull-chat']) {
+    test('a missing Worker Book waits for the explicit ' + action + ' choice', async () => {
+        const walk = world();
+        const tab = await opened(walk);
+        const origin = 'selected-parent';
+        walk.storage.set(REFERENCE.ScribeStore.name('fork', REFERENCE.ScribeStore.room(ROOM)),
+            JSON.stringify({parentRoomId: origin, childRoomId: ROOM, messageId: 'parent-passage'}));
+        tab.setDmKey(DM_KEY);
+        await until(walk, 'the Worker to finish opening the destination', () =>
+            tab.panel.headline().startsWith('No book on this PC or in the Worker'), TICK_MS);
+        const requests = walk.site.pageRequests().length;
+        tab.panel.click('scribe-fork-open');
+        await until(walk, 'the missing source choice', () => !tab.panel.byId('scribe-fork-choose').hidden, TICK_MS);
+        assert.equal(tab.panel.text('scribe-fork-outcome'), 'The Worker has no saved Book for origin room ' + origin + '.');
+        assert.equal(tab.panel.byId('scribe-fork-pull-chat').hidden, false);
+        assert.equal(walk.worker.calls('/v1/scribe', 'GET').filter((call) => call.query.roomId === '/rooms/' + origin).length, 1);
+        assert.equal(walk.site.pageRequests().length, requests);
+        assert.equal(tab.panel.byId('scribe-fork-open').hidden, true);
+        if (action === 'choose') {
+            const original = walk.site.respond.bind(walk.site);
+            walk.site.respond = (receiver, url, options) => new URL(url).pathname === '/v1/rooms/saved'
+                ? Promise.resolve(zetaResponse(url, 200, JSON.stringify({rooms: [
+                    {id: 'another-parent', title: 'Another chat', plot: {id: 'plot-' + ROOM}},
+                ], nextCursor: null})))
+                : original(receiver, url, options);
+            tab.panel.click('scribe-fork-choose');
+            await until(walk, 'the alternative origin picker', () => !tab.panel.byId('scribe-fork-picker').hidden, TICK_MS);
+            assert.equal(tab.panel.text('scribe-fork-open'), 'Pull Book');
+            assert.equal(walk.site.pageRequests().length, requests);
+        } else {
+            tab.panel.click('scribe-fork-pull-chat');
+            await until(walk, 'the requested destination chat pull', () => tab.panel.text('scribe-fork-outcome') === 'Pulled this chat.', TICK_MS);
+            assert.ok(walk.site.pageRequests().length > requests);
+            assert.ok(REFERENCE.ScribeStore.read(walk.storage, ROOM, 'campaign').messages.length);
+            assert.equal(REFERENCE.ScribeStore.read(walk.storage, ROOM, 'book'), null);
         }
     });
 }

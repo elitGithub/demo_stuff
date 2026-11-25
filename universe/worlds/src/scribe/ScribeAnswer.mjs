@@ -68,6 +68,7 @@ export const ScribeAnswer = Object.freeze({
     NotFound: -1,
     MinPosition: 1,
     MaxLabel: 60,
+    Attributions: Object.freeze(['witnessed', 'claimed', 'inferred', 'promised', 'ruled']),
     SecondField: 1,
     ThirdField: 2,
     StatementStart: 3,
@@ -902,7 +903,7 @@ export const ScribeAnswer = Object.freeze({
           ScribeAnswer.Blocks.includes(item.section) &&
           [item.row, item.messageNumber, item.blockNumber].every((number) => Number.isSafeInteger(number) && number > 0) &&
           isNonEmptyString(item.quote) &&
-          ['witnessed', 'claimed', 'inferred', 'promised', 'ruled'].includes(item.attribution) &&
+          ScribeAnswer.Settings.Attributions.includes(item.attribution) &&
           isNullableString(item.form) &&
           isNullableString(item.dimension) &&
           ['event', 'time', 'subject', 'attribute', 'value'].every((key) => item[key] === undefined || isNullableString(item[key])) &&

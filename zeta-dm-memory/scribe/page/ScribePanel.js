@@ -147,6 +147,8 @@ const ScribePanel = Object.freeze({
             Adopt: 'scribe-adopt',
             Fork: 'scribe-fork',
             ForkOpen: 'scribe-fork-open',
+            ForkChoose: 'scribe-fork-choose',
+            ForkPullChat: 'scribe-fork-pull-chat',
             ForkOrigin: 'scribe-fork-origin',
             ForkPicker: 'scribe-fork-picker',
             ForkSource: 'scribe-fork-source',
@@ -669,6 +671,8 @@ const ScribePanel = Object.freeze({
             listForkRooms: environment.listForkRooms,
             recoverFork: environment.recoverFork,
             forkRooms: [],
+            forkMissing: false,
+            forkChoosing: false,
             generateReminder: environment.generateReminder,
             generatedReminder: null,
             generationNotice: null,
@@ -1599,7 +1603,7 @@ const ScribePanel = Object.freeze({
                 if (panel.pending.has(settings.Outlets.Fork)) {
                     return;
                 }
-                const origin = panel.forkOrigin();
+                const origin = panel.forkChoosing ? null : panel.forkOrigin();
                 if (origin) {
                     return ScribePanel.pullFork(panel, origin.parentRoomId, origin.messageId);
                 }
@@ -1613,6 +1617,35 @@ const ScribePanel = Object.freeze({
             }, settings.Guard.Free, settings.Ids.ForkOpen)),
             ScribePanel.own(panel, 'ForkPicker', forkPicker.label),
             ScribePanel.outlet(panel, 'ForkOutcome', settings.Outlets.Fork),
+            ScribePanel.own(panel, 'ForkChoose', ScribePanel.button(panel, 'Choose a different origin',
+                /**
+                 * @return {Promise<boolean>}
+                 */
+                async () => {
+                    const listed = await ScribePanel.listForks(panel);
+                    if (listed && panel.forkRooms.length > 0) {
+                        panel.forkChoosing = true;
+                        panel.forkMissing = false;
+                        ScribePanel.redraw(panel);
+                        panel.parts.ForkSource.focus();
+                    }
+                    return listed;
+                }, settings.Guard.Free, settings.Ids.ForkChoose)),
+            ScribePanel.own(panel, 'ForkPullChat', ScribePanel.button(panel, 'Pull chat data',
+                /**
+                 * @return {Promise<void>}
+                 */
+                async () => {
+                    const pulled = await ScribePanel.perform(panel, {
+                        outlet: settings.Outlets.Fork, question: null, book: true,
+                        pending: 'Pulling this chat…', done: 'Pulled this chat.',
+                        call: () => panel.keeper.pull(true),
+                    });
+                    if (pulled) {
+                        panel.forkMissing = false;
+                        ScribePanel.redraw(panel);
+                    }
+                }, settings.Guard.Free, settings.Ids.ForkPullChat)),
         );
         problems.setAttribute(attributes.Role, aria.Status);
         const compact = ScribePanel.own(panel, 'ProblemsCompact', ScribePanel.make(panel, tags.Span, settings.Nothing, classes.Problem));
@@ -2339,7 +2372,10 @@ const ScribePanel = Object.freeze({
                 }
             }, guards.Book, ids.InputRetry));
             inputRetry.hidden = true;
-            const range = ScribePanel.own(panel, 'HistoryRange', ScribePanel.make(panel, tags.Block));
+            section.append(controls);
+            const range = ScribePanel.own(panel, 'HistoryRange', ScribePanel.group(panel, section, 'Check history'));
+            range.append(ScribePanel.make(panel, tags.Paragraph,
+                'To check specific messages from your last pull, enter the first and last message numbers. Leave these blank to pull the chat.'));
             const from = ScribePanel.field(panel, 'number', 'From message', ids.HistoryFrom, true, false);
             const to = ScribePanel.field(panel, 'number', 'To message', ids.HistoryTo, true, false);
             ScribePanel.own(panel, 'HistoryFrom', from.input);
@@ -2360,7 +2396,7 @@ const ScribePanel = Object.freeze({
             }, true), guards.Book, ids.CheckHistory));
             range.append(from.label, to.label, check);
             range.hidden = true;
-            section.append(controls, range, ScribePanel.outlet(panel, 'ControlsOutcome', outlets.Controls), details, retry, inputRetry, checked, story, pulled);
+            section.append(ScribePanel.outlet(panel, 'ControlsOutcome', outlets.Controls), details, retry, inputRetry, checked, story, pulled);
             const filing = ScribePanel.own(panel, 'FilingGroup', ScribePanel.group(panel, section, 'Pending book entries, checker rows and operator input'));
             filing.hidden = true;
             ScribePanel.pager(panel, settings.Lists.Filing, filing);
@@ -2735,17 +2771,19 @@ const ScribePanel = Object.freeze({
         const forkOutcome = panel.outcomes.get(forkOutlet) ?? settings.Nothing;
         const recovering = panel.pending.has(forkOutlet);
         const eligible = view.canRecoverFork === true;
-        const origin = panel.forkOrigin?.() ?? null;
+        const origin = panel.forkChoosing ? null : panel.forkOrigin?.() ?? null;
         const choosingSource = origin === null && panel.forkRooms.length > 0;
         parts.Fork.hidden = !eligible && !recovering && !forkOutcome && !origin;
         parts.ForkOrigin.hidden = origin === null;
         if (origin) {
             ScribePanel.write(parts.ForkOrigin, 'Forked from room ' + origin.parentRoomId + ' at message ' + origin.messageId);
         }
-        parts.ForkOpen.hidden = !eligible && !recovering;
+        parts.ForkOpen.hidden = panel.forkMissing || (!eligible && !recovering);
         parts.ForkOpen.disabled = !eligible || recovering || (choosingSource && !parts.ForkSource.value);
         ScribePanel.write(parts.ForkOpen, origin ? 'Pull Book from fork origin' : choosingSource ? 'Pull Book' : 'Pull Book from saved chat');
-        parts.ForkPicker.hidden = !eligible || !choosingSource;
+        parts.ForkPicker.hidden = panel.forkMissing || !eligible || !choosingSource;
+        parts.ForkChoose.hidden = parts.ForkPullChat.hidden = !eligible || !panel.forkMissing;
+        parts.ForkChoose.disabled = parts.ForkPullChat.disabled = !panel.forkMissing || recovering || !eligible;
         parts.ForkSource.disabled = !eligible || recovering;
         ScribePanel.write(parts.ForkOutcome, forkOutcome);
         parts.ForkOutcome.hidden = !forkOutcome;
@@ -3155,15 +3193,26 @@ const ScribePanel = Object.freeze({
     pullFork(panel, sourceRoomId, messageId) {
         const action = {
             outlet: ScribePanel.Settings.Outlets.Fork, question: null,
-            pending: 'Verifying the shared messages and source Book…', done: '', book: true,
+            pending: messageId
+                ? 'Checking the Worker for this origin’s Book…'
+                : 'Checking the Worker for this saved chat’s Book…',
+            done: '', book: true,
             call: async () => {
                 const result = await panel.recoverFork(sourceRoomId, messageId);
+                if (result.missingBook === true) {
+                    panel.forkMissing = true;
+                }
                 if (!result.ok) {
                     throw new Error(result.reason);
                 }
                 panel.forkRooms = [];
+                panel.forkMissing = false;
+                panel.forkChoosing = false;
                 action.done = 'Recovered ' + result.read + (result.read === 1 ? ' message reading' : ' message readings') +
                     ' from ' + sourceRoomId + '. Verified ' + result.shared + (result.shared === 1 ? ' shared message.' : ' shared messages.');
+                if (result.cutoff) {
+                    action.done += ' Stopped before selected passage ' + result.cutoff.selected + ': ' + result.cutoff.detail;
+                }
             },
         };
         return ScribePanel.perform(panel, action);

@@ -2279,31 +2279,13 @@ const ScribeBoot = Object.freeze({
      * @param {object} session
      * @param {string} sourceRoomId
      * @param {{fetch: Function, token: string|null, signal: AbortSignal, roomId: string, pause: (ms: number) => Promise<void>}} request
-     * @return {Promise<object>}
+     * @return {Promise<object|null>}
      * @throws {Error}
      */
     async forkSource(session, sourceRoomId, request) {
-        const storage = session.boot.environment.storage;
-        const kinds = ScribeStore.Kind;
-        let book = ScribeStore.read(storage, sourceRoomId, kinds.Book);
-        if (!book?.adopted) {
-            book = await session.cloud.forkBook(sourceRoomId, request.signal);
-        }
+        const book = await session.cloud.forkBook(sourceRoomId, request.signal);
         request.signal.throwIfAborted();
-        if (!book?.adopted) {
-            throw new Error('No adopted Book was found for this saved chat.');
-        }
-        const campaign = ScribeStore.read(storage, sourceRoomId, kinds.Campaign);
-        let messages = campaign?.messages;
-        if (!campaign?.completeHistory || campaign.needsHistory || !Array.isArray(messages) || !messages.length) {
-            /** @type {{messages: object[], completeHistory?: boolean, problem: string|null}} */
-            const history = await ZetaSource.history({ ...request, roomId: sourceRoomId });
-            if (history.completeHistory !== true) {
-                throw new Error(history.problem ?? 'The source chat history is incomplete.');
-            }
-            messages = history.messages;
-        }
-        return { book, messages };
+        return book === null ? null : {book, worker: true};
     },
 
     /**
@@ -2408,10 +2390,11 @@ const ScribeBoot = Object.freeze({
                 zeta: Object.freeze({
                     /**
                      * @param {(count: number) => void} onPage
+                     * @param {{id: string, messageTime: string}|null} boundary
                      * @return {Promise<object>}
                      * @throws {Error}
                      */
-                    history: async (onPage) => {
+                    history: async (onPage, boundary = null) => {
                         if (!ScribeBoot.currentRoom(session)) {
                             throw new Error(messages.Left);
                         }
@@ -2424,6 +2407,7 @@ const ScribeBoot = Object.freeze({
                         try {
                             return await ZetaSource.history({
                                 fetch, token: ScribeBoot.token(boot), roomId: session.roomId, onPage,
+                                ...(boundary ? {through: boundary.id, boundaryTime: boundary.messageTime} : {}),
                                 signal: controller.signal, pause: (ms) => ScribeBoot.pause(session, ms, controller.signal),
                             });
                         } finally {
@@ -2646,7 +2630,7 @@ const ScribeBoot = Object.freeze({
                 forkOrigin: () => session.forkOrigin,
                 listForkRooms: () => ScribeBoot.forkAction(session, fetch, (request) => ZetaSource.savedRooms(request)),
                 recoverFork: (sourceRoomId, messageId) => ScribeBoot.forkAction(session, fetch, (request) =>
-                    keeper.recoverFork(sourceRoomId, messageId, () => ScribeBoot.forkSource(session, sourceRoomId, request))),
+                    keeper.recoverFork(sourceRoomId, messageId, (room) => ScribeBoot.forkSource(session, room, request))),
                 readReminderDraft: () => live.readReminderDraft(),
                 writeReminderDraft: (text) => {
                     try {

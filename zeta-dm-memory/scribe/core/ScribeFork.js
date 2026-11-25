@@ -19,6 +19,30 @@ const ScribeFork = Object.freeze({
     },
 
     /**
+     * @param {object} before
+     * @param {object|undefined} after
+     * @return {string|null}
+     */
+    mismatch(before, after) {
+        if (!after) {
+            return 'the fork has fewer messages than the source';
+        }
+        if (before.messageTime !== after.messageTime) {
+            return 'message timestamp differs';
+        }
+        if (!ScribeFork.equal(before.sender, after.sender)) {
+            return 'sender differs';
+        }
+        if (!ScribeFork.equal(before.contents, after.contents)) {
+            return 'message content differs';
+        }
+        if (before.candidateId && after.candidateId && before.candidateId !== after.candidateId) {
+            return 'candidate ID differs';
+        }
+        return null;
+    },
+
+    /**
      * @param {object} entry
      * @param {Map} mapping
      * @param {Set} originals
@@ -307,43 +331,129 @@ const ScribeFork = Object.freeze({
      * @param {string} roomId
      * @param {string|null} selected
      * @param {object|null} current
-     * @return {{book: object, shared: number, read: number, mapping: Map, sourceIntake: object[]}}
+     * @return {{book: object, shared: number, read: number, mapping: Map, sourceIntake: object[], cutoff: object|null, mismatch: object|null}}
      * @throws {Error}
      */
     stage(source, messages, intake, sourceRoomId, roomId, selected, current) {
-        const parent = source.messages;
         const saved = source.book;
-        if (roomId === sourceRoomId || !ScribeKeeper.soundBook(saved) || !saved.adopted ||
+        if (roomId === sourceRoomId || !ScribeKeeper.soundBook(saved) || (!source.worker && !saved.adopted) ||
             !ScribeKeeper.replaceableForkBook(current)) {
             throw new Error('Fork recovery needs an adopted source Book and a fork without independent Book changes.');
         }
-        for (const [rows, room] of [[parent, sourceRoomId], [messages, roomId]]) {
+        const rawSource = source.worker !== true;
+        const transcripts = rawSource ? [[source.messages, sourceRoomId], [messages, roomId]] : [[messages, roomId]];
+        for (const [rows, room] of transcripts) {
             if (!Array.isArray(rows) || !rows.length || rows.some((row) => !row || row.roomId !== room ||
                 typeof row.id !== 'string' || !row.id || !Number.isFinite(Date.parse(row.messageTime)) ||
                 !row.sender?.type || !Array.isArray(row.contents)) || new Set(rows.map((row) => row.id)).size !== rows.length) {
-                throw new Error('The original messages for both rooms are needed to verify the fork.');
+                throw new Error(rawSource
+                    ? 'The original messages for both rooms are needed to verify the fork.'
+                    : 'The fork messages are needed to verify the Worker Book.');
             }
         }
+        let parent = source.messages;
+        const ambiguous = new Set();
+        if (!rawSource) {
+            parent = [];
+            const seen = new Set();
+            for (const row of intake.messages) {
+                if (seen.has(row.fingerprint)) {
+                    ambiguous.add(row.fingerprint);
+                }
+                seen.add(row.fingerprint);
+            }
+            const sourcePrints = new Set();
+            for (const entry of saved.log.entries) {
+                if (entry.withdrawn || entry.origin !== ScribeLog.Origin.Story) {
+                    continue;
+                }
+                const receipts = new Map((entry.sources ?? []).map((row) => [row.id, row]));
+                for (const id of entry.messageIds) {
+                    if (saved.log.read[id] !== entry.sequence) {
+                        continue;
+                    }
+                    const fingerprint = saved.fingerprints[id];
+                    const receipt = receipts.get(id);
+                    if (sourcePrints.has(fingerprint)) {
+                        ambiguous.add(fingerprint);
+                    }
+                    sourcePrints.add(fingerprint);
+                    const order = parent.length;
+                    const destIndex = Number.isInteger(receipt?.position) && receipt.position >= 1
+                        ? receipt.position - 1 : order;
+                    parent.push({id, fingerprint, receipt, destIndex, order});
+                }
+            }
+            if (!parent.length) {
+                throw new Error('No saved Writer readings were found in the Worker Book.');
+            }
+            if (parent.some((row) => Number.isInteger(row.receipt?.position) && row.receipt.position >= 1)) {
+                parent.sort((left, right) => left.destIndex - right.destIndex || left.order - right.order);
+            }
+        }
+        const target = typeof selected === 'string' && selected !== '' ? selected : null;
         const originals = new Set(parent.map((row) => row.id));
         const mapping = new Map();
+        const claimed = new Set();
+        let maxMatchedIndex = -1;
         let played = false;
         let boundary = null;
+        let mismatch = null;
         for (const [index, before] of parent.entries()) {
-            const after = messages[index];
-            if (!after || before.messageTime !== after.messageTime || !ScribeFork.equal(before.sender, after.sender) ||
-                !ScribeFork.equal(before.contents, after.contents) || (before.candidateId && after.candidateId &&
-                    before.candidateId !== after.candidateId)) {
+            const destIndex = rawSource ? index : before.destIndex;
+            const after = messages[destIndex];
+            let reason = null;
+            if (rawSource) {
+                reason = ScribeFork.mismatch(before, after);
+            } else {
+                const row = intake.messages[destIndex];
+                if (claimed.has(destIndex)) {
+                    reason = 'the saved reading does not match this position';
+                } else if (!row) {
+                    reason = 'the fork has fewer messages than the Worker readings';
+                } else if (!before.fingerprint || before.fingerprint !== row.fingerprint) {
+                    reason = 'message content differs';
+                } else if (before.receipt && (before.receipt.position !== row.position || before.receipt.fingerprint !== row.fingerprint)) {
+                    reason = 'the saved reading does not match this position';
+                } else if (!before.receipt && ambiguous.has(row.fingerprint)) {
+                    reason = 'the saved reading is ambiguous';
+                }
+            }
+            if (reason !== null) {
+                mismatch = {index: destIndex, parentId: before.id, childId: after?.id ?? null, reason};
                 break;
             }
-            mapping.set(before.id, intake.messages[index]);
+            claimed.add(destIndex);
+            mapping.set(before.id, intake.messages[destIndex]);
+            maxMatchedIndex = Math.max(maxMatchedIndex, destIndex);
             boundary = before.id;
-            played ||= before.isIntro === false && after.isIntro === false;
-            if (selected && selected === before.id) {
+            played ||= after.isIntro === false && (!rawSource || before.isIntro === false);
+            if (target && target === before.id) {
                 break;
             }
         }
-        if (!mapping.size || (selected ? !mapping.has(selected) : !played)) {
-            throw new Error('The original messages do not verify this fork through the selected passage.');
+        let cutoff = null;
+        if (target === null || !mapping.has(target)) {
+            if (!mapping.size || !played) {
+                if (mismatch !== null) {
+                    throw new Error('Fork verification failed at passage #' + (mismatch.index + 1) + ' (' + mismatch.parentId + '): ' +
+                        mismatch.reason + (target ? ' (selected ' + target + ').' : '.'));
+                }
+                if (target !== null) {
+                    throw new Error('Fork verification failed: selected passage ' + target +
+                        ' was not found in the source chat and no non-intro passage matched.');
+                }
+                throw new Error('Fork verification failed: only intro passages matched (no played passage verified).');
+            }
+            if (target !== null && mismatch !== null) {
+                cutoff = {selected: target, index: mismatch.index, parentId: mismatch.parentId, childId: mismatch.childId,
+                    reason: mismatch.reason, detail: 'passage #' + (mismatch.index + 1) + ' (' + mismatch.parentId + ') — ' + mismatch.reason + '.'};
+            } else if (target !== null) {
+                const reason = rawSource ? 'selected passage was not found in the source chat'
+                    : 'selected passage was not covered by the Worker Book readings';
+                cutoff = {selected: target, index: maxMatchedIndex + 1, parentId: null, childId: messages[maxMatchedIndex + 1]?.id ?? null,
+                    reason, detail: reason + '.'};
+            }
         }
         const log = ScribeLog.create();
         for (const key of Object.keys(log).filter((name) => typeof log[name] === 'number')) {
@@ -355,7 +465,9 @@ const ScribeFork = Object.freeze({
         const credited = new Set();
         const childIds = intake.messages.map((row) => row.id);
         const fingerprints = new Map(intake.messages.map((row) => [row.id, row.fingerprint]));
-        const sourceIntake = intake.messages.slice(0, mapping.size).map((row, index) => ({...row, id: parent[index].id}));
+        const childToParent = new Map([...mapping].map(([parentId, childRow]) => [childRow.id, parentId]));
+        const sourceIntake = intake.messages.slice(0, maxMatchedIndex + 1)
+            .map((row) => ({...row, id: childToParent.get(row.id) ?? row.id}));
         let contiguous = true;
         for (const entry of saved.log.entries) {
             if (entry.withdrawn) {
@@ -500,7 +612,7 @@ const ScribeFork = Object.freeze({
             const filed = new Map();
             for (const note of saved.log.notes) {
                 const used = filed.get(note) ?? new Set();
-                const place = parent.slice(0, mapping.size).findIndex((row, index) => !used.has(index) &&
+                const place = messages.slice(0, maxMatchedIndex + 1).findIndex((row, index) => !used.has(index) &&
                     row.contents.some((block) => typeof block.text === 'string' && note && block.text.includes(note)));
                 if (place >= 0) {
                     used.add(place);
@@ -517,6 +629,6 @@ const ScribeFork = Object.freeze({
             throw new Error('This fork has Book entries outside the verified source readings.');
         }
         ScribeReplay.run(log, childIds, null, fingerprints, null, null, intake.messages);
-        return {book, shared: mapping.size, read: credited.size, mapping, sourceIntake};
+        return {book, shared: mapping.size, read: credited.size, mapping, sourceIntake, cutoff, mismatch};
     },
 });

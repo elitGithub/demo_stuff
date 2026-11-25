@@ -1,7 +1,7 @@
 // ==UserScript==
 // @name         Zeta Scribe
 // @namespace    zeta-scribe
-// @version      0.3.46
+// @version      0.3.49
 // @description  Keeps the book of a Zeta campaign, tells the scene what it knows, and checks replies against the book.
 // @match        https://zeta-ai.io/*
 // @match        https://frame.pingpong.ai/*
@@ -7067,6 +7067,30 @@ const ScribeFork = Object.freeze({
     },
 
     /**
+     * @param {object} before
+     * @param {object|undefined} after
+     * @return {string|null}
+     */
+    mismatch(before, after) {
+        if (!after) {
+            return 'the fork has fewer messages than the source';
+        }
+        if (before.messageTime !== after.messageTime) {
+            return 'message timestamp differs';
+        }
+        if (!ScribeFork.equal(before.sender, after.sender)) {
+            return 'sender differs';
+        }
+        if (!ScribeFork.equal(before.contents, after.contents)) {
+            return 'message content differs';
+        }
+        if (before.candidateId && after.candidateId && before.candidateId !== after.candidateId) {
+            return 'candidate ID differs';
+        }
+        return null;
+    },
+
+    /**
      * @param {object} entry
      * @param {Map} mapping
      * @param {Set} originals
@@ -7355,43 +7379,129 @@ const ScribeFork = Object.freeze({
      * @param {string} roomId
      * @param {string|null} selected
      * @param {object|null} current
-     * @return {{book: object, shared: number, read: number, mapping: Map, sourceIntake: object[]}}
+     * @return {{book: object, shared: number, read: number, mapping: Map, sourceIntake: object[], cutoff: object|null, mismatch: object|null}}
      * @throws {Error}
      */
     stage(source, messages, intake, sourceRoomId, roomId, selected, current) {
-        const parent = source.messages;
         const saved = source.book;
-        if (roomId === sourceRoomId || !ScribeKeeper.soundBook(saved) || !saved.adopted ||
+        if (roomId === sourceRoomId || !ScribeKeeper.soundBook(saved) || (!source.worker && !saved.adopted) ||
             !ScribeKeeper.replaceableForkBook(current)) {
             throw new Error('Fork recovery needs an adopted source Book and a fork without independent Book changes.');
         }
-        for (const [rows, room] of [[parent, sourceRoomId], [messages, roomId]]) {
+        const rawSource = source.worker !== true;
+        const transcripts = rawSource ? [[source.messages, sourceRoomId], [messages, roomId]] : [[messages, roomId]];
+        for (const [rows, room] of transcripts) {
             if (!Array.isArray(rows) || !rows.length || rows.some((row) => !row || row.roomId !== room ||
                 typeof row.id !== 'string' || !row.id || !Number.isFinite(Date.parse(row.messageTime)) ||
                 !row.sender?.type || !Array.isArray(row.contents)) || new Set(rows.map((row) => row.id)).size !== rows.length) {
-                throw new Error('The original messages for both rooms are needed to verify the fork.');
+                throw new Error(rawSource
+                    ? 'The original messages for both rooms are needed to verify the fork.'
+                    : 'The fork messages are needed to verify the Worker Book.');
             }
         }
+        let parent = source.messages;
+        const ambiguous = new Set();
+        if (!rawSource) {
+            parent = [];
+            const seen = new Set();
+            for (const row of intake.messages) {
+                if (seen.has(row.fingerprint)) {
+                    ambiguous.add(row.fingerprint);
+                }
+                seen.add(row.fingerprint);
+            }
+            const sourcePrints = new Set();
+            for (const entry of saved.log.entries) {
+                if (entry.withdrawn || entry.origin !== ScribeLog.Origin.Story) {
+                    continue;
+                }
+                const receipts = new Map((entry.sources ?? []).map((row) => [row.id, row]));
+                for (const id of entry.messageIds) {
+                    if (saved.log.read[id] !== entry.sequence) {
+                        continue;
+                    }
+                    const fingerprint = saved.fingerprints[id];
+                    const receipt = receipts.get(id);
+                    if (sourcePrints.has(fingerprint)) {
+                        ambiguous.add(fingerprint);
+                    }
+                    sourcePrints.add(fingerprint);
+                    const order = parent.length;
+                    const destIndex = Number.isInteger(receipt?.position) && receipt.position >= 1
+                        ? receipt.position - 1 : order;
+                    parent.push({id, fingerprint, receipt, destIndex, order});
+                }
+            }
+            if (!parent.length) {
+                throw new Error('No saved Writer readings were found in the Worker Book.');
+            }
+            if (parent.some((row) => Number.isInteger(row.receipt?.position) && row.receipt.position >= 1)) {
+                parent.sort((left, right) => left.destIndex - right.destIndex || left.order - right.order);
+            }
+        }
+        const target = typeof selected === 'string' && selected !== '' ? selected : null;
         const originals = new Set(parent.map((row) => row.id));
         const mapping = new Map();
+        const claimed = new Set();
+        let maxMatchedIndex = -1;
         let played = false;
         let boundary = null;
+        let mismatch = null;
         for (const [index, before] of parent.entries()) {
-            const after = messages[index];
-            if (!after || before.messageTime !== after.messageTime || !ScribeFork.equal(before.sender, after.sender) ||
-                !ScribeFork.equal(before.contents, after.contents) || (before.candidateId && after.candidateId &&
-                    before.candidateId !== after.candidateId)) {
+            const destIndex = rawSource ? index : before.destIndex;
+            const after = messages[destIndex];
+            let reason = null;
+            if (rawSource) {
+                reason = ScribeFork.mismatch(before, after);
+            } else {
+                const row = intake.messages[destIndex];
+                if (claimed.has(destIndex)) {
+                    reason = 'the saved reading does not match this position';
+                } else if (!row) {
+                    reason = 'the fork has fewer messages than the Worker readings';
+                } else if (!before.fingerprint || before.fingerprint !== row.fingerprint) {
+                    reason = 'message content differs';
+                } else if (before.receipt && (before.receipt.position !== row.position || before.receipt.fingerprint !== row.fingerprint)) {
+                    reason = 'the saved reading does not match this position';
+                } else if (!before.receipt && ambiguous.has(row.fingerprint)) {
+                    reason = 'the saved reading is ambiguous';
+                }
+            }
+            if (reason !== null) {
+                mismatch = {index: destIndex, parentId: before.id, childId: after?.id ?? null, reason};
                 break;
             }
-            mapping.set(before.id, intake.messages[index]);
+            claimed.add(destIndex);
+            mapping.set(before.id, intake.messages[destIndex]);
+            maxMatchedIndex = Math.max(maxMatchedIndex, destIndex);
             boundary = before.id;
-            played ||= before.isIntro === false && after.isIntro === false;
-            if (selected && selected === before.id) {
+            played ||= after.isIntro === false && (!rawSource || before.isIntro === false);
+            if (target && target === before.id) {
                 break;
             }
         }
-        if (!mapping.size || (selected ? !mapping.has(selected) : !played)) {
-            throw new Error('The original messages do not verify this fork through the selected passage.');
+        let cutoff = null;
+        if (target === null || !mapping.has(target)) {
+            if (!mapping.size || !played) {
+                if (mismatch !== null) {
+                    throw new Error('Fork verification failed at passage #' + (mismatch.index + 1) + ' (' + mismatch.parentId + '): ' +
+                        mismatch.reason + (target ? ' (selected ' + target + ').' : '.'));
+                }
+                if (target !== null) {
+                    throw new Error('Fork verification failed: selected passage ' + target +
+                        ' was not found in the source chat and no non-intro passage matched.');
+                }
+                throw new Error('Fork verification failed: only intro passages matched (no played passage verified).');
+            }
+            if (target !== null && mismatch !== null) {
+                cutoff = {selected: target, index: mismatch.index, parentId: mismatch.parentId, childId: mismatch.childId,
+                    reason: mismatch.reason, detail: 'passage #' + (mismatch.index + 1) + ' (' + mismatch.parentId + ') — ' + mismatch.reason + '.'};
+            } else if (target !== null) {
+                const reason = rawSource ? 'selected passage was not found in the source chat'
+                    : 'selected passage was not covered by the Worker Book readings';
+                cutoff = {selected: target, index: maxMatchedIndex + 1, parentId: null, childId: messages[maxMatchedIndex + 1]?.id ?? null,
+                    reason, detail: reason + '.'};
+            }
         }
         const log = ScribeLog.create();
         for (const key of Object.keys(log).filter((name) => typeof log[name] === 'number')) {
@@ -7403,7 +7513,9 @@ const ScribeFork = Object.freeze({
         const credited = new Set();
         const childIds = intake.messages.map((row) => row.id);
         const fingerprints = new Map(intake.messages.map((row) => [row.id, row.fingerprint]));
-        const sourceIntake = intake.messages.slice(0, mapping.size).map((row, index) => ({...row, id: parent[index].id}));
+        const childToParent = new Map([...mapping].map(([parentId, childRow]) => [childRow.id, parentId]));
+        const sourceIntake = intake.messages.slice(0, maxMatchedIndex + 1)
+            .map((row) => ({...row, id: childToParent.get(row.id) ?? row.id}));
         let contiguous = true;
         for (const entry of saved.log.entries) {
             if (entry.withdrawn) {
@@ -7548,7 +7660,7 @@ const ScribeFork = Object.freeze({
             const filed = new Map();
             for (const note of saved.log.notes) {
                 const used = filed.get(note) ?? new Set();
-                const place = parent.slice(0, mapping.size).findIndex((row, index) => !used.has(index) &&
+                const place = messages.slice(0, maxMatchedIndex + 1).findIndex((row, index) => !used.has(index) &&
                     row.contents.some((block) => typeof block.text === 'string' && note && block.text.includes(note)));
                 if (place >= 0) {
                     used.add(place);
@@ -7565,7 +7677,7 @@ const ScribeFork = Object.freeze({
             throw new Error('This fork has Book entries outside the verified source readings.');
         }
         ScribeReplay.run(log, childIds, null, fingerprints, null, null, intake.messages);
-        return {book, shared: mapping.size, read: credited.size, mapping, sourceIntake};
+        return {book, shared: mapping.size, read: credited.size, mapping, sourceIntake, cutoff, mismatch};
     },
 });
 /** @file scribe/core/ScribeKnowledge.js */
@@ -12589,7 +12701,7 @@ const ZetaSource = Object.freeze({
     },
 
     /**
-     * @param {{ fetch: Function, token: string|null, roomId: string|null, pause: (milliseconds: number) => Promise<void>, onPage?: (count: number) => void, through?: string|null }} request
+     * @param {{ fetch: Function, token: string|null, roomId: string|null, pause: (milliseconds: number) => Promise<void>, onPage?: (count: number) => void, through?: string|null, boundaryTime?: string|null }} request
      * @return {Promise<Readonly<{ messages: object[], end: string, problem: string|null, skipped: number }>>}
      * @throws {Error}
      */
@@ -12761,6 +12873,8 @@ const ZetaSource = Object.freeze({
                 end = ends.NoCursor;
             } else if (request.through && distinct.has(request.through) && (request.required ?? []).every((id) => distinct.has(id))) {
                 end = ends.ThroughMessage;
+            } else if (request.boundaryTime && page.messages.some((row) => Date.parse(row.messageTime) < Date.parse(request.boundaryTime))) {
+                return ZetaSource.outcome(received, ends.Failed, 'The saved fork boundary was not found in the latest Zeta messages.', skipped);
             } else if (used.has(next)) {
                 end = ends.RepeatedCursor;
             }
@@ -15396,7 +15510,9 @@ const ScribeCloud = Object.freeze({
         }
         const heads = response.data.heads.filter((item) => item?.kind === ScribeStore.Kind.Book);
         if (!heads.length) {
-            if (response.data.heads.some((item) => !settings.Synced.includes(item?.kind))) {
+            if (response.data.heads.some((item) => !settings.Synced.includes(item?.kind) ||
+                !Number.isSafeInteger(item.revision) || item.revision < 1 ||
+                !Number.isSafeInteger(item.parts) || item.parts < 1 || item.parts > settings.MostParts)) {
                 throw new Error('The Worker returned an invalid list of saved records for this chat.');
             }
             return null;
@@ -15415,7 +15531,7 @@ const ScribeCloud = Object.freeze({
         if (!book || !ScribeKeeper.soundBook(book)) {
             throw new Error('The downloaded data does not contain a readable Scribe Book.');
         }
-        return book.adopted ? book : null;
+        return book;
     },
 
     /**
@@ -19161,14 +19277,24 @@ const ScribeKeeper = Object.freeze({
             }
             occupied = true;
             ScribeKeeper.occupy(keeper, ScribeKeeper.Busy.Pulling);
-            const source = await loadSource(sourceRoomId);
+            let source = await loadSource(sourceRoomId);
             if (!current()) {
                 return {ok: false, reason: 'Fork recovery stopped because the room changed.'};
             }
+            if (source === null) {
+                return {ok: false, missingBook: true, reason: 'The Worker has no saved Book for origin room ' + sourceRoomId + '.'};
+            }
+            if (!ScribeKeeper.soundBook(source?.book) || (!source.worker && !source.book.adopted)) {
+                return {ok: false, reason: 'Fork recovery needs an adopted source Book and a fork without independent Book changes.'};
+            }
             let campaign = keeper.campaign;
-            if (!campaign.completeHistory || campaign.needsHistory) {
+            if (!campaign.completeHistory || !campaign.messages.length || campaign.needsHistory || keeper.partial ||
+                keeper.unjoined || keeper.mismatch !== null || keeper.suspectAt !== null) {
                 const started = keeper.clock.now();
                 const result = await keeper.zeta.history(() => {});
+                if (!current()) {
+                    return {ok: false, reason: 'Fork recovery stopped because the room changed.'};
+                }
                 if (!result || !ScribeKeeper.whole(result) || result.skipped || result.completeHistory !== true ||
                     !result.messages?.length) {
                     return {ok: false, reason: 'Zeta did not supply the complete fork history.'};
@@ -19179,6 +19305,26 @@ const ScribeKeeper = Object.freeze({
                 delete campaign.needsHistory;
                 delete campaign.awaitingFirstPull;
                 delete campaign.recheck;
+                delete campaign.observations;
+            } else if (source.worker) {
+                const boundary = campaign.messages.at(-1);
+                const started = keeper.clock.now();
+                const delta = await keeper.zeta.history(() => {}, boundary);
+                if (!current()) {
+                    return {ok: false, reason: 'Fork recovery stopped because the room changed.'};
+                }
+                if (!delta || delta.problem || delta.skipped || (!ScribeKeeper.whole(delta) && delta.end !== ZetaSource.End.ThroughMessage) ||
+                    !delta.messages?.some((row) => row.id === boundary.id && row.roomId === keeper.roomId)) {
+                    return {ok: false, reason: delta?.problem ?? 'Zeta did not verify the saved fork boundary.'};
+                }
+                const merged = ScribeKeeper.merge(campaign.messages, delta.messages, false, delta.completeHistory === true);
+                if (merged.changed || campaign.observations?.length) {
+                    campaign = {...campaign, messages: merged.messages, gone: [...new Set([...campaign.gone, ...merged.removed])],
+                        sourceOrder: {complete: delta.completeHistory === true ? started : campaign.sourceOrder?.complete ?? 0,
+                            head: started, rows: {...campaign.sourceOrder?.rows,
+                            ...Object.fromEntries(delta.messages.map((row) => [row.id, started]))}}};
+                    delete campaign.observations;
+                }
             }
             if (!current()) {
                 return {ok: false, reason: 'Fork recovery stopped because the room changed.'};
@@ -19187,8 +19333,37 @@ const ScribeKeeper = Object.freeze({
             if (!taken.intake) {
                 return {ok: false, reason: ScribeKeeper.words(taken.disorder)};
             }
-            const result = ScribeFork.stage(source, campaign.messages, taken.intake, sourceRoomId, keeper.roomId, messageId, keeper.book);
-            await ScribeFork.requests(result, source.book, taken.intake.messages);
+            let result;
+            let canRefresh = source.cached === true;
+            for (;;) {
+                try {
+                    result = ScribeFork.stage(source, campaign.messages, taken.intake, sourceRoomId, keeper.roomId, messageId, keeper.book);
+                    const readBeyondMismatch = result.mismatch?.childId && Object.keys(source.book.log.read)
+                        .some((id) => !result.mapping.has(id));
+                    if (!canRefresh || (!result.cutoff && !readBeyondMismatch)) {
+                        await ScribeFork.requests(result, source.book, taken.intake.messages);
+                        break;
+                    }
+                } catch (error) {
+                    if (!canRefresh) {
+                        throw error;
+                    }
+                }
+                if (!current()) {
+                    return {ok: false, reason: 'Fork recovery stopped because the room changed.'};
+                }
+                canRefresh = false;
+                source = await loadSource(sourceRoomId, {refresh: true, book: source.book});
+                if (!current()) {
+                    return {ok: false, reason: 'Fork recovery stopped because the room changed.'};
+                }
+                if (!ScribeKeeper.soundBook(source?.book) || (!source.worker && !source.book.adopted)) {
+                    return {ok: false, reason: 'Fork recovery needs an adopted source Book and a fork without independent Book changes.'};
+                }
+            }
+            if (!current()) {
+                return {ok: false, reason: 'Fork recovery stopped because the room changed.'};
+            }
             ScribeKeeper.show({...keeper, intake: taken.intake, book: result.book, campaign});
             ScribeStore.installFork(keeper.storage, keeper.roomId, campaign === keeper.campaign ? null : campaign, result.book, current);
             ScribeKeeper.takeCampaign(keeper, campaign);
@@ -19204,7 +19379,7 @@ const ScribeKeeper = Object.freeze({
             keeper.historyChecked = true;
             keeper.phase = ScribeKeeper.resting(keeper);
             ScribeKeeper.show(keeper);
-            return {ok: true, shared: result.shared, read: result.read};
+            return {ok: true, shared: result.shared, read: result.read, ...(result.cutoff ? {cutoff: result.cutoff} : {})};
         } catch (error) {
             return {ok: false, reason: ScribeKeeper.words(error)};
         } finally {
@@ -19744,13 +19919,15 @@ const ScribeKeeper = Object.freeze({
             tick: (poll = true) => ScribeKeeper.track(keeper, () => ScribeKeeper.tick(keeper, poll)),
 
             /**
+             * @param {boolean} allowWithoutBook
              * @return {Promise<void>}
+             * @throws {Error}
              */
-            pull: async () => {
+            pull: async (allowWithoutBook = false) => {
                 if (keeper.pausing || keeper.stop?.reason === ScribeAdoption.Stop.Paused) {
                     throw new Error(ScribeKeeper.Settings.Messages.Paused);
                 }
-                if (keeper.book === null && keeper.damaged === null) {
+                if (!allowWithoutBook && keeper.book === null && keeper.damaged === null) {
                     throw new Error(ScribeKeeper.Settings.Messages.NoBook);
                 }
                 const epoch = keeper.epoch;
@@ -19767,7 +19944,10 @@ const ScribeKeeper = Object.freeze({
                 return ScribeKeeper.track(keeper, async () => {
                     ScribeKeeper.occupy(keeper, ScribeKeeper.Busy.Pulling);
                     try {
-                        await ScribeKeeper.history(keeper, true);
+                        const fresh = await ScribeKeeper.history(keeper, true);
+                        if (allowWithoutBook && !fresh) {
+                            throw new Error(ScribeKeeper.issue(keeper) ?? keeper.cut ?? ScribeKeeper.Settings.Messages.Unsettled);
+                        }
                         if (keeper.epoch === epoch) {
                             ScribeKeeper.flushObserved(keeper);
                         }
@@ -31879,6 +32059,8 @@ const ScribePanel = Object.freeze({
             Adopt: 'scribe-adopt',
             Fork: 'scribe-fork',
             ForkOpen: 'scribe-fork-open',
+            ForkChoose: 'scribe-fork-choose',
+            ForkPullChat: 'scribe-fork-pull-chat',
             ForkOrigin: 'scribe-fork-origin',
             ForkPicker: 'scribe-fork-picker',
             ForkSource: 'scribe-fork-source',
@@ -32401,6 +32583,8 @@ const ScribePanel = Object.freeze({
             listForkRooms: environment.listForkRooms,
             recoverFork: environment.recoverFork,
             forkRooms: [],
+            forkMissing: false,
+            forkChoosing: false,
             generateReminder: environment.generateReminder,
             generatedReminder: null,
             generationNotice: null,
@@ -33331,7 +33515,7 @@ const ScribePanel = Object.freeze({
                 if (panel.pending.has(settings.Outlets.Fork)) {
                     return;
                 }
-                const origin = panel.forkOrigin();
+                const origin = panel.forkChoosing ? null : panel.forkOrigin();
                 if (origin) {
                     return ScribePanel.pullFork(panel, origin.parentRoomId, origin.messageId);
                 }
@@ -33345,6 +33529,35 @@ const ScribePanel = Object.freeze({
             }, settings.Guard.Free, settings.Ids.ForkOpen)),
             ScribePanel.own(panel, 'ForkPicker', forkPicker.label),
             ScribePanel.outlet(panel, 'ForkOutcome', settings.Outlets.Fork),
+            ScribePanel.own(panel, 'ForkChoose', ScribePanel.button(panel, 'Choose a different origin',
+                /**
+                 * @return {Promise<boolean>}
+                 */
+                async () => {
+                    const listed = await ScribePanel.listForks(panel);
+                    if (listed && panel.forkRooms.length > 0) {
+                        panel.forkChoosing = true;
+                        panel.forkMissing = false;
+                        ScribePanel.redraw(panel);
+                        panel.parts.ForkSource.focus();
+                    }
+                    return listed;
+                }, settings.Guard.Free, settings.Ids.ForkChoose)),
+            ScribePanel.own(panel, 'ForkPullChat', ScribePanel.button(panel, 'Pull chat data',
+                /**
+                 * @return {Promise<void>}
+                 */
+                async () => {
+                    const pulled = await ScribePanel.perform(panel, {
+                        outlet: settings.Outlets.Fork, question: null, book: true,
+                        pending: 'Pulling this chat…', done: 'Pulled this chat.',
+                        call: () => panel.keeper.pull(true),
+                    });
+                    if (pulled) {
+                        panel.forkMissing = false;
+                        ScribePanel.redraw(panel);
+                    }
+                }, settings.Guard.Free, settings.Ids.ForkPullChat)),
         );
         problems.setAttribute(attributes.Role, aria.Status);
         const compact = ScribePanel.own(panel, 'ProblemsCompact', ScribePanel.make(panel, tags.Span, settings.Nothing, classes.Problem));
@@ -34071,7 +34284,10 @@ const ScribePanel = Object.freeze({
                 }
             }, guards.Book, ids.InputRetry));
             inputRetry.hidden = true;
-            const range = ScribePanel.own(panel, 'HistoryRange', ScribePanel.make(panel, tags.Block));
+            section.append(controls);
+            const range = ScribePanel.own(panel, 'HistoryRange', ScribePanel.group(panel, section, 'Check history'));
+            range.append(ScribePanel.make(panel, tags.Paragraph,
+                'To check specific messages from your last pull, enter the first and last message numbers. Leave these blank to pull the chat.'));
             const from = ScribePanel.field(panel, 'number', 'From message', ids.HistoryFrom, true, false);
             const to = ScribePanel.field(panel, 'number', 'To message', ids.HistoryTo, true, false);
             ScribePanel.own(panel, 'HistoryFrom', from.input);
@@ -34092,7 +34308,7 @@ const ScribePanel = Object.freeze({
             }, true), guards.Book, ids.CheckHistory));
             range.append(from.label, to.label, check);
             range.hidden = true;
-            section.append(controls, range, ScribePanel.outlet(panel, 'ControlsOutcome', outlets.Controls), details, retry, inputRetry, checked, story, pulled);
+            section.append(ScribePanel.outlet(panel, 'ControlsOutcome', outlets.Controls), details, retry, inputRetry, checked, story, pulled);
             const filing = ScribePanel.own(panel, 'FilingGroup', ScribePanel.group(panel, section, 'Pending book entries, checker rows and operator input'));
             filing.hidden = true;
             ScribePanel.pager(panel, settings.Lists.Filing, filing);
@@ -34467,17 +34683,19 @@ const ScribePanel = Object.freeze({
         const forkOutcome = panel.outcomes.get(forkOutlet) ?? settings.Nothing;
         const recovering = panel.pending.has(forkOutlet);
         const eligible = view.canRecoverFork === true;
-        const origin = panel.forkOrigin?.() ?? null;
+        const origin = panel.forkChoosing ? null : panel.forkOrigin?.() ?? null;
         const choosingSource = origin === null && panel.forkRooms.length > 0;
         parts.Fork.hidden = !eligible && !recovering && !forkOutcome && !origin;
         parts.ForkOrigin.hidden = origin === null;
         if (origin) {
             ScribePanel.write(parts.ForkOrigin, 'Forked from room ' + origin.parentRoomId + ' at message ' + origin.messageId);
         }
-        parts.ForkOpen.hidden = !eligible && !recovering;
+        parts.ForkOpen.hidden = panel.forkMissing || (!eligible && !recovering);
         parts.ForkOpen.disabled = !eligible || recovering || (choosingSource && !parts.ForkSource.value);
         ScribePanel.write(parts.ForkOpen, origin ? 'Pull Book from fork origin' : choosingSource ? 'Pull Book' : 'Pull Book from saved chat');
-        parts.ForkPicker.hidden = !eligible || !choosingSource;
+        parts.ForkPicker.hidden = panel.forkMissing || !eligible || !choosingSource;
+        parts.ForkChoose.hidden = parts.ForkPullChat.hidden = !eligible || !panel.forkMissing;
+        parts.ForkChoose.disabled = parts.ForkPullChat.disabled = !panel.forkMissing || recovering || !eligible;
         parts.ForkSource.disabled = !eligible || recovering;
         ScribePanel.write(parts.ForkOutcome, forkOutcome);
         parts.ForkOutcome.hidden = !forkOutcome;
@@ -34887,15 +35105,26 @@ const ScribePanel = Object.freeze({
     pullFork(panel, sourceRoomId, messageId) {
         const action = {
             outlet: ScribePanel.Settings.Outlets.Fork, question: null,
-            pending: 'Verifying the shared messages and source Book…', done: '', book: true,
+            pending: messageId
+                ? 'Checking the Worker for this origin’s Book…'
+                : 'Checking the Worker for this saved chat’s Book…',
+            done: '', book: true,
             call: async () => {
                 const result = await panel.recoverFork(sourceRoomId, messageId);
+                if (result.missingBook === true) {
+                    panel.forkMissing = true;
+                }
                 if (!result.ok) {
                     throw new Error(result.reason);
                 }
                 panel.forkRooms = [];
+                panel.forkMissing = false;
+                panel.forkChoosing = false;
                 action.done = 'Recovered ' + result.read + (result.read === 1 ? ' message reading' : ' message readings') +
                     ' from ' + sourceRoomId + '. Verified ' + result.shared + (result.shared === 1 ? ' shared message.' : ' shared messages.');
+                if (result.cutoff) {
+                    action.done += ' Stopped before selected passage ' + result.cutoff.selected + ': ' + result.cutoff.detail;
+                }
             },
         };
         return ScribePanel.perform(panel, action);
@@ -39914,31 +40143,13 @@ const ScribeBoot = Object.freeze({
      * @param {object} session
      * @param {string} sourceRoomId
      * @param {{fetch: Function, token: string|null, signal: AbortSignal, roomId: string, pause: (ms: number) => Promise<void>}} request
-     * @return {Promise<object>}
+     * @return {Promise<object|null>}
      * @throws {Error}
      */
     async forkSource(session, sourceRoomId, request) {
-        const storage = session.boot.environment.storage;
-        const kinds = ScribeStore.Kind;
-        let book = ScribeStore.read(storage, sourceRoomId, kinds.Book);
-        if (!book?.adopted) {
-            book = await session.cloud.forkBook(sourceRoomId, request.signal);
-        }
+        const book = await session.cloud.forkBook(sourceRoomId, request.signal);
         request.signal.throwIfAborted();
-        if (!book?.adopted) {
-            throw new Error('No adopted Book was found for this saved chat.');
-        }
-        const campaign = ScribeStore.read(storage, sourceRoomId, kinds.Campaign);
-        let messages = campaign?.messages;
-        if (!campaign?.completeHistory || campaign.needsHistory || !Array.isArray(messages) || !messages.length) {
-            /** @type {{messages: object[], completeHistory?: boolean, problem: string|null}} */
-            const history = await ZetaSource.history({ ...request, roomId: sourceRoomId });
-            if (history.completeHistory !== true) {
-                throw new Error(history.problem ?? 'The source chat history is incomplete.');
-            }
-            messages = history.messages;
-        }
-        return { book, messages };
+        return book === null ? null : {book, worker: true};
     },
 
     /**
@@ -40043,10 +40254,11 @@ const ScribeBoot = Object.freeze({
                 zeta: Object.freeze({
                     /**
                      * @param {(count: number) => void} onPage
+                     * @param {{id: string, messageTime: string}|null} boundary
                      * @return {Promise<object>}
                      * @throws {Error}
                      */
-                    history: async (onPage) => {
+                    history: async (onPage, boundary = null) => {
                         if (!ScribeBoot.currentRoom(session)) {
                             throw new Error(messages.Left);
                         }
@@ -40059,6 +40271,7 @@ const ScribeBoot = Object.freeze({
                         try {
                             return await ZetaSource.history({
                                 fetch, token: ScribeBoot.token(boot), roomId: session.roomId, onPage,
+                                ...(boundary ? {through: boundary.id, boundaryTime: boundary.messageTime} : {}),
                                 signal: controller.signal, pause: (ms) => ScribeBoot.pause(session, ms, controller.signal),
                             });
                         } finally {
@@ -40281,7 +40494,7 @@ const ScribeBoot = Object.freeze({
                 forkOrigin: () => session.forkOrigin,
                 listForkRooms: () => ScribeBoot.forkAction(session, fetch, (request) => ZetaSource.savedRooms(request)),
                 recoverFork: (sourceRoomId, messageId) => ScribeBoot.forkAction(session, fetch, (request) =>
-                    keeper.recoverFork(sourceRoomId, messageId, () => ScribeBoot.forkSource(session, sourceRoomId, request))),
+                    keeper.recoverFork(sourceRoomId, messageId, (room) => ScribeBoot.forkSource(session, room, request))),
                 readReminderDraft: () => live.readReminderDraft(),
                 writeReminderDraft: (text) => {
                     try {

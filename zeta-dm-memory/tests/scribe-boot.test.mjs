@@ -37,6 +37,51 @@ function load() {
 
 const { ScribeStore, ScribeFrame, ScribeBoot } = load();
 
+test('fork sources look up the selected Worker room even with a local Book and never request origin chat history', async () => {
+    const isolated = vm.createContext({TextEncoder, URL, URLSearchParams});
+    for (const file of ['core/ScribeText', 'core/ScribeLog', 'page/ZetaSource', 'page/ScribeStore', 'page/ScribeKeeper', 'page/ScribeBoot']) {
+        const url = new URL('../scribe/' + file + '.js', import.meta.url);
+        vm.runInContext(readFileSync(url, 'utf8'), isolated, {filename: url.pathname});
+    }
+    const {boot, log} = vm.runInContext('({boot: ScribeBoot, log: ScribeLog})', isolated);
+    for (const scenario of ['found', 'missing', 'unavailable', 'damaged campaign']) {
+        const storage = new FakeStorage();
+        const rows = FakeZeta.messages(3).map((row) => ({...row, roomId: FakeZeta.Room}));
+        const book = {adopted: true, fingerprints: {}, log: log.create()};
+        ScribeStore.write(storage, FakeZeta.Room, 'book', {...book, localOnly: true});
+        ScribeStore.write(storage, FakeZeta.Room, 'campaign', {completeHistory: true, messages: rows.slice(0, 2)});
+        if (scenario === 'damaged campaign') {
+            storage.set(ScribeStore.name('head', ScribeStore.room(FakeZeta.Room), 'campaign'), 'damaged');
+        }
+        const initial = [...storage.values];
+        let cloudReads = 0;
+        const site = new FakeZeta(rows);
+        const session = {boot: {environment: {storage}}, cloud: {forkBook: async (room) => {
+            cloudReads++;
+            assert.equal(room, FakeZeta.Room);
+            if (scenario === 'unavailable') {
+                throw new Error('Worker unavailable');
+            }
+            return scenario === 'missing' ? null : book;
+        }}};
+        const request = {fetch: site.fetch, roomId: 'child', token: FakeZeta.Token, signal: new AbortController().signal,
+            pause: () => new Promise(() => {})};
+        const lookup = boot.forkSource(session, FakeZeta.Room, request);
+        if (scenario === 'unavailable') {
+            await assert.rejects(lookup, /Worker unavailable/);
+        } else if (scenario === 'missing') {
+            assert.equal(await lookup, null);
+        } else {
+            const result = await lookup;
+            assert.equal(result.book, book);
+            assert.equal(result.worker, true);
+        }
+        assert.equal(site.requests.length, 0, scenario);
+        assert.equal(cloudReads, 1, scenario);
+        assert.deepEqual([...storage.values], initial, scenario);
+    }
+});
+
 /**
  * @return {object}
  */

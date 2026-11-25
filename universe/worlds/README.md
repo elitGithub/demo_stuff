@@ -50,27 +50,39 @@ In the web UI **Settings** tab (and character edit modal), you can apply these s
 
 ## Seeding from a Zeta Export
 
-Pre-populate a campaign, cast (`scribe_subject_id`, slugs, aliases, tiers, personas), and initial Scribe book (`Origin: 'Operator'`, `position: 0`, `cite: null`) from a Zeta Scribe JSON export (book/state or raw log format):
+The seeder reads exactly one input: the file written by the Zeta Scribe export (`ScribeStore.exportText()`). It replays the export's `book.log` against `campaign.messages` with Worlds' own `ScribeReplay`, then creates a campaign, its cast and an initial Scribe book of `Origin: 'Operator'` entries at `position: 0` with `cite: null`:
+
+- Cast: every live character subject except the Narrator, keeping Zeta's subject IDs, labels, every alias record and which kinds were only guessed (cut to 60 characters).
+- Facts: every live fact plus every `Reported` claim, each keeping its hidden flag, who knows it (the audience Zeta works out from its scenes, told and widened lists), and its attribution and speaker. Ended, replaced, expired and removed facts are not seeded.
+- Threads: every open thread.
+- Opening scene: day, place, time and reach of the last scene (narrowed scenes open as private), with the characters still present at its end.
+- Tiers: the player, every `--main` character and the three characters with the most facts are `main`; the rest are `recurring`.
+
+Zeta's fact status is copied, not re-judged: a fact that was `Reported` in Zeta is seeded as `Reported`, and every other seeded fact is in force. An unfinished book (`book.adopted` false) is accepted. The seeder works out how many leading chat messages the Scribe read (`readThrough`), returns it with `chatMessages` in the summary, and prints `Scribe book read through message <n> of <total>.` to stderr when the book stops short of the chat. The campaign has story memory only through that message. The seeder stops with an error naming the fact when a live or `Reported` fact is pinned or disputed, carries a form or dimension, or is a relation with no target subject.
+
+The export is refused unless it is complete: `book.log.read` present, `campaign.completeHistory` true, no `needsHistory`, neither `book` nor `campaign` listed as damaged, and every Story entry's messages present in `campaign.messages`.
 
 1. Place your export file anywhere inside `/var/www` (paths resolving outside `/var/www` via symlinks are rejected).
 2. Preview without writing SQLite:
 
    ```bash
-   node scripts/seed-from-export.mjs /var/www/demo_stuff/zeta-dm-memory/scribe/private/hero_gone_latest.json --dry-run
+   node scripts/seed-from-export.mjs /var/www/demo_stuff/zeta-dm-memory/scribe/private/hero_gone_latest.json --dry-run --player frost
    ```
 
 3. Seed into `local/worlds.sqlite`:
 
    ```bash
-   node scripts/seed-from-export.mjs /var/www/demo_stuff/zeta-dm-memory/scribe/private/hero_gone_latest.json
+   node scripts/seed-from-export.mjs /var/www/demo_stuff/zeta-dm-memory/scribe/private/hero_gone_latest.json --player frost
    ```
 
-Optional flags:
+Optional flags (each may be given once; a value may start with a dash unless it is itself one of these flags):
 
-- `--title <name>`: override campaign title (prevents duplicate-title collision errors).
-- `--main <slugOrName,...>`: comma-separated characters to assign to `main` tier instead of default auto-promotion.
+- `--player <slugNameAliasOrSubjectId>`: the player character, matched by slug, then name, then alias, then Scribe subject ID. The export names no player, so without this flag the campaign has none.
+- `--main <slugNameAliasOrSubjectId,...>`: comma-separated characters to promote to `main`, matched like `--player`. A reference that matches nothing, or matches several characters, is an error.
+- `--title <name>`: campaign title (default `Seeded Campaign`).
 - `--db <sqlitePath>`: target a custom SQLite path instead of `local/worlds.sqlite`.
-- `--force`: replace an existing campaign with the same title inside an atomic transaction.
+- `--force`: replace an existing campaign with the same title inside one transaction.
+- `--dry-run`: print the summary (`characters`, `subjects`, `facts`, `relations`, `claims`, `threads`, `player`) without opening SQLite.
 - Omitting `[exportPath]` defaults to `/var/www/demo_stuff/zeta-dm-memory/scribe/private/hero_gone_latest.json`.
 
 Then start `node src/server.mjs` and open `http://127.0.0.1:8768`.

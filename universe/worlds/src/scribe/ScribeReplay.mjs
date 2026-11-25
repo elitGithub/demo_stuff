@@ -506,6 +506,7 @@ export const ScribeReplay = Object.freeze({
       ended: null,
       pinned: false,
       made: false,
+      ...(Array.isArray(operation.audience) ? { audience: [...operation.audience] } : {}),
     };
     book.sources?.push(fact);
     if (ScribeReplay.erase(book, fact)) {
@@ -513,10 +514,11 @@ export const ScribeReplay = Object.freeze({
     }
     const keys = ScribeReplay.keys(fact, kind);
     if (
-      kind === ScribeCategory.Kind.Moving &&
-      item.origin === ScribeLogCore.Origin.Story &&
-      !book.decided.has(id) &&
-      ['claimed', 'inferred', 'promised'].includes(fact.evidence?.attribution)
+      (kind === ScribeCategory.Kind.Moving &&
+        item.origin === ScribeLogCore.Origin.Story &&
+        !book.decided.has(id) &&
+        ['claimed', 'inferred', 'promised'].includes(fact.evidence?.attribution)) ||
+      (operation.type === ScribeLogCore.Ruling.AddFact && operation.reported === true)
     ) {
       fact.status = ScribeReplay.Status.Reported;
       ScribeReplay.keep(book, fact);

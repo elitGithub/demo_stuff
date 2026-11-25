@@ -5,6 +5,8 @@ import os from 'node:os';
 import path from 'node:path';
 import test from 'node:test';
 import { fileURLToPath } from 'node:url';
+import { ScribeAnalyzer } from '../src/scribe/ScribeAnalyzer.mjs';
+import { ScribeAnswer } from '../src/scribe/ScribeAnswer.mjs';
 import { ScribeKnowledge } from '../src/scribe/ScribeKnowledge.mjs';
 import { ScribeLogCore } from '../src/scribe/ScribeLogCore.mjs';
 import { ScribeReplay } from '../src/scribe/ScribeReplay.mjs';
@@ -29,155 +31,253 @@ function makeTempDir(testContext) {
 }
 
 /**
+ * @param {string} directory
+ * @param {string} fileName
+ * @param {object} bundle
+ * @returns {string}
+ */
+function writeBundle(directory, fileName, bundle) {
+  const bundlePath = path.join(directory, fileName);
+  fs.writeFileSync(bundlePath, JSON.stringify(bundle), 'utf8');
+  return bundlePath;
+}
+
+/**
+ * @param {string} messageId
+ * @param {string} speaker
+ * @param {string} attribution
+ * @param {string} quote
  * @returns {object}
  */
-function buildRichZetaFixture() {
+function storyEvidence(messageId, speaker, attribution, quote) {
   return {
-    title: 'Hero Gone: Harbor Watch',
-    premise: 'Smugglers control the drowned lighthouse while the magistrate sleeps.',
-    styleNotes: 'Terse, sensory, maritime noir.',
-    playerName: 'Rowan Hale',
-    sceneState: {
-      location: 'Lantern Pier',
-      day: 3,
-      timeLabel: 'Midnight',
-      sceneType: 'private',
-    },
-    characters: [
-      {
-        name: 'Rowan Hale',
-        slug: 'Rowan!#',
-        subjectId: 'S10',
-        aliases: ['Watchman Rowan'],
-        tier: 'main',
-        persona: 'Disgraced harbor inspector carrying an iron key.',
-      },
-      {
-        name: 'Rowan Vane',
-        slug: 'rowan',
-        subjectId: 'S11',
-        persona: 'His estranged cousin claiming the same family name.',
-      },
-      {
-        name: 'Vesper',
-        subjectId: 'S20',
-        role: 'recurring',
-        persona: 'Quiet apothecary near the locks.',
-      },
-      {
-        name: 'Old Fen',
-        subjectId: 'S30',
-        archived: true,
-      },
-    ],
-    book: {
-      subjects: [
-        { id: 'S10', label: 'Rowan Hale', kind: 'character', aka: ['Inspector Hale'], mergedInto: null },
-        { id: 'S10_DUP', label: 'Rowan of the Pier', kind: 'character', aka: ['Greycoat'], mergedInto: 'S10' },
-        { id: 'S11', label: 'Rowan Vane', kind: 'character', aka: [], mergedInto: null },
-        { id: 'S20', label: 'Vesper', kind: 'character', aka: ['Lady Vesper'], mergedInto: null },
-        { id: 'S25', label: 'Mara', kind: 'character', aka: ['Captain Mara'], mergedInto: null },
-        { id: 'S30', label: 'Old Fen', kind: 'character', aka: [], mergedInto: null },
-        { id: 'S40', label: 'Drowned Lighthouse', kind: 'place', aka: ['North Beacon'], mergedInto: null },
-        { id: 'S99', label: 'Narrator', kind: 'character', aka: [], mergedInto: null },
-      ],
-      facts: [
-        {
-          id: 'F1',
-          subject: 'S10',
-          category: 'eyes',
-          target: null,
-          text: 'slate grey',
-          hidden: false,
-          status: 'InForce',
-        },
-        {
-          id: 'F2',
-          subject: 'S25',
-          category: 'background',
-          target: null,
-          text: 'forged the magistrate customs seal in secret',
-          hidden: true,
-          widened: ['S20'],
-          told: [],
-          status: 'InForce',
-        },
-        {
-          id: 'F3',
-          subject: 'S10_DUP',
-          category: 'belonging',
-          target: null,
-          text: 'brass harbor whistle',
-          hidden: false,
-          status: 'InForce',
-        },
-        {
-          id: 'F4',
-          subject: 'S20',
-          category: 'status',
-          target: null,
-          text: 'missing at sea',
-          hidden: false,
-          status: 'Ended',
-        },
-        {
-          id: 'F5',
-          subject: 'S40',
-          category: 'feature',
-          target: null,
-          text: 'submerged bell tolls only at low tide',
-          hidden: false,
-          status: 'InForce',
-        },
-      ],
-      relations: [
-        {
-          id: 'F6',
-          subject: 'S25',
-          target: 'S10',
-          targetText: 'Rowan Hale',
-          text: 'owes Rowan a blood debt after the seawall collapse',
-          hidden: false,
-          status: 'InForce',
-        },
-        {
-          id: 'F7',
-          subject: 'S20',
-          target: null,
-          targetText: 'Harbor Guildmaster',
-          text: 'secretly supplies laudanum to the Guildmaster',
-          hidden: true,
-          status: 'InForce',
-        },
-      ],
-      threads: [
-        { id: 'T1', text: 'Who extinguished the North Beacon before the wreck?', closed: null, subject: 'S40' },
-        { id: 'T2', text: 'Closed subplot from day one', closed: { how: 'resolved' } },
-      ],
-      scenes: [
-        {
-          id: 'SC1',
-          day: 3,
-          place: 'Lantern Pier',
-          reach: 'private',
-          present: [{ subject: 'S10', label: 'Rowan Hale' }, { subject: 'S25', label: 'Mara' }],
-        },
-      ],
-    },
+    section: 'FACTS',
+    row: 1,
+    messageNumber: 1,
+    messageId,
+    fingerprint: `fp-${messageId}`,
+    blockNumber: 1,
+    speaker,
+    quote,
+    attribution,
   };
 }
 
-test('ZetaSeeder enforces fs.realpathSync path guard against outside paths and symlink escapes', (testContext) => {
+/**
+ * @returns {object}
+ */
+function buildScribeBundleFixture() {
+  const storyLog = ScribeLogCore.create();
+  storyLog.nextSubject = 10;
+  storyLog.nextFact = 6;
+  storyLog.nextThread = 3;
+  storyLog.nextSequence = 3;
+  storyLog.revision = 2;
+  storyLog.read = { 'msg-obs-1': 1, 'msg-obs-2': 1, 'msg-obs-3': 1 };
+  storyLog.entries = [
+    {
+      sequence: 1,
+      kind: ScribeLogCore.Kind.Update,
+      origin: ScribeLogCore.Origin.Story,
+      messageIds: ['msg-obs-1', 'msg-obs-2', 'msg-obs-3'],
+      operations: [
+        { type: ScribeAnswer.Type.Subject, subject: 'S1', label: 'Corin Vale', kind: 'character' },
+        { type: ScribeAnswer.Type.Subject, subject: 'S2', label: 'Tamsin Locke', kind: 'character' },
+        { type: ScribeAnswer.Type.Subject, subject: 'S3', label: 'Bramwell', kind: 'character' },
+        { type: ScribeAnswer.Type.Subject, subject: 'S4', label: 'Brass Observatory', kind: 'place' },
+        { type: ScribeAnswer.Type.Subject, subject: 'S5', label: 'Old Corin', kind: 'character' },
+        { type: ScribeAnswer.Type.Subject, subject: 'S6', label: 'Narrator', kind: 'character' },
+        { type: ScribeAnswer.Type.Subject, subject: 'S7', label: 'Wren Ashby', kind: 'character' },
+        { type: ScribeAnswer.Type.Subject, subject: 'S8', label: 'Dorian Cross', kind: 'character' },
+        { type: ScribeAnswer.Type.Subject, subject: 'S9', label: 'Dorian Cross', kind: 'character' },
+        { type: ScribeAnswer.Type.Alias, subject: 'S1', name: 'Night Watchman', cite: 'msg-obs-1', position: 1, other: null },
+        { type: ScribeAnswer.Type.Alias, subject: 'S2', name: 'Lantern Keeper', cite: 'msg-obs-2', position: 2, other: null },
+        {
+          type: ScribeAnswer.Type.Fact,
+          fact: 'F1',
+          subject: 'S1',
+          label: 'Corin Vale',
+          category: 'eyes',
+          target: null,
+          targetText: null,
+          other: null,
+          text: 'amber',
+          cite: 'msg-obs-1',
+          position: 1,
+          hidden: false,
+          evidence: storyEvidence('msg-obs-1', 'Tamsin Locke', 'witnessed', 'His amber eyes caught the lamp.'),
+        },
+        {
+          type: ScribeAnswer.Type.Fact,
+          fact: 'F2',
+          subject: 'S2',
+          label: 'Tamsin Locke',
+          category: 'relation',
+          target: 'S1',
+          targetText: 'Corin Vale',
+          other: null,
+          text: 'guards the star-chart vault with Corin',
+          cite: 'msg-obs-2',
+          position: 2,
+          hidden: true,
+          evidence: { messageId: 'msg-obs-2', fingerprint: 'fp-msg-obs-2' },
+        },
+        {
+          type: ScribeAnswer.Type.Fact,
+          fact: 'F3',
+          subject: 'S4',
+          label: 'Brass Observatory',
+          category: 'feature',
+          target: null,
+          targetText: null,
+          other: null,
+          text: 'cracked brass dome',
+          cite: 'msg-obs-3',
+          position: 3,
+          hidden: false,
+        },
+        {
+          type: ScribeAnswer.Type.Fact,
+          fact: 'F4',
+          subject: 'S3',
+          label: 'Bramwell',
+          category: 'location',
+          target: null,
+          targetText: null,
+          other: null,
+          text: 'hiding in the bell tower',
+          cite: 'msg-obs-3',
+          position: 3,
+          hidden: false,
+          evidence: storyEvidence('msg-obs-3', 'Tamsin Locke', 'claimed', 'Bramwell is up in the bell tower, I swear it.'),
+        },
+        {
+          type: ScribeAnswer.Type.Fact,
+          fact: 'F5',
+          subject: 'S7',
+          label: 'Wren Ashby',
+          category: 'location',
+          target: null,
+          targetText: null,
+          other: null,
+          text: 'waiting at the north dock',
+          cite: 'msg-obs-1',
+          position: 1,
+          hidden: false,
+        },
+        { type: ScribeAnswer.Type.End, fact: 'F5', reason: 'left the dock', cite: 'msg-obs-3', position: 3 },
+        { type: ScribeAnswer.Type.Told, fact: 'F2', subject: 'S7', cite: 'msg-obs-3', position: 3 },
+        {
+          type: ScribeAnswer.Type.ThreadOpen,
+          thread: 'T1',
+          text: 'Who cracked the astrolabe lens before dawn?',
+          cite: 'msg-obs-3',
+          position: 3,
+          subject: 'S4',
+        },
+        { type: ScribeAnswer.Type.ThreadOpen, thread: 'T2', text: 'Who paid the bell ringer?', cite: 'msg-obs-1', position: 1 },
+        { type: ScribeAnswer.Type.ThreadClose, thread: 'T2', how: 'answered', cite: 'msg-obs-3', position: 3 },
+        {
+          type: ScribeAnswer.Type.Scene,
+          day: 4,
+          first: 'msg-obs-1',
+          last: 'msg-obs-3',
+          firstPosition: 1,
+          lastPosition: 3,
+          place: 'Brass Observatory',
+          reach: ScribeAnswer.Reach.Public,
+          present: [
+            { subject: 'S1', label: 'Corin Vale', from: null, until: null },
+            { subject: 'S5', label: 'Old Corin', from: null, until: null },
+            { subject: 'S2', label: 'Tamsin Locke', from: null, until: null },
+            { subject: 'S3', label: 'Bramwell', from: null, until: 2 },
+          ],
+          summary: 'Corin and Tamsin inspect the shattered astrolabe while Bramwell slips away.',
+          evidence: { ...storyEvidence('msg-obs-3', 'Corin Vale', 'witnessed', 'The bell struck midnight.'), time: 'Midnight' },
+        },
+      ],
+      withdrawn: false,
+    },
+    {
+      sequence: 2,
+      kind: ScribeLogCore.Kind.Operator,
+      origin: ScribeLogCore.Origin.Operator,
+      messageIds: [],
+      operations: [
+        { type: ScribeLogCore.Ruling.Merge, from: 'S5', into: 'S1' },
+        { type: ScribeLogCore.Ruling.Narrow, scene: 'msg-obs-1' },
+      ],
+      withdrawn: false,
+    },
+  ];
+
+  return {
+    roomId: 'room-observatory-01',
+    generations: { campaign: 1, book: 2, live: null, settings: 1 },
+    damaged: [],
+    raw: {},
+    campaign: {
+      messages: [
+        { id: 'msg-obs-1', sender: 'narrator@observatory.example', contents: [] },
+        { id: 'msg-obs-2', sender: 'narrator@observatory.example', contents: [] },
+        { id: 'msg-obs-3', sender: 'narrator@observatory.example', contents: [] },
+      ],
+      gone: [],
+      completeHistory: true,
+    },
+    book: {
+      log: storyLog,
+      fingerprints: {
+        'msg-obs-1': 'fp-msg-obs-1',
+        'msg-obs-2': 'fp-msg-obs-2',
+        'msg-obs-3': 'fp-msg-obs-3',
+      },
+      adopted: true,
+      projections: {},
+    },
+    live: null,
+    settings: {},
+  };
+}
+
+/**
+ * @param {object} bundle
+ * @returns {object[]}
+ */
+function storyOperations(bundle) {
+  return bundle.book.log.entries[0].operations;
+}
+
+/**
+ * @param {object} bundle
+ * @returns {object}
+ */
+function sceneOperation(bundle) {
+  return storyOperations(bundle).find((operation) => operation.type === ScribeAnswer.Type.Scene);
+}
+
+/**
+ * @param {object} bundle
+ * @returns {string}
+ */
+function bundleText(bundle) {
+  return JSON.stringify(bundle);
+}
+
+test('ZetaSeeder enforces the fs.realpathSync path guard against outside paths and symlink escapes', (testContext) => {
   const allowedDir = makeTempDir(testContext);
   const outsideDir = makeTempDir(testContext);
-  const outsideFile = path.join(outsideDir, 'secret-export.json');
-  fs.writeFileSync(outsideFile, JSON.stringify(buildRichZetaFixture()), 'utf8');
+  const outsideFile = writeBundle(outsideDir, 'secret-export.json', buildScribeBundleFixture());
 
   const symlinkPath = path.join(allowedDir, 'escape-link.json');
   fs.symlinkSync(outsideFile, symlinkPath);
 
   assert.throws(
     () => ZetaSeeder.resolveSafeExportPath(symlinkPath, [allowedDir]),
+    /Security check failed.*resolves outside/,
+  );
+  assert.throws(
+    () => ZetaSeeder.run({ exportPath: symlinkPath, dryRun: true, allowedRoots: [allowedDir] }),
     /Security check failed.*resolves outside/,
   );
   assert.throws(
@@ -188,6 +288,14 @@ test('ZetaSeeder enforces fs.realpathSync path guard against outside paths and s
     () => ZetaSeeder.resolveSafeExportPath(allowedDir, [allowedDir]),
     /not a regular file/,
   );
+  assert.throws(
+    () => ZetaSeeder.resolveSafeExportPath(`${allowedDir}/a\0b.json`, [allowedDir]),
+    /non-empty valid filesystem path/,
+  );
+  assert.equal(
+    ZetaSeeder.resolveSafeExportPath(outsideFile, [outsideDir]),
+    fs.realpathSync(outsideFile),
+  );
 
   assert.throws(
     () => execFileSync(process.execPath, [SEED_SCRIPT_PATH, '/etc/passwd', '--dry-run'], { encoding: 'utf8', stdio: 'pipe' }),
@@ -195,119 +303,250 @@ test('ZetaSeeder enforces fs.realpathSync path guard against outside paths and s
   );
 });
 
-test('ZetaSeeder rejects corrupt, truncated, or invalid Zeta export payloads at parse boundary', () => {
+test('ZetaSeeder refuses anything that is not a complete Zeta Scribe export', () => {
+  /**
+   * @param {(bundle: object) => void} mutate
+   * @returns {string}
+   */
+  const mutated = (mutate) => {
+    const bundle = buildScribeBundleFixture();
+    mutate(bundle);
+    return bundleText(bundle);
+  };
+
   assert.throws(() => ZetaSeeder.parseExport(''), /empty/);
   assert.throws(() => ZetaSeeder.parseExport('{truncated'), /invalid JSON/);
   assert.throws(() => ZetaSeeder.parseExport('[]'), /JSON object/);
-  assert.throws(() => ZetaSeeder.parseExport('{}'), /does not contain recognizable/);
-  assert.throws(
-    () => ZetaSeeder.parseExport(JSON.stringify({ book: { subjects: [{ id: 'S1', label: '   ' }] } })),
-    /missing a label or name/,
+  assert.throws(() => ZetaSeeder.parseExport('"bundle"'), /JSON object/);
+  assert.throws(() => ZetaSeeder.parseExport('null'), /JSON object/);
+
+  assert.throws(() => ZetaSeeder.parseExport(mutated((bundle) => {
+    delete bundle.damaged;
+  })), /damaged list must be an array/);
+  assert.throws(() => ZetaSeeder.parseExport(mutated((bundle) => {
+    bundle.damaged = ['book'];
+  })), /marks "book" as damaged/);
+  assert.throws(() => ZetaSeeder.parseExport(mutated((bundle) => {
+    bundle.damaged = ['live', 'campaign', 'book'];
+  })), /marks "campaign", "book" as damaged/);
+  assert.equal(
+    ZetaSeeder.parseExport(mutated((bundle) => {
+      bundle.damaged = ['live', 'settings'];
+    })).characters.length,
+    6,
   );
+
+  assert.throws(() => ZetaSeeder.parseExport(mutated((bundle) => {
+    bundle.book = null;
+  })), /book must be an object/);
+  assert.throws(() => ZetaSeeder.parseExport(mutated((bundle) => {
+    bundle.book = [bundle.book];
+  })), /book must be an object/);
+  assert.throws(() => ZetaSeeder.parseExport(mutated((bundle) => {
+    delete bundle.book.log.read;
+  })), /book\.log\.read must be an object/);
+
+  const entriesPattern = /book\.log\.entries must be an array of entry objects, each with an operations array of objects/;
+  assert.throws(() => ZetaSeeder.parseExport(mutated((bundle) => {
+    delete bundle.book.log;
+  })), entriesPattern);
+  assert.throws(() => ZetaSeeder.parseExport(mutated((bundle) => {
+    bundle.book.log.entries = {};
+  })), entriesPattern);
+  assert.throws(() => ZetaSeeder.parseExport(mutated((bundle) => {
+    bundle.book.log.entries.push(null);
+  })), entriesPattern);
+  assert.throws(() => ZetaSeeder.parseExport(mutated((bundle) => {
+    delete bundle.book.log.entries[1].operations;
+  })), entriesPattern);
+  assert.throws(() => ZetaSeeder.parseExport(mutated((bundle) => {
+    bundle.book.log.entries[1].operations.push('Merge');
+  })), entriesPattern);
+
+  const messagesPattern = /campaign\.messages must be a non-empty array/;
+  assert.throws(() => ZetaSeeder.parseExport(mutated((bundle) => {
+    bundle.campaign.messages = [];
+  })), messagesPattern);
+  assert.throws(() => ZetaSeeder.parseExport(mutated((bundle) => {
+    bundle.campaign = null;
+  })), messagesPattern);
+  assert.throws(() => ZetaSeeder.parseExport(mutated((bundle) => {
+    bundle.messages = bundle.campaign.messages;
+    delete bundle.campaign;
+  })), messagesPattern);
+  assert.throws(() => ZetaSeeder.parseExport(mutated((bundle) => {
+    bundle.campaign.messages = ['msg-obs-1', 'msg-obs-2', 'msg-obs-3'];
+  })), /objects with a string id/);
+  assert.throws(() => ZetaSeeder.parseExport(mutated((bundle) => {
+    delete bundle.campaign.completeHistory;
+  })), /history is incomplete/);
+  assert.throws(() => ZetaSeeder.parseExport(mutated((bundle) => {
+    bundle.campaign.completeHistory = 1;
+  })), /history is incomplete/);
+  assert.throws(() => ZetaSeeder.parseExport(mutated((bundle) => {
+    bundle.campaign.needsHistory = true;
+  })), /needs history/);
+
+  assert.throws(() => ZetaSeeder.parseExport(mutated((bundle) => {
+    bundle.campaign.messages = bundle.campaign.messages.slice(0, 2);
+  })), /Story entry 1 cites messages missing from campaign\.messages/);
+  assert.throws(() => ZetaSeeder.parseExport(mutated((bundle) => {
+    delete bundle.book.log.entries[0].messageIds;
+  })), /Story entry 1 cites messages missing/);
+  assert.doesNotThrow(() => ZetaSeeder.parseExport(mutated((bundle) => {
+    bundle.book.log.entries[0].withdrawn = true;
+    bundle.campaign.messages = bundle.campaign.messages.slice(0, 1);
+  })));
+
   assert.throws(
-    () => ZetaSeeder.parseExport(JSON.stringify({
-      book: {
-        subjects: [{ id: 'S1', label: 'Mara', kind: 'character' }],
-        facts: [{ id: 'F1', subject: 'S999', category: 'eyes', text: 'blue' }],
-      },
+    () => ZetaSeeder.parseExport(mutated((bundle) => {
+      bundle.book.log.entries[0].retired = 5;
     })),
-    /unknown subject/,
+    (error) => /^Scribe log could not be replayed: /.test(error.message) && error.cause instanceof TypeError,
   );
-  assert.throws(
-    () => ZetaSeeder.parseExport(JSON.stringify({
-      book: {
-        subjects: [{ id: 'S1', label: 'Mara', kind: 'character' }],
-        relations: [{ id: 'F1', subject: 'S1', target: null, targetText: null, text: 'knows nobody' }],
-      },
-    })),
-    /valid target or targetText/,
-  );
+
+  assert.throws(() => ZetaSeeder.parseExport(mutated((bundle) => {
+    storyOperations(bundle)[0].label = ['Corin', 'Vale'];
+  })), /Subject S1 has no usable label/);
 });
 
-test('ZetaSeeder dry-run validates and summarizes without creating SQLite file', (testContext) => {
+test('ZetaSeeder refuses the removed input shapes: pre-replayed books, bare logs, top-level messages, hand-written casts', () => {
+  const bundle = buildScribeBundleFixture();
+  assert.throws(() => ZetaSeeder.parseExport(bundleText(bundle.book.log)), /damaged list must be an array/);
+  assert.throws(() => ZetaSeeder.parseExport(bundleText({ ...bundle.book.log, damaged: [] })), /book must be an object/);
+  assert.throws(
+    () => ZetaSeeder.parseExport(bundleText({ damaged: [], scribe: { log: bundle.book.log }, campaign: bundle.campaign })),
+    /book must be an object/,
+  );
+  assert.throws(
+    () => ZetaSeeder.parseExport(bundleText({
+      damaged: [],
+      book: { subjects: [{ id: 'S1', label: 'Marlowe', kind: 'character' }], facts: [], adopted: true },
+      campaign: bundle.campaign,
+    })),
+    /book\.log\.entries must be an array/,
+  );
+  assert.throws(
+    () => ZetaSeeder.parseExport(bundleText({
+      damaged: [],
+      title: 'Hand Cast',
+      playerName: 'Marlowe',
+      characters: [{ name: 'Marlowe', isPlayer: true }],
+    })),
+    /book must be an object/,
+  );
+
+  const handWritten = buildScribeBundleFixture();
+  handWritten.title = 'Ignored Title';
+  handWritten.premise = 'Ignored premise.';
+  handWritten.playerName = 'Corin Vale';
+  handWritten.characters = [{ name: 'Phantom Guest', isPlayer: true, tier: 'main' }];
+  handWritten.sceneState = { location: 'Ignored Pier', sceneType: 'public' };
+  const parsed = ZetaSeeder.parseExport(bundleText(handWritten));
+  assert.equal(parsed.title, 'Seeded Campaign');
+  assert.equal(parsed.characters.some((character) => character.isPlayer), false);
+  assert.equal(parsed.characters.some((character) => character.name === 'Phantom Guest'), false);
+  assert.equal(parsed.initialScene.location, 'Brass Observatory');
+  assert.equal(Object.hasOwn(parsed, 'premise'), false);
+});
+
+test('ZetaSeeder dry-run summarizes the replayed export without creating the SQLite file', (testContext) => {
   const workDir = makeTempDir(testContext);
-  const exportPath = path.join(workDir, 'fixture.json');
-  const dbPath = path.join(workDir, 'never-created.sqlite');
-  fs.writeFileSync(exportPath, JSON.stringify(buildRichZetaFixture()), 'utf8');
+  const exportPath = writeBundle(workDir, 'observatory.json', buildScribeBundleFixture());
+  const dbPath = path.join(workDir, 'nested', 'never-created.sqlite');
 
-  const summary = ZetaSeeder.run({
-    exportPath,
-    dbPath,
+  const summary = ZetaSeeder.run({ exportPath, dbPath, dryRun: true, allowedRoots: [workDir] });
+  assert.deepEqual(summary, {
+    exportPath: fs.realpathSync(exportPath),
+    title: 'Seeded Campaign',
+    player: null,
+    characters: 6,
+    subjects: 7,
+    facts: 2,
+    relations: 1,
+    claims: 1,
+    threads: 1,
+    readThrough: 3,
+    chatMessages: 3,
     dryRun: true,
-    mainRefs: ['vesper'],
-    allowedRoots: [workDir],
   });
+  assert.equal(fs.existsSync(dbPath), false);
+  assert.equal(fs.existsSync(path.dirname(dbPath)), false);
 
-  assert.equal(summary.dryRun, true);
-  assert.equal(summary.title, 'Hero Gone: Harbor Watch');
-  assert.equal(summary.threads, 1);
-  assert.equal(summary.relations, 2);
-  assert.equal(summary.facts, 4);
+  const withPlayer = ZetaSeeder.run({ exportPath, dbPath, dryRun: true, playerRef: 'Lantern Keeper', allowedRoots: [workDir] });
+  assert.equal(withPlayer.player, 'Tamsin Locke');
   assert.equal(fs.existsSync(dbPath), false);
 });
 
-test('ZetaSeeder preseeds campaign, cast, Scribe Operator log (position 0, cite null), and replays cleanly', (testContext) => {
+test('ZetaSeeder seeds campaign, cast and an Operator-only Scribe book that replays with claims, speakers and audiences intact', (testContext) => {
   const workDir = makeTempDir(testContext);
-  const exportPath = path.join(workDir, 'hero-export.json');
+  const exportPath = writeBundle(workDir, 'observatory.json', buildScribeBundleFixture());
   const dbPath = path.join(workDir, 'worlds-seed.sqlite');
-  fs.writeFileSync(exportPath, JSON.stringify(buildRichZetaFixture()), 'utf8');
 
   const result = ZetaSeeder.run({
     exportPath,
     dbPath,
-    mainRefs: ['vesper'],
+    title: 'Observatory Vigil',
+    playerRef: 'corin-vale',
+    mainRefs: ['wren-ashby'],
     allowedRoots: [workDir],
   });
   assert.equal(result.dryRun, false);
-  assert.ok(result.campaignId);
+  assert.equal(result.title, 'Observatory Vigil');
+  assert.equal(result.player, 'Corin Vale');
+  assert.equal(result.replacedExisting, false);
 
   const store = new SqliteStore(dbPath);
   try {
     const campaign = store.getCampaign(result.campaignId);
-    assert.equal(campaign.title, 'Hero Gone: Harbor Watch');
-    assert.equal(campaign.premise, 'Smugglers control the drowned lighthouse while the magistrate sleeps.');
-    assert.equal(campaign.styleNotes, 'Terse, sensory, maritime noir.');
-    assert.equal(campaign.sceneState.location, 'Lantern Pier');
-    assert.equal(campaign.sceneState.day, 3);
+    assert.equal(campaign.title, 'Observatory Vigil');
+    assert.equal(campaign.sceneState.location, 'Brass Observatory');
+    assert.equal(campaign.sceneState.day, 4);
+    assert.equal(campaign.sceneState.timeLabel, 'Midnight');
     assert.equal(campaign.sceneState.sceneType, SceneType.Private);
 
     const castPage = store.listCharacters(campaign.id, { includeArchived: true, limit: 25 });
-    const rowanOne = castPage.items.find((char) => char.scribeSubjectId && char.isPlayer);
-    const rowanTwo = castPage.items.find((char) => char.name === 'Rowan Vane' && !char.isPlayer);
-    const vesper = castPage.items.find((char) => char.name === 'Vesper');
-    const mara = castPage.items.find((char) => char.name === 'Mara');
-    const oldFen = castPage.items.find((char) => char.name === 'Old Fen');
+    assert.equal(castPage.items.length, 6);
+    assert.equal(castPage.items.some((character) => character.name === 'Narrator'), false);
+    assert.equal(castPage.items.some((character) => character.name === 'Old Corin'), false);
+    const bySlug = new Map(castPage.items.map((character) => [character.slug, character]));
+    const corin = bySlug.get('corin-vale');
+    const tamsin = bySlug.get('tamsin-locke');
+    const bramwell = bySlug.get('bramwell');
+    const wren = bySlug.get('wren-ashby');
+    const dorianFirst = bySlug.get('dorian-cross');
+    const dorianSecond = bySlug.get('dorian-cross-2');
+    for (const character of [corin, tamsin, bramwell, wren, dorianFirst, dorianSecond]) {
+      assert.ok(character);
+      assert.match(character.slug, /^[a-z0-9][a-z0-9_-]{0,47}$/);
+    }
+    assert.equal(corin.scribeSubjectId, 'S1');
+    assert.equal(dorianSecond.scribeSubjectId, 'S9');
+    assert.equal(corin.isPlayer, true);
+    assert.equal(campaign.playerCharacterId, corin.id);
+    assert.equal(castPage.items.filter((character) => character.isPlayer).length, 1);
+    assert.ok(corin.aliases.includes('Night Watchman'));
+    assert.ok(corin.aliases.includes('Old Corin'));
+    assert.ok(tamsin.aliases.includes('Lantern Keeper'));
+    assert.equal(corin.persona, 'eyes: amber');
+    assert.equal(bramwell.persona, '');
+    assert.equal(corin.tier, CharacterTier.Main);
+    assert.equal(tamsin.tier, CharacterTier.Main);
+    assert.equal(bramwell.tier, CharacterTier.Main);
+    assert.equal(wren.tier, CharacterTier.Main);
+    assert.equal(dorianFirst.tier, CharacterTier.Recurring);
+    assert.equal(dorianSecond.tier, CharacterTier.Recurring);
 
-    assert.ok(rowanOne);
-    assert.equal(campaign.playerCharacterId, rowanOne.id);
-    assert.match(rowanOne.slug, /^[a-z0-9][a-z0-9_-]{0,47}$/);
-    assert.ok(rowanOne.aliases.includes('Watchman Rowan'));
-    assert.ok(rowanOne.aliases.includes('Rowan of the Pier'));
-    assert.ok(rowanOne.aliases.includes('Greycoat'));
-
-    assert.ok(rowanTwo);
-    assert.notEqual(rowanTwo.slug, rowanOne.slug);
-    assert.match(rowanTwo.slug, /^rowan/);
-
-    assert.ok(vesper);
-    assert.equal(vesper.tier, CharacterTier.Main);
-    assert.ok(mara);
-    assert.ok(oldFen);
-    assert.equal(oldFen.archived, true);
-
-    assert.deepEqual(
-      new Set(campaign.sceneState.presentIds),
-      new Set([rowanOne.id, mara.id]),
-    );
+    assert.deepEqual([...campaign.sceneState.presentIds].sort(), [corin.id, tamsin.id].sort());
 
     const bookRecord = store.getScribeBook(campaign.id);
     assert.equal(bookRecord.lastTurnSeq, 0);
     assert.equal(bookRecord.dirty, false);
-
     const savedLog = JSON.parse(bookRecord.bookJson);
     for (const entry of savedLog.entries) {
       assert.equal(entry.origin, ScribeLogCore.Origin.Operator);
       assert.equal(entry.kind, ScribeLogCore.Kind.Operator);
+      assert.deepEqual(entry.messageIds, []);
       for (const operation of entry.operations) {
         if (operation.position !== undefined) {
           assert.equal(operation.position, 0);
@@ -315,100 +554,659 @@ test('ZetaSeeder preseeds campaign, cast, Scribe Operator log (position 0, cite 
         if (operation.cite !== undefined) {
           assert.equal(operation.cite, null);
         }
+        if (operation.evidence !== undefined) {
+          assert.deepEqual(Object.keys(operation.evidence).sort(), ['attribution', 'speaker']);
+        }
       }
     }
 
     const replayed = ScribeReplay.run(savedLog, []);
-    const activeFacts = replayed.facts.filter((fact) => ScribeReplay.live(fact));
-    assert.equal(activeFacts.some((fact) => fact.text === 'missing at sea'), false);
-    assert.equal(activeFacts.length, 6);
-    for (const fact of activeFacts) {
+    const liveSubjects = replayed.subjects.filter((subject) => subject.mergedInto === null);
+    assert.deepEqual(liveSubjects.map((subject) => subject.id).sort(), ['S1', 'S2', 'S3', 'S4', 'S7', 'S8', 'S9']);
+    assert.equal(replayed.subjects.some((subject) => subject.label === 'Narrator'), false);
+
+    assert.equal(replayed.facts.length, 4);
+    for (const fact of replayed.facts) {
+      assert.equal(fact.origin, ScribeLogCore.Origin.Operator);
       assert.equal(fact.position, 0);
       assert.equal(fact.cite, null);
-      assert.equal(fact.origin, ScribeLogCore.Origin.Operator);
     }
+    assert.equal(replayed.facts.some((fact) => fact.text === 'waiting at the north dock'), false);
+    assert.equal(replayed.facts.filter((fact) => ScribeReplay.live(fact)).length, 3);
 
-    const secretSealFact = activeFacts.find((fact) => fact.text.includes('customs seal'));
-    assert.ok(secretSealFact);
-    assert.equal(ScribeKnowledge.knows(replayed, mara.scribeSubjectId, secretSealFact), true);
-    assert.equal(ScribeKnowledge.knows(replayed, vesper.scribeSubjectId, secretSealFact), true);
-    assert.equal(ScribeKnowledge.knows(replayed, rowanOne.scribeSubjectId, secretSealFact), false);
+    const labels = ScribeAnalyzer.labels(replayed);
+    const claim = replayed.facts.find((fact) => fact.text === 'hiding in the bell tower');
+    assert.equal(claim.status, ScribeReplay.Status.Reported);
+    assert.equal(claim.subject, 'S3');
+    assert.deepEqual(claim.evidence, { attribution: 'claimed', speaker: 'Tamsin Locke' });
+    assert.match(ScribeAnalyzer.statement(claim, labels), /\[claimed by Tamsin Locke\]$/);
+
+    const witnessed = replayed.facts.find((fact) => fact.text === 'amber');
+    assert.equal(witnessed.status, ScribeReplay.Status.InForce);
+    assert.deepEqual(witnessed.evidence, { attribution: 'witnessed', speaker: 'Tamsin Locke' });
+    assert.doesNotMatch(ScribeAnalyzer.statement(witnessed, labels), /witnessed by/);
+
+    const vault = replayed.facts.find((fact) => fact.category === 'relation');
+    assert.equal(vault.status, ScribeReplay.Status.InForce);
+    assert.equal(vault.target, 'S1');
+    assert.equal(vault.hidden, true);
+    assert.equal(Object.hasOwn(vault, 'evidence'), false);
+    assert.equal(ScribeKnowledge.knows(replayed, 'S2', vault), true);
+    assert.equal(ScribeKnowledge.knows(replayed, 'S7', vault), true);
+    assert.equal(ScribeKnowledge.knows(replayed, 'S3', vault), false);
 
     assert.equal(replayed.threads.length, 1);
+    assert.equal(replayed.threads[0].text, 'Who cracked the astrolabe lens before dawn?');
+    assert.equal(replayed.threads[0].subject, 'S4');
+    assert.equal(replayed.threads[0].origin, ScribeLogCore.Origin.Operator);
     assert.equal(replayed.threads[0].position, 0);
     assert.equal(replayed.threads[0].cite, null);
-    assert.equal(replayed.threads[0].origin, ScribeLogCore.Origin.Operator);
   } finally {
     store.close();
   }
 });
 
-test('ZetaSeeder imports raw Scribe log format and guards duplicate campaigns unless --force or --title is passed', (testContext) => {
+test('ZetaSeeder refuses a duplicate title unless --title or --force is given', (testContext) => {
   const workDir = makeTempDir(testContext);
-  const rawLog = ScribeLogCore.create();
-  let state = ScribeReplay.run(rawLog, []);
-  ScribeLogCore.syncCharacterSubject(rawLog, state, {
-    subjectId: null,
-    name: 'Kestrel',
-    aliases: ['The Falcon'],
-    kind: 'character',
-  });
-  state = ScribeReplay.run(rawLog, []);
-  ScribeLogCore.rule(rawLog, state, {
-    type: ScribeLogCore.Ruling.AddFact,
-    subject: 'S1',
-    category: 'role',
-    target: null,
-    text: 'courier for the Bell Tower',
-    hidden: false,
-    cite: null,
-    position: 0,
-  });
-
-  const rawExportPath = path.join(workDir, 'raw-log-export.json');
+  const exportPath = writeBundle(workDir, 'observatory.json', buildScribeBundleFixture());
   const dbPath = path.join(workDir, 'duplicate-guard.sqlite');
-  fs.writeFileSync(rawExportPath, JSON.stringify({
-    title: 'Raw Log World',
-    scribe: { log: rawLog },
-  }), 'utf8');
 
-  const firstRun = ZetaSeeder.run({
-    exportPath: rawExportPath,
-    dbPath,
-    allowedRoots: [workDir],
-  });
+  const firstRun = ZetaSeeder.run({ exportPath, dbPath, allowedRoots: [workDir] });
+  assert.equal(firstRun.title, 'Seeded Campaign');
+  assert.throws(() => ZetaSeeder.run({ exportPath, dbPath, allowedRoots: [workDir] }), /already exists/);
 
-  assert.throws(
-    () => ZetaSeeder.run({ exportPath: rawExportPath, dbPath, allowedRoots: [workDir] }),
-    /already exists/,
-  );
-
-  const distinctTitleRun = ZetaSeeder.run({
-    exportPath: rawExportPath,
-    dbPath,
-    title: 'Raw Log World Copy',
-    allowedRoots: [workDir],
-  });
+  const distinctTitleRun = ZetaSeeder.run({ exportPath, dbPath, title: '  Observatory Copy  ', allowedRoots: [workDir] });
+  assert.equal(distinctTitleRun.title, 'Observatory Copy');
   assert.notEqual(distinctTitleRun.campaignId, firstRun.campaignId);
 
-  const forcedRun = ZetaSeeder.run({
-    exportPath: rawExportPath,
-    dbPath,
-    force: true,
-    allowedRoots: [workDir],
-  });
+  const forcedRun = ZetaSeeder.run({ exportPath, dbPath, force: true, allowedRoots: [workDir] });
+  assert.equal(forcedRun.replacedExisting, true);
   assert.notEqual(forcedRun.campaignId, firstRun.campaignId);
 
   const store = new SqliteStore(dbPath);
   try {
-    const campaigns = store.listCampaigns({ limit: 50 });
-    assert.equal(campaigns.total, 2);
+    assert.equal(store.listCampaigns({ limit: 50 }).total, 2);
     assert.equal(store.getCampaign(firstRun.campaignId), null);
     assert.ok(store.getCampaign(distinctTitleRun.campaignId));
-    const replacedChars = store.listCharacters(forcedRun.campaignId);
-    assert.equal(replacedChars.items[0].name, 'Kestrel');
-    assert.equal(replacedChars.items[0].persona, 'role: courier for the Bell Tower');
+    assert.equal(store.listCharacters(forcedRun.campaignId, { limit: 25 }).items.length, 6);
   } finally {
     store.close();
   }
+
+  assert.throws(
+    () => ZetaSeeder.run({ exportPath, dbPath: `${workDir}/bad\0name.sqlite`, title: 'Nul Path', allowedRoots: [workDir] }),
+    /Invalid SQLite database path/,
+  );
+  assert.throws(() => ZetaSeeder.run({ exportPath, dbPath, title: '   ', allowedRoots: [workDir] }), /title cannot be empty/);
+});
+
+test('ZetaSeeder matches --player and --main by slug, name, alias or subject id and refuses misses and ambiguity', () => {
+  const fixtureText = bundleText(buildScribeBundleFixture());
+  /**
+   * @param {object} options
+   * @returns {Map<string, object>}
+   */
+  const castFor = (options) => {
+    return new Map(ZetaSeeder.parseExport(fixtureText, options).characters.map((character) => [character.slug, character]));
+  };
+  /**
+   * @param {object} options
+   * @returns {string[]}
+   */
+  const playersFor = (options) => {
+    return ZetaSeeder.parseExport(fixtureText, options).characters
+      .filter((character) => character.isPlayer)
+      .map((character) => character.subjectId);
+  };
+
+  assert.deepEqual(playersFor({}), []);
+  assert.deepEqual(playersFor({ playerRef: 'CORIN-VALE' }), ['S1']);
+  assert.deepEqual(playersFor({ playerRef: 'Bramwell' }), ['S3']);
+  assert.deepEqual(playersFor({ playerRef: 'the Lantern Keeper-san' }), ['S2']);
+  assert.deepEqual(playersFor({ playerRef: 'Old Corin' }), ['S1']);
+  assert.deepEqual(playersFor({ playerRef: 's7' }), ['S7']);
+  assert.deepEqual(playersFor({ playerRef: 'dorian-cross-2' }), ['S9']);
+  assert.deepEqual(playersFor({ playerRef: '  S8  ' }), ['S8']);
+
+  const playerCast = castFor({ playerRef: 's8' });
+  assert.equal(playerCast.get('dorian-cross').tier, CharacterTier.Main);
+  assert.equal(playerCast.get('wren-ashby').tier, CharacterTier.Recurring);
+
+  assert.throws(
+    () => ZetaSeeder.parseExport(fixtureText, { playerRef: 'Dorian Cross' }),
+    /Player character "Dorian Cross" is ambiguous.*Dorian Cross \(dorian-cross\), Dorian Cross \(dorian-cross-2\)/,
+  );
+  assert.throws(() => ZetaSeeder.parseExport(fixtureText, { playerRef: 'Narrator' }), /"Narrator" did not match any character/);
+  assert.throws(() => ZetaSeeder.parseExport(fixtureText, { playerRef: 'Brass Observatory' }), /did not match any character/);
+  assert.throws(() => ZetaSeeder.parseExport(fixtureText, { playerRef: 'S5' }), /"S5" did not match any character/);
+  assert.throws(() => ZetaSeeder.parseExport(fixtureText, { playerRef: 'unknown-wanderer' }), /unknown-wanderer/);
+  assert.throws(() => ZetaSeeder.parseExport(fixtureText, { playerRef: '...' }), /normalizes to an empty name/);
+  assert.throws(() => ZetaSeeder.parseExport(fixtureText, { playerRef: '' }), /cannot be empty/);
+  assert.throws(() => ZetaSeeder.parseExport(fixtureText, { playerRef: '   ' }), /cannot be empty/);
+  assert.throws(() => ZetaSeeder.parseExport(fixtureText, { playerRef: 42 }), TypeError);
+
+  const mainCast = castFor({ mainRefs: ['wren-ashby', 'S9'] });
+  assert.equal(mainCast.get('wren-ashby').tier, CharacterTier.Main);
+  assert.equal(mainCast.get('dorian-cross-2').tier, CharacterTier.Main);
+  assert.equal(mainCast.get('dorian-cross').tier, CharacterTier.Recurring);
+  assert.equal(mainCast.get('corin-vale').tier, CharacterTier.Main);
+
+  const aliasMain = castFor({ mainRefs: ['Lantern Keeper'], playerRef: 'Wren Ashby' });
+  assert.equal(aliasMain.get('tamsin-locke').tier, CharacterTier.Main);
+  assert.equal(aliasMain.get('wren-ashby').isPlayer, true);
+  assert.equal(aliasMain.get('wren-ashby').tier, CharacterTier.Main);
+
+  assert.throws(() => ZetaSeeder.parseExport(fixtureText, { mainRefs: ['ghost'] }), /Main character "ghost" did not match any character/);
+  assert.throws(() => ZetaSeeder.parseExport(fixtureText, { mainRefs: ['wren-ashby', 'ghost'] }), /"ghost"/);
+  assert.throws(
+    () => ZetaSeeder.parseExport(fixtureText, { mainRefs: ['Dorian Cross'] }),
+    /Main character "Dorian Cross" is ambiguous/,
+  );
+  assert.throws(() => ZetaSeeder.parseExport(fixtureText, { mainRefs: ['...'] }), /normalizes to an empty name/);
+  assert.throws(() => ZetaSeeder.parseExport(fixtureText, { mainRefs: [' '] }), /cannot contain empty references/);
+  assert.throws(() => ZetaSeeder.parseExport(fixtureText, { mainRefs: 'wren-ashby' }), TypeError);
+  assert.throws(() => ZetaSeeder.parseExport(fixtureText, { mainRefs: [7] }), TypeError);
+});
+
+test('ZetaSeeder builds the opening scene from the last replayed scene: reach, narrowing, time, departures and fallbacks', (testContext) => {
+  /**
+   * @param {(bundle: object) => void} mutate
+   * @returns {object}
+   */
+  const sceneFor = (mutate) => {
+    const bundle = buildScribeBundleFixture();
+    mutate(bundle);
+    return ZetaSeeder.parseExport(bundleText(bundle)).initialScene;
+  };
+
+  assert.deepEqual(sceneFor(() => {}), {
+    day: 4,
+    timeLabel: 'Midnight',
+    location: 'Brass Observatory',
+    sceneType: SceneType.Private,
+    presentSubjectIds: ['S1', 'S2'],
+  });
+
+  /**
+   * @param {object} bundle
+   * @returns {void}
+   */
+  const unnarrow = (bundle) => {
+    bundle.book.log.entries[1].operations = bundle.book.log.entries[1].operations
+      .filter((operation) => operation.type !== ScribeLogCore.Ruling.Narrow);
+  };
+  assert.equal(sceneFor(unnarrow).sceneType, SceneType.Public);
+  assert.equal(sceneFor((bundle) => {
+    unnarrow(bundle);
+    sceneOperation(bundle).reach = ScribeAnswer.Reach.Private;
+  }).sceneType, SceneType.Private);
+
+  const plainScene = sceneFor((bundle) => {
+    delete sceneOperation(bundle).evidence;
+    sceneOperation(bundle).place = '   ';
+  });
+  assert.equal(plainScene.timeLabel, 'Daytime');
+  assert.equal(plainScene.location, 'Opening Scene');
+
+  assert.deepEqual(sceneFor((bundle) => {
+    sceneOperation(bundle).present.push({ subject: 'S7', label: 'Wren Ashby', from: 2, until: 3 });
+  }).presentSubjectIds, ['S1', 'S2']);
+
+  assert.deepEqual(sceneFor((bundle) => {
+    const operations = storyOperations(bundle);
+    operations.splice(operations.indexOf(sceneOperation(bundle)), 1);
+    unnarrow(bundle);
+  }), {
+    day: 1,
+    timeLabel: 'Daytime',
+    location: 'Opening Scene',
+    sceneType: SceneType.Public,
+    presentSubjectIds: [],
+  });
+
+  const workDir = makeTempDir(testContext);
+  const emptyPresent = buildScribeBundleFixture();
+  sceneOperation(emptyPresent).present = [
+    { subject: 'S4', label: 'Brass Observatory', from: null, until: null },
+    { subject: 'S3', label: 'Bramwell', from: null, until: 2 },
+  ];
+  const exportPath = writeBundle(workDir, 'empty-present.json', emptyPresent);
+  const dbPath = path.join(workDir, 'empty-present.sqlite');
+  const seeded = ZetaSeeder.run({ exportPath, dbPath, allowedRoots: [workDir] });
+  const store = new SqliteStore(dbPath);
+  try {
+    const campaign = store.getCampaign(seeded.campaignId);
+    const castPage = store.listCharacters(campaign.id, { limit: 25 });
+    const mainIds = castPage.items.filter((character) => character.tier === CharacterTier.Main).map((character) => character.id);
+    assert.equal(mainIds.length, 3);
+    assert.deepEqual([...campaign.sceneState.presentIds].sort(), mainIds.sort());
+    assert.equal(campaign.playerCharacterId, null);
+  } finally {
+    store.close();
+  }
+});
+
+test('ZetaSeeder clamps names and aliases without splitting surrogate pairs', () => {
+  assert.equal(ZetaSeeder.clampText(`  ${'A'.repeat(59)}\u{1F600}tail  `, 60), 'A'.repeat(59));
+  assert.equal(ZetaSeeder.clampText(`${'A'.repeat(58)}\u{1F600}tail`, 60), `${'A'.repeat(58)}\u{1F600}`);
+  assert.equal(ZetaSeeder.clampText(`${'A'.repeat(50)}          ${'B'.repeat(20)}`, 60), 'A'.repeat(50));
+
+  const bundle = buildScribeBundleFixture();
+  const operations = storyOperations(bundle);
+  operations.push(
+    { type: ScribeAnswer.Type.Subject, subject: 'S10', label: `  ${'A'.repeat(59)}\u{1F600} Longname`, kind: 'character' },
+    { type: ScribeAnswer.Type.Alias, subject: 'S10', name: `${'B'.repeat(59)}\u{1F600}`, cite: 'msg-obs-1', position: 1, other: null },
+  );
+  const parsed = ZetaSeeder.parseExport(bundleText(bundle), { playerRef: 'S10' });
+  const longNamed = parsed.characters.find((character) => character.subjectId === 'S10');
+  assert.equal(longNamed.name, 'A'.repeat(59));
+  assert.equal(longNamed.isPlayer, true);
+  assert.ok(longNamed.aliases.includes('B'.repeat(59)));
+  for (const character of parsed.characters) {
+    assert.ok(character.name.length <= ScribeAnswer.Settings.MaxLabel);
+    assert.equal(/[\uD800-\uDBFF]$/.test(character.name), false);
+  }
+
+  const materialized = ZetaSeeder.materializeScribeLog(parsed);
+  const subjectsByLabel = new Map(materialized.state.subjects.map((subject) => [subject.label, subject]));
+  assert.ok(subjectsByLabel.has('A'.repeat(59)));
+  assert.equal(new Set(materialized.state.subjects.map((subject) => subject.id)).size, materialized.state.subjects.length);
+});
+
+test('ZetaSeeder CLI parsing rejects repeated flags and empty --main, and accepts dash-led values that are not flags', () => {
+  const parsedArgs = ZetaSeeder.parseCliArgs(['bundle.json', '--player', 'dorian-cross-2', '--main', 'wren, ,S3', '--dry-run']);
+  assert.equal(parsedArgs.exportPath, 'bundle.json');
+  assert.equal(parsedArgs.playerRef, 'dorian-cross-2');
+  assert.deepEqual(parsedArgs.mainRefs, ['wren', 'S3']);
+  assert.equal(parsedArgs.dryRun, true);
+  assert.equal(parsedArgs.force, false);
+  assert.equal(parsedArgs.title, null);
+
+  const defaults = ZetaSeeder.parseCliArgs([]);
+  assert.equal(defaults.playerRef, null);
+  assert.deepEqual(defaults.mainRefs, []);
+  assert.match(defaults.exportPath, /hero_gone_latest\.json$/);
+
+  assert.equal(ZetaSeeder.parseCliArgs(['--player', '-x']).playerRef, '-x');
+  assert.equal(ZetaSeeder.parseCliArgs(['--title', '-t']).title, '-t');
+  assert.equal(ZetaSeeder.parseCliArgs(['--db', '-f']).dbPath, '-f');
+  assert.deepEqual(ZetaSeeder.parseCliArgs(['--main', '-m,--x']).mainRefs, ['-m', '--x']);
+  assert.equal(ZetaSeeder.parseCliArgs(['--player', ' -v ']).playerRef, '-v');
+
+  for (const flag of ['--title', '--db', '--main', '--player']) {
+    assert.throws(() => ZetaSeeder.parseCliArgs([flag]), /requires a non-empty value/);
+    assert.throws(() => ZetaSeeder.parseCliArgs([flag, '   ']), /requires a non-empty value/);
+    for (const known of ['--title', '--db', '--main', '--player', '--dry-run', '--force', '--help', '-h']) {
+      assert.throws(() => ZetaSeeder.parseCliArgs([flag, known]), /requires a non-empty value/);
+    }
+  }
+  assert.throws(() => ZetaSeeder.parseCliArgs(['--player', ' --force ']), /requires a non-empty value/);
+
+  assert.throws(() => ZetaSeeder.parseCliArgs(['--title', 'One', '--title', 'Two']), /--title was given more than once/);
+  assert.throws(() => ZetaSeeder.parseCliArgs(['--player', 'a', '--player', 'b']), /--player was given more than once/);
+  assert.throws(() => ZetaSeeder.parseCliArgs(['--main', 'a', '--main', 'b']), /--main was given more than once/);
+  assert.throws(() => ZetaSeeder.parseCliArgs(['--db', 'a.sqlite', '--db', 'b.sqlite']), /--db was given more than once/);
+  assert.throws(() => ZetaSeeder.parseCliArgs(['--dry-run', '--dry-run']), /--dry-run was given more than once/);
+  assert.throws(() => ZetaSeeder.parseCliArgs(['--force', '--force']), /--force was given more than once/);
+  assert.throws(() => ZetaSeeder.parseCliArgs(['--help', '-h']), /--help was given more than once/);
+  assert.throws(() => ZetaSeeder.parseCliArgs(['-h', '-h']), /--help was given more than once/);
+
+  assert.throws(() => ZetaSeeder.parseCliArgs(['--main', ',']), /--main requires at least one non-empty reference/);
+  assert.throws(() => ZetaSeeder.parseCliArgs(['--main', ' , ,']), /--main requires at least one non-empty reference/);
+
+  assert.throws(() => ZetaSeeder.parseCliArgs(['--bogus']), /Unknown CLI flag: --bogus/);
+  assert.throws(() => ZetaSeeder.parseCliArgs(['a.json', 'b.json']), /Unexpected extra positional argument/);
+  assert.throws(() => ZetaSeeder.parseCliArgs([123]), TypeError);
+  assert.throws(() => ZetaSeeder.parseCliArgs(['--dry-run', null]), TypeError);
+  assert.throws(() => ZetaSeeder.parseCliArgs('--dry-run'), TypeError);
+
+  const helpOutput = execFileSync(process.execPath, [SEED_SCRIPT_PATH, '--help'], { encoding: 'utf8', stdio: 'pipe' });
+  assert.match(helpOutput, /\[--player <slugNameAliasOrSubjectId>\]/);
+  assert.match(helpOutput, /\[--main <slugNameAliasOrSubjectId,\.\.\.>\]/);
+});
+
+test('ZetaSeeder accepts an unadopted book and reports how far the Scribe read the chat', (testContext) => {
+  const workDir = makeTempDir(testContext);
+  /**
+   * @param {(bundle: object) => void} mutate
+   * @returns {object}
+   */
+  const summaryFor = (mutate) => {
+    const bundle = buildScribeBundleFixture();
+    bundle.book.adopted = false;
+    mutate(bundle);
+    const exportPath = writeBundle(workDir, 'unadopted.json', bundle);
+    return ZetaSeeder.run({ exportPath, dryRun: true, allowedRoots: [workDir] });
+  };
+
+  const complete = summaryFor(() => {});
+  assert.equal(complete.readThrough, 3);
+  assert.equal(complete.chatMessages, 3);
+  assert.equal(complete.facts, 2);
+  assert.equal(complete.claims, 1);
+
+  const partial = summaryFor((bundle) => {
+    delete bundle.book.log.read['msg-obs-3'];
+  });
+  assert.equal(partial.readThrough, 2);
+  assert.equal(partial.chatMessages, 3);
+
+  const gap = summaryFor((bundle) => {
+    delete bundle.book.log.read['msg-obs-2'];
+  });
+  assert.equal(gap.readThrough, 1);
+
+  const unread = summaryFor((bundle) => {
+    delete bundle.book.log.read['msg-obs-1'];
+  });
+  assert.equal(unread.readThrough, 0);
+  assert.equal(unread.chatMessages, 3);
+
+  const nothingRead = summaryFor((bundle) => {
+    bundle.book.log.read = {};
+  });
+  assert.equal(nothingRead.readThrough, 0);
+});
+
+test('ZetaSeeder copies Zeta status: a refined InForce fact with claimed evidence stays InForce and a Reported fact stays Reported', () => {
+  const bundle = buildScribeBundleFixture();
+  const operations = storyOperations(bundle);
+  operations.push(
+    {
+      type: ScribeAnswer.Type.Fact,
+      fact: 'F6',
+      subject: 'S2',
+      label: 'Tamsin Locke',
+      category: 'location',
+      target: null,
+      targetText: null,
+      other: null,
+      text: 'at the vault',
+      cite: 'msg-obs-2',
+      position: 2,
+      hidden: false,
+      evidence: storyEvidence('msg-obs-2', 'Tamsin Locke', 'witnessed', 'She stood at the vault.'),
+    },
+    {
+      type: ScribeAnswer.Type.Refine,
+      fact: 'F6',
+      becomes: 'F7',
+      subject: 'S2',
+      label: 'Tamsin Locke',
+      category: 'location',
+      target: null,
+      targetText: null,
+      other: null,
+      text: 'at the vault door',
+      cite: 'msg-obs-3',
+      position: 3,
+      hidden: false,
+      evidence: storyEvidence('msg-obs-3', 'Corin Vale', 'claimed', 'She is at the vault door, I think.'),
+    },
+  );
+  bundle.book.log.nextFact = 8;
+
+  const parsed = ZetaSeeder.parseExport(bundleText(bundle));
+  const refined = parsed.facts.find((fact) => fact.text === 'at the vault door');
+  assert.equal(refined.reported, false);
+  assert.deepEqual(refined.evidence, { attribution: 'claimed', speaker: 'Corin Vale' });
+  const claim = parsed.facts.find((fact) => fact.text === 'hiding in the bell tower');
+  assert.equal(claim.reported, true);
+  assert.deepEqual(claim.evidence, { attribution: 'claimed', speaker: 'Tamsin Locke' });
+
+  const seeded = ZetaSeeder.materializeScribeLog(parsed).state;
+  const seededRefined = seeded.facts.find((fact) => fact.text === 'at the vault door');
+  assert.equal(seededRefined.status, ScribeReplay.Status.InForce);
+  assert.deepEqual(seededRefined.evidence, { attribution: 'claimed', speaker: 'Corin Vale' });
+  const seededClaim = seeded.facts.find((fact) => fact.text === 'hiding in the bell tower');
+  assert.equal(seededClaim.status, ScribeReplay.Status.Reported);
+  assert.deepEqual(seededClaim.evidence, { attribution: 'claimed', speaker: 'Tamsin Locke' });
+  assert.equal(seeded.facts.filter((fact) => fact.status === ScribeReplay.Status.Reported).length, 1);
+  assert.equal(seeded.facts.filter((fact) => ScribeReplay.live(fact)).length, 4);
+});
+
+test('ZetaSeeder seeds a Reported fact without evidence as Reported', () => {
+  const parsed = ZetaSeeder.parseExport(bundleText(buildScribeBundleFixture()));
+  const withoutEvidence = {
+    ...parsed.facts.find((fact) => fact.text === 'hiding in the bell tower'),
+    text: 'rumoured to hide in the cellar',
+    evidence: null,
+  };
+  const seeded = ZetaSeeder.materializeScribeLog({ ...parsed, facts: [withoutEvidence] }).state;
+  const fact = seeded.facts.find((item) => item.text === 'rumoured to hide in the cellar');
+  assert.equal(fact.status, ScribeReplay.Status.Reported);
+  assert.equal(Object.hasOwn(fact, 'evidence'), false);
+});
+
+/**
+ * @param {string} fact
+ * @param {string} subject
+ * @param {string} label
+ * @param {string} category
+ * @param {string} text
+ * @param {number} position
+ * @returns {object}
+ */
+function audienceFact(fact, subject, label, category, text, position) {
+  return {
+    type: ScribeAnswer.Type.Fact,
+    fact,
+    subject,
+    label,
+    category,
+    target: null,
+    targetText: null,
+    other: null,
+    text,
+    cite: `msg-aud-${position}`,
+    position,
+    hidden: false,
+  };
+}
+
+/**
+ * @returns {object}
+ */
+function buildAudienceBundleFixture() {
+  const log = ScribeLogCore.create();
+  log.nextSubject = 5;
+  log.nextFact = 4;
+  log.nextSequence = 2;
+  log.revision = 1;
+  log.read = { 'msg-aud-1': 1, 'msg-aud-2': 1, 'msg-aud-3': 1, 'msg-aud-4': 1, 'msg-aud-5': 1 };
+  log.entries = [
+    {
+      sequence: 1,
+      kind: ScribeLogCore.Kind.Update,
+      origin: ScribeLogCore.Origin.Story,
+      messageIds: ['msg-aud-1', 'msg-aud-2', 'msg-aud-3', 'msg-aud-4', 'msg-aud-5'],
+      operations: [
+        { type: ScribeAnswer.Type.Subject, subject: 'S1', label: 'Ayla', kind: 'character' },
+        { type: ScribeAnswer.Type.Subject, subject: 'S2', label: 'Brek', kind: 'character' },
+        { type: ScribeAnswer.Type.Subject, subject: 'S3', label: 'Cade', kind: 'character' },
+        { type: ScribeAnswer.Type.Subject, subject: 'S4', label: 'Dara', kind: null },
+        { type: ScribeAnswer.Type.Alias, subject: 'S2', name: 'Brek', cite: 'msg-aud-1', position: 1, other: null },
+        {
+          type: ScribeAnswer.Type.Scene,
+          day: 1,
+          first: 'msg-aud-1',
+          last: 'msg-aud-2',
+          firstPosition: 1,
+          lastPosition: 2,
+          place: 'Cellar',
+          reach: ScribeAnswer.Reach.Private,
+          present: [
+            { subject: 'S1', label: 'Ayla', from: null, until: null },
+            { subject: 'S2', label: 'Brek', from: null, until: null },
+          ],
+          summary: 'Ayla and Brek talk in the cellar.',
+        },
+        {
+          type: ScribeAnswer.Type.Scene,
+          day: 1,
+          first: 'msg-aud-3',
+          last: 'msg-aud-4',
+          firstPosition: 3,
+          lastPosition: 4,
+          place: 'Square',
+          reach: ScribeAnswer.Reach.Public,
+          present: [
+            { subject: 'S1', label: 'Ayla', from: null, until: null },
+            { subject: 'S2', label: 'Brek', from: null, until: null },
+            { subject: 'S3', label: 'Cade', from: null, until: null },
+          ],
+          summary: 'The square fills with people.',
+        },
+        audienceFact('F1', 'S1', 'Ayla', 'eyes', 'green', 1),
+        audienceFact('F2', 'S3', 'Cade', 'hair', 'black', 3),
+        audienceFact('F3', 'S2', 'Brek', 'eyes', 'grey', 5),
+      ],
+      withdrawn: false,
+    },
+  ];
+  const bundle = buildScribeBundleFixture();
+  bundle.campaign.messages = [1, 2, 3, 4, 5].map((number) => {
+    return { id: `msg-aud-${number}`, sender: 'narrator@observatory.example', contents: [] };
+  });
+  bundle.book.log = log;
+  bundle.book.fingerprints = {};
+  return bundle;
+}
+
+test('ZetaSeeder copies who knows each fact: private scene audiences stay named, public ones stay open, a fact outside any scene stays with its subject', () => {
+  const bundle = buildAudienceBundleFixture();
+  const zeta = ScribeReplay.run(bundle.book.log, bundle.campaign.messages);
+  const parsed = ZetaSeeder.parseExport(bundleText(bundle));
+  const seeded = ZetaSeeder.materializeScribeLog(parsed).state;
+  /**
+   * @param {object} state
+   * @param {string} text
+   * @returns {object}
+   */
+  const audienceOf = (state, text) => {
+    const audience = ScribeKnowledge.audience(state, state.facts.find((fact) => fact.text === text));
+    return Array.isArray(audience) ? [...audience].sort() : audience;
+  };
+  /**
+   * @param {string} text
+   * @returns {object}
+   */
+  const factOf = (text) => seeded.facts.find((fact) => fact.text === text);
+
+  assert.deepEqual(audienceOf(seeded, 'green'), ['S1', 'S2']);
+  assert.equal(audienceOf(seeded, 'black'), ScribeKnowledge.Everyone);
+  assert.deepEqual(audienceOf(seeded, 'grey'), ['S2']);
+  for (const text of ['green', 'black', 'grey']) {
+    assert.deepEqual(audienceOf(seeded, text), audienceOf(zeta, text));
+  }
+  assert.equal(ScribeKnowledge.knows(seeded, 'S3', factOf('green')), false);
+  assert.equal(ScribeKnowledge.knows(seeded, 'S2', factOf('green')), true);
+  assert.equal(ScribeKnowledge.knows(seeded, 'S3', factOf('black')), true);
+  assert.equal(ScribeKnowledge.knows(seeded, 'S1', factOf('grey')), false);
+  assert.equal(ScribeKnowledge.knows(seeded, 'S2', factOf('grey')), true);
+  for (const subject of parsed.characters) {
+    const zetaKnown = zeta.facts.filter((fact) => ScribeKnowledge.knows(zeta, subject.subjectId, fact)).length;
+    const seededKnown = seeded.facts.filter((fact) => ScribeKnowledge.knows(seeded, subject.subjectId, fact)).length;
+    assert.equal(seededKnown, zetaKnown);
+  }
+});
+
+test('ZetaSeeder keeps a hidden fact that Zeta widened to Everyone known to every character and still hidden', () => {
+  const bundle = buildAudienceBundleFixture();
+  bundle.book.log.entries[0].operations.push({
+    ...audienceFact('F4', 'S2', 'Brek', 'hair', 'red', 5),
+    hidden: true,
+  });
+  const zetaBefore = ScribeReplay.run(bundle.book.log, bundle.campaign.messages);
+  ScribeLogCore.rule(bundle.book.log, zetaBefore, {
+    type: ScribeLogCore.Ruling.Widen,
+    fact: 'F4',
+    to: ScribeKnowledge.Everyone,
+  });
+  const zeta = ScribeReplay.run(bundle.book.log, bundle.campaign.messages);
+  assert.equal(ScribeKnowledge.audience(zeta, zeta.facts.find((fact) => fact.id === 'F4')), ScribeKnowledge.Everyone);
+
+  const parsed = ZetaSeeder.parseExport(bundleText(bundle));
+  const seeded = ZetaSeeder.materializeScribeLog(parsed).state;
+  const widened = seeded.facts.find((fact) => fact.text === 'red');
+  assert.equal(widened.hidden, true);
+  assert.equal(ScribeKnowledge.audience(seeded, widened), ScribeKnowledge.Everyone);
+  for (const character of parsed.characters) {
+    assert.equal(ScribeKnowledge.knows(seeded, character.subjectId, widened), true, character.subjectId);
+  }
+  const narrow = seeded.facts.find((fact) => fact.text === 'grey');
+  assert.equal(ScribeKnowledge.knows(seeded, 'S1', narrow), false);
+});
+
+test('ZetaSeeder keeps a guessed subject kind guessed and seeds an alias that equals its subject label', () => {
+  const bundle = buildAudienceBundleFixture();
+  const zeta = ScribeReplay.run(bundle.book.log, bundle.campaign.messages);
+  const parsed = ZetaSeeder.parseExport(bundleText(bundle));
+  const seeded = ZetaSeeder.materializeScribeLog(parsed).state;
+
+  assert.equal(zeta.subjects.find((subject) => subject.id === 'S4').assumed, true);
+  const guessed = seeded.subjects.find((subject) => subject.id === 'S4');
+  assert.equal(guessed.assumed, true);
+  assert.equal(guessed.kind, 'character');
+  assert.equal(parsed.characters.some((character) => character.subjectId === 'S4'), true);
+  assert.equal(seeded.subjects.find((subject) => subject.id === 'S1').assumed, false);
+
+  assert.equal(zeta.aliases.some((record) => record.subject === 'S2' && record.name === 'Brek'), true);
+  assert.equal(seeded.aliases.some((record) => record.subject === 'S2' && record.name === 'Brek'), true);
+  assert.equal(seeded.aliases.length, zeta.aliases.length);
+});
+
+test('ZetaSeeder refuses facts it cannot copy faithfully and names the fact', () => {
+  /**
+   * @param {(bundle: object) => void} mutate
+   * @returns {() => unknown}
+   */
+  const seedWith = (mutate) => {
+    const bundle = buildAudienceBundleFixture();
+    mutate(bundle);
+    return () => ZetaSeeder.parseExport(bundleText(bundle));
+  };
+  /**
+   * @param {object} bundle
+   * @param {string} text
+   * @returns {void}
+   */
+  const pin = (bundle, text) => {
+    const state = ScribeReplay.run(bundle.book.log, bundle.campaign.messages);
+    ScribeLogCore.rule(bundle.book.log, state, {
+      type: ScribeLogCore.Ruling.Pin,
+      subject: 'S1',
+      category: 'eyes',
+      target: null,
+      text,
+      hidden: false,
+    });
+  };
+
+  assert.doesNotThrow(seedWith(() => {}));
+  assert.throws(seedWith((bundle) => pin(bundle, 'green')), /Fact F1 is pinned in the export/);
+  assert.throws(seedWith((bundle) => pin(bundle, 'blue')), /Fact F1 is disputed in the export/);
+  assert.throws(seedWith((bundle) => {
+    bundle.book.log.entries[0].operations.push({
+      ...audienceFact('F4', 'S1', 'Ayla', 'build', 'tall', 1),
+      form: 'human',
+      dimension: 'height',
+    });
+  }), /Fact F4 carries a form or dimension/);
+  assert.throws(seedWith((bundle) => {
+    bundle.book.log.entries[0].operations.push({
+      ...audienceFact('F4', 'S1', 'Ayla', 'relation', 'owes a debt', 1),
+      targetText: 'Harbor Guildmaster',
+    });
+  }), /Relation fact F4 has no target subject/);
+});
+
+test('ZetaSeeder names the allowed root it cannot resolve instead of skipping it', (testContext) => {
+  const workDir = makeTempDir(testContext);
+  const exportPath = writeBundle(workDir, 'observatory.json', buildScribeBundleFixture());
+  const missingRoot = path.join(workDir, 'missing-root');
+  assert.throws(
+    () => ZetaSeeder.resolveSafeExportPath(exportPath, [missingRoot, workDir]),
+    (error) => error.message.includes(`Cannot resolve allowed root "${missingRoot}"`) && error.cause instanceof Error,
+  );
 });

@@ -4,6 +4,7 @@ import { fileURLToPath } from 'node:url';
 import { WorldsConfig } from '../src/config.mjs';
 import { ScribeAnswer } from '../src/scribe/ScribeAnswer.mjs';
 import { ScribeCategory } from '../src/scribe/ScribeCategory.mjs';
+import { ScribeKnowledge } from '../src/scribe/ScribeKnowledge.mjs';
 import { ScribeLogCore } from '../src/scribe/ScribeLogCore.mjs';
 import { ScribeReplay } from '../src/scribe/ScribeReplay.mjs';
 import { ScribeText } from '../src/scribe/ScribeText.mjs';
@@ -14,6 +15,23 @@ import { SceneType } from '../src/store/enums/SceneType.mjs';
 
 const DEFAULT_EXPORT_PATH = '/var/www/demo_stuff/zeta-dm-memory/scribe/private/hero_gone_latest.json';
 const DEFAULT_ALLOWED_ROOT = '/var/www';
+const DEFAULT_TITLE = 'Seeded Campaign';
+const DEFAULT_LOCATION = 'Opening Scene';
+const DEFAULT_TIME_LABEL = 'Daytime';
+const FIRST_DAY = 1;
+const MAX_TITLE_LENGTH = 120;
+const MAX_BASE_SLUG_LENGTH = 42;
+const MAX_SLUG_LENGTH = 48;
+const TOP_MENTIONED_MAIN_COUNT = 3;
+const PERSONA_FACT_COUNT = 4;
+const BLOCKING_DAMAGE = Object.freeze(['book', 'campaign']);
+const VALUE_FLAGS = Object.freeze(['--title', '--db', '--main', '--player']);
+const HELP_FLAGS = Object.freeze(['--help', '-h']);
+const KNOWN_FLAGS = Object.freeze([...VALUE_FLAGS, '--dry-run', '--force', ...HELP_FLAGS]);
+const TRAILING_HIGH_SURROGATE = /[\uD800-\uDBFF]$/;
+const SUBJECT_ID_PATTERN = /^S(\d+)$/;
+const USAGE = 'Usage: node scripts/seed-from-export.mjs [exportPath] [--title <title>] [--db <sqlitePath>] '
+  + '[--main <slugNameAliasOrSubjectId,...>] [--player <slugNameAliasOrSubjectId>] [--dry-run] [--force]\n';
 const AVATAR_TOKENS = Object.freeze([
   AvatarToken.Sage,
   AvatarToken.Rose,
@@ -27,13 +45,43 @@ const AVATAR_TOKENS = Object.freeze([
 
 export class ZetaSeeder {
   /**
+   * @param {unknown} value
+   * @returns {boolean}
+   */
+  static isRecord(value) {
+    return value !== null && typeof value === 'object' && !Array.isArray(value);
+  }
+
+  /**
+   * @param {unknown} value
+   * @returns {boolean}
+   */
+  static isText(value) {
+    return typeof value === 'string' && value.trim().length > 0;
+  }
+
+  /**
+   * @param {string} text
+   * @param {number} limit
+   * @returns {string}
+   */
+  static clampText(text, limit) {
+    return text.trim().slice(0, limit).replace(TRAILING_HIGH_SURROGATE, '').trim();
+  }
+
+  /**
    * @param {string[]} argv
-   * @returns {{exportPath: string, dbPath: string | null, title: string | null, dryRun: boolean, force: boolean, mainRefs: string[], help: boolean}}
+   * @returns {{exportPath: string, dbPath: string | null, title: string | null, dryRun: boolean, force: boolean, mainRefs: string[], playerRef: string | null, help: boolean}}
    * @throws {Error}
    */
   static parseCliArgs(argv) {
     if (!Array.isArray(argv)) {
       throw new TypeError('argv must be an array.');
+    }
+    for (const item of argv) {
+      if (typeof item !== 'string') {
+        throw new TypeError('All argv elements must be strings.');
+      }
     }
     let positionalPath = null;
     let dbPath = null;
@@ -41,32 +89,42 @@ export class ZetaSeeder {
     let dryRun = false;
     let force = false;
     let help = false;
-    const mainRefs = [];
+    let playerRef = null;
+    let mainRefs = [];
+    const seenFlags = new Set();
 
     for (let index = 0; index < argv.length; index += 1) {
       const arg = argv[index];
-      if (arg === '--help' || arg === '-h') {
+      if (KNOWN_FLAGS.includes(arg)) {
+        const flagName = HELP_FLAGS.includes(arg) ? HELP_FLAGS[0] : arg;
+        if (seenFlags.has(flagName)) {
+          throw new Error(`Flag ${flagName} was given more than once.`);
+        }
+        seenFlags.add(flagName);
+      }
+      if (HELP_FLAGS.includes(arg)) {
         help = true;
       } else if (arg === '--dry-run') {
         dryRun = true;
       } else if (arg === '--force') {
         force = true;
-      } else if (arg === '--title' || arg === '--db' || arg === '--main') {
+      } else if (VALUE_FLAGS.includes(arg)) {
         const nextValue = argv[index + 1];
-        if (typeof nextValue !== 'string' || nextValue.trim().length === 0 || nextValue.startsWith('--')) {
+        if (typeof nextValue !== 'string' || nextValue.trim().length === 0 || KNOWN_FLAGS.includes(nextValue.trim())) {
           throw new Error(`Flag ${arg} requires a non-empty value.`);
         }
         index += 1;
+        const value = nextValue.trim();
         if (arg === '--title') {
-          title = nextValue.trim();
+          title = value;
         } else if (arg === '--db') {
-          dbPath = nextValue.trim();
+          dbPath = value;
+        } else if (arg === '--player') {
+          playerRef = value;
         } else {
-          for (const entry of nextValue.split(',')) {
-            const trimmedEntry = entry.trim();
-            if (trimmedEntry.length > 0) {
-              mainRefs.push(trimmedEntry.toLowerCase());
-            }
+          mainRefs = value.split(',').map((entry) => entry.trim()).filter((entry) => entry.length > 0);
+          if (mainRefs.length === 0) {
+            throw new Error('Flag --main requires at least one non-empty reference.');
           }
         }
       } else if (arg.startsWith('-')) {
@@ -85,6 +143,7 @@ export class ZetaSeeder {
       dryRun,
       force,
       mainRefs,
+      playerRef,
       help,
     };
   }
@@ -117,8 +176,8 @@ export class ZetaSeeder {
       let realRoot;
       try {
         realRoot = fs.realpathSync(path.resolve(root));
-      } catch {
-        continue;
+      } catch (error) {
+        throw new Error(`Cannot resolve allowed root "${root}": ${error.message}`, { cause: error });
       }
       if (realCandidate === realRoot || realCandidate.startsWith(`${realRoot}${path.sep}`)) {
         return realCandidate;
@@ -128,12 +187,87 @@ export class ZetaSeeder {
   }
 
   /**
-   * @param {string} rawJsonText
-   * @param {{titleOverride?: string | null, mainRefs?: string[]}} options
+   * @param {object[]} characters
+   * @param {string} ref
+   * @param {string} role
    * @returns {object}
    * @throws {Error}
    */
-  static parseExport(rawJsonText, { titleOverride = null, mainRefs = [] } = {}) {
+  static matchCharacter(characters, ref, role) {
+    const loweredRef = ref.toLowerCase();
+    const normalizedRef = ScribeText.normaliseName(ref);
+    if (normalizedRef.length === 0) {
+      throw new Error(`${role} "${ref}" normalizes to an empty name.`);
+    }
+    const matchers = [
+      /**
+       * @param {object} character
+       * @returns {boolean}
+       */
+      (character) => character.slug === loweredRef,
+      /**
+       * @param {object} character
+       * @returns {boolean}
+       */
+      (character) => ScribeText.normaliseName(character.name) === normalizedRef,
+      /**
+       * @param {object} character
+       * @returns {boolean}
+       */
+      (character) => character.aliases.some((alias) => ScribeText.normaliseName(alias) === normalizedRef),
+      /**
+       * @param {object} character
+       * @returns {boolean}
+       */
+      (character) => character.subjectId.toLowerCase() === loweredRef,
+    ];
+    for (const matcher of matchers) {
+      const matches = characters.filter(matcher);
+      if (matches.length > 1) {
+        const candidateList = matches.map((match) => `${match.name} (${match.slug})`).join(', ');
+        throw new Error(`${role} "${ref}" is ambiguous and matches multiple characters: ${candidateList}.`);
+      }
+      if (matches.length === 1) {
+        return matches[0];
+      }
+    }
+    throw new Error(`${role} "${ref}" did not match any character in the export.`);
+  }
+
+  /**
+   * @param {string} rawJsonText
+   * @param {{titleOverride?: string | null, mainRefs?: string[], playerRef?: string | null}} options
+   * @returns {{title: string, subjects: object[], characters: object[], facts: object[], threads: object[], initialScene: object, readThrough: number, chatMessages: number}}
+   * @throws {Error}
+   */
+  static parseExport(rawJsonText, { titleOverride = null, mainRefs = [], playerRef = null } = {}) {
+    let normalizedPlayerRef = null;
+    if (playerRef !== null) {
+      if (typeof playerRef !== 'string') {
+        throw new TypeError('playerRef must be a string or null.');
+      }
+      if (playerRef.trim().length === 0) {
+        throw new Error('playerRef cannot be empty.');
+      }
+      normalizedPlayerRef = playerRef.trim();
+    }
+    if (!Array.isArray(mainRefs) || !mainRefs.every((ref) => typeof ref === 'string')) {
+      throw new TypeError('mainRefs must be an array of strings.');
+    }
+    if (mainRefs.some((ref) => ref.trim().length === 0)) {
+      throw new Error('mainRefs cannot contain empty references.');
+    }
+    let campaignTitle = DEFAULT_TITLE;
+    if (titleOverride !== null) {
+      if (typeof titleOverride !== 'string') {
+        throw new TypeError('titleOverride must be a string or null.');
+      }
+      campaignTitle = ZetaSeeder.clampText(titleOverride, MAX_TITLE_LENGTH);
+      if (campaignTitle.length === 0) {
+        throw new Error('Campaign title cannot be empty.');
+      }
+    }
+
     if (typeof rawJsonText !== 'string' || rawJsonText.trim().length === 0) {
       throw new Error('Export file is empty.');
     }
@@ -143,591 +277,313 @@ export class ZetaSeeder {
     } catch (error) {
       throw new Error(`Export file contains invalid JSON: ${error.message}`, { cause: error });
     }
-    if (parsed === null || typeof parsed !== 'object' || Array.isArray(parsed)) {
-      throw new Error('Export payload must be a JSON object.');
+    if (!ZetaSeeder.isRecord(parsed)) {
+      throw new Error('Export must be the JSON object written by the Zeta Scribe export.');
     }
-
-    let rawLog = null;
-    if (parsed.scribe?.log && typeof parsed.scribe.log === 'object') {
-      rawLog = parsed.scribe.log;
-    } else if (parsed.log && typeof parsed.log === 'object') {
-      rawLog = parsed.log;
-    } else if (Array.isArray(parsed.entries) && Number.isInteger(parsed.nextSubject)) {
-      rawLog = parsed;
+    if (!Array.isArray(parsed.damaged)) {
+      throw new Error('Export damaged list must be an array.');
     }
-
-    let bookSource = parsed.scribe?.state ?? parsed.book ?? parsed.state ?? null;
-    if (bookSource === null && rawLog !== null) {
-      const replayMessages = Array.isArray(parsed.messages) ? parsed.messages : [];
-      bookSource = ScribeReplay.run(rawLog, replayMessages);
+    const blockingDamage = parsed.damaged.filter((kind) => BLOCKING_DAMAGE.includes(kind));
+    if (blockingDamage.length > 0) {
+      throw new Error(`Export bundle marks ${blockingDamage.map((kind) => JSON.stringify(kind)).join(', ')} as damaged.`);
     }
-    if (bookSource === null) {
-      bookSource = parsed;
+    const book = parsed.book;
+    if (!ZetaSeeder.isRecord(book)) {
+      throw new Error('Export book must be an object.');
     }
-    if (bookSource === null || typeof bookSource !== 'object' || Array.isArray(bookSource)) {
-      throw new Error('Export book/state payload must be an object.');
+    const log = book.log;
+    const entriesValid = ZetaSeeder.isRecord(log)
+      && Array.isArray(log.entries)
+      && log.entries.every(
+        (entry) => ZetaSeeder.isRecord(entry)
+          && Array.isArray(entry.operations)
+          && entry.operations.every((operation) => ZetaSeeder.isRecord(operation)),
+      );
+    if (!entriesValid) {
+      throw new Error('Export book.log.entries must be an array of entry objects, each with an operations array of objects.');
     }
-
-    const explicitCharacters = Array.isArray(parsed.characters)
-      ? parsed.characters
-      : Array.isArray(parsed.cast)
-        ? parsed.cast
-        : [];
-    const rawSubjects = Array.isArray(bookSource.subjects) ? bookSource.subjects : [];
-    const rawFacts = Array.isArray(bookSource.facts) ? bookSource.facts : [];
-    const rawRelations = Array.isArray(bookSource.relations) ? bookSource.relations : [];
-    const rawThreads = Array.isArray(bookSource.threads) ? bookSource.threads : [];
-    const rawScenes = Array.isArray(bookSource.scenes) ? bookSource.scenes : [];
-    const rawAliases = Array.isArray(bookSource.aliases) ? bookSource.aliases : [];
-
-    if (
-      explicitCharacters.length === 0
-      && rawSubjects.length === 0
-      && rawFacts.length === 0
-      && rawRelations.length === 0
-      && rawThreads.length === 0
-    ) {
-      throw new Error('Export payload does not contain recognizable Zeta characters, subjects, facts, relations, or threads.');
+    const messages = parsed.campaign?.messages;
+    if (!Array.isArray(messages) || messages.length === 0) {
+      throw new Error('Export campaign.messages must be a non-empty array.');
     }
-
-    const rawTitleCandidate = titleOverride
-      ?? [parsed.title, parsed.campaignTitle, parsed.name, parsed.worldName, bookSource.title].find(
-        (candidate) => typeof candidate === 'string' && candidate.trim().length > 0,
-      )
-      ?? 'Seeded Campaign';
-    const campaignTitle = String(rawTitleCandidate).trim().slice(0, 120);
-    if (campaignTitle.length === 0) {
-      throw new Error('Campaign title cannot be empty.');
+    if (!messages.every((message) => ZetaSeeder.isRecord(message) && typeof message.id === 'string')) {
+      throw new Error('Export campaign.messages entries must be objects with a string id.');
     }
-
-    const premiseCandidate = [parsed.premise, parsed.description, parsed.summary, parsed.worldSetting, bookSource.premise].find(
-      (candidate) => typeof candidate === 'string' && candidate.trim().length > 0,
-    ) ?? '';
-    const styleCandidate = [parsed.styleNotes, parsed.toneRules, parsed.narratorStyle, parsed.style].find(
-      (candidate) => typeof candidate === 'string' && candidate.trim().length > 0,
-    ) ?? '';
-
-    const normalizedSubjects = [];
-    const mergedAliasesBySurvivor = new Map();
-    const survivorByOldId = new Map();
-
-    for (const rawSubject of rawSubjects) {
-      if (rawSubject === null || typeof rawSubject !== 'object' || Array.isArray(rawSubject)) {
-        throw new Error('Invalid subject entry in export.');
+    if (parsed.campaign.completeHistory !== true) {
+      throw new Error('Export campaign history is incomplete (completeHistory is not true).');
+    }
+    if (parsed.campaign.needsHistory === true) {
+      throw new Error('Export campaign still needs history (needsHistory is true).');
+    }
+    if (!ZetaSeeder.isRecord(log.read)) {
+      throw new Error('Export book.log.read must be an object.');
+    }
+    let readThrough = 0;
+    while (readThrough < messages.length && Object.hasOwn(log.read, messages[readThrough].id)) {
+      readThrough += 1;
+    }
+    const messageIds = new Set(messages.map((message) => message.id));
+    for (const entry of log.entries) {
+      const citesMissing = !Array.isArray(entry.messageIds) || entry.messageIds.some((messageId) => !messageIds.has(messageId));
+      if (!entry.withdrawn && entry.origin === ScribeLogCore.Origin.Story && citesMissing) {
+        throw new Error(`Scribe log Story entry ${JSON.stringify(entry.sequence)} cites messages missing from campaign.messages.`);
       }
-      const subjectId = typeof rawSubject.id === 'string' ? rawSubject.id.trim() : '';
-      const rawName = rawSubject.label ?? rawSubject.name ?? '';
-      if (typeof rawName !== 'string' || rawName.trim().length === 0) {
-        throw new Error(`Subject ${subjectId || '(unknown)'} is missing a label or name.`);
-      }
-      const clampedName = rawName.trim().slice(0, ScribeAnswer.Settings.MaxLabel);
-      const mergedInto = typeof rawSubject.mergedInto === 'string' && rawSubject.mergedInto.trim().length > 0
-        ? rawSubject.mergedInto.trim()
-        : null;
-      const akaList = Array.isArray(rawSubject.aka)
-        ? rawSubject.aka.filter((entry) => typeof entry === 'string' && entry.trim().length > 0).map((entry) => entry.trim())
-        : [];
-      if (mergedInto !== null) {
-        if (subjectId) {
-          survivorByOldId.set(subjectId, mergedInto);
-        }
-        const mergedAliases = mergedAliasesBySurvivor.get(mergedInto) ?? [];
-        mergedAliases.push(clampedName, ...akaList);
-        mergedAliasesBySurvivor.set(mergedInto, mergedAliases);
+    }
+    let state;
+    try {
+      state = ScribeReplay.run(log, messages);
+    } catch (error) {
+      throw new Error(`Scribe log could not be replayed: ${error.message}`, { cause: error });
+    }
+
+    const maxLabel = ScribeAnswer.Settings.MaxLabel;
+    const survivorOf = new Map();
+    for (const subject of state.subjects) {
+      survivorOf.set(subject.id, subject.mergedInto ?? subject.id);
+    }
+    /**
+     * @param {string} subjectId
+     * @returns {string}
+     */
+    const survivor = (subjectId) => survivorOf.get(subjectId) ?? subjectId;
+
+    const subjects = [];
+    for (const subject of state.subjects) {
+      if (subject.mergedInto !== null) {
         continue;
       }
-
-      let normalizedKind = ScribeCategory.SubjectKinds.Character;
-      if (rawSubject.kind !== null && rawSubject.kind !== undefined) {
-        if (typeof rawSubject.kind !== 'string') {
-          throw new Error(`Invalid subject kind: ${String(rawSubject.kind)}`);
+      const name = typeof subject.label === 'string' ? ZetaSeeder.clampText(subject.label, maxLabel) : '';
+      if (name.length === 0) {
+        throw new Error(`Subject ${subject.id} has no usable label.`);
+      }
+      const nameForm = ScribeText.normaliseName(name);
+      if (nameForm === ScribeAnswer.Settings.NarratorName) {
+        continue;
+      }
+      const recordedNames = state.aliases.filter((record) => record.subject === subject.id).map((record) => record.name);
+      const aliases = [];
+      for (const alias of [...recordedNames, ...subject.aka]) {
+        if (!ZetaSeeder.isText(alias)) {
+          throw new Error(`Subject ${subject.id} has an alias that is not text.`);
         }
-        const loweredKind = rawSubject.kind.trim().toLowerCase();
-        if (['character', 'npc', 'pc', 'person'].includes(loweredKind)) {
-          normalizedKind = ScribeCategory.SubjectKinds.Character;
-        } else if (['group', 'faction', 'organization', 'organisation'].includes(loweredKind)) {
-          normalizedKind = ScribeCategory.SubjectKinds.Group;
-        } else if (['place', 'location', 'setting', 'area'].includes(loweredKind)) {
-          normalizedKind = ScribeCategory.SubjectKinds.Place;
-        } else if (['item', 'object', 'artifact', 'artefact'].includes(loweredKind)) {
-          normalizedKind = ScribeCategory.SubjectKinds.Item;
-        } else if (['world', 'lore', 'rule', 'concept'].includes(loweredKind)) {
-          normalizedKind = ScribeCategory.SubjectKinds.World;
-        } else {
-          throw new Error(`Unsupported subject kind: ${rawSubject.kind}`);
+        const clampedAlias = ZetaSeeder.clampText(alias, maxLabel);
+        if (!aliases.includes(clampedAlias)) {
+          aliases.push(clampedAlias);
         }
       }
-
-      normalizedSubjects.push({
-        oldId: subjectId || null,
-        name: clampedName,
-        kind: normalizedKind,
-        aliases: akaList,
-        isNarrator: ScribeText.normaliseName(clampedName) === ScribeAnswer.Settings.NarratorName,
-      });
-      if (subjectId) {
-        survivorByOldId.set(subjectId, subjectId);
-      }
+      subjects.push({ id: subject.id, name, kind: subject.kind, assumed: subject.assumed, aliases });
     }
+    const seededSubjectIds = new Set(subjects.map((subject) => subject.id));
 
-    for (const aliasEntry of rawAliases) {
-      if (aliasEntry === null || typeof aliasEntry !== 'object') {
+    const facts = [];
+    const mentionCounts = new Map();
+    for (const fact of state.facts) {
+      const reported = fact.status === ScribeReplay.Status.Reported;
+      if (!ScribeReplay.live(fact) && !reported) {
         continue;
       }
-      const targetSubject = typeof aliasEntry.subject === 'string' ? aliasEntry.subject.trim() : '';
-      const aliasName = typeof aliasEntry.name === 'string' ? aliasEntry.name.trim() : '';
-      if (!targetSubject || !aliasName) {
-        continue;
+      if (fact.pinned) {
+        throw new Error(`Fact ${fact.id} is pinned in the export, which the seed cannot copy.`);
       }
-      const survivorId = survivorByOldId.get(targetSubject) ?? targetSubject;
-      const existing = mergedAliasesBySurvivor.get(survivorId) ?? [];
-      existing.push(aliasName);
-      mergedAliasesBySurvivor.set(survivorId, existing);
-    }
-
-    for (const subject of normalizedSubjects) {
-      const extraAliases = subject.oldId ? (mergedAliasesBySurvivor.get(subject.oldId) ?? []) : [];
-      const uniqueAliases = [];
-      const seenForms = new Set([ScribeText.normaliseName(subject.name)]);
-      for (const alias of [...subject.aliases, ...extraAliases]) {
-        const form = ScribeText.normaliseName(alias);
-        if (form.length > 0 && !seenForms.has(form)) {
-          seenForms.add(form);
-          uniqueAliases.push(alias);
+      if (fact.status === ScribeReplay.Status.Disputed) {
+        throw new Error(`Fact ${fact.id} is disputed in the export, which the seed cannot copy.`);
+      }
+      if (fact.form || fact.dimension) {
+        throw new Error(`Fact ${fact.id} carries a form or dimension, which the seed cannot copy.`);
+      }
+      if (fact.category === ScribeCategory.Settings.RelationCategory && fact.target === null) {
+        throw new Error(`Relation fact ${fact.id} has no target subject, which the seed cannot copy.`);
+      }
+      const subjectId = survivor(fact.subject);
+      const targetId = fact.target === null ? null : survivor(fact.target);
+      for (const mentionedId of [subjectId, targetId]) {
+        if (mentionedId !== null) {
+          mentionCounts.set(mentionedId, (mentionCounts.get(mentionedId) ?? 0) + 1);
         }
       }
-      subject.aliases = uniqueAliases;
-    }
-
-    const activeCharacters = [];
-    const matchedSubjectIndices = new Set();
-    const explicitPlayerName = typeof parsed.playerName === 'string' && parsed.playerName.trim().length > 0
-      ? parsed.playerName.trim()
-      : typeof parsed.playerCharacter === 'string' && parsed.playerCharacter.trim().length > 0
-        ? parsed.playerCharacter.trim()
-        : null;
-    const explicitPlayerSlug = typeof parsed.playerSlug === 'string' && parsed.playerSlug.trim().length > 0
-      ? parsed.playerSlug.trim().toLowerCase()
-      : null;
-
-    for (const rawChar of explicitCharacters) {
-      if (rawChar === null || typeof rawChar !== 'object' || Array.isArray(rawChar)) {
-        throw new Error('Invalid character entry in export.');
-      }
-      const rawCharName = rawChar.name ?? rawChar.label ?? '';
-      if (typeof rawCharName !== 'string' || rawCharName.trim().length === 0) {
-        throw new Error('Character entry is missing a non-empty name.');
-      }
-      const name = rawCharName.trim().slice(0, ScribeAnswer.Settings.MaxLabel);
-      if (ScribeText.normaliseName(name) === ScribeAnswer.Settings.NarratorName) {
-        continue;
-      }
-      const explicitSubjectId = typeof rawChar.subjectId === 'string' && rawChar.subjectId.trim().length > 0
-        ? rawChar.subjectId.trim()
-        : typeof rawChar.scribeSubjectId === 'string' && rawChar.scribeSubjectId.trim().length > 0
-          ? rawChar.scribeSubjectId.trim()
-          : null;
-      let subjectMatchIndex = -1;
-      if (explicitSubjectId !== null) {
-        subjectMatchIndex = normalizedSubjects.findIndex((subject) => subject.oldId === explicitSubjectId);
-      }
-      if (subjectMatchIndex === -1) {
-        const normName = ScribeText.normaliseName(name);
-        subjectMatchIndex = normalizedSubjects.findIndex(
-          (subject) => subject.kind === ScribeCategory.SubjectKinds.Character && ScribeText.normaliseName(subject.name) === normName,
-        );
-      }
-      let subjectAliases = [];
-      let matchedOldId = explicitSubjectId;
-      if (subjectMatchIndex >= 0) {
-        matchedSubjectIndices.add(subjectMatchIndex);
-        subjectAliases = normalizedSubjects[subjectMatchIndex].aliases;
-        matchedOldId = normalizedSubjects[subjectMatchIndex].oldId ?? matchedOldId;
-      } else {
-        normalizedSubjects.push({
-          oldId: matchedOldId,
-          name,
-          kind: ScribeCategory.SubjectKinds.Character,
-          aliases: [],
-          isNarrator: false,
-        });
-        matchedSubjectIndices.add(normalizedSubjects.length - 1);
-      }
-      const charAliases = Array.isArray(rawChar.aliases)
-        ? rawChar.aliases.filter((entry) => typeof entry === 'string' && entry.trim().length > 0).map((entry) => entry.trim())
-        : [];
-      const mergedAliases = [];
-      const seenCharAliasForms = new Set([ScribeText.normaliseName(name)]);
-      for (const aliasCandidate of [...subjectAliases, ...charAliases]) {
-        const aliasForm = ScribeText.normaliseName(aliasCandidate);
-        if (aliasForm.length > 0 && !seenCharAliasForms.has(aliasForm)) {
-          seenCharAliasForms.add(aliasForm);
-          mergedAliases.push(aliasCandidate);
+      const zetaAudience = ScribeKnowledge.audience(state, fact);
+      let audience = null;
+      if (Array.isArray(zetaAudience)) {
+        audience = [];
+        for (const listenerId of zetaAudience) {
+          const resolvedListener = survivor(listenerId);
+          if (seededSubjectIds.has(resolvedListener) && !audience.includes(resolvedListener)) {
+            audience.push(resolvedListener);
+          }
         }
       }
-      const persona = [rawChar.persona, rawChar.description, rawChar.notes, rawChar.prompt]
-        .find((entry) => typeof entry === 'string' && entry.trim().length > 0)?.trim() ?? '';
-      const rawTier = rawChar.tier ?? rawChar.role ?? rawChar.importance;
-      const normalizedTier = typeof rawTier === 'string' && rawTier.trim().toLowerCase() === CharacterTier.Main
-        ? CharacterTier.Main
-        : typeof rawTier === 'string' && rawTier.trim().toLowerCase() === CharacterTier.Recurring
-          ? CharacterTier.Recurring
-          : null;
-
-      activeCharacters.push({
-        name,
-        oldSubjectId: matchedOldId,
-        rawSlug: typeof rawChar.slug === 'string' ? rawChar.slug.trim() : null,
-        aliases: mergedAliases,
-        persona,
-        explicitTier: normalizedTier,
-        explicitAvatar: Object.values(AvatarToken).includes(rawChar.avatarToken) ? rawChar.avatarToken : null,
-        isPlayer: rawChar.isPlayer === true,
-        archived: rawChar.archived === true || rawChar.status === 'archived',
-      });
-    }
-
-    for (const [subjectIndex, subject] of normalizedSubjects.entries()) {
-      if (matchedSubjectIndices.has(subjectIndex) || subject.kind !== ScribeCategory.SubjectKinds.Character || subject.isNarrator) {
-        continue;
-      }
-      activeCharacters.push({
-        name: subject.name,
-        oldSubjectId: subject.oldId,
-        rawSlug: null,
-        aliases: subject.aliases,
-        persona: '',
-        explicitTier: null,
-        explicitAvatar: null,
-        isPlayer: false,
-        archived: false,
-      });
-    }
-
-    const combinedFacts = [...rawFacts];
-    for (const relation of rawRelations) {
-      if (relation === null || typeof relation !== 'object') {
-        throw new Error('Invalid relation entry in export.');
-      }
-      combinedFacts.push({
-        ...relation,
-        category: ScribeCategory.Settings.RelationCategory,
-      });
-    }
-
-    const knownSubjectOldIds = new Set(normalizedSubjects.map((subject) => subject.oldId).filter(Boolean));
-    const normalizedFacts = [];
-    const factMentionCounts = new Map();
-    for (const rawFact of combinedFacts) {
-      if (rawFact === null || typeof rawFact !== 'object' || Array.isArray(rawFact)) {
-        throw new Error('Invalid fact entry in export.');
-      }
-      const status = rawFact.status ?? ScribeReplay.Status.InForce;
-      if (
-        status === ScribeReplay.Status.Removed
-        || status === ScribeReplay.Status.Replaced
-        || status === ScribeReplay.Status.Ended
-      ) {
-        continue;
-      }
-      const subjectId = typeof rawFact.subject === 'string' ? rawFact.subject.trim() : '';
-      const category = typeof rawFact.category === 'string' ? rawFact.category.trim() : '';
-      const text = typeof rawFact.text === 'string' ? rawFact.text.trim() : '';
-      if (!subjectId || !category || !ScribeCategory.parse(category) || !ScribeAnswer.Settings.HasContent.test(text)) {
-        throw new Error(`Fact ${rawFact.id ?? '(unknown)'} is missing valid subject, category, or text.`);
-      }
-      const resolvedSubject = survivorByOldId.get(subjectId) ?? subjectId;
-      if (!knownSubjectOldIds.has(resolvedSubject)) {
-        throw new Error(`Fact ${rawFact.id ?? '(unknown)'} references unknown subject "${subjectId}".`);
-      }
-      factMentionCounts.set(resolvedSubject, (factMentionCounts.get(resolvedSubject) ?? 0) + 1);
-      const isRelation = category.toLowerCase() === ScribeCategory.Settings.RelationCategory;
-      let targetId = typeof rawFact.target === 'string' && rawFact.target.trim().length > 0
-        ? (survivorByOldId.get(rawFact.target.trim()) ?? rawFact.target.trim())
-        : null;
-      const targetText = typeof rawFact.targetText === 'string' && rawFact.targetText.trim().length > 0
-        ? rawFact.targetText.trim()
-        : null;
-      if (!isRelation) {
-        targetId = null;
-      } else if (targetId === null && targetText === null) {
-        throw new Error(`Relation fact ${rawFact.id ?? '(unknown)'} must provide a valid target or targetText.`);
-      } else if (targetId !== null && !knownSubjectOldIds.has(targetId) && targetText === null) {
-        throw new Error(`Relation fact ${rawFact.id ?? '(unknown)'} references unknown target "${targetId}".`);
-      }
-      if (targetId !== null) {
-        factMentionCounts.set(targetId, (factMentionCounts.get(targetId) ?? 0) + 1);
-      }
-
-      const widened = rawFact.widened === ScribeLogCore.Settings.Everyone
-        ? ScribeLogCore.Settings.Everyone
-        : Array.isArray(rawFact.widened)
-          ? rawFact.widened.filter((id) => typeof id === 'string' && id.trim().length > 0).map((id) => survivorByOldId.get(id.trim()) ?? id.trim())
-          : null;
-      const told = Array.isArray(rawFact.told)
-        ? rawFact.told.filter((id) => typeof id === 'string' && id.trim().length > 0).map((id) => survivorByOldId.get(id.trim()) ?? id.trim())
-        : [];
-
-      normalizedFacts.push({
-        subject: resolvedSubject,
-        category: isRelation ? ScribeCategory.Settings.RelationCategory : category,
+      const evidence = fact.evidence;
+      const attested = ZetaSeeder.isRecord(evidence) && ZetaSeeder.isText(evidence.attribution) && ZetaSeeder.isText(evidence.speaker);
+      facts.push({
+        id: fact.id,
+        subject: subjectId,
+        category: fact.category,
         target: targetId,
-        targetText,
-        text,
-        hidden: Boolean(rawFact.hidden),
-        widened,
-        told,
+        text: fact.text,
+        hidden: fact.hidden,
+        reported,
+        audience,
+        widenedToEveryone: fact.widened === ScribeLogCore.Settings.Everyone,
+        evidence: attested ? { attribution: evidence.attribution, speaker: evidence.speaker } : null,
       });
     }
 
-    const normalizedThreads = [];
-    for (const rawThread of rawThreads) {
-      if (rawThread === null || typeof rawThread !== 'object' || Array.isArray(rawThread)) {
-        throw new Error('Invalid thread entry in export.');
-      }
-      if (rawThread.closed !== null && rawThread.closed !== undefined) {
+    const threads = [];
+    for (const thread of state.threads) {
+      if (thread.closed !== null) {
         continue;
       }
-      const text = typeof rawThread.text === 'string' ? rawThread.text.trim() : '';
-      if (!text) {
-        throw new Error(`Open thread ${rawThread.id ?? '(unknown)'} is missing text.`);
+      if (!ZetaSeeder.isText(thread.text)) {
+        throw new Error(`Open thread ${thread.id} has no text.`);
       }
-      const subjectRef = typeof rawThread.subject === 'string' && rawThread.subject.trim().length > 0
-        ? (survivorByOldId.get(rawThread.subject.trim()) ?? rawThread.subject.trim())
-        : null;
-      normalizedThreads.push({ text, subject: subjectRef });
+      const threadSubject = typeof thread.subject === 'string' ? survivor(thread.subject) : null;
+      threads.push({
+        text: thread.text.trim(),
+        subject: threadSubject !== null && seededSubjectIds.has(threadSubject) ? threadSubject : null,
+      });
     }
 
-    const mainRefSet = new Set(mainRefs.map((entry) => entry.toLowerCase()));
-    const rankedByMentions = [...activeCharacters].sort((first, second) => {
-      const countFirst = first.oldSubjectId ? (factMentionCounts.get(first.oldSubjectId) ?? 0) : 0;
-      const countSecond = second.oldSubjectId ? (factMentionCounts.get(second.oldSubjectId) ?? 0) : 0;
-      return countSecond - countFirst;
-    });
-    const topMentionedNames = new Set(rankedByMentions.slice(0, 3).map((entry) => entry.name));
-
+    const characters = [];
     const usedSlugs = new Set();
-    let assignedPlayer = false;
-    for (const [charIndex, character] of activeCharacters.entries()) {
-      let baseSlug = String(character.rawSlug ?? character.name)
+    for (const subject of subjects) {
+      if (subject.kind !== ScribeCategory.SubjectKinds.Character) {
+        continue;
+      }
+      let baseSlug = subject.name
         .toLowerCase()
         .replace(/[^a-z0-9_-]+/g, '-')
         .replace(/^[-_]+|[-_]+$/g, '');
       if (!/^[a-z0-9]/.test(baseSlug)) {
         baseSlug = `char-${baseSlug}`.replace(/-+$/g, '');
       }
-      baseSlug = baseSlug.slice(0, 42);
-      if (baseSlug.length === 0) {
-        baseSlug = 'character';
-      }
+      baseSlug = baseSlug.slice(0, MAX_BASE_SLUG_LENGTH);
       let uniqueSlug = baseSlug;
       let slugSuffix = 2;
       while (usedSlugs.has(uniqueSlug)) {
         const suffixTail = `-${slugSuffix}`;
-        uniqueSlug = `${baseSlug.slice(0, 48 - suffixTail.length)}${suffixTail}`;
+        uniqueSlug = `${baseSlug.slice(0, MAX_SLUG_LENGTH - suffixTail.length)}${suffixTail}`;
         slugSuffix += 1;
       }
       usedSlugs.add(uniqueSlug);
-      character.slug = uniqueSlug;
-      character.avatarToken = character.explicitAvatar ?? AVATAR_TOKENS[charIndex % AVATAR_TOKENS.length];
-
-      const matchesPlayer = character.isPlayer
-        || (explicitPlayerSlug !== null && uniqueSlug === explicitPlayerSlug)
-        || (explicitPlayerName !== null && ScribeText.normaliseName(character.name) === ScribeText.normaliseName(explicitPlayerName));
-      if (matchesPlayer && !assignedPlayer) {
-        character.isPlayer = true;
-        assignedPlayer = true;
-      } else {
-        character.isPlayer = false;
-      }
-
-      const matchesMainFlag = mainRefSet.has(uniqueSlug)
-        || mainRefSet.has(character.name.toLowerCase())
-        || (character.oldSubjectId !== null && mainRefSet.has(character.oldSubjectId.toLowerCase()));
-      if (matchesMainFlag) {
-        character.tier = CharacterTier.Main;
-      } else if (character.explicitTier !== null) {
-        character.tier = character.explicitTier;
-      } else if (character.isPlayer || topMentionedNames.has(character.name)) {
-        character.tier = CharacterTier.Main;
-      } else {
-        character.tier = CharacterTier.Recurring;
-      }
-
-      if (!character.persona && character.oldSubjectId !== null) {
-        const publicCharFacts = normalizedFacts
-          .filter((fact) => fact.subject === character.oldSubjectId && !fact.hidden && fact.category !== ScribeCategory.Settings.RelationCategory)
-          .slice(0, 4)
-          .map((fact) => `${fact.category}: ${fact.text}`);
-        if (publicCharFacts.length > 0) {
-          character.persona = publicCharFacts.join('; ');
-        }
-      }
+      const persona = facts
+        .filter((fact) => {
+          return fact.subject === subject.id
+            && !fact.reported
+            && !fact.hidden
+            && fact.category !== ScribeCategory.Settings.RelationCategory;
+        })
+        .slice(0, PERSONA_FACT_COUNT)
+        .map((fact) => `${fact.category}: ${fact.text}`)
+        .join('; ');
+      characters.push({
+        subjectId: subject.id,
+        name: subject.name,
+        aliases: subject.aliases,
+        slug: uniqueSlug,
+        avatarToken: AVATAR_TOKENS[characters.length % AVATAR_TOKENS.length],
+        persona,
+        isPlayer: false,
+        tier: CharacterTier.Recurring,
+      });
     }
 
-    const latestScene = rawScenes.length > 0 ? rawScenes[rawScenes.length - 1] : null;
-    const rawSceneState = parsed.sceneState && typeof parsed.sceneState === 'object' ? parsed.sceneState : null;
-    const initialLocation = rawSceneState?.location ?? latestScene?.place ?? latestScene?.location ?? 'Opening Scene';
-    const initialDay = Number.isInteger(rawSceneState?.day) && rawSceneState.day >= 1
-      ? rawSceneState.day
-      : Number.isInteger(latestScene?.day) && latestScene.day >= 1
-        ? latestScene.day
-        : 1;
-    const initialTimeLabel = typeof rawSceneState?.timeLabel === 'string' && rawSceneState.timeLabel.trim().length > 0
-      ? rawSceneState.timeLabel.trim()
-      : 'Daytime';
-    const initialReach = (rawSceneState?.sceneType ?? latestScene?.reach) === SceneType.Private
-      ? SceneType.Private
-      : SceneType.Public;
+    const player = normalizedPlayerRef === null
+      ? null
+      : ZetaSeeder.matchCharacter(characters, normalizedPlayerRef, 'Player character');
+    const mainCharacters = new Set(mainRefs.map((ref) => ZetaSeeder.matchCharacter(characters, ref.trim(), 'Main character')));
+    const rankedByMentions = [...characters].sort((first, second) => {
+      return (mentionCounts.get(second.subjectId) ?? 0) - (mentionCounts.get(first.subjectId) ?? 0);
+    });
+    for (const character of rankedByMentions.slice(0, TOP_MENTIONED_MAIN_COUNT)) {
+      mainCharacters.add(character);
+    }
+    for (const character of characters) {
+      character.isPlayer = character === player;
+      character.tier = character.isPlayer || mainCharacters.has(character) ? CharacterTier.Main : CharacterTier.Recurring;
+    }
+
+    let initialScene = {
+      day: FIRST_DAY,
+      timeLabel: DEFAULT_TIME_LABEL,
+      location: DEFAULT_LOCATION,
+      sceneType: SceneType.Public,
+      presentSubjectIds: [],
+    };
+    const lastScene = state.scenes.at(-1) ?? null;
+    if (lastScene !== null) {
+      const presentSubjectIds = [];
+      for (const attendee of lastScene.present) {
+        if (attendee.until !== null) {
+          continue;
+        }
+        const presentId = survivor(attendee.subject);
+        if (!presentSubjectIds.includes(presentId)) {
+          presentSubjectIds.push(presentId);
+        }
+      }
+      const sceneTime = lastScene.evidence?.time;
+      initialScene = {
+        day: Number.isSafeInteger(lastScene.day) && lastScene.day >= FIRST_DAY ? lastScene.day : FIRST_DAY,
+        timeLabel: ZetaSeeder.isText(sceneTime) ? sceneTime.trim() : DEFAULT_TIME_LABEL,
+        location: ZetaSeeder.isText(lastScene.place) ? lastScene.place.trim() : DEFAULT_LOCATION,
+        sceneType: lastScene.reach === ScribeAnswer.Reach.Private || lastScene.narrowed === true
+          ? SceneType.Private
+          : SceneType.Public,
+        presentSubjectIds,
+      };
+    }
 
     return {
       title: campaignTitle,
-      premise: premiseCandidate.trim(),
-      styleNotes: styleCandidate.trim(),
-      subjects: normalizedSubjects.filter((subject) => !subject.isNarrator),
-      characters: activeCharacters,
-      facts: normalizedFacts,
-      threads: normalizedThreads,
-      initialScene: {
-        day: initialDay,
-        timeLabel: initialTimeLabel,
-        location: typeof initialLocation === 'string' && initialLocation.trim().length > 0
-          ? initialLocation.trim()
-          : 'Opening Scene',
-        sceneType: initialReach,
-        presentOldSubjectIds: Array.isArray(latestScene?.present)
-          ? latestScene.present.map((attendee) => attendee.subject).filter((id) => typeof id === 'string')
-          : [],
-      },
+      subjects,
+      characters,
+      facts,
+      threads,
+      initialScene,
+      readThrough,
+      chatMessages: messages.length,
     };
   }
 
   /**
-   * @param {object} parsedExport
-   * @returns {{log: object, state: object, oldToNewSubjectId: Map<string, string>, characters: object[]}}
+   * @param {{subjects: object[], facts: object[], threads: object[]}} parsedExport
+   * @returns {{log: object, state: object}}
    * @throws {Error}
    */
   static materializeScribeLog(parsedExport) {
     const log = ScribeLogCore.create();
     let state = ScribeReplay.run(log, []);
-    const oldToNewSubjectId = new Map();
-    const normNameToNewSubjectId = new Map();
 
-    const orderedSubjects = [
-      ...parsedExport.subjects.filter((subject) => subject.kind === ScribeCategory.SubjectKinds.Character),
-      ...parsedExport.subjects.filter((subject) => subject.kind !== ScribeCategory.SubjectKinds.Character),
-    ];
-
-    for (const subject of orderedSubjects) {
-      const existingByName = normNameToNewSubjectId.get(ScribeText.normaliseName(subject.name));
-      if (existingByName !== undefined) {
-        if (subject.oldId) {
-          oldToNewSubjectId.set(subject.oldId, existingByName);
-        }
-        continue;
-      }
-      const synced = ScribeLogCore.syncCharacterSubject(log, state, {
-        subjectId: null,
-        name: subject.name,
-        aliases: subject.aliases,
-        kind: subject.kind,
-      });
-      state = ScribeReplay.run(log, []);
-      if (subject.oldId) {
-        oldToNewSubjectId.set(subject.oldId, synced.subjectId);
-      }
-      normNameToNewSubjectId.set(ScribeText.normaliseName(subject.name), synced.subjectId);
-      for (const alias of subject.aliases) {
-        normNameToNewSubjectId.set(ScribeText.normaliseName(alias), synced.subjectId);
-      }
-    }
-
-    const resolveSubjectId = (refId, fallbackName = null) => {
-      if (typeof refId === 'string' && oldToNewSubjectId.has(refId)) {
-        return oldToNewSubjectId.get(refId);
-      }
-      if (typeof refId === 'string' && ScribeLogCore.lookup(state.subjects, refId) !== undefined && oldToNewSubjectId.size === 0) {
-        return refId;
-      }
-      if (typeof fallbackName === 'string' && fallbackName.trim().length > 0) {
-        const normFallback = ScribeText.normaliseName(fallbackName);
-        if (normNameToNewSubjectId.has(normFallback)) {
-          return normNameToNewSubjectId.get(normFallback);
-        }
-        const created = ScribeLogCore.syncCharacterSubject(log, state, {
-          subjectId: null,
-          name: fallbackName.trim().slice(0, ScribeAnswer.Settings.MaxLabel),
-          aliases: [],
-          kind: ScribeCategory.SubjectKinds.Character,
+    if (parsedExport.subjects.length > 0) {
+      const subjectOperations = [];
+      for (const subject of parsedExport.subjects) {
+        subjectOperations.push({
+          type: ScribeAnswer.Type.Subject,
+          subject: subject.id,
+          label: subject.name,
+          kind: subject.assumed ? null : subject.kind,
         });
-        state = ScribeReplay.run(log, []);
-        normNameToNewSubjectId.set(normFallback, created.subjectId);
-        if (typeof refId === 'string' && refId.length > 0) {
-          oldToNewSubjectId.set(refId, created.subjectId);
+        for (const alias of subject.aliases) {
+          subjectOperations.push({
+            type: ScribeAnswer.Type.Alias,
+            subject: subject.id,
+            name: alias,
+            cite: null,
+            position: 0,
+            other: null,
+          });
         }
-        return created.subjectId;
-      }
-      return null;
-    };
-
-    const validatedFactOperations = [];
-    const widenPending = [];
-    const factCounters = { nextFact: log.nextFact };
-
-    for (const fact of parsedExport.facts) {
-      const mappedSubject = resolveSubjectId(fact.subject);
-      if (mappedSubject === null) {
-        throw new Error(`Cannot resolve subject "${fact.subject}" for fact "${fact.text}".`);
-      }
-      let mappedTarget = null;
-      if (fact.category === ScribeCategory.Settings.RelationCategory) {
-        mappedTarget = resolveSubjectId(fact.target, fact.targetText);
-        if (mappedTarget === null) {
-          throw new Error(`Cannot resolve relation target for "${fact.text}".`);
+        const numbered = SUBJECT_ID_PATTERN.exec(subject.id);
+        if (numbered !== null && Number(numbered[1]) >= log.nextSubject) {
+          log.nextSubject = Number(numbered[1]) + 1;
         }
       }
-      const viewWithResolved = ScribeLogCore.view(state);
-      const outcome = { counters: factCounters, stored: null };
-      const reason = ScribeLogCore.Rulers.AddFact({
-        type: ScribeLogCore.Ruling.AddFact,
-        subject: mappedSubject,
-        category: fact.category,
-        target: mappedTarget,
-        text: fact.text,
-        hidden: fact.hidden,
-        cite: null,
-        position: 0,
-      }, viewWithResolved, outcome);
-      if (reason !== null || outcome.stored === null) {
-        throw new Error(`Failed to validate seeded fact "${fact.text}": ${reason ?? 'unknown error'}`);
-      }
-      validatedFactOperations.push(outcome.stored);
-
-      if (fact.widened === ScribeLogCore.Settings.Everyone) {
-        widenPending.push({ factId: outcome.stored.fact, to: ScribeLogCore.Settings.Everyone });
-      } else {
-        const audienceIds = [];
-        for (const recipientId of [...(Array.isArray(fact.widened) ? fact.widened : []), ...fact.told]) {
-          const resolvedRecipient = resolveSubjectId(recipientId);
-          if (resolvedRecipient !== null && !audienceIds.includes(resolvedRecipient)) {
-            audienceIds.push(resolvedRecipient);
-          }
-        }
-        if (audienceIds.length > 0) {
-          widenPending.push({ factId: outcome.stored.fact, to: audienceIds });
-        }
-      }
-    }
-
-    log.nextFact = factCounters.nextFact;
-
-    if (validatedFactOperations.length > 0) {
       log.entries.push({
         sequence: log.nextSequence,
         kind: ScribeLogCore.Kind.Operator,
         origin: ScribeLogCore.Origin.Operator,
         messageIds: [],
-        operations: validatedFactOperations,
+        operations: subjectOperations,
         withdrawn: false,
       });
       log.nextSequence += 1;
@@ -735,26 +591,68 @@ export class ZetaSeeder {
       state = ScribeReplay.run(log, []);
     }
 
-    for (const widenSpec of widenPending) {
+    const view = ScribeLogCore.view(state);
+    const counters = { nextFact: log.nextFact };
+    const factOperations = [];
+    const widenedFactIds = [];
+    for (const fact of parsedExport.facts) {
+      const outcome = { counters, stored: null };
+      const reason = ScribeLogCore.Rulers.AddFact({
+        type: ScribeLogCore.Ruling.AddFact,
+        subject: fact.subject,
+        category: fact.category,
+        target: fact.target,
+        text: fact.text,
+        hidden: fact.hidden,
+        cite: null,
+        position: ScribeLogCore.Settings.LeastPosition,
+        ...(fact.evidence === null ? {} : { evidence: fact.evidence }),
+        ...(fact.reported ? { reported: true } : {}),
+        ...(fact.audience === null ? {} : { audience: fact.audience }),
+      }, view, outcome);
+      if (reason !== null) {
+        throw new Error(`Seeded fact ${fact.id} ("${fact.text}") was refused: ${reason}.`);
+      }
+      factOperations.push(outcome.stored);
+      if (fact.widenedToEveryone) {
+        widenedFactIds.push(outcome.stored.fact);
+      }
+    }
+    log.nextFact = counters.nextFact;
+
+    if (factOperations.length > 0) {
+      log.entries.push({
+        sequence: log.nextSequence,
+        kind: ScribeLogCore.Kind.Operator,
+        origin: ScribeLogCore.Origin.Operator,
+        messageIds: [],
+        operations: factOperations,
+        withdrawn: false,
+      });
+      log.nextSequence += 1;
+      log.revision += 1;
+      state = ScribeReplay.run(log, []);
+    }
+
+    for (const factId of widenedFactIds) {
       ScribeLogCore.rule(log, state, {
         type: ScribeLogCore.Ruling.Widen,
-        fact: widenSpec.factId,
-        to: widenSpec.to,
+        fact: factId,
+        to: ScribeLogCore.Settings.Everyone,
       });
       state = ScribeReplay.run(log, []);
     }
 
     if (parsedExport.threads.length > 0) {
-      const threadOps = [];
+      const threadOperations = [];
       for (const thread of parsedExport.threads) {
-        const threadSubject = thread.subject ? resolveSubjectId(thread.subject) : null;
-        threadOps.push({
+        threadOperations.push({
           type: ScribeAnswer.Type.ThreadOpen,
           thread: `${ScribeLogCore.Settings.ThreadPrefix}${log.nextThread}`,
           text: thread.text,
           cite: null,
-          position: 0,
-          ...(threadSubject !== null ? { subject: threadSubject } : {}),
+          position: ScribeLogCore.Settings.LeastPosition,
+          ...(thread.subject !== null ? { subject: thread.subject } : {}),
         });
         log.nextThread += 1;
       }
@@ -763,7 +661,7 @@ export class ZetaSeeder {
         kind: ScribeLogCore.Kind.Operator,
         origin: ScribeLogCore.Origin.Operator,
         messageIds: [],
-        operations: threadOps,
+        operations: threadOperations,
         withdrawn: false,
       });
       log.nextSequence += 1;
@@ -771,24 +669,11 @@ export class ZetaSeeder {
       state = ScribeReplay.run(log, []);
     }
 
-    const enrichedCharacters = parsedExport.characters.map((character) => {
-      const assignedSubjectId = resolveSubjectId(character.oldSubjectId, character.name);
-      return {
-        ...character,
-        scribeSubjectId: assignedSubjectId,
-      };
-    });
-
-    return {
-      log,
-      state,
-      oldToNewSubjectId,
-      characters: enrichedCharacters,
-    };
+    return { log, state };
   }
 
   /**
-   * @param {{exportPath?: string, dbPath?: string | null, title?: string | null, dryRun?: boolean, force?: boolean, mainRefs?: string[], allowedRoots?: string[]}} options
+   * @param {{exportPath?: string, dbPath?: string | null, title?: string | null, dryRun?: boolean, force?: boolean, mainRefs?: string[], playerRef?: string | null, allowedRoots?: string[]}} options
    * @returns {object}
    * @throws {Error}
    */
@@ -799,23 +684,30 @@ export class ZetaSeeder {
     dryRun = false,
     force = false,
     mainRefs = [],
+    playerRef = null,
     allowedRoots = [DEFAULT_ALLOWED_ROOT],
   } = {}) {
     const safeExportPath = ZetaSeeder.resolveSafeExportPath(exportPath, allowedRoots);
     const rawJsonText = fs.readFileSync(safeExportPath, 'utf8');
-    const parsedExport = ZetaSeeder.parseExport(rawJsonText, { titleOverride: title, mainRefs });
+    const parsedExport = ZetaSeeder.parseExport(rawJsonText, { titleOverride: title, mainRefs, playerRef });
     const materialized = ZetaSeeder.materializeScribeLog(parsedExport);
     const bookJson = JSON.stringify(materialized.log);
-    const relations = materialized.state.facts.filter((fact) => ScribeReplay.live(fact) && fact.category === ScribeCategory.Settings.RelationCategory);
+    const liveFacts = materialized.state.facts.filter((fact) => ScribeReplay.live(fact));
+    const relationCount = liveFacts.filter((fact) => fact.category === ScribeCategory.Settings.RelationCategory).length;
+    const selectedPlayer = parsedExport.characters.find((character) => character.isPlayer) ?? null;
 
     const summary = {
       exportPath: safeExportPath,
       title: parsedExport.title,
-      characters: materialized.characters.length,
+      player: selectedPlayer !== null ? selectedPlayer.name : null,
+      characters: parsedExport.characters.length,
       subjects: materialized.state.subjects.filter((subject) => subject.mergedInto === null).length,
-      facts: materialized.state.facts.filter((fact) => ScribeReplay.live(fact) && fact.category !== ScribeCategory.Settings.RelationCategory).length,
-      relations: relations.length,
+      facts: liveFacts.length - relationCount,
+      relations: relationCount,
+      claims: materialized.state.facts.filter((fact) => fact.status === ScribeReplay.Status.Reported).length,
       threads: materialized.state.threads.filter((thread) => thread.closed === null).length,
+      readThrough: parsedExport.readThrough,
+      chatMessages: parsedExport.chatMessages,
       dryRun: Boolean(dryRun),
     };
 
@@ -833,7 +725,7 @@ export class ZetaSeeder {
 
     const store = new SqliteStore(resolvedDbPath);
     try {
-      const campaignRecord = store.runTransaction(() => {
+      const seeded = store.runTransaction(() => {
         let existingMatch = null;
         let afterCursor = null;
         do {
@@ -853,65 +745,55 @@ export class ZetaSeeder {
           store.deleteCampaign(existingMatch.id);
         }
 
+        const openingScene = {
+          sceneNumber: 1,
+          day: parsedExport.initialScene.day,
+          timeLabel: parsedExport.initialScene.timeLabel,
+          location: parsedExport.initialScene.location,
+          sceneType: parsedExport.initialScene.sceneType,
+          presentIds: [],
+          remoteIds: [],
+          offscreenNotes: {},
+          activeWalkOns: [],
+        };
         const campaign = store.createCampaign({
           title: parsedExport.title,
-          premise: parsedExport.premise,
-          styleNotes: parsedExport.styleNotes,
-          sceneState: {
-            sceneNumber: 1,
-            day: parsedExport.initialScene.day,
-            timeLabel: parsedExport.initialScene.timeLabel,
-            location: parsedExport.initialScene.location,
-            sceneType: parsedExport.initialScene.sceneType,
-            presentIds: [],
-            remoteIds: [],
-            offscreenNotes: {},
-            activeWalkOns: [],
-          },
+          sceneState: openingScene,
         });
 
         let playerCharacterId = null;
-        const presentCharacterIds = [];
-        const presentOldSet = new Set(parsedExport.initialScene.presentOldSubjectIds);
+        const presentSubjectIds = new Set(parsedExport.initialScene.presentSubjectIds);
         const createdCharacters = [];
-
-        for (const charSpec of materialized.characters) {
-          let created = store.createCharacter(campaign.id, {
-            slug: charSpec.slug,
-            scribeSubjectId: charSpec.scribeSubjectId,
-            name: charSpec.name,
-            aliases: charSpec.aliases,
-            isPlayer: charSpec.isPlayer,
-            tier: charSpec.tier,
-            avatarToken: charSpec.avatarToken,
-            persona: charSpec.persona,
+        for (const character of parsedExport.characters) {
+          const created = store.createCharacter(campaign.id, {
+            slug: character.slug,
+            scribeSubjectId: character.subjectId,
+            name: character.name,
+            aliases: character.aliases,
+            isPlayer: character.isPlayer,
+            tier: character.tier,
+            avatarToken: character.avatarToken,
+            persona: character.persona,
           });
-          if (charSpec.archived) {
-            created = store.updateCharacter(campaign.id, created.id, { archived: true });
-          }
           createdCharacters.push(created);
           if (created.isPlayer) {
             playerCharacterId = created.id;
           }
-          if (!created.archived && (presentOldSet.has(charSpec.oldSubjectId) || (presentOldSet.size === 0 && created.tier === CharacterTier.Main))) {
-            presentCharacterIds.push(created.id);
-          }
+        }
+
+        let presentCharacterIds = createdCharacters
+          .filter((created) => presentSubjectIds.has(created.scribeSubjectId))
+          .map((created) => created.id);
+        if (presentCharacterIds.length === 0) {
+          presentCharacterIds = createdCharacters
+            .filter((created) => created.tier === CharacterTier.Main)
+            .map((created) => created.id);
         }
 
         if (playerCharacterId !== null || presentCharacterIds.length > 0) {
           store.updateCampaign(campaign.id, {
             ...(playerCharacterId !== null ? { playerCharacterId } : {}),
-            sceneState: {
-              sceneNumber: 1,
-              day: parsedExport.initialScene.day,
-              timeLabel: parsedExport.initialScene.timeLabel,
-              location: parsedExport.initialScene.location,
-              sceneType: parsedExport.initialScene.sceneType,
-              presentIds: presentCharacterIds,
-              remoteIds: [],
-              offscreenNotes: {},
-              activeWalkOns: [],
-            },
+            sceneState: { ...openingScene, presentIds: presentCharacterIds },
           });
         }
 
@@ -921,14 +803,14 @@ export class ZetaSeeder {
           dirty: false,
         });
 
-        return { campaign, createdCharacters };
+        return { campaign, replacedExisting: existingMatch !== null };
       });
 
       return {
         ...summary,
         dbPath: resolvedDbPath,
-        campaignId: campaignRecord.campaign.id,
-        replacedExisting: Boolean(force),
+        campaignId: seeded.campaign.id,
+        replacedExisting: seeded.replacedExisting,
       };
     } finally {
       store.close();
@@ -941,9 +823,7 @@ if (process.argv[1] && path.resolve(process.argv[1]) === currentFilePath) {
   try {
     const cliOptions = ZetaSeeder.parseCliArgs(process.argv.slice(2));
     if (cliOptions.help) {
-      process.stdout.write(
-        'Usage: node scripts/seed-from-export.mjs [exportPath] [--title <title>] [--db <sqlitePath>] [--main <slugOrName,...>] [--dry-run] [--force]\n',
-      );
+      process.stdout.write(USAGE);
       process.exit(0);
     }
     const result = ZetaSeeder.run({
@@ -953,7 +833,13 @@ if (process.argv[1] && path.resolve(process.argv[1]) === currentFilePath) {
       dryRun: cliOptions.dryRun,
       force: cliOptions.force,
       mainRefs: cliOptions.mainRefs,
+      playerRef: cliOptions.playerRef,
     });
+    if (result.readThrough < result.chatMessages) {
+      process.stderr.write(
+        `Scribe book read through message ${result.readThrough} of ${result.chatMessages}.\n`,
+      );
+    }
     process.stdout.write(`${JSON.stringify(result, null, 2)}\n`);
   } catch (error) {
     process.stderr.write(`Seed failed: ${error.message}\n`);

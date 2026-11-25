@@ -2127,3 +2127,310 @@ describe('Task 3 adversarial review regressions', () => {
     }
   });
 });
+
+describe('AddFact evidence and the Reported rule for ruled facts', () => {
+  /**
+   * @returns {{log: object, state: object}}
+   */
+  const buildCastLog = () => {
+    const log = ScribeLogCore.create();
+    let state = ScribeReplay.run(log, []);
+    for (const name of ['Ilse Marrow', 'Garrick Fenn', 'Odo Brask']) {
+      ScribeLogCore.syncCharacterSubject(log, state, {
+        subjectId: null,
+        name,
+        aliases: [],
+        kind: ScribeCategory.SubjectKinds.Character,
+      });
+      state = ScribeReplay.run(log, []);
+    }
+    return { log, state };
+  };
+
+  const landingRuling = Object.freeze({
+    type: ScribeLogCore.Ruling.AddFact,
+    subject: 'S1',
+    category: 'location',
+    target: null,
+    text: 'at the ferry landing',
+    hidden: false,
+    cite: null,
+    position: 0,
+  });
+
+  it('stores only a valid {attribution, speaker} evidence on AddFact and refuses every other evidence value', () => {
+    const { log, state } = buildCastLog();
+    const view = ScribeLogCore.view(state);
+
+    const plain = { counters: { nextFact: 1 }, stored: null };
+    assert.equal(ScribeLogCore.Rulers.AddFact(landingRuling, view, plain), null);
+    assert.equal(Object.hasOwn(plain.stored, 'evidence'), false);
+
+    for (const attribution of ['witnessed', 'claimed', 'inferred', 'promised', 'ruled']) {
+      const outcome = { counters: { nextFact: 1 }, stored: null };
+      const evidence = { attribution, speaker: 'Garrick Fenn' };
+      assert.equal(ScribeLogCore.Rulers.AddFact({ ...landingRuling, evidence }, view, outcome), null);
+      assert.deepEqual(outcome.stored.evidence, evidence);
+      assert.notEqual(outcome.stored.evidence, evidence);
+    }
+
+    const refusedEvidence = [
+      null,
+      [],
+      'claimed',
+      0,
+      {},
+      { attribution: 'claimed' },
+      { speaker: 'Garrick Fenn' },
+      { attribution: 'rumoured', speaker: 'Garrick Fenn' },
+      { attribution: 'Claimed', speaker: 'Garrick Fenn' },
+      { attribution: 'claimed', speaker: '' },
+      { attribution: 'claimed', speaker: '   ' },
+      { attribution: 'claimed', speaker: 7 },
+      { attribution: 'claimed', speaker: null },
+      { attribution: 'claimed', speaker: 'Garrick Fenn', messageId: 'msg-ferry-1' },
+      { attribution: 'claimed', speaker: 'Garrick Fenn', quote: 'He waits at the landing.' },
+      Object.create({ attribution: 'claimed', speaker: 'Garrick Fenn' }),
+    ];
+    for (const evidence of refusedEvidence) {
+      const outcome = { counters: { nextFact: 1 }, stored: null };
+      assert.equal(
+        ScribeLogCore.Rulers.AddFact({ ...landingRuling, evidence }, view, outcome),
+        ScribeLogCore.Settings.InvalidOperation,
+        JSON.stringify(evidence),
+      );
+      assert.equal(outcome.stored, null);
+    }
+
+    const entriesBefore = log.entries.length;
+    assert.throws(
+      () => ScribeLogCore.rule(log, state, { ...landingRuling, evidence: { attribution: 'claimed', speaker: ' ' } }),
+      /InvalidOperation/,
+    );
+    assert.equal(log.entries.length, entriesBefore);
+    const entry = ScribeLogCore.rule(log, state, {
+      ...landingRuling,
+      evidence: { attribution: 'claimed', speaker: 'Garrick Fenn' },
+    });
+    assert.deepEqual(entry.operations[0].evidence, { attribution: 'claimed', speaker: 'Garrick Fenn' });
+    assert.equal(entry.origin, ScribeLogCore.Origin.Operator);
+  });
+
+  it('accepts reported only as true or absent, stores it on the operation and refuses every other value', () => {
+    const { log, state } = buildCastLog();
+    const view = ScribeLogCore.view(state);
+
+    const absent = { counters: { nextFact: 1 }, stored: null };
+    assert.equal(ScribeLogCore.Rulers.AddFact(landingRuling, view, absent), null);
+    assert.equal(Object.hasOwn(absent.stored, 'reported'), false);
+
+    const accepted = { counters: { nextFact: 1 }, stored: null };
+    assert.equal(ScribeLogCore.Rulers.AddFact({ ...landingRuling, reported: true }, view, accepted), null);
+    assert.equal(accepted.stored.reported, true);
+
+    for (const reported of [false, 'true', 1, null]) {
+      const outcome = { counters: { nextFact: 1 }, stored: null };
+      assert.equal(
+        ScribeLogCore.Rulers.AddFact({ ...landingRuling, reported }, view, outcome),
+        ScribeLogCore.Settings.InvalidOperation,
+        JSON.stringify(reported),
+      );
+      assert.equal(outcome.stored, null);
+    }
+
+    const entriesBefore = log.entries.length;
+    assert.throws(() => ScribeLogCore.rule(log, state, { ...landingRuling, reported: 1 }), /InvalidOperation/);
+    assert.equal(log.entries.length, entriesBefore);
+  });
+
+  it('files an AddFact as Reported only when reported is true, whatever its evidence says', () => {
+    const { log } = buildCastLog();
+    const rulings = [
+      { subject: 'S1', category: 'location', text: 'at the ferry landing', reported: true, evidence: { attribution: 'claimed', speaker: 'Garrick Fenn' } },
+      { subject: 'S2', category: 'role', text: 'harbor pilot', reported: true },
+      { subject: 'S3', category: 'status', text: 'sworn to the watch', evidence: { attribution: 'promised', speaker: 'Odo Brask' } },
+      { subject: 'S1', category: 'eyes', text: 'grey', evidence: { attribution: 'claimed', speaker: 'Garrick Fenn' } },
+      { subject: 'S3', category: 'role', text: 'ferryman' },
+    ];
+    for (const ruling of rulings) {
+      ScribeLogCore.rule(log, ScribeReplay.run(log, []), { ...landingRuling, ...ruling });
+    }
+    const state = ScribeReplay.run(log, []);
+    const labels = ScribeAnalyzer.labels(state);
+    /**
+     * @param {string} text
+     * @returns {object}
+     */
+    const factNamed = (text) => state.facts.find((fact) => fact.text === text);
+
+    for (const text of ['at the ferry landing', 'harbor pilot']) {
+      assert.equal(factNamed(text).status, ScribeReplay.Status.Reported, text);
+      assert.equal(ScribeReplay.live(factNamed(text)), false, text);
+      assert.equal(factNamed(text).origin, ScribeLogCore.Origin.Operator, text);
+    }
+    for (const text of ['sworn to the watch', 'grey', 'ferryman']) {
+      assert.equal(factNamed(text).status, ScribeReplay.Status.InForce, text);
+    }
+
+    assert.deepEqual(factNamed('at the ferry landing').evidence, { attribution: 'claimed', speaker: 'Garrick Fenn' });
+    assert.match(ScribeAnalyzer.statement(factNamed('at the ferry landing'), labels), / \[claimed by Garrick Fenn\]$/);
+    assert.equal(Object.hasOwn(factNamed('harbor pilot'), 'evidence'), false);
+    assert.match(ScribeAnalyzer.statement(factNamed('grey'), labels), / \[claimed by Garrick Fenn\]$/);
+    assert.equal(Object.hasOwn(factNamed('ferryman'), 'evidence'), false);
+  });
+
+  it('still files Story-origin Moving facts with claimed, inferred or promised evidence as Reported', () => {
+    const log = ScribeLogCore.create();
+    log.read = { 'msg-1': 1 };
+    log.entries = [
+      {
+        sequence: 1,
+        kind: ScribeLogCore.Kind.Update,
+        origin: ScribeLogCore.Origin.Story,
+        messageIds: ['msg-1'],
+        operations: [
+          { type: ScribeAnswer.Type.Subject, subject: 'S1', label: 'Ilse Marrow', kind: 'character' },
+          ...['claimed', 'witnessed'].map((attribution, index) => ({
+            type: ScribeAnswer.Type.Fact,
+            fact: `F${index + 1}`,
+            subject: 'S1',
+            label: 'Ilse Marrow',
+            category: 'location',
+            target: null,
+            targetText: null,
+            other: null,
+            text: `place ${attribution}`,
+            cite: 'msg-1',
+            position: 1,
+            hidden: false,
+            evidence: {
+              section: 'FACTS',
+              row: index + 1,
+              messageNumber: 1,
+              messageId: 'msg-1',
+              fingerprint: 'fp-msg-1',
+              blockNumber: 1,
+              speaker: 'Garrick Fenn',
+              quote: 'q',
+              attribution,
+            },
+          })),
+        ],
+        withdrawn: false,
+      },
+    ];
+    const state = ScribeReplay.run(log, [{ id: 'msg-1', sender: 'narrator@ferry.example', contents: [] }]);
+    assert.equal(state.facts.find((fact) => fact.text === 'place claimed').status, ScribeReplay.Status.Reported);
+    assert.equal(state.facts.find((fact) => fact.text === 'place witnessed').status, ScribeReplay.Status.InForce);
+  });
+});
+
+describe('AddFact audience for ruled facts', () => {
+  /**
+   * @returns {{log: object, state: object}}
+   */
+  const buildCastLog = () => {
+    const log = ScribeLogCore.create();
+    let state = ScribeReplay.run(log, []);
+    for (const name of ['Ilse Marrow', 'Garrick Fenn', 'Odo Brask', 'Pell Dunmore', 'Ruth Quill']) {
+      ScribeLogCore.syncCharacterSubject(log, state, {
+        subjectId: null,
+        name,
+        aliases: [],
+        kind: ScribeCategory.SubjectKinds.Character,
+      });
+      state = ScribeReplay.run(log, []);
+    }
+    return { log, state };
+  };
+
+  const landingRuling = Object.freeze({
+    type: ScribeLogCore.Ruling.AddFact,
+    subject: 'S1',
+    category: 'location',
+    target: null,
+    text: 'at the ferry landing',
+    hidden: false,
+    cite: null,
+    position: 0,
+  });
+
+  /**
+   * @param {object} state
+   * @returns {object}
+   */
+  const landing = (state) => state.facts.find((fact) => fact.text === 'at the ferry landing');
+
+  it('stores a copy of a valid audience and refuses every other audience value', () => {
+    const { log, state } = buildCastLog();
+    const view = ScribeLogCore.view(state);
+    const audience = ['S2', 'S3'];
+
+    const accepted = { counters: { nextFact: 1 }, stored: null };
+    assert.equal(ScribeLogCore.Rulers.AddFact({ ...landingRuling, audience }, view, accepted), null);
+    assert.deepEqual(accepted.stored.audience, audience);
+    assert.notEqual(accepted.stored.audience, audience);
+
+    const absent = { counters: { nextFact: 1 }, stored: null };
+    assert.equal(ScribeLogCore.Rulers.AddFact(landingRuling, view, absent), null);
+    assert.equal(Object.hasOwn(absent.stored, 'audience'), false);
+
+    for (const refused of [[], ['S2', 'S2'], [''], ['  '], ['S2', ' '], ['S99'], ['S2', 7], 'S2', null, {}, 'Everyone']) {
+      const outcome = { counters: { nextFact: 1 }, stored: null };
+      assert.equal(
+        ScribeLogCore.Rulers.AddFact({ ...landingRuling, audience: refused }, view, outcome),
+        ScribeLogCore.Settings.InvalidOperation,
+        JSON.stringify(refused),
+      );
+      assert.equal(outcome.stored, null);
+    }
+
+    const entriesBefore = log.entries.length;
+    assert.throws(() => ScribeLogCore.rule(log, state, { ...landingRuling, audience: ['S99'] }), /InvalidOperation/);
+    assert.equal(log.entries.length, entriesBefore);
+
+    ScribeLogCore.rule(log, state, { ...landingRuling, audience });
+    assert.deepEqual(landing(ScribeReplay.run(log, [])).audience, ['S2', 'S3']);
+  });
+
+  it('makes a non-hidden Operator fact with an audience known only to its subject, audience, told and widened subjects', () => {
+    const { log, state } = buildCastLog();
+    ScribeLogCore.rule(log, state, { ...landingRuling, audience: ['S2'] });
+    const fact = landing(ScribeReplay.run(log, []));
+    log.entries.push({
+      sequence: log.nextSequence,
+      kind: ScribeLogCore.Kind.Operator,
+      origin: ScribeLogCore.Origin.Operator,
+      messageIds: [],
+      operations: [{ type: ScribeAnswer.Type.Told, fact: fact.id, subject: 'S3', cite: null, position: 0 }],
+      withdrawn: false,
+    });
+    log.nextSequence += 1;
+    log.revision += 1;
+    ScribeLogCore.rule(log, ScribeReplay.run(log, []), { type: ScribeLogCore.Ruling.Widen, fact: fact.id, to: ['S4'] });
+
+    const replayed = ScribeReplay.run(log, []);
+    const known = ['S1', 'S2', 'S3', 'S4', 'S5'].filter((id) => ScribeKnowledge.knows(replayed, id, landing(replayed)));
+    assert.deepEqual(known, ['S1', 'S2', 'S3', 'S4']);
+    assert.deepEqual([...ScribeKnowledge.audience(replayed, landing(replayed))].sort(), ['S1', 'S2', 'S3', 'S4']);
+  });
+
+  it('lets a widening to Everyone reach all and keeps an Operator fact without an audience known to everyone', () => {
+    const { log, state } = buildCastLog();
+    ScribeLogCore.rule(log, state, { ...landingRuling, audience: ['S2'] });
+    ScribeLogCore.rule(log, ScribeReplay.run(log, []), { ...landingRuling, category: 'role', text: 'harbor pilot' });
+    let replayed = ScribeReplay.run(log, []);
+    const narrowed = landing(replayed);
+    const open = replayed.facts.find((fact) => fact.text === 'harbor pilot');
+    assert.equal(ScribeKnowledge.knows(replayed, 'S5', narrowed), false);
+    assert.equal(ScribeKnowledge.audience(replayed, open), ScribeKnowledge.Everyone);
+    assert.equal(ScribeKnowledge.knows(replayed, 'S5', open), true);
+
+    ScribeLogCore.rule(log, replayed, { type: ScribeLogCore.Ruling.Widen, fact: narrowed.id, to: ScribeKnowledge.Everyone });
+    replayed = ScribeReplay.run(log, []);
+    assert.equal(ScribeKnowledge.audience(replayed, landing(replayed)), ScribeKnowledge.Everyone);
+    for (const id of ['S1', 'S2', 'S3', 'S4', 'S5']) {
+      assert.equal(ScribeKnowledge.knows(replayed, id, landing(replayed)), true, id);
+    }
+  });
+});

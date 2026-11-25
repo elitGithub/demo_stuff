@@ -1102,7 +1102,9 @@ const ScribeCloud = Object.freeze({
         }
         const heads = response.data.heads.filter((item) => item?.kind === ScribeStore.Kind.Book);
         if (!heads.length) {
-            if (response.data.heads.some((item) => !settings.Synced.includes(item?.kind))) {
+            if (response.data.heads.some((item) => !settings.Synced.includes(item?.kind) ||
+                !Number.isSafeInteger(item.revision) || item.revision < 1 ||
+                !Number.isSafeInteger(item.parts) || item.parts < 1 || item.parts > settings.MostParts)) {
                 throw new Error('The Worker returned an invalid list of saved records for this chat.');
             }
             return null;
@@ -1121,7 +1123,7 @@ const ScribeCloud = Object.freeze({
         if (!book || !ScribeKeeper.soundBook(book)) {
             throw new Error('The downloaded data does not contain a readable Scribe Book.');
         }
-        return book.adopted ? book : null;
+        return book;
     },
 
     /**

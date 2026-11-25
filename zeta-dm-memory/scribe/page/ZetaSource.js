@@ -1469,7 +1469,7 @@ const ZetaSource = Object.freeze({
     },
 
     /**
-     * @param {{ fetch: Function, token: string|null, roomId: string|null, pause: (milliseconds: number) => Promise<void>, onPage?: (count: number) => void, through?: string|null }} request
+     * @param {{ fetch: Function, token: string|null, roomId: string|null, pause: (milliseconds: number) => Promise<void>, onPage?: (count: number) => void, through?: string|null, boundaryTime?: string|null }} request
      * @return {Promise<Readonly<{ messages: object[], end: string, problem: string|null, skipped: number }>>}
      * @throws {Error}
      */
@@ -1641,6 +1641,8 @@ const ZetaSource = Object.freeze({
                 end = ends.NoCursor;
             } else if (request.through && distinct.has(request.through) && (request.required ?? []).every((id) => distinct.has(id))) {
                 end = ends.ThroughMessage;
+            } else if (request.boundaryTime && page.messages.some((row) => Date.parse(row.messageTime) < Date.parse(request.boundaryTime))) {
+                return ZetaSource.outcome(received, ends.Failed, 'The saved fork boundary was not found in the latest Zeta messages.', skipped);
             } else if (used.has(next)) {
                 end = ends.RepeatedCursor;
             }

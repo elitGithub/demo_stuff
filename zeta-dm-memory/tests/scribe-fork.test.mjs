@@ -9,7 +9,7 @@ const context = vm.createContext({TextEncoder, URL, URLSearchParams});
 for (const [folder, names] of Object.entries({
     core: ['ScribeText', 'ScribeCategory', 'ScribeIntake', 'ScribeAnswer', 'ScribeLog', 'ScribeReplay',
         'ScribeFork', 'ScribeKnowledge', 'ScribeAnalyzer', 'ScribeAdoption'],
-    page: ['ScribeStore', 'ScribePedant', 'ScribeKeeper', 'ScribeCloud'],
+    page: ['ZetaSource', 'ScribeStore', 'ScribePedant', 'ScribeKeeper', 'ScribeCloud'],
 })) {
     for (const name of names) {
         const file = new URL('../scribe/' + folder + '/' + name + '.js', import.meta.url);
@@ -61,11 +61,104 @@ test('direct cutoff, source attribution, candidate mismatch and independent edit
     assert.equal(stage(data, 'parent1').read, 2);
     data.child[3].candidateId = 'other';
     assert.equal(stage(data).read, 3);
-    assert.throws(() => stage(data, 'parent3'), /do not verify/);
+    const stopped = stage(data, 'parent3');
+    assert.equal(stopped.shared, 3);
+    assert.equal(stopped.read, 3);
+    assert.equal(stopped.cutoff.detail, 'passage #4 (parent3) — candidate ID differs.');
     data.child[1].contents[0].text += ' edited';
-    assert.throws(() => stage(data), /do not verify/);
+    assert.throws(() => stage(data), /Fork verification failed at passage #2 \(parent1\): message content differs\./);
     data.child[1].roomId = 'other';
     assert.throws(() => stage(data), /both rooms/);
+});
+
+test('fork diagnostics identify the first differing field and require evidence beyond a common intro for an unknown origin', () => {
+    for (const [change, reason] of [
+        [(row) => { row.messageTime = '2025-01-01T00:00:00.000Z'; }, 'message timestamp differs'],
+        [(row) => { row.sender.type = 'USER'; }, 'sender differs'],
+        [(row) => { row.contents[0].text = 'Different words'; }, 'message content differs'],
+        [(row) => { row.candidateId = 'different'; }, 'candidate ID differs'],
+    ]) {
+        const data = example();
+        change(data.child[0]);
+        assert.throws(() => stage(data, 'parent2'), {message: 'Fork verification failed at passage #1 (parent0): ' + reason + ' (selected parent2).'});
+    }
+    const data = example();
+    assert.equal(stage(data, 'parent0').cutoff, null);
+    const missing = stage(data, 'elsewhere');
+    assert.equal(missing.shared, data.parent.length);
+    assert.equal(missing.cutoff.reason, 'selected passage was not found in the source chat');
+    assert.equal(missing.cutoff.index, data.parent.length);
+    data.child.length = 1;
+    assert.throws(() => stage(data), {message: 'Fork verification failed at passage #2 (parent1): the fork has fewer messages than the source.'});
+    data.parent.length = 1;
+    assert.throws(() => stage(data), /only intro passages matched/);
+    assert.throws(() => stage(data, 'elsewhere'), /selected passage elsewhere was not found in the source chat and no non-intro passage matched/);
+});
+
+test('fork recovery reads the parent again at most once and commits only a current verified result', async () => {
+    for (const scenario of ['first mismatch', 'cutoff', 'picker divergence', 'shorter fork', 'extra child', 'fresh cutoff', 'fresh mismatch',
+        'offline', 'room changed', 'fresh child']) {
+        const data = example();
+        const cached = structuredClone(data.parent);
+        const storage = new FakeStorage();
+        const first = ['first mismatch', 'fresh mismatch', 'offline', 'room changed'].includes(scenario);
+        if (first || ['cutoff', 'picker divergence', 'fresh cutoff'].includes(scenario)) {
+            cached[first ? 0 : 3].contents[0].text += ' Obsolete.';
+        }
+        if (scenario === 'shorter fork') {
+            data.child.pop();
+        } else if (scenario === 'extra child') {
+            cached.pop();
+        }
+        const needsHistory = scenario === 'fresh child';
+        ScribeStore.write(storage, 'child', 'campaign', {completeHistory: true, messages: needsHistory ? data.child.slice(0, 1) : data.child,
+            ...(needsHistory ? {needsHistory: true, observations: [{ids: ['obsolete']}]} : {})});
+        let childPulls = 0;
+        const keeper = await ScribeKeeper.open({storage, roomId: 'child', tabId: 'tab', notify: () => {},
+            clock: {now: () => 1000, today: () => '2026-11-24'}, zeta: {history: async () => {
+                childPulls++;
+                return {messages: data.child, end: 'NoCursor', completeHistory: true};
+            }}});
+        const calls = [];
+        const picker = ['picker divergence', 'shorter fork', 'extra child'].includes(scenario);
+        const result = await keeper.recoverFork('parent', picker ? null : 'parent4', async (room, options) => {
+            assert.equal(room, 'parent');
+            calls.push(options);
+            if (!options) {
+                return {book: data.book, messages: cached, cached: !['fresh cutoff', 'fresh mismatch'].includes(scenario)};
+            }
+            assert.equal(options.refresh, true);
+            assert.equal(options.book, data.book);
+            if (scenario === 'offline') {
+                throw new Error('Source history is offline.');
+            }
+            if (scenario === 'room changed') {
+                ScribeStore.write(storage, 'child', 'live', {changed: true});
+            }
+            return {book: data.book, messages: data.parent, cached: false};
+        });
+        const retry = ['first mismatch', 'cutoff', 'picker divergence', 'offline', 'room changed'].includes(scenario);
+        assert.equal(calls.length, retry ? 2 : 1, scenario);
+        assert.equal(childPulls, needsHistory ? 1 : 0, scenario);
+        if (needsHistory) {
+            assert.equal(ScribeStore.read(storage, 'child', 'campaign').observations, undefined);
+        }
+        if (['fresh mismatch', 'offline', 'room changed'].includes(scenario)) {
+            assert.equal(result.ok, false, scenario);
+            assert.equal(ScribeStore.read(storage, 'child', 'book'), null, scenario);
+            if (scenario === 'room changed') {
+                assert.equal(result.reason, 'Fork recovery stopped because the room changed.');
+            } else if (scenario === 'offline') {
+                assert.equal(result.reason, 'Source history is offline.');
+            }
+        } else {
+            assert.equal(result.ok, true, result.reason);
+            const count = scenario === 'fresh cutoff' ? 3 : ['shorter fork', 'extra child'].includes(scenario) ? 4 : 5;
+            assert.equal(result.read, count, scenario);
+            assert.equal(result.shared, count, scenario);
+        }
+        keeper.close();
+    }
 });
 
 test('partial Writer batch never crosses a fork; modern note and Checker receipts reuse child message IDs', () => {
@@ -270,8 +363,155 @@ test('refused Book publication restores the old campaign and Book', () => {
     assert.equal(ScribeStore.read(storage, 'child', 'book').old, true);
 });
 
+test('an unfinished Worker Book maps its saved readings to different destination IDs without an origin transcript', () => {
+    const data = example();
+    data.book.adopted = false;
+    const candidate = {worker: true, book: data.book};
+    const recover = () => ScribeFork.stage(candidate, data.child, ScribeIntake.read(data.child), 'parent', 'child', null, null);
+    assert.equal(recover().read, 5);
+    data.child[3].contents[0].text += ' A different passage.';
+    const result = recover();
+    assert.equal(result.read, 3);
+    assert.deepEqual(Object.keys(result.book.log.read), ['child0', 'child1', 'child2']);
+    assert.equal(result.book.log.read.parent1, undefined);
+});
+
+test('Worker Book verification handles unread intros, out-of-order reads, Checker pages, cutoffs, duplicates, and empty inputs', () => {
+    const unreadIntro = example(4);
+    unreadIntro.book.log.entries.shift();
+    delete unreadIntro.book.log.read.parent0;
+    delete unreadIntro.book.fingerprints.parent0;
+    const parentIntake = ScribeIntake.read(unreadIntro.parent).messages;
+    const checkedTarget = parentIntake[2];
+    const pageId = 'incoming-' + ScribeText.fingerprint(JSON.stringify([checkedTarget.id, checkedTarget.fingerprint])) + ':0';
+    const page = {id: pageId, complete: true, index: 0, total: 1, judged: true, claims: [], findings: [],
+        answer: JSON.stringify({page: pageId, complete: true, claims: [], findings: []})};
+    assert.equal(ScribeLog.saveCheck(unreadIntro.book, parentIntake,
+        ScribeLog.checkWork(unreadIntro.book, parentIntake, false, checkedTarget.id), page), true);
+    const introRecovered = ScribeFork.stage({worker: true, book: unreadIntro.book}, unreadIntro.child,
+        ScribeIntake.read(unreadIntro.child), 'parent', 'child', null, null);
+    assert.equal(introRecovered.shared, 3);
+    assert.equal(introRecovered.read, 3);
+    assert.equal(introRecovered.mapping.get('parent1').id, 'child1');
+    assert.equal(introRecovered.mapping.get('parent2').id, 'child2');
+    assert.equal(ScribeLog.checkWork(introRecovered.book, ScribeIntake.read(unreadIntro.child).messages,
+        false, 'child2').targetComplete, true);
+
+    const outOfOrder = example(4);
+    outOfOrder.book.log.entries = [outOfOrder.book.log.entries[2], outOfOrder.book.log.entries[1]];
+    outOfOrder.book.log.read = {parent2: outOfOrder.book.log.entries[0].sequence, parent1: outOfOrder.book.log.entries[1].sequence};
+    const ordered = ScribeFork.stage({worker: true, book: outOfOrder.book}, outOfOrder.child,
+        ScribeIntake.read(outOfOrder.child), 'parent', 'child', null, null);
+    assert.equal(ordered.shared, 2);
+    assert.equal(ordered.mapping.get('parent1').id, 'child1');
+    assert.equal(ordered.mapping.get('parent2').id, 'child2');
+
+    const duplicatedIntro = example(3);
+    duplicatedIntro.book.log.entries[1].sources[0].position = 1;
+    assert.throws(() => ScribeFork.stage({worker: true, book: duplicatedIntro.book}, duplicatedIntro.child,
+        ScribeIntake.read(duplicatedIntro.child), 'parent', 'child', null, null),
+    /Fork verification failed at passage #1 \(parent1\): the saved reading does not match this position\./);
+
+    const duplicatedPlayed = example(3);
+    duplicatedPlayed.book.log.entries[2].sources[0].position = 2;
+    const dupStopped = ScribeFork.stage({worker: true, book: duplicatedPlayed.book}, duplicatedPlayed.child,
+        ScribeIntake.read(duplicatedPlayed.child), 'parent', 'child', 'parent2', null);
+    assert.equal(dupStopped.shared, 2);
+    assert.equal(dupStopped.mismatch.reason, 'the saved reading does not match this position');
+    assert.equal(dupStopped.cutoff.reason, 'the saved reading does not match this position');
+
+    const emptyBook = example(3);
+    emptyBook.book.log.entries = [];
+    emptyBook.book.log.read = {};
+    emptyBook.book.fingerprints = {};
+    assert.throws(() => ScribeFork.stage({worker: true, book: emptyBook.book}, emptyBook.child,
+        ScribeIntake.read(emptyBook.child), 'parent', 'child', null, null),
+    {message: 'No saved Writer readings were found in the Worker Book.'});
+
+    const partialRead = example(5);
+    partialRead.book.log.entries = partialRead.book.log.entries.slice(0, 3);
+    partialRead.book.log.read = Object.fromEntries(partialRead.book.log.entries.map((entry) => [entry.messageIds[0], entry.sequence]));
+    const beyond = ScribeFork.stage({worker: true, book: partialRead.book}, partialRead.child,
+        ScribeIntake.read(partialRead.child), 'parent', 'child', 'parent4', null);
+    assert.equal(beyond.shared, 3);
+    assert.deepEqual({...beyond.cutoff}, {
+        selected: 'parent4',
+        index: 3,
+        parentId: null,
+        childId: 'child3',
+        reason: 'selected passage was not covered by the Worker Book readings',
+        detail: 'selected passage was not covered by the Worker Book readings.',
+    });
+
+    const noMessages = example(3);
+    assert.throws(() => ScribeFork.stage({worker: true, book: noMessages.book}, [],
+        {messages: []}, 'parent', 'child', null, null),
+    {message: 'The fork messages are needed to verify the Worker Book.'});
+});
+
+test('Worker fork recovery pulls full history without a boundary, checks room changes immediately, and clears stale observations', async () => {
+    for (const scenario of ['fresh', 'room changed during full pull', 'delta changed', 'delta unchanged']) {
+        const data = example(5);
+        const storage = new FakeStorage();
+        const isDelta = scenario.startsWith('delta');
+        if (isDelta) {
+            const initialMessages = scenario === 'delta changed' ? data.child.slice(0, 4) : data.child;
+            ScribeStore.write(storage, 'child', 'campaign', {
+                completeHistory: true,
+                gone: [],
+                messages: initialMessages,
+                observations: [{ids: ['stale-observation']}],
+            });
+        }
+        let historyCalls = 0;
+        let lastBoundary = undefined;
+        const keeper = await ScribeKeeper.open({
+            storage,
+            roomId: 'child',
+            tabId: 'tab',
+            notify: () => {},
+            clock: {now: () => 2000, today: () => '2026-11-25'},
+            zeta: {
+                history: async (_onPage, boundary = null) => {
+                    historyCalls++;
+                    lastBoundary = boundary;
+                    if (scenario === 'room changed during full pull') {
+                        ScribeStore.write(storage, 'child', 'live', {changed: true});
+                        return {messages: [], end: 'Failed', completeHistory: false};
+                    }
+                    if (isDelta) {
+                        const rows = scenario === 'delta changed' ? data.child.slice(3) : data.child.slice(4);
+                        return {messages: rows, end: 'ThroughMessage', completeHistory: false, problem: null, skipped: 0};
+                    }
+                    return {messages: data.child, end: 'NoCursor', completeHistory: true, problem: null, skipped: 0};
+                },
+            },
+        });
+        const result = await keeper.recoverFork('parent', null, async () => ({book: data.book, worker: true}));
+        assert.equal(historyCalls, 1, scenario);
+        if (scenario === 'room changed during full pull') {
+            assert.equal(result.ok, false);
+            assert.equal(result.reason, 'Fork recovery stopped because the room changed.');
+            assert.equal(ScribeStore.read(storage, 'child', 'book'), null);
+        } else {
+            assert.equal(result.ok, true, result.reason);
+            assert.equal(result.read, 5, scenario);
+            assert.equal(result.shared, 5, scenario);
+            assert.equal(ScribeStore.read(storage, 'child', 'campaign').observations, undefined, scenario);
+            assert.equal(ScribeStore.read(storage, 'child', 'campaign').messages.length, 5, scenario);
+            if (isDelta) {
+                assert.equal(lastBoundary.id, scenario === 'delta changed' ? 'child3' : 'child4');
+            } else {
+                assert.equal(lastBoundary, null);
+            }
+        }
+        keeper.close();
+    }
+});
+
 test('Worker Book lookup reads the selected parent revision even when the child has the same revision', async () => {
     const {book} = example();
+    book.adopted = false;
     const storage = new FakeStorage();
     ScribeStore.setCloudKey(storage, 'synthetic'.repeat(8));
     const paths = [];
@@ -286,6 +526,7 @@ test('Worker Book lookup reads the selected parent revision even when the child 
             details.onload({status:200, finalUrl:details.url, responseText: JSON.stringify(response)});
         }};
     const found = await ScribeCloud.forkBook(cloud, 'parent');
+    assert.equal(found.adopted, false);
     assert.equal(found.log.entries.length, 5);
     assert.deepEqual(paths, ['/v1/scribe', '/v1/scribe/part']);
 });
@@ -311,6 +552,7 @@ test('a saved Book lookup reports why it failed without exposing credentials or 
         [{body: {error: {message: key}}}, 'The Worker returned an invalid list of saved records for this chat.', 1],
         [{body: {heads: [{kind: 'BOok', revision: 2, parts: 1}]}}, 'The Worker returned an invalid list of saved records for this chat.', 1],
         [{body: {heads: [null]}}, 'The Worker returned an invalid list of saved records for this chat.', 1],
+        [{body: {heads: [{kind: 'settings'}]}}, 'The Worker returned an invalid list of saved records for this chat.', 1],
         [{body: {heads: [{kind: 'book', parts: 0, revision: 1}]}}, 'The Worker returned invalid revision or part information for the saved Book.', 1],
         [{parts: true, body: key}, 'The downloaded data does not contain a readable Scribe Book.', 2],
         [{parts: true, restart: true}, 'The Worker connection changed while downloading the saved Book.', 2],

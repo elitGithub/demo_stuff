@@ -63,6 +63,7 @@ export const ScribeLogCore = Object.freeze({
     UnknownOrigin: 'UnknownOrigin',
     StaleState: 'StaleState',
     InvalidOperation: 'InvalidOperation',
+    EvidenceKeys: Object.freeze(['attribution', 'speaker']),
 
     /**
      * @returns {RegExp}
@@ -1186,8 +1187,28 @@ export const ScribeLogCore = Object.freeze({
      * @returns {string | null}
      */
     AddFact(operation, view, outcome) {
-      const { subject, category, target, text, hidden, cite, position } = operation;
+      const settings = ScribeLogCore.Settings;
+      const { subject, category, target, text, hidden, cite, position, evidence, reported, audience } = operation;
       const relation = category === ScribeCategory.Settings.RelationCategory;
+      const reportable = reported === undefined || reported === true;
+      const audible =
+        audience === undefined ||
+        (Array.isArray(audience) &&
+          audience.length > 0 &&
+          new Set(audience).size === audience.length &&
+          audience.every((listener) => {
+            return typeof listener === 'string' && listener.trim().length > 0 && view.subjects.has(listener);
+          }));
+      const attested =
+        evidence === undefined ||
+        (evidence !== null &&
+          typeof evidence === 'object' &&
+          !Array.isArray(evidence) &&
+          Object.keys(evidence).length === settings.EvidenceKeys.length &&
+          settings.EvidenceKeys.every((key) => Object.hasOwn(evidence, key)) &&
+          ScribeAnswer.Settings.Attributions.includes(evidence.attribution) &&
+          typeof evidence.speaker === 'string' &&
+          evidence.speaker.trim().length > 0);
       const valid =
         typeof subject === 'string' &&
         typeof category === 'string' &&
@@ -1197,9 +1218,12 @@ export const ScribeLogCore = Object.freeze({
         typeof hidden === 'boolean' &&
         (cite === null || typeof cite === 'string') &&
         Number.isSafeInteger(position) &&
-        position >= ScribeLogCore.Settings.LeastPosition;
+        position >= settings.LeastPosition &&
+        attested &&
+        reportable &&
+        audible;
       if (!valid) {
-        return ScribeLogCore.Settings.InvalidOperation;
+        return settings.InvalidOperation;
       }
       const aimed = relation ? view.subjects.get(target) : undefined;
       if (!view.subjects.has(subject) || (relation && aimed === undefined)) {
@@ -1216,6 +1240,9 @@ export const ScribeLogCore = Object.freeze({
         cite,
         position,
         fact: ScribeLogCore.nextFactId(outcome.counters),
+        ...(evidence === undefined ? {} : { evidence: { attribution: evidence.attribution, speaker: evidence.speaker } }),
+        ...(reported === true ? { reported: true } : {}),
+        ...(audience === undefined ? {} : { audience: [...audience] }),
       };
       return null;
     },

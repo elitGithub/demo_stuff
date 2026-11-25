@@ -133,6 +133,9 @@ export default class PanelHarness {
         this.reminderPreview = null;
         this.draftWrites = [];
         this.draftRefusal = null;
+        this.forkOrigin = options.forkOrigin ?? (() => null);
+        this.listForkRooms = options.listForkRooms ?? (async () => ({ rooms: [], nextCursor: null }));
+        this.recoverFork = options.recoverFork ?? (async () => ({ ok: false, reason: 'Unavailable' }));
     }
 
     /**
@@ -144,6 +147,9 @@ export default class PanelHarness {
             keeper: this.keeper,
             live: this.live,
             cloud: this.cloud,
+            forkOrigin: () => this.forkOrigin(),
+            listForkRooms: () => this.listForkRooms(),
+            recoverFork: (sourceRoomId, messageId) => this.recoverFork(sourceRoomId, messageId),
             readReminderDraft: () => this.live.readReminderDraft ? this.live.readReminderDraft() : this.reminderDraft,
             writeReminderDraft: (text) => {
                 this.draftWrites.push(text);

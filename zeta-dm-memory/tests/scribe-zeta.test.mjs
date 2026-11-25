@@ -987,6 +987,16 @@ test('a target search proves the complete history only when it actually reaches 
     assert.equal(recent.completeHistory, undefined);
 });
 
+test('a delta stops on the page crossing a missing fork boundary and leaves earlier history unread', async () => {
+    const messages = FakeZeta.messages(100);
+    const api = new FakeZeta(messages);
+    const result = await latest(api.fetch, {through: 'deleted', boundaryTime: messages[95].messageTime});
+    assert.equal(result.end, END.Failed);
+    assert.match(result.problem, /boundary/);
+    assert.equal(api.requests.length, 1);
+    assert.equal(result.completeHistory, undefined);
+});
+
 test('the status-only watcher reads only the room and HTTP result for player message POSTs', async () => {
     const page = FakeZeta.window();
     const headerSetter = page.XMLHttpRequest.prototype.setRequestHeader;

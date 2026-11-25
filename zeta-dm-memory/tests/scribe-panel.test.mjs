@@ -181,6 +181,9 @@ function mounted(log, options = {}) {
         width: options.width,
         storage: options.storage,
         reminders: options.reminders,
+        forkOrigin: options.forkOrigin,
+        listForkRooms: options.listForkRooms,
+        recoverFork: options.recoverFork,
     }).mount();
 }
 
@@ -4884,14 +4887,33 @@ test('Check history asks for an inclusive range from the manual pull and blocks 
     };
     panel.keeper.current = { ...panel.keeper.current, historyCheckCount: 7, canCheckHistory: true };
     panel.redraw();
-    assert.equal(panel.byId('scribe-history-range').hidden, false);
+    const range = panel.byId('scribe-history-range');
+    assert.equal(range.hidden, false);
+    const groups = panel.section('Progress').children;
+    assert.equal(groups.filter((group) => group.id === range.id).length, 1);
+    assert.equal(groups[groups.indexOf(range) - 1], panel.byId('scribe-pull').parent);
+    assert.deepEqual(range.children.map((element) => [element.tagName, element.textContent]), [
+        ['H3', 'Check history'],
+        ['P', 'To check specific messages from your last pull, enter the first and last message numbers. Leave these blank to pull the chat.'],
+        ['LABEL', 'From message *'],
+        ['LABEL', 'To message *'],
+        ['BUTTON', 'Check history'],
+    ]);
+    assert.doesNotMatch(range.textContent, /undefined/);
     const from = panel.byId('scribe-history-from');
     const to = panel.byId('scribe-history-to');
-    for (const values of [['', '7'], ['3', '2'], ['1.5', '7'], ['1', '8']]) {
+    assert.equal(from.value, '');
+    assert.equal(to.value, '');
+    panel.click('scribe-pull');
+    await panel.flush();
+    assert.deepEqual(panel.keeper.called('pull'), [[]]);
+    assert.deepEqual(calls, []);
+    for (const values of [['', ''], ['', '7'], ['3', '2'], ['1.5', '7'], ['1', '8']]) {
         [from.value, to.value] = values;
         panel.click('scribe-check-history');
         await panel.flush();
         assert.match(panel.text('scribe-controls-outcome'), /Enter a range from 1 to 7/);
+        assert.deepEqual(calls, []);
     }
     from.value = '1';
     to.value = '7';
@@ -5933,4 +5955,107 @@ test('saving a key asks the keeper to lift a failed reading', async () => {
         panel.live.calls.map((call) => call.name),
         ['rekey'],
     );
+});
+
+test('fork recovery outcomes handle undefined, null, and present cutoff values cleanly', async () => {
+    for (const [label, cutoff, suffix] of [
+        ['undefined', undefined, ''],
+        ['null', null, ''],
+        ['present', { selected: 'parent9', detail: 'passage #6 (parent5) — message content differs.' },
+            ' Stopped before selected passage parent9: passage #6 (parent5) — message content differs.'],
+    ]) {
+        const panel = mounted(ScribeLog.create(), {
+            keeper: { book: false, canRecoverFork: true },
+            forkOrigin: () => ({ parentRoomId: 'origin-room', messageId: 'parent9' }),
+            recoverFork: async () => ({ ok: true, read: 5, shared: 5, ...(cutoff !== undefined ? { cutoff } : {}) }),
+        });
+        panel.click('scribe-fork-open');
+        await panel.flush();
+        assert.equal(
+            panel.text('scribe-fork-outcome'),
+            'Recovered 5 message readings from origin-room. Verified 5 shared messages.' + suffix,
+            label,
+        );
+    }
+});
+
+test('a missing Worker Book keeps Choose a different origin and Pull chat data accessible if listing fails or is empty', async () => {
+    const missingReason = 'The Worker has no saved Book for origin room origin-room.';
+    let listMode = 'reject';
+    let seenOutcomeDuringPending = '';
+    const panel = mounted(ScribeLog.create(), {
+        keeper: { book: false, canRecoverFork: true },
+        forkOrigin: () => ({ parentRoomId: 'origin-room', messageId: 'parent2' }),
+        recoverFork: async () => {
+            seenOutcomeDuringPending = panel.text('scribe-fork-outcome');
+            return { ok: false, missingBook: true, reason: missingReason };
+        },
+        listForkRooms: async () => {
+            if (listMode === 'reject') {
+                throw new Error('Saved chats unavailable.');
+            }
+            if (listMode === 'empty') {
+                return { rooms: [], nextCursor: null };
+            }
+            return { rooms: [{ id: 'other-room', title: 'Other save' }], nextCursor: null };
+        },
+    });
+    const stub = {
+        mounted: false,
+        busy: 0,
+        pending: new Map(),
+        outcomes: new Map(),
+        signed: new Map(),
+        shown: new Set(['fork']),
+        trouble: '',
+        troubled: null,
+        forkMissing: false,
+        forkChoosing: false,
+        forkRooms: [],
+        confirm: () => true,
+        recoverFork: async () => ({ ok: false, missingBook: true, reason: missingReason }),
+    };
+    assert.equal(await scripts.ScribePanel.pullFork(stub, 'origin-room', 'parent2'), false);
+    assert.equal(stub.forkMissing, true);
+    assert.equal(stub.outcomes.get('fork'), missingReason);
+
+    panel.click('scribe-fork-open');
+    await panel.flush();
+    assert.equal(seenOutcomeDuringPending, 'Checking the Worker for this origin’s Book…');
+    assert.equal(panel.text('scribe-fork-outcome'), missingReason);
+    assert.equal(panel.byId('scribe-fork-origin').hidden, false);
+    assert.equal(panel.byId('scribe-fork-open').hidden, true);
+    assert.equal(panel.byId('scribe-fork-choose').hidden, false);
+    assert.equal(panel.byId('scribe-fork-choose').disabled, false);
+    assert.equal(panel.byId('scribe-fork-pull-chat').hidden, false);
+    assert.equal(panel.byId('scribe-fork-pull-chat').disabled, false);
+
+    panel.click('scribe-fork-choose');
+    await panel.flush();
+    assert.equal(panel.text('scribe-fork-outcome'), 'Saved chats unavailable.');
+    assert.equal(panel.byId('scribe-fork-origin').hidden, false);
+    assert.equal(panel.byId('scribe-fork-choose').hidden, false);
+    assert.equal(panel.byId('scribe-fork-choose').disabled, false);
+    assert.equal(panel.byId('scribe-fork-pull-chat').hidden, false);
+    assert.equal(panel.byId('scribe-fork-pull-chat').disabled, false);
+    assert.equal(panel.byId('scribe-fork-picker').hidden, true);
+
+    listMode = 'empty';
+    panel.click('scribe-fork-choose');
+    await panel.flush();
+    assert.equal(panel.text('scribe-fork-outcome'), 'Zeta returned no other saved chats for this story.');
+    assert.equal(panel.byId('scribe-fork-origin').hidden, false);
+    assert.equal(panel.byId('scribe-fork-choose').hidden, false);
+    assert.equal(panel.byId('scribe-fork-pull-chat').hidden, false);
+    assert.equal(panel.byId('scribe-fork-picker').hidden, true);
+
+    listMode = 'found';
+    panel.click('scribe-fork-choose');
+    await panel.flush();
+    assert.equal(panel.byId('scribe-fork-origin').hidden, true);
+    assert.equal(panel.byId('scribe-fork-choose').hidden, true);
+    assert.equal(panel.byId('scribe-fork-pull-chat').hidden, true);
+    assert.equal(panel.byId('scribe-fork-picker').hidden, false);
+    assert.equal(panel.byId('scribe-fork-open').hidden, false);
+    assert.equal(panel.text('scribe-fork-open'), 'Pull Book');
 });

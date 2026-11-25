@@ -123,6 +123,35 @@ describe('WorldsConfig.load', () => {
     }
   });
 
+  it('reads WORLDS_LOG_REPLIES: on when unset, empty or 1, off for 0, RangeError otherwise', () => {
+    const rootDir = createTempDir();
+    assert.equal(WorldsConfig.load({ rootDir, env: {} }).logReplies, true);
+    assert.equal(WorldsConfig.load({ rootDir, env: { WORLDS_LOG_REPLIES: '' } }).logReplies, true);
+    assert.equal(WorldsConfig.load({ rootDir, env: { WORLDS_LOG_REPLIES: '1' } }).logReplies, true);
+    assert.equal(WorldsConfig.load({ rootDir, env: { WORLDS_LOG_REPLIES: '0' } }).logReplies, false);
+    for (const badValue of ['yes', 'true', '2', ' 1', '01']) {
+      assert.throws(
+        () => WorldsConfig.load({ rootDir, env: { WORLDS_LOG_REPLIES: badValue } }),
+        new RangeError(`Invalid WORLDS_LOG_REPLIES: ${badValue}`),
+      );
+    }
+    fs.writeFileSync(path.join(rootDir, '.env'), 'WORLDS_LOG_REPLIES=0\n', 'utf8');
+    assert.equal(WorldsConfig.load({ rootDir, env: {} }).logReplies, false);
+  });
+
+  it('places replyLogPath in localDir', () => {
+    const rootDir = createTempDir();
+    const config = WorldsConfig.load({ rootDir, env: {} });
+    assert.equal(config.replyLogPath, path.join(config.localDir, 'model-replies.log'));
+  });
+
+  it('places modelCachePath in localDir', () => {
+    const rootDir = createTempDir();
+    const config = WorldsConfig.load({ rootDir, env: {} });
+    assert.equal(config.modelCachePath, path.join(config.localDir, 'openrouter-models-cache.json'));
+    assert.equal(config.modelCachePath, path.join(rootDir, 'local', 'openrouter-models-cache.json'));
+  });
+
   it('rejects partial, non-string, or malformed R2 credentials and accepts valid all-four credentials', () => {
     const rootDir = createTempDir();
     assert.throws(

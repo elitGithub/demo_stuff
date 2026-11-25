@@ -51,6 +51,22 @@ export const ScribeReplay = Object.freeze({
 
   /**
    * @param {object} book
+   * @param {readonly string[]} ids
+   * @returns {string[]}
+   */
+  resolveAll(book, ids) {
+    const resolved = [];
+    for (const id of ids) {
+      const subject = ScribeReplay.resolve(book, id);
+      if (!resolved.includes(subject)) {
+        resolved.push(subject);
+      }
+    }
+    return resolved;
+  },
+
+  /**
+   * @param {object} book
    * @param {string} id
    * @param {string} subject
    * @returns {string}
@@ -72,6 +88,7 @@ export const ScribeReplay = Object.freeze({
   /**
    * @param {{subject: string, category: string, target: string | null, targetText: string | null, text: string}} statement
    * @returns {string[]}
+   * @throws {TypeError}
    */
   statementKeys(statement) {
     const settings = ScribeReplay.Settings;
@@ -96,6 +113,7 @@ export const ScribeReplay = Object.freeze({
    * @param {object} book
    * @param {{subject: string, category: string, target: string | null, targetText: string | null, text: string}} mark
    * @returns {string[]}
+   * @throws {TypeError}
    */
   markKeys(book, mark) {
     return ScribeReplay.statementKeys({
@@ -136,6 +154,7 @@ export const ScribeReplay = Object.freeze({
    * @param {object} book
    * @param {object} fact
    * @returns {boolean}
+   * @throws {TypeError}
    */
   erase(book, fact) {
     const struck =
@@ -160,6 +179,7 @@ export const ScribeReplay = Object.freeze({
    * @param {readonly object[]} rulings
    * @param {Object<string, Function>} handlers
    * @returns {void}
+   * @throws {TypeError}
    */
   apply(book, rulings, handlers) {
     for (const [order, operation] of rulings.entries()) {
@@ -220,6 +240,7 @@ export const ScribeReplay = Object.freeze({
   /**
    * @param {string} category
    * @returns {string | null}
+   * @throws {TypeError}
    */
   kindOf(category) {
     if (category === ScribeCategory.Settings.RelationCategory) {
@@ -232,6 +253,7 @@ export const ScribeReplay = Object.freeze({
   /**
    * @param {string} text
    * @returns {string}
+   * @throws {TypeError}
    */
   wording(text) {
     return ScribeText.words(text).join(ScribeReplay.Settings.WordJoiner);
@@ -240,6 +262,7 @@ export const ScribeReplay = Object.freeze({
   /**
    * @param {object} fact
    * @returns {string}
+   * @throws {TypeError}
    */
   filedValue(fact) {
     if (fact.evidence && Object.hasOwn(fact.evidence, 'valueSupplied')) {
@@ -289,6 +312,7 @@ export const ScribeReplay = Object.freeze({
    * @param {object} fact
    * @param {string} kind
    * @returns {string[]}
+   * @throws {TypeError}
    */
   keys(fact, kind) {
     if (fact.category === ScribeCategory.Settings.RelationCategory) {
@@ -479,6 +503,7 @@ export const ScribeReplay = Object.freeze({
    * @param {{operation: object, position: number, origin: string}} item
    * @param {string} id
    * @returns {object | null}
+   * @throws {TypeError}
    */
   file(book, item, id) {
     const operation = item.operation;
@@ -506,7 +531,7 @@ export const ScribeReplay = Object.freeze({
       ended: null,
       pinned: false,
       made: false,
-      ...(Array.isArray(operation.audience) ? { audience: [...operation.audience] } : {}),
+      ...(Array.isArray(operation.audience) ? { audience: ScribeReplay.resolveAll(book, operation.audience) } : {}),
     };
     book.sources?.push(fact);
     if (ScribeReplay.erase(book, fact)) {
@@ -554,6 +579,7 @@ export const ScribeReplay = Object.freeze({
    * @param {{operation: object, position: number, origin: string}} item
    * @param {object} named
    * @returns {object | null}
+   * @throws {TypeError}
    */
   succeed(book, item, named) {
     const status = ScribeReplay.Status;
@@ -604,6 +630,7 @@ export const ScribeReplay = Object.freeze({
      * @param {object} book
      * @param {{operation: object, position: number, origin: string}} item
      * @returns {void}
+     * @throws {TypeError}
      */
     Fact(book, item) {
       ScribeReplay.file(book, item, item.operation.fact);
@@ -613,6 +640,7 @@ export const ScribeReplay = Object.freeze({
      * @param {object} book
      * @param {{operation: object, position: number, origin: string}} item
      * @returns {void}
+     * @throws {TypeError}
      */
     Refine(book, item) {
       const operation = item.operation;
@@ -636,6 +664,7 @@ export const ScribeReplay = Object.freeze({
      * @param {object} book
      * @param {{operation: object, position: number, origin: string}} item
      * @returns {void}
+     * @throws {TypeError}
      */
     Change(book, item) {
       const operation = item.operation;
@@ -739,6 +768,7 @@ export const ScribeReplay = Object.freeze({
      * @param {object} book
      * @param {{operation: object, position: number, origin: string}} item
      * @returns {void}
+     * @throws {TypeError}
      */
     AddFact(book, item) {
       const operation = item.operation;
@@ -859,6 +889,7 @@ export const ScribeReplay = Object.freeze({
      * @param {object} book
      * @param {object} operation
      * @returns {void}
+     * @throws {TypeError}
      */
     RemoveFact(book, operation) {
       book.removed.add(operation.fact);
@@ -904,6 +935,7 @@ export const ScribeReplay = Object.freeze({
      * @param {object} book
      * @param {object} operation
      * @returns {void}
+     * @throws {TypeError}
      */
     Pin(book, operation) {
       const status = ScribeReplay.Status;
@@ -957,6 +989,7 @@ export const ScribeReplay = Object.freeze({
           ended: null,
           pinned: false,
           made: true,
+          ...(Array.isArray(operation.audience) ? { audience: ScribeReplay.resolveAll(book, operation.audience) } : {}),
         };
         book.sources?.push(winner);
         if (ScribeReplay.erase(book, winner)) {
@@ -985,6 +1018,7 @@ export const ScribeReplay = Object.freeze({
      * @param {object} operation
      * @param {number} order
      * @returns {void}
+     * @throws {TypeError}
      */
     Widen(book, operation, order) {
       const known =
@@ -995,7 +1029,7 @@ export const ScribeReplay = Object.freeze({
       }
       const ruling = { order, operation };
       book.widenings.set(operation.fact, ruling);
-      if (operation.editedSource) {
+      if (operation.editedSource || operation.exact === true) {
         return;
       }
       for (const key of ScribeReplay.markKeys(book, operation.mark)) {
@@ -1071,6 +1105,7 @@ export const ScribeReplay = Object.freeze({
    * @param {Array<object> | null} [sources]
    * @param {ReadonlyMap<string, object> | readonly object[] | null} [messages]
    * @returns {Readonly<{revision: number, subjects: readonly object[], facts: readonly object[], scenes: readonly object[], nights: readonly object[], threads: readonly object[], conflicts: readonly object[], lookAlikes: readonly object[], stale: readonly object[], refinements: readonly object[], aliases: readonly object[], questions: readonly object[], unaliased: readonly object[], distinct: readonly object[], contradictions: readonly object[]}>}
+   * @throws {TypeError}
    */
   run(log, order, pending = null, fingerprints = null, edits = null, sources = null, messages = null) {
     const settings = ScribeReplay.Settings;
@@ -1362,6 +1397,10 @@ export const ScribeReplay = Object.freeze({
       }
     }
 
+    /**
+     * @param {{evidence?: {attribute?: string}, category: string}} fact
+     * @returns {string}
+     */
     const decisionField = (fact) => {
       return JSON.stringify([ScribeReplay.keys(fact, ScribeCategory.Kind.Fixed)[0], fact.evidence?.attribute ?? fact.category]);
     };
@@ -1488,9 +1527,10 @@ export const ScribeReplay = Object.freeze({
       if (book.widenings.size === 0 || fact.status === status.Removed) {
         continue;
       }
+      const own = book.widenings.get(fact.id);
       const edit = edits.get(fact.id);
       const keys = ScribeReplay.statementKeys(edit ? { ...fact, text: edit.source.book } : fact);
-      const ruling = ScribeReplay.latest(book.widenedMarks, keys, book.widenings.get(fact.id));
+      const ruling = own?.operation.exact === true ? own : ScribeReplay.latest(book.widenedMarks, keys, own);
       if (ruling === undefined) {
         continue;
       }

@@ -34,6 +34,10 @@ export class WorldsApp {
   #health = null;
   #settings = null;
   #modelCatalog = null;
+  #modelCatalogLoading = false;
+  #modelCatalogError = '';
+  #modelLoadSeq = 0;
+  #modelAbortController = null;
   #campaigns = [];
   #campaignsTotal = 0;
   #campaignsNextCursor = null;
@@ -167,6 +171,7 @@ export class WorldsApp {
           }
         }
         await this.#refreshCast({ includeArchived: this.#castIncludeArchived });
+        return savedCharacter;
       },
     });
 
@@ -369,14 +374,18 @@ export class WorldsApp {
           this.#characterModal.open({
             character: null,
             modelCatalog: this.#modelCatalog,
-            onLoadAllModels: (refresh) => this.#loadAllModels(refresh),
+            modelCatalogLoading: this.#modelCatalogLoading,
+            modelCatalogError: this.#modelCatalogError,
+            onRefreshModels: () => this.#loadModels(true),
           });
         },
         onEditCharacter: (character) => {
           this.#characterModal.open({
             character,
             modelCatalog: this.#modelCatalog,
-            onLoadAllModels: (refresh) => this.#loadAllModels(refresh),
+            modelCatalogLoading: this.#modelCatalogLoading,
+            modelCatalogError: this.#modelCatalogError,
+            onRefreshModels: () => this.#loadModels(true),
           });
         },
         onToggleArchiveCharacter: async (character) => {
@@ -503,11 +512,10 @@ export class WorldsApp {
           const updatedSettings = await this.#api.updateSettings(patch);
           this.#settings = updatedSettings;
           this.#inspectorDrawer.setSettings(updatedSettings);
+          this.#inspectorDrawer.setSettingsWarnings(updatedSettings.warnings);
           this.#renderTopBar();
         },
-        onLoadAllModels: async (refresh = false) => {
-          await this.#loadAllModels(refresh);
-        },
+        onRefreshModels: () => this.#loadModels(true),
       },
     });
   }
@@ -615,21 +623,20 @@ export class WorldsApp {
     this.#inspectorDrawer.render();
     this.#chatView.render();
 
+    void this.#loadModels(false);
+
     try {
-      const [health, settings, campaignsPage, modelCatalog] = await Promise.all([
+      const [health, settings, campaignsPage] = await Promise.all([
         this.#api.getHealth(),
         this.#api.getSettings(),
         this.#api.listCampaigns({ limit: 25 }),
-        this.#api.getModels({ includeAll: false }),
       ]);
       this.#health = health;
       this.#settings = settings;
-      this.#modelCatalog = modelCatalog;
       this.#campaigns = [...(campaignsPage.items ?? [])];
       this.#campaignsTotal = Number.isInteger(campaignsPage.total) ? campaignsPage.total : this.#campaigns.length;
       this.#campaignsNextCursor = campaignsPage.nextCursor ?? null;
 
-      this.#inspectorDrawer.setModelCatalog(modelCatalog);
       this.#inspectorDrawer.setSettings(settings);
       this.#renderTopBar();
 
@@ -883,14 +890,42 @@ export class WorldsApp {
    * @param {boolean} [refresh]
    * @returns {Promise<void>}
    */
-  async #loadAllModels(refresh = false) {
-    const catalog = await this.#api.getModels({
-      includeAll: true,
-      refresh: Boolean(refresh),
-    });
-    this.#modelCatalog = catalog;
-    this.#inspectorDrawer.setModelCatalog(catalog);
-    this.#characterModal.setModelCatalog(catalog);
+  async #loadModels(refresh = false) {
+    this.#modelLoadSeq += 1;
+    const requestSeq = this.#modelLoadSeq;
+    if (this.#modelAbortController !== null) {
+      this.#modelAbortController.abort();
+    }
+    const controller = new AbortController();
+    this.#modelAbortController = controller;
+
+    this.#modelCatalogLoading = true;
+    this.#modelCatalogError = '';
+    this.#inspectorDrawer.setModelCatalogLoading(true);
+    this.#characterModal.setModelCatalogLoading(true);
+
+    try {
+      const catalog = refresh
+        ? await this.#api.refreshModels({ signal: controller.signal })
+        : await this.#api.getModels({ signal: controller.signal });
+      if (requestSeq !== this.#modelLoadSeq || controller.signal.aborted) {
+        return;
+      }
+      this.#modelCatalog = catalog;
+      this.#modelCatalogLoading = false;
+      this.#modelCatalogError = '';
+      this.#inspectorDrawer.setModelCatalog(catalog);
+      this.#characterModal.setModelCatalog(catalog);
+    } catch (loadError) {
+      if (requestSeq !== this.#modelLoadSeq || controller.signal.aborted) {
+        return;
+      }
+      const message = loadError instanceof Error ? loadError.message : String(loadError);
+      this.#modelCatalogLoading = false;
+      this.#modelCatalogError = message;
+      this.#inspectorDrawer.setModelCatalogError(message);
+      this.#characterModal.setModelCatalogError(message);
+    }
   }
 
   /**

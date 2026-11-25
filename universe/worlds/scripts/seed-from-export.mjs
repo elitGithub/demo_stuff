@@ -12,12 +12,22 @@ import { SqliteStore } from '../src/store/SqliteStore.mjs';
 import { AvatarToken } from '../src/store/enums/AvatarToken.mjs';
 import { CharacterTier } from '../src/store/enums/CharacterTier.mjs';
 import { SceneType } from '../src/store/enums/SceneType.mjs';
+import { SpeakerType } from '../src/store/enums/SpeakerType.mjs';
+import { TurnMode } from '../src/store/enums/TurnMode.mjs';
+import { TurnRole } from '../src/store/enums/TurnRole.mjs';
 
-const DEFAULT_EXPORT_PATH = '/var/www/demo_stuff/zeta-dm-memory/scribe/private/hero_gone_latest.json';
+const DEFAULT_EXPORT_PATH = '/var/www/demo_stuff/zeta-dm-memory/scribe/private/hero_gone_latest_updated.json';
 const DEFAULT_ALLOWED_ROOT = '/var/www';
 const DEFAULT_TITLE = 'Seeded Campaign';
 const DEFAULT_LOCATION = 'Opening Scene';
 const DEFAULT_TIME_LABEL = 'Daytime';
+const NARRATOR_SPEAKER_NAME = 'Narrator';
+const USER_SENDER_TYPE = 'USER';
+const NARRATOR_POSITION = 'NARRATOR';
+const PLAYER_POSITION = 'RIGHT';
+const FLAG_PREFIX = '-';
+const CHARACTER_SLUG_PREFIX = 'char-';
+const NUL_CHARACTER = '\0';
 const FIRST_DAY = 1;
 const MAX_TITLE_LENGTH = 120;
 const MAX_BASE_SLUG_LENGTH = 42;
@@ -25,13 +35,24 @@ const MAX_SLUG_LENGTH = 48;
 const TOP_MENTIONED_MAIN_COUNT = 3;
 const PERSONA_FACT_COUNT = 4;
 const BLOCKING_DAMAGE = Object.freeze(['book', 'campaign']);
-const VALUE_FLAGS = Object.freeze(['--title', '--db', '--main', '--player']);
-const HELP_FLAGS = Object.freeze(['--help', '-h']);
-const KNOWN_FLAGS = Object.freeze([...VALUE_FLAGS, '--dry-run', '--force', ...HELP_FLAGS]);
+const CAMPAIGN_PAGE_LIMIT = 50;
+const Flag = Object.freeze({
+  Title: '--title',
+  Db: '--db',
+  Main: '--main',
+  Player: '--player',
+  DryRun: '--dry-run',
+  Force: '--force',
+  Help: '--help',
+  HelpShort: '-h',
+});
+const VALUE_FLAGS = Object.freeze([Flag.Title, Flag.Db, Flag.Main, Flag.Player]);
+const HELP_FLAGS = Object.freeze([Flag.Help, Flag.HelpShort]);
+const KNOWN_FLAGS = Object.freeze([...VALUE_FLAGS, Flag.DryRun, Flag.Force, ...HELP_FLAGS]);
 const TRAILING_HIGH_SURROGATE = /[\uD800-\uDBFF]$/;
 const SUBJECT_ID_PATTERN = /^S(\d+)$/;
-const USAGE = 'Usage: node scripts/seed-from-export.mjs [exportPath] [--title <title>] [--db <sqlitePath>] '
-  + '[--main <slugNameAliasOrSubjectId,...>] [--player <slugNameAliasOrSubjectId>] [--dry-run] [--force]\n';
+const USAGE = `Usage: node scripts/seed-from-export.mjs [exportPath] [${Flag.Title} <title>] [${Flag.Db} <sqlitePath>] `
+  + `[${Flag.Main} <slugNameAliasOrSubjectId,...>] [${Flag.Player} <slugNameAliasOrSubjectId>] [${Flag.DryRun}] [${Flag.Force}]\n`;
 const AVATAR_TOKENS = Object.freeze([
   AvatarToken.Sage,
   AvatarToken.Rose,
@@ -104,9 +125,9 @@ export class ZetaSeeder {
       }
       if (HELP_FLAGS.includes(arg)) {
         help = true;
-      } else if (arg === '--dry-run') {
+      } else if (arg === Flag.DryRun) {
         dryRun = true;
-      } else if (arg === '--force') {
+      } else if (arg === Flag.Force) {
         force = true;
       } else if (VALUE_FLAGS.includes(arg)) {
         const nextValue = argv[index + 1];
@@ -115,19 +136,19 @@ export class ZetaSeeder {
         }
         index += 1;
         const value = nextValue.trim();
-        if (arg === '--title') {
+        if (arg === Flag.Title) {
           title = value;
-        } else if (arg === '--db') {
+        } else if (arg === Flag.Db) {
           dbPath = value;
-        } else if (arg === '--player') {
+        } else if (arg === Flag.Player) {
           playerRef = value;
         } else {
           mainRefs = value.split(',').map((entry) => entry.trim()).filter((entry) => entry.length > 0);
           if (mainRefs.length === 0) {
-            throw new Error('Flag --main requires at least one non-empty reference.');
+            throw new Error(`Flag ${Flag.Main} requires at least one non-empty reference.`);
           }
         }
-      } else if (arg.startsWith('-')) {
+      } else if (arg.startsWith(FLAG_PREFIX)) {
         throw new Error(`Unknown CLI flag: ${arg}`);
       } else if (positionalPath === null) {
         positionalPath = arg;
@@ -155,7 +176,7 @@ export class ZetaSeeder {
    * @throws {Error}
    */
   static resolveSafeExportPath(rawPath, allowedRoots = [DEFAULT_ALLOWED_ROOT]) {
-    if (typeof rawPath !== 'string' || rawPath.trim().length === 0 || rawPath.includes('\0')) {
+    if (typeof rawPath !== 'string' || rawPath.trim().length === 0 || rawPath.includes(NUL_CHARACTER)) {
       throw new Error('Export file path must be a non-empty valid filesystem path.');
     }
     if (!Array.isArray(allowedRoots) || allowedRoots.length === 0) {
@@ -335,6 +356,10 @@ export class ZetaSeeder {
     } catch (error) {
       throw new Error(`Scribe log could not be replayed: ${error.message}`, { cause: error });
     }
+    if (state.lookAlikes.length > 0) {
+      const [pair] = state.lookAlikes;
+      throw new Error(`Subjects ${pair.first} and ${pair.second} are look-alikes in the export, which the seed cannot copy.`);
+    }
 
     const maxLabel = ScribeAnswer.Settings.MaxLabel;
     const survivorOf = new Map();
@@ -346,6 +371,25 @@ export class ZetaSeeder {
      * @returns {string}
      */
     const survivor = (subjectId) => survivorOf.get(subjectId) ?? subjectId;
+
+    const akaFactTexts = new Map();
+    for (const fact of state.facts) {
+      if (fact.category === ScribeLogCore.Settings.AkaCategory && fact.status === ScribeReplay.Status.InForce) {
+        const owner = survivor(fact.subject);
+        const texts = akaFactTexts.get(owner) ?? new Set();
+        texts.add(fact.text);
+        akaFactTexts.set(owner, texts);
+      }
+    }
+    const mergedNames = new Map();
+    for (const subject of state.subjects) {
+      if (subject.mergedInto !== null) {
+        const names = mergedNames.get(subject.mergedInto) ?? new Set();
+        names.add(subject.label);
+        names.add(subject.name);
+        mergedNames.set(subject.mergedInto, names);
+      }
+    }
 
     const subjects = [];
     for (const subject of state.subjects) {
@@ -362,16 +406,25 @@ export class ZetaSeeder {
       }
       const recordedNames = state.aliases.filter((record) => record.subject === subject.id).map((record) => record.name);
       const aliases = [];
+      const recordAliases = [];
       for (const alias of [...recordedNames, ...subject.aka]) {
         if (!ZetaSeeder.isText(alias)) {
           throw new Error(`Subject ${subject.id} has an alias that is not text.`);
         }
         const clampedAlias = ZetaSeeder.clampText(alias, maxLabel);
-        if (!aliases.includes(clampedAlias)) {
-          aliases.push(clampedAlias);
+        const akaFactGivesAlias = akaFactTexts.get(subject.id)?.has(alias) === true;
+        const characterAlias = akaFactGivesAlias ? alias.trim() : clampedAlias;
+        if (!aliases.includes(characterAlias)) {
+          aliases.push(characterAlias);
+        }
+        const givenByAkaFact = akaFactGivesAlias
+          && !recordedNames.includes(alias)
+          && !mergedNames.get(subject.id)?.has(alias);
+        if (!givenByAkaFact && !recordAliases.includes(clampedAlias)) {
+          recordAliases.push(clampedAlias);
         }
       }
-      subjects.push({ id: subject.id, name, kind: subject.kind, assumed: subject.assumed, aliases });
+      subjects.push({ id: subject.id, name, kind: subject.kind, assumed: subject.assumed, aliases, recordAliases });
     }
     const seededSubjectIds = new Set(subjects.map((subject) => subject.id));
 
@@ -454,7 +507,7 @@ export class ZetaSeeder {
         .replace(/[^a-z0-9_-]+/g, '-')
         .replace(/^[-_]+|[-_]+$/g, '');
       if (!/^[a-z0-9]/.test(baseSlug)) {
-        baseSlug = `char-${baseSlug}`.replace(/-+$/g, '');
+        baseSlug = `${CHARACTER_SLUG_PREFIX}${baseSlug}`.replace(/-+$/g, '');
       }
       baseSlug = baseSlug.slice(0, MAX_BASE_SLUG_LENGTH);
       let uniqueSlug = baseSlug;
@@ -502,6 +555,21 @@ export class ZetaSeeder {
       character.tier = character.isPlayer || mainCharacters.has(character) ? CharacterTier.Main : CharacterTier.Recurring;
     }
 
+    const sceneTimeline = state.scenes.map((scene, sceneIndex) => {
+      const sceneTime = scene.evidence?.time;
+      return {
+        sceneNumber: sceneIndex + 1,
+        firstPosition: Number.isSafeInteger(scene.firstPosition) ? scene.firstPosition : 1,
+        day: Number.isSafeInteger(scene.day) && scene.day >= FIRST_DAY ? scene.day : FIRST_DAY,
+        timeLabel: ZetaSeeder.isText(sceneTime) ? sceneTime.trim() : DEFAULT_TIME_LABEL,
+        location: ZetaSeeder.isText(scene.place) ? scene.place.trim() : DEFAULT_LOCATION,
+        sceneType: scene.reach === ScribeAnswer.Reach.Private || scene.narrowed === true
+          ? SceneType.Private
+          : SceneType.Public,
+        present: Array.isArray(scene.present) ? scene.present : [],
+      };
+    });
+
     let initialScene = {
       day: FIRST_DAY,
       timeLabel: DEFAULT_TIME_LABEL,
@@ -509,7 +577,7 @@ export class ZetaSeeder {
       sceneType: SceneType.Public,
       presentSubjectIds: [],
     };
-    const lastScene = state.scenes.at(-1) ?? null;
+    const lastScene = sceneTimeline.at(-1) ?? null;
     if (lastScene !== null) {
       const presentSubjectIds = [];
       for (const attendee of lastScene.present) {
@@ -521,16 +589,105 @@ export class ZetaSeeder {
           presentSubjectIds.push(presentId);
         }
       }
-      const sceneTime = lastScene.evidence?.time;
       initialScene = {
-        day: Number.isSafeInteger(lastScene.day) && lastScene.day >= FIRST_DAY ? lastScene.day : FIRST_DAY,
-        timeLabel: ZetaSeeder.isText(sceneTime) ? sceneTime.trim() : DEFAULT_TIME_LABEL,
-        location: ZetaSeeder.isText(lastScene.place) ? lastScene.place.trim() : DEFAULT_LOCATION,
-        sceneType: lastScene.reach === ScribeAnswer.Reach.Private || lastScene.narrowed === true
-          ? SceneType.Private
-          : SceneType.Public,
+        day: lastScene.day,
+        timeLabel: lastScene.timeLabel,
+        location: lastScene.location,
+        sceneType: lastScene.sceneType,
         presentSubjectIds,
       };
+    }
+
+    const turns = [];
+    for (let messageIndex = 0; messageIndex < messages.length; messageIndex += 1) {
+      const message = messages[messageIndex];
+      const messagePosition = messageIndex + 1;
+      const rawContents = Array.isArray(message.contents) ? message.contents : [];
+      const mergedBeats = [];
+      for (const contentEntry of rawContents) {
+        if (!ZetaSeeder.isRecord(contentEntry) || typeof contentEntry.text !== 'string') {
+          continue;
+        }
+        const positionTag = typeof contentEntry.position === 'string' ? contentEntry.position.trim().toUpperCase() : '';
+        const speakerName = typeof contentEntry.speakerName === 'string' ? contentEntry.speakerName.trim() : '';
+        const previousBeat = mergedBeats.at(-1) ?? null;
+        if (
+          previousBeat !== null
+          && previousBeat.positionTag === positionTag
+          && previousBeat.speakerName === speakerName
+        ) {
+          const needsSeparator = previousBeat.text.length > 0
+            && !previousBeat.text.endsWith('\n')
+            && !contentEntry.text.startsWith('\n');
+          previousBeat.text = needsSeparator
+            ? `${previousBeat.text}\n${contentEntry.text}`
+            : `${previousBeat.text}${contentEntry.text}`;
+        } else {
+          mergedBeats.push({ positionTag, speakerName, text: contentEntry.text });
+        }
+      }
+      const cleanedBeats = mergedBeats
+        .map((beat) => ({
+          positionTag: beat.positionTag,
+          speakerName: beat.speakerName,
+          text: beat.text.trim(),
+        }))
+        .filter((beat) => beat.text.length > 0);
+      if (cleanedBeats.length === 0) {
+        continue;
+      }
+
+      let activeScene = null;
+      for (const scene of sceneTimeline) {
+        if (scene.firstPosition <= messagePosition) {
+          activeScene = scene;
+        } else {
+          break;
+        }
+      }
+      if (activeScene === null) {
+        activeScene = sceneTimeline[0] ?? null;
+      }
+
+      const presentSubjectIds = [];
+      if (activeScene !== null) {
+        for (const attendee of activeScene.present) {
+          const started = attendee.from === null || attendee.from <= messagePosition;
+          const active = attendee.until === null || attendee.until >= messagePosition;
+          if (!started || !active) {
+            continue;
+          }
+          const resolvedId = survivor(attendee.subject);
+          if (!presentSubjectIds.includes(resolvedId)) {
+            presentSubjectIds.push(resolvedId);
+          }
+        }
+      }
+      if (presentSubjectIds.length === 0) {
+        presentSubjectIds.push(...initialScene.presentSubjectIds);
+      }
+
+      const senderType = ZetaSeeder.isRecord(message.sender) && typeof message.sender.type === 'string'
+        ? message.sender.type.trim().toUpperCase()
+        : '';
+      const role = senderType === USER_SENDER_TYPE ? TurnRole.User : TurnRole.Assistant;
+      const createdAt = typeof message.messageTime === 'string' && !Number.isNaN(Date.parse(message.messageTime))
+        ? new Date(message.messageTime).toISOString()
+        : null;
+
+      turns.push({
+        role,
+        rawText: cleanedBeats.map((beat) => beat.text).join('\n\n'),
+        sceneNumber: activeScene !== null ? activeScene.sceneNumber : 1,
+        day: activeScene !== null ? activeScene.day : initialScene.day,
+        timeLabel: activeScene !== null ? activeScene.timeLabel : initialScene.timeLabel,
+        location: activeScene !== null ? activeScene.location : initialScene.location,
+        sceneType: activeScene !== null ? activeScene.sceneType : initialScene.sceneType,
+        presentSubjectIds,
+        createdAt,
+        wasRead: Object.hasOwn(log.read, message.id),
+        beats: cleanedBeats,
+      });
     }
 
     return {
@@ -540,6 +697,8 @@ export class ZetaSeeder {
       facts,
       threads,
       initialScene,
+      sceneCount: sceneTimeline.length,
+      turns,
       readThrough,
       chatMessages: messages.length,
     };
@@ -563,7 +722,7 @@ export class ZetaSeeder {
           label: subject.name,
           kind: subject.assumed ? null : subject.kind,
         });
-        for (const alias of subject.aliases) {
+        for (const alias of subject.recordAliases) {
           subjectOperations.push({
             type: ScribeAnswer.Type.Alias,
             subject: subject.id,
@@ -594,7 +753,7 @@ export class ZetaSeeder {
     const view = ScribeLogCore.view(state);
     const counters = { nextFact: log.nextFact };
     const factOperations = [];
-    const widenedFactIds = [];
+    const widenings = [];
     for (const fact of parsedExport.facts) {
       const outcome = { counters, stored: null };
       const reason = ScribeLogCore.Rulers.AddFact({
@@ -615,7 +774,7 @@ export class ZetaSeeder {
       }
       factOperations.push(outcome.stored);
       if (fact.widenedToEveryone) {
-        widenedFactIds.push(outcome.stored.fact);
+        widenings.push(outcome.stored.fact);
       }
     }
     log.nextFact = counters.nextFact;
@@ -634,11 +793,12 @@ export class ZetaSeeder {
       state = ScribeReplay.run(log, []);
     }
 
-    for (const factId of widenedFactIds) {
+    for (const wideningFact of widenings) {
       ScribeLogCore.rule(log, state, {
         type: ScribeLogCore.Ruling.Widen,
-        fact: factId,
+        fact: wideningFact,
         to: ScribeLogCore.Settings.Everyone,
+        exact: true,
       });
       state = ScribeReplay.run(log, []);
     }
@@ -691,7 +851,6 @@ export class ZetaSeeder {
     const rawJsonText = fs.readFileSync(safeExportPath, 'utf8');
     const parsedExport = ZetaSeeder.parseExport(rawJsonText, { titleOverride: title, mainRefs, playerRef });
     const materialized = ZetaSeeder.materializeScribeLog(parsedExport);
-    const bookJson = JSON.stringify(materialized.log);
     const liveFacts = materialized.state.facts.filter((fact) => ScribeReplay.live(fact));
     const relationCount = liveFacts.filter((fact) => fact.category === ScribeCategory.Settings.RelationCategory).length;
     const selectedPlayer = parsedExport.characters.find((character) => character.isPlayer) ?? null;
@@ -706,6 +865,7 @@ export class ZetaSeeder {
       relations: relationCount,
       claims: materialized.state.facts.filter((fact) => fact.status === ScribeReplay.Status.Reported).length,
       threads: materialized.state.threads.filter((thread) => thread.closed === null).length,
+      turns: parsedExport.turns.length,
       readThrough: parsedExport.readThrough,
       chatMessages: parsedExport.chatMessages,
       dryRun: Boolean(dryRun),
@@ -718,7 +878,7 @@ export class ZetaSeeder {
     const resolvedDbPath = dbPath !== null && dbPath.trim().length > 0
       ? path.resolve(dbPath.trim())
       : WorldsConfig.load().dbPath;
-    if (resolvedDbPath.includes('\0')) {
+    if (resolvedDbPath.includes(NUL_CHARACTER)) {
       throw new Error('Invalid SQLite database path.');
     }
     fs.mkdirSync(path.dirname(resolvedDbPath), { recursive: true });
@@ -729,7 +889,7 @@ export class ZetaSeeder {
         let existingMatch = null;
         let afterCursor = null;
         do {
-          const campaignPage = store.listCampaigns({ limit: 50, after: afterCursor });
+          const campaignPage = store.listCampaigns({ limit: CAMPAIGN_PAGE_LIMIT, after: afterCursor });
           const foundCampaign = campaignPage.items.find((item) => item.title === parsedExport.title);
           if (foundCampaign) {
             existingMatch = foundCampaign;
@@ -740,13 +900,13 @@ export class ZetaSeeder {
 
         if (existingMatch !== null) {
           if (!force) {
-            throw new Error(`Campaign "${parsedExport.title}" already exists in database; pass --force to replace it or --title for a distinct name.`);
+            throw new Error(`Campaign "${parsedExport.title}" already exists in database; pass ${Flag.Force} to replace it or ${Flag.Title} for a distinct name.`);
           }
           store.deleteCampaign(existingMatch.id);
         }
 
         const openingScene = {
-          sceneNumber: 1,
+          sceneNumber: Math.max(1, parsedExport.sceneCount ?? 1),
           day: parsedExport.initialScene.day,
           timeLabel: parsedExport.initialScene.timeLabel,
           location: parsedExport.initialScene.location,
@@ -761,7 +921,7 @@ export class ZetaSeeder {
           sceneState: openingScene,
         });
 
-        let playerCharacterId = null;
+        let playerCharacter = null;
         const presentSubjectIds = new Set(parsedExport.initialScene.presentSubjectIds);
         const createdCharacters = [];
         for (const character of parsedExport.characters) {
@@ -777,7 +937,7 @@ export class ZetaSeeder {
           });
           createdCharacters.push(created);
           if (created.isPlayer) {
-            playerCharacterId = created.id;
+            playerCharacter = created;
           }
         }
 
@@ -790,16 +950,124 @@ export class ZetaSeeder {
             .map((created) => created.id);
         }
 
-        if (playerCharacterId !== null || presentCharacterIds.length > 0) {
+        const finalOpeningScene = { ...openingScene, presentIds: presentCharacterIds };
+        if (playerCharacter !== null || presentCharacterIds.length > 0) {
           store.updateCampaign(campaign.id, {
-            ...(playerCharacterId !== null ? { playerCharacterId } : {}),
-            sceneState: { ...openingScene, presentIds: presentCharacterIds },
+            ...(playerCharacter !== null ? { playerCharacterId: playerCharacter.id } : {}),
+            sceneState: finalOpeningScene,
           });
         }
 
+        const characterBySubjectId = new Map();
+        const characterByName = new Map();
+        const characterByAlias = new Map();
+        const characterBySlug = new Map();
+        for (const created of createdCharacters) {
+          if (created.scribeSubjectId !== null) {
+            characterBySubjectId.set(created.scribeSubjectId, created);
+          }
+          const normalizedName = ScribeText.normaliseName(created.name);
+          if (normalizedName.length > 0 && !characterByName.has(normalizedName)) {
+            characterByName.set(normalizedName, created);
+          }
+          characterBySlug.set(created.slug.toLowerCase(), created);
+          for (const alias of created.aliases) {
+            const normalizedAlias = ScribeText.normaliseName(alias);
+            if (normalizedAlias.length > 0 && !characterByAlias.has(normalizedAlias)) {
+              characterByAlias.set(normalizedAlias, created);
+            }
+          }
+        }
+
+        let lastTurnSeq = 0;
+        if (parsedExport.turns.length > 0) {
+          const turnPayloads = parsedExport.turns.map((parsedTurn) => {
+            const witnessSet = new Set();
+            for (const subjectId of parsedTurn.presentSubjectIds) {
+              const witness = characterBySubjectId.get(subjectId);
+              if (witness !== undefined) {
+                witnessSet.add(witness.id);
+              }
+            }
+            const mappedBeats = parsedTurn.beats.map((beat) => {
+              const normalizedSpeaker = ScribeText.normaliseName(beat.speakerName);
+              const isNarrator = beat.positionTag === NARRATOR_POSITION
+                || normalizedSpeaker.length === 0
+                || normalizedSpeaker === ScribeAnswer.Settings.NarratorName;
+              if (isNarrator) {
+                return {
+                  speakerType: SpeakerType.Narrator,
+                  characterId: null,
+                  speakerName: NARRATOR_SPEAKER_NAME,
+                  text: beat.text,
+                };
+              }
+              if (parsedTurn.role === TurnRole.User && beat.positionTag === PLAYER_POSITION && playerCharacter !== null) {
+                witnessSet.add(playerCharacter.id);
+                return {
+                  speakerType: SpeakerType.Player,
+                  characterId: playerCharacter.id,
+                  speakerName: playerCharacter.name,
+                  text: beat.text,
+                };
+              }
+              const matched = characterByName.get(normalizedSpeaker)
+                ?? characterByAlias.get(normalizedSpeaker)
+                ?? characterBySlug.get(beat.speakerName.toLowerCase())
+                ?? null;
+              if (matched !== null) {
+                witnessSet.add(matched.id);
+                return {
+                  speakerType: matched.isPlayer ? SpeakerType.Player : SpeakerType.Character,
+                  characterId: matched.id,
+                  speakerName: matched.name,
+                  text: beat.text,
+                };
+              }
+              return {
+                speakerType: SpeakerType.Narrator,
+                characterId: null,
+                speakerName: beat.speakerName,
+                text: beat.text,
+              };
+            });
+            const witnessIds = [...witnessSet];
+            const turnSceneState = {
+              sceneNumber: parsedTurn.sceneNumber,
+              day: parsedTurn.day,
+              timeLabel: parsedTurn.timeLabel,
+              location: parsedTurn.location,
+              sceneType: parsedTurn.sceneType,
+              presentIds: witnessIds,
+              remoteIds: [],
+              offscreenNotes: {},
+              activeWalkOns: [],
+            };
+            return {
+              role: parsedTurn.role,
+              mode: TurnMode.Normal,
+              rawText: parsedTurn.rawText,
+              sceneNumber: parsedTurn.sceneNumber,
+              witnessIds,
+              sceneStateBefore: turnSceneState,
+              sceneStateAfter: turnSceneState,
+              createdAt: parsedTurn.createdAt,
+              beats: mappedBeats.map((beat) => ({ ...beat, witnessIds })),
+            };
+          });
+
+          const insertedTurns = store.importTurns(campaign.id, turnPayloads);
+          for (let turnIndex = 0; turnIndex < insertedTurns.length; turnIndex += 1) {
+            if (parsedExport.turns[turnIndex].wasRead) {
+              materialized.log.read[insertedTurns[turnIndex].id] = 1;
+              lastTurnSeq = insertedTurns[turnIndex].seq;
+            }
+          }
+        }
+
         store.saveScribeBook(campaign.id, {
-          bookJson,
-          lastTurnSeq: 0,
+          bookJson: JSON.stringify(materialized.log),
+          lastTurnSeq,
           dirty: false,
         });
 

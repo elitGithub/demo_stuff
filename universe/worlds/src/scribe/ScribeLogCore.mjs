@@ -1052,6 +1052,7 @@ export const ScribeLogCore = Object.freeze({
         cite: source === undefined ? null : source.cite,
         position: source === undefined ? ScribeReplay.Settings.PinnedPosition : source.position,
         ...(source?.evidence ? { evidence: source.evidence } : {}),
+        ...(Array.isArray(source?.audience) ? { audience: [...source.audience] } : {}),
       };
       return null;
     },
@@ -1157,12 +1158,13 @@ export const ScribeLogCore = Object.freeze({
      * @returns {string | null}
      */
     Widen(operation, view, outcome) {
-      const { fact, to } = operation;
+      const { fact, to, exact } = operation;
       const everyone = to === ScribeLogCore.Settings.Everyone;
       const named = view.facts.get(fact);
       if (
         typeof fact !== 'string' ||
         (!everyone && !ScribeLogCore.ids(to)) ||
+        (exact !== undefined && exact !== true) ||
         (named !== undefined && named.status === ScribeReplay.Status.Removed)
       ) {
         return ScribeLogCore.Settings.InvalidOperation;
@@ -1176,6 +1178,7 @@ export const ScribeLogCore = Object.freeze({
         fact,
         to: everyone ? to : [...to],
         mark: ScribeLogCore.mark(named),
+        ...(exact === true ? { exact: true } : {}),
       };
       return null;
     },

@@ -1,3 +1,6 @@
+import { FocusKeeper } from './FocusKeeper.mjs';
+import { ModelCatalogView } from './ModelCatalogView.mjs';
+
 export class InspectorDrawer {
   static #Tabs = Object.freeze([
     { id: 'scene', label: 'Scene' },
@@ -23,10 +26,15 @@ export class InspectorDrawer {
     { key: 'scribe', label: 'Scribe / Pedant / Muse model' },
   ]);
 
+  static #FilterPlaceholder = 'Filter OpenRouter models...';
+  static #RefreshButtonId = 'settings-refresh-models';
+  static #ScrollSelector = '.drawer-body';
+
   #drawerElement;
   #backdropElement;
   #documentRef;
   #callbacks;
+  #firstWarningElement = null;
 
   #isOpen = false;
   #activeTab = 'scene';
@@ -100,7 +108,9 @@ export class InspectorDrawer {
     modelCatalog: null,
     modelCatalogLoading: false,
     modelCatalogError: '',
+    refreshFocusPending: false,
     modelFilter: '',
+    warnings: [],
     prefilledDefaults: false,
     draft: {
       models: { director: '', composer: '', main: '', recurring: '', scribe: '' },
@@ -334,6 +344,38 @@ export class InspectorDrawer {
     this.#settingsData.modelCatalogLoading = false;
     this.#settingsData.modelCatalogError = '';
     this.#applyBlankModelDefaults();
+    this.#renderCatalogUpdate();
+  }
+
+  /**
+   * @param {boolean} isLoading
+   * @returns {void}
+   */
+  setModelCatalogLoading(isLoading) {
+    this.#settingsData.modelCatalogLoading = Boolean(isLoading);
+    if (this.#settingsData.modelCatalogLoading) {
+      this.#settingsData.modelCatalogError = '';
+    }
+    this.#renderCatalogUpdate();
+  }
+
+  /**
+   * @param {unknown} errorMessage
+   * @returns {void}
+   */
+  setModelCatalogError(errorMessage) {
+    this.#settingsData.modelCatalogLoading = false;
+    this.#settingsData.modelCatalogError = typeof errorMessage === 'string' ? errorMessage : String(errorMessage ?? '');
+    this.#renderCatalogUpdate();
+  }
+
+  /**
+   * @param {Array<string>} warnings
+   * @returns {void}
+   * @throws {TypeError}
+   */
+  setSettingsWarnings(warnings) {
+    this.#settingsData.warnings = [...warnings];
     this.render();
   }
 
@@ -345,6 +387,7 @@ export class InspectorDrawer {
       return;
     }
 
+    this.#firstWarningElement = null;
     const header = this.#documentRef.createElement('div');
     header.className = 'drawer-header';
 
@@ -1670,57 +1713,43 @@ export class InspectorDrawer {
           },
         });
 
-        const hasOpenRouterModels = Array.isArray(catalog?.openrouter);
-        const loadAllModelsBtn = this.#buildButton(
-          hasOpenRouterModels ? 'Refresh OpenRouter models' : 'Load all OpenRouter models',
-          {
-            variant: 'secondary',
-            compact: true,
-            busy: this.#settingsData.modelCatalogLoading,
-            busyLabel: 'Loading catalog...',
-            disabled: busy || typeof this.#callbacks.onLoadAllModels !== 'function',
-            onClick: async () => {
-              if (this.#settingsData.modelCatalogLoading || typeof this.#callbacks.onLoadAllModels !== 'function') {
-                return;
-              }
-              this.#settingsData.modelCatalogLoading = true;
-              this.#settingsData.modelCatalogError = '';
-              this.render();
-              try {
-                await this.#callbacks.onLoadAllModels(hasOpenRouterModels);
-              } catch (catalogError) {
-                this.#settingsData.modelCatalogLoading = false;
-                this.#settingsData.modelCatalogError = catalogError instanceof Error
-                  ? catalogError.message
-                  : String(catalogError);
-                this.render();
-              }
-            },
+        const refreshModelsBtn = this.#buildButton(ModelCatalogView.RefreshLabel, {
+          variant: 'secondary',
+          compact: true,
+          busy: this.#settingsData.modelCatalogLoading,
+          busyLabel: ModelCatalogView.RefreshBusyLabel,
+          disabled: busy || typeof this.#callbacks.onRefreshModels !== 'function',
+          onClick: () => {
+            this.#settingsData.refreshFocusPending = true;
+            return this.#callbacks.onRefreshModels();
           },
-        );
-        catalogButtons.append(applyDefaultsBtn, loadAllModelsBtn);
+        });
+        refreshModelsBtn.id = InspectorDrawer.#RefreshButtonId;
+        catalogButtons.append(applyDefaultsBtn, refreshModelsBtn);
         catalogBar.append(catalogButtons);
 
         const filterInput = this.#documentRef.createElement('input');
         filterInput.id = 'settings-model-filter';
         filterInput.type = 'search';
         filterInput.className = 'field-control';
-        filterInput.placeholder = 'Filter suggested or OpenRouter models...';
+        filterInput.placeholder = InspectorDrawer.#FilterPlaceholder;
         filterInput.value = this.#settingsData.modelFilter;
         filterInput.disabled = busy;
         catalogBar.append(this.#buildField('Model picker filter', filterInput));
 
-        const catalogStatus = this.#documentRef.createElement('div');
-        catalogStatus.className = 'item-meta';
-        const suggestedCount = Array.isArray(catalog?.recommended) ? catalog.recommended.length : 0;
-        const openRouterCount = hasOpenRouterModels ? catalog.openrouter.length : 0;
-        catalogStatus.textContent = hasOpenRouterModels
-          ? `Suggested: ${suggestedCount} · OpenRouter loaded: ${openRouterCount}`
-          : `Suggested: ${suggestedCount} · Click "Load all OpenRouter models" to browse full catalog`;
-        catalogBar.append(catalogStatus);
+        const catalogStatusText = ModelCatalogView.statusText(catalog, this.#settingsData.modelCatalogLoading);
+        if (catalogStatusText.length > 0) {
+          const catalogStatus = this.#documentRef.createElement('div');
+          catalogStatus.className = 'item-meta';
+          catalogStatus.textContent = catalogStatusText;
+          catalogBar.append(catalogStatus);
+        }
 
         if (this.#settingsData.modelCatalogError.length > 0) {
           catalogBar.append(this.#buildAlert(this.#settingsData.modelCatalogError, 'danger'));
+        }
+        if (typeof catalog?.warning === 'string' && catalog.warning.length > 0) {
+          catalogBar.append(this.#buildAlert(catalog.warning, 'warning'));
         }
         settingsForm.append(catalogBar);
 
@@ -1832,6 +1861,7 @@ export class InspectorDrawer {
         const pedantRow = this.#documentRef.createElement('label');
         pedantRow.className = 'checkbox-row';
         const pedantCheck = this.#documentRef.createElement('input');
+        pedantCheck.id = 'settings-pedant-enabled';
         pedantCheck.type = 'checkbox';
         pedantCheck.checked = draft.pedantEnabled;
         pedantCheck.disabled = busy;
@@ -1913,6 +1943,13 @@ export class InspectorDrawer {
         if (this.#settingsData.success.length > 0) {
           settingsForm.append(this.#buildAlert(this.#settingsData.success, 'success'));
         }
+        for (const settingsWarning of this.#settingsData.warnings) {
+          const warningAlert = this.#buildAlert(settingsWarning, 'warning');
+          settingsForm.append(warningAlert);
+          if (this.#firstWarningElement === null) {
+            this.#firstWarningElement = warningAlert;
+          }
+        }
 
         const settingsFooter = this.#documentRef.createElement('div');
         settingsFooter.className = 'action-row-end';
@@ -1989,6 +2026,7 @@ export class InspectorDrawer {
           this.#settingsData.saving = true;
           this.#settingsData.error = '';
           this.#settingsData.success = '';
+          this.#settingsData.warnings = [];
           this.render();
           try {
             await this.#callbacks.onSaveSettings(patch);
@@ -1998,6 +2036,9 @@ export class InspectorDrawer {
           } finally {
             this.#settingsData.saving = false;
             this.render();
+            if (this.#firstWarningElement !== null) {
+              FocusKeeper.reveal(this.#firstWarningElement);
+            }
           }
         });
 
@@ -2184,90 +2225,37 @@ export class InspectorDrawer {
    * @returns {void}
    */
   #populateModelSelect(selectElement, currentValue, filterQuery) {
-    const normalizedFilter = typeof filterQuery === 'string' ? filterQuery.trim().toLowerCase() : '';
-    const catalog = this.#settingsData.modelCatalog;
-    const nodes = [];
-
-    const placeholderOpt = this.#documentRef.createElement('option');
-    placeholderOpt.value = '';
-    placeholderOpt.textContent = 'Select a suggested or OpenRouter model...';
-    nodes.push(placeholderOpt);
-
-    const recommendedList = Array.isArray(catalog?.recommended) ? catalog.recommended : [];
-    const matchingRecommended = recommendedList.filter((item) => {
-      if (normalizedFilter.length === 0) {
-        return true;
-      }
-      return [item.id, item.name, item.recommendedFor, item.notes].some((field) => {
-        return typeof field === 'string' && field.toLowerCase().includes(normalizedFilter);
-      });
+    ModelCatalogView.populateSelect({
+      documentRef: this.#documentRef,
+      selectElement,
+      catalog: this.#settingsData.modelCatalog,
+      currentValue,
+      filterQuery,
+      emptyOptionText: ModelCatalogView.SelectPlaceholder,
+      hiddenOptionText: ModelCatalogView.SelectPlaceholder,
     });
+  }
 
-    if (matchingRecommended.length > 0) {
-      const recGroup = this.#documentRef.createElement('optgroup');
-      recGroup.label = `Suggested (Unrestricted RP) - ${matchingRecommended.length}`;
-      for (const item of matchingRecommended) {
-        const option = this.#documentRef.createElement('option');
-        option.value = item.id;
-        option.textContent = item.recommendedFor
-          ? `${item.id} (${item.recommendedFor})`
-          : item.id;
-        recGroup.append(option);
-      }
-      nodes.push(recGroup);
+  /**
+   * @returns {void}
+   */
+  #renderCatalogUpdate() {
+    const isLoadEnd = !this.#settingsData.modelCatalogLoading;
+    const returnFocusId = isLoadEnd && this.#settingsData.refreshFocusPending ? InspectorDrawer.#RefreshButtonId : '';
+    if (isLoadEnd) {
+      this.#settingsData.refreshFocusPending = false;
     }
-
-    const openRouterList = Array.isArray(catalog?.openrouter) ? catalog.openrouter : [];
-    if (openRouterList.length > 0) {
-      const matchingOpenRouter = openRouterList.filter((item) => {
-        if (normalizedFilter.length === 0) {
-          return true;
-        }
-        return [item.id, item.name].some((field) => {
-          return typeof field === 'string' && field.toLowerCase().includes(normalizedFilter);
-        });
-      });
-      const maxDisplayed = 60;
-      const displayed = matchingOpenRouter.slice(0, maxDisplayed);
-      if (
-        typeof currentValue === 'string' &&
-        currentValue.length > 0 &&
-        !displayed.some((item) => item.id === currentValue)
-      ) {
-        const currentMatch = openRouterList.find((item) => item.id === currentValue);
-        if (currentMatch !== undefined) {
-          displayed.unshift(currentMatch);
-        }
-      }
-
-      if (displayed.length > 0) {
-        const orGroup = this.#documentRef.createElement('optgroup');
-        orGroup.label = `OpenRouter Catalog (${displayed.length} of ${matchingOpenRouter.length})`;
-        for (const item of displayed) {
-          const option = this.#documentRef.createElement('option');
-          option.value = item.id;
-          const parts = [];
-          if (Number.isInteger(item.contextLength)) {
-            parts.push(`${Math.round(item.contextLength / 1000)}k`);
-          }
-          if (item.promptCostPerMillion !== null && item.completionCostPerMillion !== null) {
-            parts.push(`$${item.promptCostPerMillion}/$${item.completionCostPerMillion}`);
-          }
-          if (item.isModerated === true) {
-            parts.push('moderated');
-          }
-          option.textContent = parts.length > 0 ? `${item.id} (${parts.join(', ')})` : item.id;
-          orGroup.append(option);
-        }
-        nodes.push(orGroup);
-      }
+    if (this.#activeTab !== 'settings') {
+      return;
     }
-
-    selectElement.replaceChildren(...nodes);
-    const hasExactOption = [
-      ...matchingRecommended.map((item) => item.id),
-      ...(Array.isArray(catalog?.openrouter) ? catalog.openrouter.map((item) => item.id) : []),
-    ].includes(currentValue);
-    selectElement.value = hasExactOption ? currentValue : '';
+    FocusKeeper.keep({
+      documentRef: this.#documentRef,
+      containerElement: this.#drawerElement,
+      scrollSelector: InspectorDrawer.#ScrollSelector,
+      renderFn: () => {
+        this.render();
+      },
+      returnFocusId,
+    });
   }
 }

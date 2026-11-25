@@ -1,6 +1,5 @@
 import fs from 'node:fs';
 import { WorldsConfig } from '../config.mjs';
-import { ModelCatalog } from '../openrouter/ModelCatalog.mjs';
 import { ScribeAnalyzer } from '../scribe/ScribeAnalyzer.mjs';
 import { ScribeAnswer } from '../scribe/ScribeAnswer.mjs';
 import { ScribeCategory } from '../scribe/ScribeCategory.mjs';
@@ -18,6 +17,8 @@ export class Router {
   static #AllowedMethods = new Set(['GET', 'POST', 'PUT', 'PATCH', 'DELETE']);
   static #MutatingMethods = new Set(['POST', 'PUT', 'PATCH', 'DELETE']);
   static #MemorySections = new Set(['subjects', 'facts', 'relations', 'threads', 'rulings']);
+  static #ModelSlots = new Set(['director', 'composer', 'main', 'recurring', 'scribe']);
+  static #NewCharacterName = 'The new character';
 
   #config;
   #store;
@@ -33,11 +34,12 @@ export class Router {
   #activeControllers;
   #getSyncStatus;
   #modelCatalog;
+  #modelAvailability;
   #exclusiveCampaignOps = new Set();
   #activeCampaignLlmCounts = new Map();
 
   /**
-   * @param {{config: object, store: object, scribeService: object, pedantService: object, museService: object, turnEngine: object, syncService?: object | null, publicDir: string, csrfToken: string, port: number, rateLimiter?: RateLimiter, activeControllers?: Set<AbortController>, getSyncStatus?: (() => object) | null, modelCatalog?: ModelCatalog}} options
+   * @param {{config: object, store: object, scribeService: object, pedantService: object, museService: object, turnEngine: object, syncService?: object | null, publicDir: string, csrfToken: string, port: number, rateLimiter?: RateLimiter, activeControllers?: Set<AbortController>, getSyncStatus?: (() => object) | null, modelCatalog: object, modelAvailability: object}} options
    * @throws {TypeError | RangeError}
    */
   constructor(options = {}) {
@@ -59,7 +61,8 @@ export class Router {
       rateLimiter = new RateLimiter(),
       activeControllers = new Set(),
       getSyncStatus = null,
-      modelCatalog = new ModelCatalog(),
+      modelCatalog,
+      modelAvailability,
     } = options;
 
     if (config === null || typeof config !== 'object') {
@@ -104,6 +107,17 @@ export class Router {
     if (modelCatalog === null || typeof modelCatalog !== 'object' || typeof modelCatalog.listModels !== 'function') {
       throw new TypeError('modelCatalog must provide listModels().');
     }
+    if (
+      modelAvailability === null ||
+      typeof modelAvailability !== 'object' ||
+      typeof modelAvailability.checkSlotChanges !== 'function' ||
+      typeof modelAvailability.checkOverrideChange !== 'function' ||
+      typeof modelAvailability.blockingMessage !== 'function'
+    ) {
+      throw new TypeError(
+        'modelAvailability must provide checkSlotChanges(), checkOverrideChange() and blockingMessage().',
+      );
+    }
 
     this.#config = config;
     this.#store = store;
@@ -119,6 +133,7 @@ export class Router {
     this.#activeControllers = activeControllers;
     this.#getSyncStatus = getSyncStatus;
     this.#modelCatalog = modelCatalog;
+    this.#modelAvailability = modelAvailability;
   }
 
   /**
@@ -319,55 +334,78 @@ export class Router {
           return;
         }
         if (method === 'PUT') {
-          const body = await Security.readJsonBody(request);
-          this.#assertAllowedKeys(
-            body,
-            ['models', 'publicOdds', 'privateOdds', 'scribeInterval', 'pedantEnabled', 'dailyWarnUsd', 'openRouterApiKey'],
-            'settings',
-          );
+          await this.#runWithAbortController(request, response, async (signal) => {
+            const body = await Security.readJsonBody(request);
+            this.#assertAllowedKeys(
+              body,
+              ['models', 'publicOdds', 'privateOdds', 'scribeInterval', 'pedantEnabled', 'dailyWarnUsd', 'openRouterApiKey'],
+              'settings',
+            );
 
-          const hasApiKeyField = Object.hasOwn(body, 'openRouterApiKey');
-          if (hasApiKeyField) {
-            const candidateKey = body.openRouterApiKey;
-            if (candidateKey !== null && typeof candidateKey !== 'string') {
-              throw this.#createHttpError(400, 'openRouterApiKey must be a string or null.');
-            }
-            if (typeof candidateKey === 'string') {
-              extraSecrets.push(candidateKey);
-              if (/[\u0000-\u001f\u007f]|[^\u0000-\u00ff]/.test(candidateKey)) {
-                throw this.#createHttpError(400, 'openRouterApiKey contains invalid control or non-ByteString characters.');
-              }
-              const trimmedKey = candidateKey.trim();
-              if (trimmedKey.length > 0 && /\s/.test(trimmedKey)) {
-                throw this.#createHttpError(400, 'openRouterApiKey must not contain whitespace.');
-              }
-            }
-          }
-
-          const settingsPatch = {};
-          for (const [patchKey, patchValue] of Object.entries(body)) {
-            if (patchKey !== 'openRouterApiKey') {
-              settingsPatch[patchKey] = patchValue;
-            }
-          }
-
-          const updatedSettings = this.#store.runTransaction(() => {
-            const nextSettings = this.#store.updateSettings(settingsPatch);
+            const hasApiKeyField = Object.hasOwn(body, 'openRouterApiKey');
             if (hasApiKeyField) {
-              WorldsConfig.writeSecrets(this.#config.secretsPath, {
-                openRouterApiKey: body.openRouterApiKey,
-              });
+              const candidateKey = body.openRouterApiKey;
+              if (candidateKey !== null && typeof candidateKey !== 'string') {
+                throw this.#createHttpError(400, 'openRouterApiKey must be a string or null.');
+              }
+              if (typeof candidateKey === 'string') {
+                extraSecrets.push(candidateKey);
+                if (/[\u0000-\u001f\u007f]|[^\u0000-\u00ff]/.test(candidateKey)) {
+                  throw this.#createHttpError(400, 'openRouterApiKey contains invalid control or non-ByteString characters.');
+                }
+                const trimmedKey = candidateKey.trim();
+                if (trimmedKey.length > 0 && /\s/.test(trimmedKey)) {
+                  throw this.#createHttpError(400, 'openRouterApiKey must not contain whitespace.');
+                }
+              }
             }
-            return nextSettings;
-          });
 
-          const resolved = WorldsConfig.resolveApiKey(this.#config);
-          this.#sendJson(response, 200, {
-            ...updatedSettings,
-            apiKey: {
-              configured: resolved.key !== null,
-              source: resolved.source,
-            },
+            let warnings = [];
+            if (body.models !== undefined) {
+              if (body.models === null || typeof body.models !== 'object' || Array.isArray(body.models)) {
+                throw this.#createHttpError(400, 'models must be an object.');
+              }
+              for (const [slotName, slotModel] of Object.entries(body.models)) {
+                if (!Router.#ModelSlots.has(slotName)) {
+                  throw this.#createHttpError(400, `models.${slotName} is not a model slot.`);
+                }
+                if (typeof slotModel !== 'string') {
+                  throw this.#createHttpError(400, `models.${slotName} must be a string.`);
+                }
+              }
+              const slotChecks = await this.#modelAvailability.checkSlotChanges(body.models, { signal });
+              if (slotChecks.refusals.length > 0) {
+                throw this.#createHttpError(400, slotChecks.refusals.join(' '));
+              }
+              warnings = slotChecks.warnings;
+            }
+
+            const settingsPatch = {};
+            for (const [patchKey, patchValue] of Object.entries(body)) {
+              if (patchKey !== 'openRouterApiKey') {
+                settingsPatch[patchKey] = patchValue;
+              }
+            }
+
+            const updatedSettings = this.#store.runTransaction(() => {
+              const nextSettings = this.#store.updateSettings(settingsPatch);
+              if (hasApiKeyField) {
+                WorldsConfig.writeSecrets(this.#config.secretsPath, {
+                  openRouterApiKey: body.openRouterApiKey,
+                });
+              }
+              return nextSettings;
+            });
+
+            const resolved = WorldsConfig.resolveApiKey(this.#config);
+            this.#sendJson(response, 200, {
+              ...updatedSettings,
+              apiKey: {
+                configured: resolved.key !== null,
+                source: resolved.source,
+              },
+              warnings,
+            });
           });
           return;
         }
@@ -380,14 +418,23 @@ export class Router {
           this.#sendJson(response, 405, { error: 'Method not allowed.' });
           return;
         }
-        const includeAll = this.#parseBooleanParam(searchParams, 'includeAll');
-        const refresh = this.#parseBooleanParam(searchParams, 'refresh');
-        const catalogResult = includeAll
-          ? await this.#runWithAbortController(request, response, async (signal) => {
-              return await this.#modelCatalog.listModels({ includeAll: true, refresh, signal });
-            })
-          : await this.#modelCatalog.listModels({ includeAll: false, refresh: false });
+        const catalogResult = await this.#runWithAbortController(request, response, async (signal) => {
+          return await this.#modelCatalog.listModels({ refresh: false, signal });
+        });
         this.#sendJson(response, 200, catalogResult);
+        return;
+      }
+
+      if (segments.length === 3 && segments[1] === 'models' && segments[2] === 'refresh') {
+        if (method !== 'POST') {
+          this.#sendJson(response, 405, { error: 'Method not allowed.' });
+          return;
+        }
+        await Security.readJsonBody(request, { allowEmpty: true });
+        const refreshResult = await this.#runWithAbortController(request, response, async (signal) => {
+          return await this.#modelCatalog.listModels({ refresh: true, signal });
+        });
+        this.#sendJson(response, 200, refreshResult);
         return;
       }
 
@@ -619,6 +666,13 @@ export class Router {
             if (body.isPlayer === true && body.archived === true) {
               throw this.#createHttpError(400, 'Archived character cannot be marked as active player.');
             }
+            const createWarnings = await this.#checkModelOverride(request, response, {
+              characterName: typeof body.name === 'string' && body.name.trim().length > 0
+                ? body.name.trim()
+                : Router.#NewCharacterName,
+              storedOverride: null,
+              body,
+            });
             this.#requireIdleCampaign(campaignId);
 
             const created = this.#store.runTransaction(() => {
@@ -637,7 +691,7 @@ export class Router {
               return character;
             });
 
-            this.#sendJson(response, 201, created);
+            this.#sendJson(response, 201, { ...created, warnings: createWarnings });
             return;
           }
           this.#sendJson(response, 405, { error: 'Method not allowed.' });
@@ -688,6 +742,13 @@ export class Router {
             if (body.archived !== undefined && typeof body.archived !== 'boolean') {
               throw this.#createHttpError(400, 'archived must be a boolean.');
             }
+            const updateWarnings = await this.#checkModelOverride(request, response, {
+              characterName: typeof body.name === 'string' && body.name.trim().length > 0
+                ? body.name.trim()
+                : existingCharacter.name,
+              storedOverride: existingCharacter.modelOverride,
+              body,
+            });
             this.#requireIdleCampaign(campaignId);
 
             const updated = this.#store.runTransaction(() => {
@@ -726,7 +787,7 @@ export class Router {
               return character;
             });
 
-            this.#sendJson(response, 200, updated);
+            this.#sendJson(response, 200, { ...updated, warnings: updateWarnings });
             return;
           }
           if (method === 'DELETE') {
@@ -790,6 +851,7 @@ export class Router {
               throw this.#createHttpError(400, 'Turn text must not be empty.');
             }
 
+            this.#assertModelsAvailable(campaignId);
             this.#requireIdleCampaign(campaignId);
 
             await this.#withCampaignLock(campaignId, { exclusive: true }, async () => {
@@ -821,6 +883,7 @@ export class Router {
           if (latestPair === null || latestPair.userTurn === null || latestPair.assistantTurn === null) {
             throw this.#createHttpError(404, 'No latest turn pair available to regenerate.');
           }
+          this.#assertModelsAvailable(campaignId);
           this.#requireIdleCampaign(campaignId);
 
           await this.#withCampaignLock(campaignId, { exclusive: true }, async () => {
@@ -1049,6 +1112,7 @@ export class Router {
           }
           this.#requireCampaign(campaignId);
           await Security.readJsonBody(request, { allowEmpty: true });
+          this.#assertModelsAvailable(campaignId);
           this.#requireIdleCampaign(campaignId);
 
           const memoryResult = await this.#withCampaignLock(campaignId, { exclusive: true }, async () => {
@@ -1088,6 +1152,7 @@ export class Router {
               throw this.#createHttpError(400, 'operations must be an array.');
             }
           }
+          this.#assertModelsAvailable(campaignId);
           this.#requireIdleCampaign(campaignId);
 
           if (body.action === 'preview') {
@@ -1152,6 +1217,7 @@ export class Router {
               throw this.#createHttpError(400, 'excludeThreadIds must contain non-empty strings.');
             }
           }
+          this.#assertModelsAvailable(campaignId);
 
           const suggestion = await this.#withCampaignLock(campaignId, { exclusive: false }, async () => {
             return await this.#runWithAbortController(request, response, async (signal) => {
@@ -1374,23 +1440,43 @@ export class Router {
   }
 
   /**
-   * @param {URLSearchParams} searchParams
-   * @param {string} paramName
-   * @returns {boolean}
+   * @param {import('node:http').IncomingMessage} request
+   * @param {import('node:http').ServerResponse} response
+   * @param {{characterName: string, storedOverride: string | null, body: Record<string, unknown>}} options
+   * @returns {Promise<string[]>}
    * @throws {Error}
    */
-  #parseBooleanParam(searchParams, paramName) {
-    if (!searchParams.has(paramName)) {
-      return false;
+  async #checkModelOverride(request, response, { characterName, storedOverride, body }) {
+    if (body.modelOverride === undefined) {
+      return [];
     }
-    const rawValue = searchParams.get(paramName);
-    if (rawValue === 'true' || rawValue === '1') {
-      return true;
+    if (body.modelOverride !== null && typeof body.modelOverride !== 'string') {
+      throw this.#createHttpError(400, 'modelOverride must be a string or null.');
     }
-    if (rawValue === 'false' || rawValue === '0') {
-      return false;
+    const overrideChecks = await this.#runWithAbortController(request, response, async (signal) => {
+      return await this.#modelAvailability.checkOverrideChange(
+        characterName,
+        storedOverride,
+        body.modelOverride,
+        { signal },
+      );
+    });
+    if (overrideChecks.refusals.length > 0) {
+      throw this.#createHttpError(400, overrideChecks.refusals.join(' '));
     }
-    throw this.#createHttpError(400, `${paramName} must be true or false.`);
+    return overrideChecks.warnings;
+  }
+
+  /**
+   * @param {string} campaignId
+   * @returns {void}
+   * @throws {Error}
+   */
+  #assertModelsAvailable(campaignId) {
+    const blockingMessage = this.#modelAvailability.blockingMessage(campaignId);
+    if (blockingMessage !== null) {
+      throw this.#createHttpError(409, blockingMessage);
+    }
   }
 
   /**

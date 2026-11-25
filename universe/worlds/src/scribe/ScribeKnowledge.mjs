@@ -107,7 +107,7 @@ export const ScribeKnowledge = Object.freeze({
     if (Array.isArray(fact.audience)) {
       return Object.freeze([...new Set([fact.subject, ...fact.audience, ...fact.told, ...(fact.widened ?? [])])]);
     }
-    const noted =fact.origin === origins.Notes || fact.origin === origins.Operator;
+    const noted = fact.origin === origins.Notes || fact.origin === origins.Operator;
     if (!fact.hidden && (noted || cover === ScribeKnowledge.Cover.Open)) {
       return everyone;
     }

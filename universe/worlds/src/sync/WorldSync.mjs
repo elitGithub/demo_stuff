@@ -153,18 +153,10 @@ export class WorldSync {
       signal.addEventListener('abort', onParentAbort, { once: true });
     }
 
-    let hasForeign = false;
     let remoteControl = null;
     try {
       try {
-        hasForeign = await this.#transport.hasForeignObjects({
-          allowedPrefix: this.#allowedRootFolder,
-          timeoutMs: this.#pullTimeoutMs,
-          signal: startupController.signal,
-        });
-        if (!hasForeign) {
-          remoteControl = await this.#readRemoteControl(startupController.signal);
-        }
+        remoteControl = await this.#readRemoteControl(startupController.signal);
       } catch (error) {
         if (signal?.aborted) {
           throw error;
@@ -198,20 +190,6 @@ export class WorldSync {
       if (onParentAbort !== null && signal !== undefined) {
         signal.removeEventListener('abort', onParentAbort);
       }
-    }
-
-    if (hasForeign) {
-      const foreignError = this.#domainError('Refusing sync: R2 bucket contains non-Worlds objects outside _worlds/.');
-      this.#status = {
-        mode: 'r2',
-        status: 'error',
-        bucket: this.#bucket,
-        head: localState?.head ?? null,
-        offline: false,
-        warning: foreignError.message,
-        conflictBackupPath: null,
-      };
-      throw foreignError;
     }
 
     this.#assertSameBucketAndLineage(localState, remoteControl);
@@ -449,15 +427,6 @@ export class WorldSync {
     const queuedWork = this.#pushQueue.then(async () => {
       if (signal?.aborted) {
         throw signal.reason instanceof Error ? signal.reason : new DOMException('Aborted', 'AbortError');
-      }
-
-      const hasForeign = await this.#transport.hasForeignObjects({
-        allowedPrefix: this.#allowedRootFolder,
-        timeoutMs: this.#pullTimeoutMs,
-        signal,
-      });
-      if (hasForeign) {
-        throw this.#domainError('Refusing sync: R2 bucket contains non-Worlds objects outside _worlds/.');
       }
 
       let localState = this.#readLocalState(syncStatePath);

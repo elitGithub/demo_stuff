@@ -3,6 +3,9 @@ import fs from 'node:fs';
 import path from 'node:path';
 import dotenv from 'dotenv';
 
+const LOG_REPLIES_ON = '1';
+const LOG_REPLIES_OFF = '0';
+
 export const WorldsConfig = Object.freeze({
   /**
    * @param {string} content
@@ -19,7 +22,7 @@ export const WorldsConfig = Object.freeze({
 
   /**
    * @param {{rootDir?: string, env?: Record<string, string | undefined>}} options
-   * @returns {Readonly<{port: number, rootDir: string, localDir: string, dbPath: string, secretsPath: string, syncStatePath: string, conflictsDir: string, envApiKey: string | null, r2: Readonly<{account: string, accessKey: string, secret: string, bucket: string}> | null}>}
+   * @returns {Readonly<{port: number, rootDir: string, localDir: string, dbPath: string, secretsPath: string, syncStatePath: string, conflictsDir: string, envApiKey: string | null, r2: Readonly<{account: string, accessKey: string, secret: string, bucket: string}> | null, logReplies: boolean, replyLogPath: string, modelCachePath: string}>}
    * @throws {Error}
    */
   load({ rootDir = path.resolve(import.meta.dirname, '..'), env = process.env } = {}) {
@@ -53,6 +56,16 @@ export const WorldsConfig = Object.freeze({
         throw new RangeError(`WORLDS_PORT out of range (1024..65535): ${parsedPort}`);
       }
       port = parsedPort;
+    }
+
+    let logReplies = true;
+    const rawLogReplies = merged.WORLDS_LOG_REPLIES;
+    if (rawLogReplies !== undefined && rawLogReplies !== '') {
+      if (rawLogReplies === LOG_REPLIES_OFF) {
+        logReplies = false;
+      } else if (rawLogReplies !== LOG_REPLIES_ON) {
+        throw new RangeError(`Invalid WORLDS_LOG_REPLIES: ${String(rawLogReplies)}`);
+      }
     }
 
     const r2Values = [
@@ -108,6 +121,9 @@ export const WorldsConfig = Object.freeze({
       conflictsDir: path.join(localDir, 'conflicts'),
       envApiKey,
       r2,
+      logReplies,
+      replyLogPath: path.join(localDir, 'model-replies.log'),
+      modelCachePath: path.join(localDir, 'openrouter-models-cache.json'),
     });
   },
 

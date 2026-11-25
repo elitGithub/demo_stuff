@@ -29,13 +29,30 @@ import { SqliteStore } from '../src/store/SqliteStore.mjs';
  * @param {Array<string | ((payload: object) => string)>} responses
  * @param {{store?: SqliteStore | null}} [options]
  * @returns {{client: OpenRouterClient, calls: Array<object>}}
+ * @throws {TypeError | RangeError}
  */
 function createFakeClient(responses, { store = null } = {}) {
   const queue = [...responses];
   const calls = [];
   const client = new OpenRouterClient({
+    /**
+     * @returns {string}
+     */
     apiKeyProvider: () => 'sk-test-fake-scribe-key',
-    onSpend: store === null ? null : (spendDto) => store.recordSpend(spendDto),
+    onSpend: store === null
+      ? null
+      /**
+       * @param {object} spendDto
+       * @returns {void}
+       * @throws {Error}
+       */
+      : (spendDto) => store.recordSpend(spendDto),
+    /**
+     * @param {string} url
+     * @param {{body: string}} init
+     * @returns {Promise<Response>}
+     * @throws {Error}
+     */
     fetchImpl: async (url, init) => {
       const parsedBody = JSON.parse(init.body);
       calls.push(parsedBody);
@@ -59,6 +76,7 @@ function createFakeClient(responses, { store = null } = {}) {
 /**
  * @param {{scribeModel?: string}} [options]
  * @returns {{store: SqliteStore, campaign: object, rowan: object, mara: object, vesper: object, corin: object}}
+ * @throws {Error}
  */
 function createSeededCampaign({ scribeModel = 'openai/gpt-4.1-mini' } = {}) {
   const store = new SqliteStore(':memory:');
@@ -1936,8 +1954,19 @@ describe('Task 3 adversarial review regressions', () => {
       });
 
       const httpErrorClient = new OpenRouterClient({
+        /**
+         * @returns {string}
+         */
         apiKeyProvider: () => 'sk-test-fake-scribe-key',
+        /**
+         * @param {object} spendDto
+         * @returns {void}
+         * @throws {Error}
+         */
         onSpend: (spendDto) => store.recordSpend(spendDto),
+        /**
+         * @returns {Promise<Response>}
+         */
         fetchImpl: async () => {
           return new Response(
             JSON.stringify({ error: { message: 'Unauthorized key' } }),
@@ -1952,8 +1981,19 @@ describe('Task 3 adversarial review regressions', () => {
       assert.equal(store.getScribeBook(campaign.id), null);
 
       const failingClient = new OpenRouterClient({
+        /**
+         * @returns {string}
+         */
         apiKeyProvider: () => 'sk-test-fake-scribe-key',
+        /**
+         * @param {object} spendDto
+         * @returns {void}
+         * @throws {Error}
+         */
         onSpend: (spendDto) => store.recordSpend(spendDto),
+        /**
+         * @returns {Promise<Response>}
+         */
         fetchImpl: async () => {
           return new Response(
             JSON.stringify({
@@ -2131,6 +2171,7 @@ describe('Task 3 adversarial review regressions', () => {
 describe('AddFact evidence and the Reported rule for ruled facts', () => {
   /**
    * @returns {{log: object, state: object}}
+   * @throws {Error}
    */
   const buildCastLog = () => {
     const log = ScribeLogCore.create();
@@ -2328,6 +2369,7 @@ describe('AddFact evidence and the Reported rule for ruled facts', () => {
 describe('AddFact audience for ruled facts', () => {
   /**
    * @returns {{log: object, state: object}}
+   * @throws {Error}
    */
   const buildCastLog = () => {
     const log = ScribeLogCore.create();
@@ -2434,3 +2476,333 @@ describe('AddFact audience for ruled facts', () => {
     }
   });
 });
+
+describe('Exact Widen, Pin audience and audience ids through merges', () => {
+  const everyone = ScribeKnowledge.Everyone;
+
+  const baseRuling = Object.freeze({
+    type: ScribeLogCore.Ruling.AddFact,
+    subject: 'S1',
+    category: 'eyes',
+    target: null,
+    text: 'amber',
+    hidden: false,
+    cite: null,
+    position: 0,
+  });
+
+  /**
+   * @returns {{log: object, state: object}}
+   * @throws {Error}
+   */
+  const buildCastLog = () => {
+    const log = ScribeLogCore.create();
+    let state = ScribeReplay.run(log, []);
+    for (const name of ['Ilse Marrow', 'Garrick Fenn', 'Odo Brask', 'Pell Dunmore', 'Ruth Quill']) {
+      ScribeLogCore.syncCharacterSubject(log, state, {
+        subjectId: null,
+        name,
+        aliases: [],
+        kind: ScribeCategory.SubjectKinds.Character,
+      });
+      state = ScribeReplay.run(log, []);
+    }
+    return { log, state };
+  };
+
+  /**
+   * @param {object} log
+   * @param {object} operation
+   * @returns {object}
+   * @throws {Error}
+   */
+  const rule = (log, operation) => {
+    ScribeLogCore.rule(log, ScribeReplay.run(log, []), operation);
+    return ScribeReplay.run(log, []);
+  };
+
+  /**
+   * @param {object} state
+   * @param {string} factId
+   * @returns {object}
+   */
+  const factOf = (state, factId) => state.facts.find((fact) => fact.id === factId);
+
+  /**
+   * @param {object} state
+   * @param {string} factId
+   * @returns {string[]}
+   */
+  const knowers = (state, factId) => {
+    return ['S1', 'S2', 'S3', 'S4', 'S5'].filter((id) => ScribeKnowledge.knows(state, id, factOf(state, factId)));
+  };
+
+  describe('Widen exact', () => {
+    const bold = Object.freeze({ ...baseRuling, category: 'feature', text: 'bold', hidden: true });
+
+    /**
+     * @returns {{log: object, state: object}}
+     * @throws {Error}
+     */
+    const buildTwins = () => {
+      const { log } = buildCastLog();
+      rule(log, bold);
+      return { log, state: rule(log, { ...bold, position: 1 }) };
+    };
+
+    it('widens only its own fact when exact is true and stores exact on the operation', () => {
+      const { log, state } = buildTwins();
+      assert.deepEqual([...ScribeKnowledge.audience(state, factOf(state, 'F2'))], ['S1']);
+      const widened = rule(log, { type: ScribeLogCore.Ruling.Widen, fact: 'F1', to: everyone, exact: true });
+
+      assert.equal(log.entries.at(-1).operations[0].exact, true);
+      assert.equal(ScribeKnowledge.audience(widened, factOf(widened, 'F1')), everyone);
+      assert.deepEqual([...ScribeKnowledge.audience(widened, factOf(widened, 'F2'))], ['S1']);
+      assert.deepEqual(knowers(widened, 'F2'), ['S1']);
+    });
+
+    it('lets a Widen without exact spread to the same wording as before and stores no exact key', () => {
+      const { log, state } = buildTwins();
+      assert.equal(state.facts.length, 2);
+      const widened = rule(log, { type: ScribeLogCore.Ruling.Widen, fact: 'F1', to: everyone });
+
+      assert.equal(Object.hasOwn(log.entries.at(-1).operations[0], 'exact'), false);
+      assert.equal(ScribeKnowledge.audience(widened, factOf(widened, 'F1')), everyone);
+      assert.equal(ScribeKnowledge.audience(widened, factOf(widened, 'F2')), everyone);
+    });
+
+    it('refuses every exact value other than true and leaves the log unchanged', () => {
+      const { log, state } = buildTwins();
+      const entriesBefore = log.entries.length;
+      for (const refused of [false, 1, 0, 'true', null, {}, []]) {
+        const outcome = { counters: { nextFact: 3 }, stored: null };
+        assert.equal(
+          ScribeLogCore.Rulers.Widen(
+            { type: ScribeLogCore.Ruling.Widen, fact: 'F1', to: everyone, exact: refused },
+            ScribeLogCore.view(state),
+            outcome,
+          ),
+          ScribeLogCore.Settings.InvalidOperation,
+          JSON.stringify(refused),
+        );
+        assert.equal(outcome.stored, null);
+        assert.throws(
+          () => ScribeLogCore.rule(log, state, { type: ScribeLogCore.Ruling.Widen, fact: 'F1', to: everyone, exact: refused }),
+          /InvalidOperation/,
+        );
+      }
+      assert.equal(log.entries.length, entriesBefore);
+    });
+
+    it('keeps an exact Widen to named subjects on its own fact too', () => {
+      const { log, state } = buildTwins();
+      assert.equal(state.facts.length, 2);
+      const widened = rule(log, { type: ScribeLogCore.Ruling.Widen, fact: 'F1', to: ['S3'], exact: true });
+      assert.deepEqual(knowers(widened, 'F1'), ['S1', 'S3']);
+      assert.deepEqual(knowers(widened, 'F2'), ['S1']);
+    });
+
+    it('keeps an exact Everyone ruling on its fact when a later named Widen reaches a same-wording fact', () => {
+      const { log } = buildTwins();
+      rule(log, { type: ScribeLogCore.Ruling.Widen, fact: 'F1', to: everyone, exact: true });
+      const told = rule(log, { type: ScribeLogCore.Ruling.Widen, fact: 'F2', to: ['S3'] });
+
+      assert.equal(ScribeKnowledge.audience(told, factOf(told, 'F1')), everyone);
+      assert.deepEqual(knowers(told, 'F1'), ['S1', 'S2', 'S3', 'S4', 'S5']);
+      assert.deepEqual(knowers(told, 'F2'), ['S1', 'S3']);
+    });
+
+    it('lets a later non-exact ruling on the same fact replace the exact one', () => {
+      const { log } = buildTwins();
+      rule(log, { type: ScribeLogCore.Ruling.Widen, fact: 'F1', to: everyone, exact: true });
+      const replaced = rule(log, { type: ScribeLogCore.Ruling.Widen, fact: 'F1', to: ['S3'] });
+
+      assert.deepEqual(knowers(replaced, 'F1'), ['S1', 'S3']);
+      assert.deepEqual(knowers(replaced, 'F2'), ['S1', 'S3']);
+    });
+
+    it('lets a later named Widen on a same-wording fact narrow a plain Everyone ruling as before', () => {
+      const { log } = buildTwins();
+      rule(log, { type: ScribeLogCore.Ruling.Widen, fact: 'F1', to: everyone });
+      const told = rule(log, { type: ScribeLogCore.Ruling.Widen, fact: 'F2', to: ['S3'] });
+
+      assert.deepEqual(knowers(told, 'F1'), ['S1', 'S3']);
+      assert.deepEqual(knowers(told, 'F2'), ['S1', 'S3']);
+    });
+
+    it('applies a Widen after an edit to its own fact only and leaves a later same-wording fact alone', () => {
+      const messages = [{ id: 'msg-edit-1', sender: 'narrator@worlds.example', contents: [] }];
+      const log = ScribeLogCore.create();
+      log.nextSubject = 2;
+      log.nextFact = 2;
+      log.nextSequence = 2;
+      log.revision = 1;
+      log.read = { 'msg-edit-1': 1 };
+      log.entries = [{
+        sequence: 1,
+        kind: ScribeLogCore.Kind.Update,
+        origin: ScribeLogCore.Origin.Story,
+        messageIds: ['msg-edit-1'],
+        operations: [
+          { type: ScribeAnswer.Type.Subject, subject: 'S1', label: 'Ayla', kind: 'character' },
+          {
+            type: ScribeAnswer.Type.Fact,
+            fact: 'F1',
+            subject: 'S1',
+            label: 'Ayla',
+            category: 'feature',
+            target: null,
+            targetText: null,
+            other: null,
+            text: 'bold',
+            cite: 'msg-edit-1',
+            position: 1,
+            hidden: true,
+          },
+        ],
+        withdrawn: false,
+      }];
+      /**
+       * @param {object} operation
+       * @returns {void}
+       * @throws {Error}
+       */
+      const ruleEdited = (operation) => {
+        const state = ScribeReplay.run(log, messages, null, null, null, null, messages);
+        ScribeLogCore.rule(log, state, operation);
+      };
+      ruleEdited({
+        type: ScribeLogCore.Ruling.EditFact,
+        fact: 'F1',
+        text: 'brave',
+        expected: ScribeLogCore.editExpected(
+          ScribeReplay.run(log, messages, null, null, null, null, messages).facts.find((fact) => fact.id === 'F1'),
+        ),
+      });
+      ruleEdited({ type: ScribeLogCore.Ruling.Widen, fact: 'F1', to: everyone });
+      log.entries.push({
+        sequence: log.nextSequence,
+        kind: ScribeLogCore.Kind.Update,
+        origin: ScribeLogCore.Origin.Story,
+        messageIds: ['msg-edit-1'],
+        operations: [{
+          type: ScribeAnswer.Type.Fact,
+          fact: 'F2',
+          subject: 'S1',
+          label: 'Ayla',
+          category: 'feature',
+          target: null,
+          targetText: null,
+          other: null,
+          text: 'brave',
+          cite: 'msg-edit-1',
+          position: 1,
+          hidden: true,
+        }],
+        withdrawn: false,
+      });
+      log.nextSequence += 1;
+      log.revision += 1;
+      log.nextFact = 3;
+      const state = ScribeReplay.run(log, messages, null, null, null, null, messages);
+
+      assert.equal(log.entries.some((entry) => entry.operations.some((operation) => operation.editedSource)), true);
+      assert.equal(ScribeKnowledge.audience(state, factOf(state, 'F1')), everyone);
+      assert.deepEqual([...ScribeKnowledge.audience(state, factOf(state, 'F2'))], ['S1']);
+    });
+  });
+
+  describe('Pin keeps the audience', () => {
+    /**
+     * @param {object | undefined} audience
+     * @returns {{log: object, state: object}}
+     * @throws {Error}
+     */
+    const buildPinned = (audience) => {
+      const { log } = buildCastLog();
+      rule(log, { ...baseRuling, ...(audience === undefined ? {} : { audience }) });
+      const state = rule(log, {
+        type: ScribeLogCore.Ruling.Pin,
+        subject: 'S1',
+        category: 'eyes',
+        target: null,
+        text: 'amber',
+        hidden: false,
+      });
+      return { log, state };
+    };
+
+    it('copies the audience onto the stored Pin and the pinned original stays as it was', () => {
+      const { log, state } = buildPinned(['S1', 'S2']);
+      const stored = log.entries.at(-1).operations[0];
+      assert.deepEqual(stored.audience, ['S1', 'S2']);
+      assert.equal(state.facts.length, 1);
+      assert.equal(factOf(state, 'F1').pinned, true);
+      assert.deepEqual(knowers(state, 'F1'), ['S1', 'S2']);
+    });
+
+    it('carries the audience onto the copy that survives when the original is removed', () => {
+      const { log } = buildPinned(['S1', 'S2']);
+      const state = rule(log, { type: ScribeLogCore.Ruling.RemoveFact, fact: 'F1' });
+      const copy = state.facts.find((fact) => fact.made);
+
+      assert.equal(copy.pinned, true);
+      assert.deepEqual(copy.audience, ['S1', 'S2']);
+      assert.deepEqual(knowers(state, copy.id), ['S1', 'S2']);
+      assert.equal(ScribeKnowledge.knows(state, 'S3', copy), false);
+    });
+
+    it('adds no audience key to the stored Pin or to the copy when the fact had none', () => {
+      const { log } = buildPinned(undefined);
+      assert.equal(Object.hasOwn(log.entries.at(-1).operations[0], 'audience'), false);
+      const state = rule(log, { type: ScribeLogCore.Ruling.RemoveFact, fact: 'F1' });
+      const copy = state.facts.find((fact) => fact.made);
+
+      assert.equal(Object.hasOwn(copy, 'audience'), false);
+      assert.equal(ScribeKnowledge.audience(state, copy), everyone);
+    });
+
+    it('resolves a copied audience through a merge that comes after the Pin without duplicates', () => {
+      const { log } = buildPinned(['S2', 'S4']);
+      rule(log, { type: ScribeLogCore.Ruling.RemoveFact, fact: 'F1' });
+      const state = rule(log, { type: ScribeLogCore.Ruling.Merge, from: 'S2', into: 'S4' });
+      const copy = state.facts.find((fact) => fact.made);
+
+      assert.deepEqual(copy.audience, ['S4']);
+      assert.equal(ScribeKnowledge.knows(state, 'S4', copy), true);
+      assert.deepEqual(knowers(state, copy.id), ['S1', 'S2', 'S4']);
+    });
+  });
+
+  describe('audience ids resolve through merges', () => {
+    it('lets the survivor know the fact when the merge comes after the AddFact', () => {
+      const { log } = buildCastLog();
+      rule(log, { ...baseRuling, audience: ['S2'] });
+      const state = rule(log, { type: ScribeLogCore.Ruling.Merge, from: 'S2', into: 'S4' });
+
+      assert.deepEqual(factOf(state, 'F1').audience, ['S4']);
+      assert.equal(ScribeKnowledge.knows(state, 'S4', factOf(state, 'F1')), true);
+      assert.deepEqual(knowers(state, 'F1'), ['S1', 'S2', 'S4']);
+    });
+
+    it('lets the survivor know the fact when the merge comes before the AddFact', () => {
+      const { log } = buildCastLog();
+      rule(log, { type: ScribeLogCore.Ruling.Merge, from: 'S2', into: 'S4' });
+      const state = rule(log, { ...baseRuling, audience: ['S2'] });
+
+      assert.deepEqual(factOf(state, 'F1').audience, ['S4']);
+      assert.equal(ScribeKnowledge.knows(state, 'S4', factOf(state, 'F1')), true);
+      assert.deepEqual(knowers(state, 'F1'), ['S1', 'S2', 'S4']);
+    });
+
+    it('keeps order and drops the duplicate when the audience names both sides of a merge', () => {
+      const { log } = buildCastLog();
+      rule(log, { ...baseRuling, audience: ['S3', 'S2', 'S4'] });
+      const state = rule(log, { type: ScribeLogCore.Ruling.Merge, from: 'S2', into: 'S4' });
+
+      assert.deepEqual(factOf(state, 'F1').audience, ['S3', 'S4']);
+      assert.deepEqual(knowers(state, 'F1'), ['S1', 'S2', 'S3', 'S4']);
+    });
+  });
+});
+

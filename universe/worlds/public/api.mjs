@@ -269,16 +269,21 @@ export class WorldsApi {
   }
 
   /**
-   * @param {{includeAll?: boolean, refresh?: boolean, signal?: AbortSignal | null}} [options]
-   * @returns {Promise<{defaults: Record<string, string>, recommended: Array<object>, openrouter: Array<object> | null, fetchedAt: string | null}>}
+   * @param {{signal?: AbortSignal | null}} [options]
+   * @returns {Promise<{defaults: Record<string, string>, openrouter: Array<object>, fetchedAt: string | null, stale: boolean, warning: string | null}>}
    * @throws {Error}
    */
-  async getModels({ includeAll = false, refresh = false, signal = null } = {}) {
-    const params = new URLSearchParams({
-      includeAll: includeAll ? 'true' : 'false',
-      refresh: refresh ? 'true' : 'false',
-    });
-    return await this.#requestJson('GET', `/api/models?${params.toString()}`, { signal });
+  async getModels({ signal = null } = {}) {
+    return await this.#requestJson('GET', '/api/models', { signal });
+  }
+
+  /**
+   * @param {{signal?: AbortSignal | null}} [options]
+   * @returns {Promise<{defaults: Record<string, string>, openrouter: Array<object>, fetchedAt: string | null, stale: boolean, warning: string | null}>}
+   * @throws {Error}
+   */
+  async refreshModels({ signal = null } = {}) {
+    return await this.#requestJson('POST', '/api/models/refresh', { signal });
   }
 
   /**

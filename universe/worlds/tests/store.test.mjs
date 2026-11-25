@@ -417,6 +417,29 @@ describe('SqliteStore characters and deletion guards', () => {
   });
 });
 
+describe('SqliteStore.listModelOverrides', () => {
+  it('returns the distinct overrides of non-archived characters across campaigns and skips blanks', () => {
+    const store = new SqliteStore(':memory:');
+    try {
+      const campaignAlpha = store.createCampaign({ title: 'Alpha' });
+      const campaignBeta = store.createCampaign({ title: 'Beta' });
+      assert.deepEqual(store.listModelOverrides(), []);
+
+      store.createCharacter(campaignAlpha.id, { slug: 'one', name: 'One', modelOverride: 'a/shared' });
+      store.createCharacter(campaignAlpha.id, { slug: 'two', name: 'Two', modelOverride: '   ' });
+      store.createCharacter(campaignAlpha.id, { slug: 'three', name: 'Three' });
+      store.createCharacter(campaignBeta.id, { slug: 'four', name: 'Four', modelOverride: '  a/shared  ' });
+      store.createCharacter(campaignBeta.id, { slug: 'five', name: 'Five', modelOverride: 'b/other' });
+      const archived = store.createCharacter(campaignBeta.id, { slug: 'six', name: 'Six', modelOverride: 'c/archived' });
+      store.updateCharacter(campaignBeta.id, archived.id, { archived: true });
+
+      assert.deepEqual(store.listModelOverrides().toSorted(), ['a/shared', 'b/other']);
+    } finally {
+      store.close();
+    }
+  });
+});
+
 describe('SqliteStore turns, beat editing, rollback, pagination, and Scribe tracking', () => {
   it('rolls back commitTurnPair completely on beat FK failure or invalid spendIds linking', () => {
     const store = new SqliteStore(':memory:');

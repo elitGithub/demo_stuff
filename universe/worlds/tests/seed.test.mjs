@@ -7,9 +7,11 @@ import test from 'node:test';
 import { fileURLToPath } from 'node:url';
 import { ScribeAnalyzer } from '../src/scribe/ScribeAnalyzer.mjs';
 import { ScribeAnswer } from '../src/scribe/ScribeAnswer.mjs';
+import { ScribeCategory } from '../src/scribe/ScribeCategory.mjs';
 import { ScribeKnowledge } from '../src/scribe/ScribeKnowledge.mjs';
 import { ScribeLogCore } from '../src/scribe/ScribeLogCore.mjs';
 import { ScribeReplay } from '../src/scribe/ScribeReplay.mjs';
+import { ScribeText } from '../src/scribe/ScribeText.mjs';
 import { CharacterTier } from '../src/store/enums/CharacterTier.mjs';
 import { SceneType } from '../src/store/enums/SceneType.mjs';
 import { SqliteStore } from '../src/store/SqliteStore.mjs';
@@ -21,6 +23,7 @@ const SEED_SCRIPT_PATH = path.resolve(CURRENT_DIR, '../scripts/seed-from-export.
 /**
  * @param {import('node:test').TestContext} testContext
  * @returns {string}
+ * @throws {Error}
  */
 function makeTempDir(testContext) {
   const tempDir = fs.mkdtempSync(path.join(os.tmpdir(), 'worlds-seed-test-'));
@@ -35,6 +38,7 @@ function makeTempDir(testContext) {
  * @param {string} fileName
  * @param {object} bundle
  * @returns {string}
+ * @throws {Error}
  */
 function writeBundle(directory, fileName, bundle) {
   const bundlePath = path.join(directory, fileName);
@@ -259,6 +263,7 @@ function sceneOperation(bundle) {
 /**
  * @param {object} bundle
  * @returns {string}
+ * @throws {TypeError}
  */
 function bundleText(bundle) {
   return JSON.stringify(bundle);
@@ -307,6 +312,7 @@ test('ZetaSeeder refuses anything that is not a complete Zeta Scribe export', ()
   /**
    * @param {(bundle: object) => void} mutate
    * @returns {string}
+   * @throws {TypeError}
    */
   const mutated = (mutate) => {
     const bundle = buildScribeBundleFixture();
@@ -466,6 +472,7 @@ test('ZetaSeeder dry-run summarizes the replayed export without creating the SQL
     relations: 1,
     claims: 1,
     threads: 1,
+    turns: 0,
     readThrough: 3,
     chatMessages: 3,
     dryRun: true,
@@ -645,6 +652,7 @@ test('ZetaSeeder matches --player and --main by slug, name, alias or subject id 
   /**
    * @param {object} options
    * @returns {Map<string, object>}
+   * @throws {Error}
    */
   const castFor = (options) => {
     return new Map(ZetaSeeder.parseExport(fixtureText, options).characters.map((character) => [character.slug, character]));
@@ -652,6 +660,7 @@ test('ZetaSeeder matches --player and --main by slug, name, alias or subject id 
   /**
    * @param {object} options
    * @returns {string[]}
+   * @throws {Error}
    */
   const playersFor = (options) => {
     return ZetaSeeder.parseExport(fixtureText, options).characters
@@ -712,6 +721,7 @@ test('ZetaSeeder builds the opening scene from the last replayed scene: reach, n
   /**
    * @param {(bundle: object) => void} mutate
    * @returns {object}
+   * @throws {Error}
    */
   const sceneFor = (mutate) => {
     const bundle = buildScribeBundleFixture();
@@ -825,7 +835,7 @@ test('ZetaSeeder CLI parsing rejects repeated flags and empty --main, and accept
   const defaults = ZetaSeeder.parseCliArgs([]);
   assert.equal(defaults.playerRef, null);
   assert.deepEqual(defaults.mainRefs, []);
-  assert.match(defaults.exportPath, /hero_gone_latest\.json$/);
+  assert.match(defaults.exportPath, /hero_gone_latest_updated\.json$/);
 
   assert.equal(ZetaSeeder.parseCliArgs(['--player', '-x']).playerRef, '-x');
   assert.equal(ZetaSeeder.parseCliArgs(['--title', '-t']).title, '-t');
@@ -870,6 +880,7 @@ test('ZetaSeeder accepts an unadopted book and reports how far the Scribe read t
   /**
    * @param {(bundle: object) => void} mutate
    * @returns {object}
+   * @throws {Error}
    */
   const summaryFor = (mutate) => {
     const bundle = buildScribeBundleFixture();
@@ -1160,6 +1171,7 @@ test('ZetaSeeder refuses facts it cannot copy faithfully and names the fact', ()
   /**
    * @param {(bundle: object) => void} mutate
    * @returns {() => unknown}
+   * @throws {Error}
    */
   const seedWith = (mutate) => {
     const bundle = buildAudienceBundleFixture();
@@ -1170,6 +1182,7 @@ test('ZetaSeeder refuses facts it cannot copy faithfully and names the fact', ()
    * @param {object} bundle
    * @param {string} text
    * @returns {void}
+   * @throws {Error}
    */
   const pin = (bundle, text) => {
     const state = ScribeReplay.run(bundle.book.log, bundle.campaign.messages);
@@ -1209,4 +1222,494 @@ test('ZetaSeeder names the allowed root it cannot resolve instead of skipping it
     () => ZetaSeeder.resolveSafeExportPath(exportPath, [missingRoot, workDir]),
     (error) => error.message.includes(`Cannot resolve allowed root "${missingRoot}"`) && error.cause instanceof Error,
   );
+});
+
+/**
+ * @param {string} fact
+ * @param {string} text
+ * @returns {object}
+ */
+function hiddenFeature(fact, text) {
+  return { ...audienceFact(fact, 'S2', 'Brek', 'feature', text, 5), hidden: true };
+}
+
+/**
+ * @param {object} bundle
+ * @param {object} operation
+ * @returns {void}
+ * @throws {Error}
+ */
+function ruleOn(bundle, operation) {
+  const state = ScribeReplay.run(bundle.book.log, bundle.campaign.messages);
+  const ruling = operation.type === ScribeLogCore.Ruling.EditFact
+    ? { ...operation, expected: ScribeLogCore.editExpected(state.facts.find((fact) => fact.id === operation.fact)) }
+    : operation;
+  ScribeLogCore.rule(bundle.book.log, state, ruling);
+}
+
+/**
+ * @param {object} bundle
+ * @param {object[]} operations
+ * @returns {void}
+ */
+function appendStory(bundle, operations) {
+  const log = bundle.book.log;
+  log.entries.push({
+    sequence: log.nextSequence,
+    kind: ScribeLogCore.Kind.Update,
+    origin: ScribeLogCore.Origin.Story,
+    messageIds: ['msg-aud-5'],
+    operations,
+    withdrawn: false,
+  });
+  log.nextSequence += 1;
+  log.revision += 1;
+}
+
+/**
+ * @param {object[]} facts
+ * @returns {object}
+ */
+function buildWidenBundleFixture(facts) {
+  const bundle = buildAudienceBundleFixture();
+  bundle.book.log.nextFact = 10;
+  bundle.book.log.nextSubject = 6;
+  bundle.book.log.entries[0].operations.push(...facts);
+  return bundle;
+}
+
+/**
+ * @param {object} state
+ * @param {string} factId
+ * @returns {string | readonly string[]}
+ */
+function audienceById(state, factId) {
+  return ScribeKnowledge.audience(state, state.facts.find((fact) => fact.id === factId));
+}
+
+/**
+ * @param {string | readonly string[]} audience
+ * @returns {string | string[]}
+ */
+function sortedAudience(audience) {
+  return Array.isArray(audience) ? [...audience].sort() : audience;
+}
+
+/**
+ * @param {object} bundle
+ * @param {Record<string, string | string[]>} expected
+ * @returns {{log: object, state: object}}
+ * @throws {Error}
+ */
+function assertSeededAudiences(bundle, expected) {
+  const zeta = ScribeReplay.run(bundle.book.log, bundle.campaign.messages);
+  const parsed = ZetaSeeder.parseExport(bundleText(bundle));
+  const seeded = ZetaSeeder.materializeScribeLog(parsed);
+  for (const [zetaId, audience] of Object.entries(expected)) {
+    const seededId = `${ScribeLogCore.Settings.FactPrefix}${parsed.facts.findIndex((fact) => fact.id === zetaId) + 1}`;
+    assert.deepEqual(sortedAudience(audienceById(zeta, zetaId)), audience, `zeta ${zetaId}`);
+    assert.deepEqual(sortedAudience(audienceById(seeded.state, seededId)), audience, `seeded ${zetaId}`);
+  }
+  const widenings = seeded.log.entries
+    .flatMap((entry) => entry.operations)
+    .filter((operation) => operation.type === ScribeLogCore.Ruling.Widen);
+  assert.equal(widenings.length > 0, true);
+  for (const widening of widenings) {
+    assert.equal(widening.exact, true);
+  }
+  return seeded;
+}
+
+test('ZetaSeeder seeds a Widen followed by an edit on its own fact only', () => {
+  const bundle = buildWidenBundleFixture([hiddenFeature('F4', 'bold')]);
+  ruleOn(bundle, { type: ScribeLogCore.Ruling.Widen, fact: 'F4', to: ScribeKnowledge.Everyone });
+  ruleOn(bundle, { type: ScribeLogCore.Ruling.EditFact, fact: 'F4', text: 'brave' });
+  appendStory(bundle, [hiddenFeature('F5', 'brave')]);
+  assertSeededAudiences(bundle, { F4: ScribeKnowledge.Everyone, F5: ['S2'] });
+});
+
+test('ZetaSeeder seeds a Widen on one of two same-wording facts when the other was edited away', () => {
+  const bundle = buildWidenBundleFixture([hiddenFeature('F4', 'bold'), hiddenFeature('F5', 'bold')]);
+  ruleOn(bundle, { type: ScribeLogCore.Ruling.EditFact, fact: 'F5', text: 'brave' });
+  ruleOn(bundle, { type: ScribeLogCore.Ruling.Widen, fact: 'F4', to: ScribeKnowledge.Everyone });
+  appendStory(bundle, [hiddenFeature('F6', 'brave')]);
+  assertSeededAudiences(bundle, { F4: ScribeKnowledge.Everyone, F5: ScribeKnowledge.Everyone, F6: ['S2'] });
+});
+
+test('ZetaSeeder seeds a Widen on a fact whose wording another fact was edited onto', () => {
+  const bundle = buildWidenBundleFixture([hiddenFeature('F4', 'brave'), hiddenFeature('F5', 'bold')]);
+  ruleOn(bundle, { type: ScribeLogCore.Ruling.EditFact, fact: 'F5', text: 'brave' });
+  ruleOn(bundle, { type: ScribeLogCore.Ruling.Widen, fact: 'F4', to: ScribeKnowledge.Everyone });
+  assertSeededAudiences(bundle, { F4: ScribeKnowledge.Everyone, F5: ['S2'] });
+});
+
+test('ZetaSeeder seeds a Widen followed by a Split on the facts it widened only', () => {
+  const bundle = buildWidenBundleFixture([hiddenFeature('F4', 'bold')]);
+  ruleOn(bundle, { type: ScribeLogCore.Ruling.Widen, fact: 'F4', to: ScribeKnowledge.Everyone });
+  ruleOn(bundle, {
+    type: ScribeLogCore.Ruling.Split,
+    subject: 'S2',
+    label: 'Dorn',
+    kind: 'character',
+    facts: ['F4'],
+  });
+  appendStory(bundle, [{ ...hiddenFeature('F5', 'bold'), subject: 'S6', label: 'Dorn' }]);
+  assertSeededAudiences(bundle, { F4: ScribeKnowledge.Everyone, F5: ['S6'] });
+});
+
+test('ZetaSeeder seeds an edit followed by a Widen on its own fact only', () => {
+  const bundle = buildWidenBundleFixture([hiddenFeature('F4', 'bold')]);
+  ruleOn(bundle, { type: ScribeLogCore.Ruling.EditFact, fact: 'F4', text: 'brave' });
+  ruleOn(bundle, { type: ScribeLogCore.Ruling.Widen, fact: 'F4', to: ScribeKnowledge.Everyone });
+  appendStory(bundle, [hiddenFeature('F5', 'brave')]);
+  assertSeededAudiences(bundle, { F4: ScribeKnowledge.Everyone, F5: ['S2'] });
+});
+
+/**
+ * @param {object} bundle
+ * @param {string} toldId
+ * @param {Record<string, string | string[]>} expected
+ * @param {string[]} seededOnly
+ * @returns {void}
+ * @throws {Error}
+ */
+function assertToldAudiences(bundle, toldId, expected, seededOnly = []) {
+  const messages = bundle.campaign.messages;
+  const native = structuredClone(bundle.book.log);
+  ScribeLogCore.tell(native, ScribeReplay.run(native, messages), { factId: toldId, speakerSubjectId: 'S3' });
+  const nativeState = ScribeReplay.run(native, messages);
+
+  const parsed = ZetaSeeder.parseExport(bundleText(bundle));
+  const seeded = ZetaSeeder.materializeScribeLog(parsed);
+  /**
+   * @param {string} zetaId
+   * @returns {string}
+   */
+  const seededIdOf = (zetaId) => {
+    return `${ScribeLogCore.Settings.FactPrefix}${parsed.facts.findIndex((fact) => fact.id === zetaId) + 1}`;
+  };
+  ScribeLogCore.tell(seeded.log, seeded.state, { factId: seededIdOf(toldId), speakerSubjectId: 'S3' });
+  const seededState = ScribeReplay.run(seeded.log, []);
+  for (const [zetaId, audience] of Object.entries(expected)) {
+    if (!seededOnly.includes(zetaId)) {
+      assert.deepEqual(sortedAudience(audienceById(nativeState, zetaId)), audience, `worlds ${zetaId}`);
+    }
+    assert.deepEqual(sortedAudience(audienceById(seededState, seededIdOf(zetaId))), audience, `seeded ${zetaId}`);
+  }
+}
+
+test('ZetaSeeder keeps a seeded Everyone ruling when a live Told reaches a same-wording fact after an edit and a later fact', () => {
+  const bundle = buildWidenBundleFixture([hiddenFeature('F4', 'bold')]);
+  ruleOn(bundle, { type: ScribeLogCore.Ruling.Widen, fact: 'F4', to: ScribeKnowledge.Everyone });
+  ruleOn(bundle, { type: ScribeLogCore.Ruling.EditFact, fact: 'F4', text: 'brave' });
+  appendStory(bundle, [hiddenFeature('F5', 'brave')]);
+  assertToldAudiences(bundle, 'F5', { F4: ScribeKnowledge.Everyone, F5: ['S2', 'S3'] });
+});
+
+test('ZetaSeeder keeps seeded Everyone rulings on both same-wording facts when a live Told reaches a later fact', () => {
+  const bundle = buildWidenBundleFixture([hiddenFeature('F4', 'bold'), hiddenFeature('F5', 'bold')]);
+  ruleOn(bundle, { type: ScribeLogCore.Ruling.EditFact, fact: 'F5', text: 'brave' });
+  ruleOn(bundle, { type: ScribeLogCore.Ruling.Widen, fact: 'F4', to: ScribeKnowledge.Everyone });
+  appendStory(bundle, [hiddenFeature('F6', 'brave')]);
+  assertToldAudiences(bundle, 'F6', {
+    F4: ScribeKnowledge.Everyone,
+    F5: ScribeKnowledge.Everyone,
+    F6: ['S2', 'S3'],
+  });
+});
+
+test('ZetaSeeder keeps a seeded Everyone ruling after an edit then a Widen when a live Told reaches a later fact', () => {
+  const bundle = buildWidenBundleFixture([hiddenFeature('F4', 'bold')]);
+  ruleOn(bundle, { type: ScribeLogCore.Ruling.EditFact, fact: 'F4', text: 'brave' });
+  ruleOn(bundle, { type: ScribeLogCore.Ruling.Widen, fact: 'F4', to: ScribeKnowledge.Everyone });
+  appendStory(bundle, [hiddenFeature('F5', 'brave')]);
+  assertToldAudiences(bundle, 'F5', { F4: ScribeKnowledge.Everyone, F5: ['S2', 'S3'] });
+});
+
+test('ZetaSeeder keeps a seeded Everyone ruling when a live Told reaches the fact edited onto its wording', () => {
+  const bundle = buildWidenBundleFixture([hiddenFeature('F4', 'brave'), hiddenFeature('F5', 'bold')]);
+  ruleOn(bundle, { type: ScribeLogCore.Ruling.EditFact, fact: 'F5', text: 'brave' });
+  ruleOn(bundle, { type: ScribeLogCore.Ruling.Widen, fact: 'F4', to: ScribeKnowledge.Everyone });
+  assertToldAudiences(bundle, 'F5', { F4: ScribeKnowledge.Everyone, F5: ['S2', 'S3'] });
+});
+
+test('ZetaSeeder keeps the seeded fact Everyone when a live Told reaches a same-wording fact after a Split', () => {
+  const bundle = buildWidenBundleFixture([hiddenFeature('F4', 'bold')]);
+  ruleOn(bundle, { type: ScribeLogCore.Ruling.Widen, fact: 'F4', to: ScribeKnowledge.Everyone });
+  ruleOn(bundle, {
+    type: ScribeLogCore.Ruling.Split,
+    subject: 'S2',
+    label: 'Dorn',
+    kind: 'character',
+    facts: ['F4'],
+  });
+  appendStory(bundle, [{ ...hiddenFeature('F5', 'bold'), subject: 'S6', label: 'Dorn' }]);
+  assertToldAudiences(bundle, 'F5', { F4: ScribeKnowledge.Everyone, F5: ['S3', 'S6'] }, ['F4']);
+});
+
+test('ZetaSeeder keeps a seeded Everyone ruling when a live Told reaches a fact of another subject', () => {
+  const bundle = buildWidenBundleFixture([
+    hiddenFeature('F4', 'bold'),
+    { ...hiddenFeature('F5', 'bold'), subject: 'S1', label: 'Ayla' },
+  ]);
+  ruleOn(bundle, { type: ScribeLogCore.Ruling.Widen, fact: 'F5', to: ['S3'] });
+  ruleOn(bundle, { type: ScribeLogCore.Ruling.Widen, fact: 'F4', to: ScribeKnowledge.Everyone });
+  assertToldAudiences(bundle, 'F5', { F4: ScribeKnowledge.Everyone, F5: ['S1', 'S3'] });
+});
+
+test('ZetaSeeder keeps an aka fact of 68 characters whole on the character and never files a sync for it', () => {
+  const longName = 'The Wanderer Who Walked Out Of The Burning Library At Midnight Alone';
+  assert.equal(longName.length, 68);
+  const bundle = buildAudienceBundleFixture();
+  bundle.book.log.entries[0].operations.push(
+    audienceFact('F4', 'S1', 'Ayla', ScribeLogCore.Settings.AkaCategory, longName, 1),
+  );
+  const zeta = ScribeReplay.run(bundle.book.log, bundle.campaign.messages);
+  assert.equal(zeta.aliases.filter((record) => record.subject === 'S1').length, 0);
+
+  const parsed = ZetaSeeder.parseExport(bundleText(bundle), { playerRef: longName });
+  const character = parsed.characters.find((row) => row.subjectId === 'S1');
+  assert.deepEqual(character.aliases, [longName]);
+  assert.equal(character.isPlayer, true);
+  assert.deepEqual(parsed.subjects.find((subject) => subject.id === 'S1').recordAliases, []);
+
+  const { log, state } = ZetaSeeder.materializeScribeLog(parsed);
+  assert.equal(state.aliases.length, zeta.aliases.length);
+  assert.equal(state.aliases.filter((record) => record.subject === 'S1').length, 0);
+  const akaForms = new Set(state.subjects.find((subject) => subject.id === 'S1').aka.map((entry) => ScribeText.normaliseName(entry)));
+  for (const alias of character.aliases) {
+    assert.equal(akaForms.has(ScribeText.normaliseName(alias)), true);
+  }
+  const akaFact = state.facts.find((fact) => fact.category === ScribeLogCore.Settings.AkaCategory);
+  assert.equal(akaFact.text, longName);
+
+  const synced = ScribeLogCore.syncCharacterSubject(log, state, {
+    subjectId: character.subjectId,
+    name: character.name,
+    aliases: character.aliases,
+    kind: ScribeCategory.SubjectKinds.Character,
+  });
+  assert.equal(synced.changed, false);
+  assert.equal(ScribeReplay.run(log, []).facts.find((fact) => fact.id === akaFact.id).status, ScribeReplay.Status.InForce);
+});
+
+test('ZetaSeeder clamps a long alias that no seeded aka fact gives back, on the character and on the record', () => {
+  const longName = 'The Wanderer Who Walked Out Of The Burning Library At Midnight Alone';
+  const clamped = longName.slice(0, ScribeAnswer.Settings.MaxLabel).trim();
+  const bundle = buildAudienceBundleFixture();
+  bundle.book.log.entries[0].operations.push(
+    { type: ScribeAnswer.Type.Alias, subject: 'S1', name: longName, cite: 'msg-aud-1', position: 1, other: null },
+  );
+
+  const parsed = ZetaSeeder.parseExport(bundleText(bundle));
+  const character = parsed.characters.find((row) => row.subjectId === 'S1');
+  assert.deepEqual(character.aliases, [clamped]);
+  assert.deepEqual(parsed.subjects.find((subject) => subject.id === 'S1').recordAliases, [clamped]);
+
+  const { log, state } = ZetaSeeder.materializeScribeLog(parsed);
+  assert.deepEqual(state.aliases.filter((record) => record.subject === 'S1').map((record) => record.name), [clamped]);
+  const synced = ScribeLogCore.syncCharacterSubject(log, state, {
+    subjectId: character.subjectId,
+    name: character.name,
+    aliases: character.aliases,
+    kind: ScribeCategory.SubjectKinds.Character,
+  });
+  assert.equal(synced.changed, false);
+});
+
+test('ZetaSeeder keeps every seeded character alias, including an aka name, and never loses the aka fact', () => {
+  const bundle = buildAudienceBundleFixture();
+  bundle.book.log.entries[0].operations.push(
+    { type: ScribeAnswer.Type.Alias, subject: 'S1', name: 'Ayla the Bold', cite: 'msg-aud-1', position: 1, other: null },
+    audienceFact('F4', 'S1', 'Ayla', ScribeLogCore.Settings.AkaCategory, 'The Wanderer', 1),
+  );
+  const zeta = ScribeReplay.run(bundle.book.log, bundle.campaign.messages);
+
+  const parsed = ZetaSeeder.parseExport(bundleText(bundle), { playerRef: 'The Wanderer' });
+  const character = parsed.characters.find((row) => row.subjectId === 'S1');
+  assert.equal(character.aliases.includes('The Wanderer'), true);
+  assert.equal(character.isPlayer, true);
+
+  const { log, state } = ZetaSeeder.materializeScribeLog(parsed);
+  assert.equal(state.aliases.length, zeta.aliases.length);
+  const akaFact = state.facts.find((fact) => fact.text === 'The Wanderer');
+  assert.equal(akaFact.status, ScribeReplay.Status.InForce);
+
+  const synced = ScribeLogCore.syncCharacterSubject(log, state, {
+    subjectId: character.subjectId,
+    name: character.name,
+    aliases: character.aliases,
+    kind: ScribeCategory.SubjectKinds.Character,
+  });
+  assert.equal(synced.changed, false);
+  const after = ScribeReplay.run(log, []);
+  assert.equal(after.facts.find((fact) => fact.id === akaFact.id).status, ScribeReplay.Status.InForce);
+});
+
+test('ZetaSeeder copies one alias record for a subject with an Alias op and a live aka fact', () => {
+  const bundle = buildAudienceBundleFixture();
+  bundle.book.log.entries[0].operations.push(
+    { type: ScribeAnswer.Type.Alias, subject: 'S1', name: 'Ayla the Bold', cite: 'msg-aud-1', position: 1, other: null },
+    audienceFact('F4', 'S1', 'Ayla', ScribeLogCore.Settings.AkaCategory, 'The Wanderer', 1),
+  );
+  const zeta = ScribeReplay.run(bundle.book.log, bundle.campaign.messages);
+  const zetaRecords = zeta.aliases.filter((record) => record.subject === 'S1');
+  assert.equal(zetaRecords.length, 1);
+  assert.equal(zeta.subjects.find((subject) => subject.id === 'S1').aka.includes('The Wanderer'), true);
+
+  const parsed = ZetaSeeder.parseExport(bundleText(bundle));
+  assert.deepEqual(parsed.subjects.find((subject) => subject.id === 'S1').recordAliases, ['Ayla the Bold']);
+  const seeded = ZetaSeeder.materializeScribeLog(parsed).state;
+  assert.equal(seeded.aliases.length, zeta.aliases.length);
+  assert.deepEqual(seeded.aliases.filter((record) => record.subject === 'S1').map((record) => record.name), ['Ayla the Bold']);
+  assert.equal(seeded.subjects.find((subject) => subject.id === 'S1').aka.includes('The Wanderer'), true);
+});
+
+test('ZetaSeeder keeps an aka name that no copied aka fact gives back', () => {
+  const bundle = buildAudienceBundleFixture();
+  bundle.book.log.entries[0].operations.push(
+    audienceFact('F4', 'S1', 'Ayla', ScribeLogCore.Settings.AkaCategory, 'The Wanderer', 1),
+    {
+      ...audienceFact('F5', 'S1', 'Ayla', ScribeLogCore.Settings.AkaCategory, 'The Wandering Knight', 2),
+      type: ScribeAnswer.Type.Change,
+      fact: 'F4',
+      becomes: 'F5',
+    },
+  );
+  const zeta = ScribeReplay.run(bundle.book.log, bundle.campaign.messages);
+  assert.equal(zeta.facts.find((fact) => fact.id === 'F4').status, ScribeReplay.Status.Replaced);
+  assert.deepEqual(zeta.subjects.find((subject) => subject.id === 'S1').aka, ['The Wanderer', 'The Wandering Knight']);
+
+  const parsed = ZetaSeeder.parseExport(bundleText(bundle));
+  assert.deepEqual(parsed.subjects.find((subject) => subject.id === 'S1').recordAliases, ['The Wanderer']);
+});
+
+test('ZetaSeeder keeps the name of a merged subject even when a copied aka fact repeats it', () => {
+  const bundle = buildAudienceBundleFixture();
+  bundle.book.log.entries[0].operations.push(
+    audienceFact('F4', 'S1', 'Ayla', ScribeLogCore.Settings.AkaCategory, 'Dara', 1),
+  );
+  ScribeLogCore.rule(bundle.book.log, ScribeReplay.run(bundle.book.log, bundle.campaign.messages), {
+    type: ScribeLogCore.Ruling.Merge,
+    from: 'S4',
+    into: 'S1',
+  });
+  const zeta = ScribeReplay.run(bundle.book.log, bundle.campaign.messages);
+  assert.equal(zeta.subjects.find((subject) => subject.id === 'S1').aka.includes('Dara'), true);
+
+  const parsed = ZetaSeeder.parseExport(bundleText(bundle));
+  assert.deepEqual(parsed.subjects.find((subject) => subject.id === 'S1').recordAliases, ['Dara']);
+});
+
+test('ZetaSeeder refuses a look-alike pair it cannot copy and accepts the pair once Zeta ruled it distinct', () => {
+  const bundle = buildAudienceBundleFixture();
+  bundle.book.log.entries[0].operations.push({
+    type: ScribeAnswer.Type.Alias,
+    subject: 'S1',
+    name: 'Ayla the Bold',
+    cite: 'msg-aud-1',
+    position: 1,
+    other: 'S2',
+  });
+  assert.equal(ScribeReplay.run(bundle.book.log, bundle.campaign.messages).lookAlikes.length, 1);
+  assert.throws(
+    () => ZetaSeeder.parseExport(bundleText(bundle)),
+    /Subjects S1 and S2 are look-alikes in the export, which the seed cannot copy\./,
+  );
+
+  ScribeLogCore.rule(bundle.book.log, ScribeReplay.run(bundle.book.log, bundle.campaign.messages), {
+    type: ScribeLogCore.Ruling.Distinct,
+    first: 'S1',
+    second: 'S2',
+  });
+  assert.equal(ScribeReplay.run(bundle.book.log, bundle.campaign.messages).lookAlikes.length, 0);
+  assert.doesNotThrow(() => ZetaSeeder.parseExport(bundleText(bundle)));
+});
+
+test('ZetaSeeder imports chat messages as speaker-tagged turns with scene witnesses and marks read turns', (testContext) => {
+  const workDir = makeTempDir(testContext);
+  const bundle = buildScribeBundleFixture();
+  bundle.campaign.messages = [
+    {
+      id: 'msg-obs-1',
+      sender: { id: 'USER-1', type: 'USER' },
+      messageTime: '2026-11-20T10:00:00Z',
+      contents: [
+        { type: 'TEXT', speakerName: 'Corin Vale', position: 'RIGHT', text: '*Steps inside.*\n' },
+        { type: 'TEXT', speakerName: 'Corin Vale', position: 'RIGHT', text: 'Who broke the astrolabe?' },
+      ],
+    },
+    {
+      id: 'msg-obs-2',
+      sender: { id: 'BOT-1', type: 'BOT' },
+      messageTime: '2026-11-20T10:01:00Z',
+      contents: [
+        { type: 'TEXT', speakerName: 'Narrator', position: 'NARRATOR', text: '*Dust hangs in the lantern beam.*\n' },
+        { type: 'TEXT', speakerName: 'Tamsin Locke', position: 'LEFT', text: '*Looks up.*\n' },
+        { type: 'TEXT', speakerName: 'Tamsin Locke', position: 'LEFT', text: 'It was shattered before I arrived.' },
+        { type: 'TEXT', speakerName: 'Night Guard', position: 'LEFT', text: 'All quiet outside.' },
+      ],
+    },
+    {
+      id: 'msg-obs-3',
+      sender: { id: 'BOT-1', type: 'BOT' },
+      messageTime: '2026-11-20T10:02:00Z',
+      contents: [
+        { type: 'TEXT', speakerName: 'Tamsin Locke', position: 'LEFT', text: 'Bramwell slipped out a moment ago.' },
+      ],
+    },
+  ];
+  const exportPath = writeBundle(workDir, 'with-chat.json', bundle);
+  const dbPath = path.join(workDir, 'seeded-chat.sqlite');
+
+  const summary = ZetaSeeder.run({
+    exportPath,
+    dbPath,
+    title: 'Observatory Chat',
+    playerRef: 'corin-vale',
+    allowedRoots: [workDir],
+  });
+  assert.equal(summary.turns, 3);
+
+  const store = new SqliteStore(dbPath);
+  try {
+    const characters = store.listCharacters(summary.campaignId, { limit: 50 }).items;
+    const bySubject = new Map(characters.map((character) => [character.scribeSubjectId, character]));
+    const corin = bySubject.get('S1');
+    const tamsin = bySubject.get('S2');
+    const bramwell = bySubject.get('S3');
+
+    const turnsPage = store.listTurns(summary.campaignId, { limit: 50 });
+    assert.equal(turnsPage.total, 3);
+    const [firstTurn, secondTurn, thirdTurn] = [...turnsPage.items].sort((left, right) => left.seq - right.seq);
+
+    assert.equal(firstTurn.role, 'user');
+    assert.equal(firstTurn.beats.length, 1);
+    assert.equal(firstTurn.beats[0].speakerType, 'player');
+    assert.equal(firstTurn.beats[0].characterId, corin.id);
+    assert.equal(firstTurn.beats[0].text, '*Steps inside.*\nWho broke the astrolabe?');
+    assert.equal(firstTurn.witnessIds.includes(bramwell.id), true);
+
+    assert.equal(secondTurn.role, 'assistant');
+    assert.equal(secondTurn.beats.length, 3);
+    assert.equal(secondTurn.beats[0].speakerType, 'narrator');
+    assert.equal(secondTurn.beats[1].speakerType, 'character');
+    assert.equal(secondTurn.beats[1].characterId, tamsin.id);
+    assert.equal(secondTurn.beats[1].text, '*Looks up.*\nIt was shattered before I arrived.');
+    assert.equal(secondTurn.beats[2].speakerType, 'narrator');
+    assert.equal(secondTurn.beats[2].speakerName, 'Night Guard');
+
+    assert.equal(thirdTurn.witnessIds.includes(bramwell.id), false);
+    assert.equal(thirdTurn.witnessIds.includes(corin.id), true);
+    assert.equal(thirdTurn.witnessIds.includes(tamsin.id), true);
+
+    const bookRecord = store.getScribeBook(summary.campaignId);
+    const savedLog = JSON.parse(bookRecord.bookJson);
+    assert.equal(bookRecord.lastTurnSeq, 3);
+    assert.equal(savedLog.read[firstTurn.id], 1);
+    assert.equal(savedLog.read[secondTurn.id], 1);
+    assert.equal(savedLog.read[thirdTurn.id], 1);
+  } finally {
+    store.close();
+  }
 });

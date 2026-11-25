@@ -452,6 +452,16 @@ export class SqliteStore {
   }
 
   /**
+   * @returns {string[]}
+   */
+  listModelOverrides() {
+    const rows = this.#db.prepare(
+      'SELECT DISTINCT model_override FROM characters WHERE archived = 0 AND model_override IS NOT NULL',
+    ).all();
+    return rows.map((row) => row.model_override);
+  }
+
+  /**
    * @param {string} campaignId
    * @param {{includeArchived?: boolean, limit?: number, after?: string | null}} options
    * @returns {{items: Array<object>, total: number, nextCursor: string | null}}
@@ -1178,6 +1188,167 @@ export class SqliteStore {
         userTurn: this.#mapTurn(insertedTurns[0], beatsByTurnId.get(userTurnId)),
         assistantTurn: this.#mapTurn(insertedTurns[1], beatsByTurnId.get(assistantTurnId)),
       };
+    });
+  }
+
+  /**
+   * @param {string} campaignId
+   * @param {Array<Record<string, unknown>>} turns
+   * @returns {Array<{id: string, seq: number, role: string}>}
+   * @throws {Error}
+   */
+  importTurns(campaignId, turns) {
+    this.#validateNonEmptyString(campaignId, 'campaignId');
+    if (!Array.isArray(turns)) {
+      throw new TypeError('turns must be an array.');
+    }
+    if (turns.length === 0) {
+      return [];
+    }
+
+    const validatedTurns = turns.map((turn) => {
+      if (turn === null || typeof turn !== 'object' || Array.isArray(turn)) {
+        throw new TypeError('Each imported turn must be an object.');
+      }
+      TurnRole.label(turn.role);
+      const mode = turn.mode === undefined ? TurnMode.Normal : turn.mode;
+      TurnMode.label(mode);
+      if (typeof turn.rawText !== 'string') {
+        throw new TypeError('Imported turn rawText must be a string.');
+      }
+      if (!Number.isInteger(turn.sceneNumber) || turn.sceneNumber < 1) {
+        throw new RangeError('Imported turn sceneNumber must be a positive integer.');
+      }
+      const witnessIds = turn.witnessIds === undefined
+        ? []
+        : this.#validateStringArray(turn.witnessIds, 'turn.witnessIds');
+      const sceneStateBefore = turn.sceneStateBefore === undefined || turn.sceneStateBefore === null
+        ? null
+        : this.#normalizeSceneState(turn.sceneStateBefore, null);
+      const sceneStateAfter = turn.sceneStateAfter === undefined || turn.sceneStateAfter === null
+        ? null
+        : this.#normalizeSceneState(turn.sceneStateAfter, null);
+      const createdAt = typeof turn.createdAt === 'string' && turn.createdAt.trim().length > 0
+        ? turn.createdAt.trim()
+        : null;
+      if (!Array.isArray(turn.beats) || turn.beats.length === 0) {
+        throw new RangeError('Each imported turn must contain a non-empty beats array.');
+      }
+      const validatedBeats = turn.beats.map((beat) => {
+        if (beat === null || typeof beat !== 'object' || Array.isArray(beat)) {
+          throw new TypeError('Each imported beat must be an object.');
+        }
+        SpeakerType.label(beat.speakerType);
+        if (beat.characterId !== undefined && beat.characterId !== null) {
+          this.#validateNonEmptyString(beat.characterId, 'beat.characterId');
+        }
+        this.#validateNonEmptyString(beat.speakerName, 'beat.speakerName');
+        if (typeof beat.text !== 'string') {
+          throw new TypeError('Imported beat text must be a string.');
+        }
+        const beatWitnessIds = beat.witnessIds === undefined
+          ? witnessIds
+          : this.#validateStringArray(beat.witnessIds, 'beat.witnessIds');
+        return {
+          speakerType: beat.speakerType,
+          characterId: beat.characterId === undefined ? null : beat.characterId,
+          speakerName: beat.speakerName.trim(),
+          text: beat.text,
+          witnessIds: beatWitnessIds,
+        };
+      });
+      return {
+        role: turn.role,
+        mode,
+        rawText: turn.rawText,
+        sceneNumber: turn.sceneNumber,
+        witnessIds,
+        sceneStateBefore,
+        sceneStateAfter,
+        createdAt,
+        beats: validatedBeats,
+      };
+    });
+
+    return this.#runTransaction(() => {
+      const campaignRow = this.#db.prepare(
+        'SELECT id FROM campaigns WHERE id = ?',
+      ).get(campaignId);
+      if (campaignRow === undefined) {
+        throw new Error(`Campaign not found: ${campaignId}`);
+      }
+
+      const maxRow = this.#db.prepare(
+        'SELECT COALESCE(MAX(seq), 0) AS max_seq FROM turns WHERE campaign_id = ?',
+      ).get(campaignId);
+      let nextSeq = Number(maxRow.max_seq) + 1;
+      const fallbackNow = new Date().toISOString();
+
+      const insertTurnStmt = this.#db.prepare(
+        `INSERT INTO turns (
+          id, campaign_id, seq, role, mode, raw_text, ooc_nudge, scene_number,
+          witness_ids_json, scene_state_before_json, scene_state_after_json,
+          director_plan_json, truncated, created_at
+        ) VALUES (?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?)`,
+      );
+      const insertBeatStmt = this.#db.prepare(
+        `INSERT INTO beats (
+          id, turn_id, seq, speaker_type, character_id, speaker_name,
+          text, witness_ids_json, mind_packet_json
+        ) VALUES (?, ?, ?, ?, ?, ?, ?, ?, ?)`,
+      );
+      const checkCharCampaignStmt = this.#db.prepare(
+        'SELECT campaign_id FROM characters WHERE id = ?',
+      );
+
+      const results = [];
+      for (const turn of validatedTurns) {
+        const turnId = randomUUID();
+        const turnSeq = nextSeq;
+        nextSeq += 1;
+        insertTurnStmt.run(
+          turnId,
+          campaignId,
+          turnSeq,
+          turn.role,
+          turn.mode,
+          turn.rawText,
+          null,
+          turn.sceneNumber,
+          JSON.stringify(turn.witnessIds),
+          turn.sceneStateBefore === null ? null : JSON.stringify(turn.sceneStateBefore),
+          turn.sceneStateAfter === null ? null : JSON.stringify(turn.sceneStateAfter),
+          null,
+          0,
+          turn.createdAt ?? fallbackNow,
+        );
+
+        for (let beatIndex = 0; beatIndex < turn.beats.length; beatIndex += 1) {
+          const beat = turn.beats[beatIndex];
+          if (beat.characterId !== null) {
+            const beatCharRow = checkCharCampaignStmt.get(beat.characterId);
+            if (beatCharRow !== undefined && beatCharRow.campaign_id !== campaignId) {
+              throw new RangeError(`Character does not belong to campaign: ${beat.characterId}`);
+            }
+          }
+          insertBeatStmt.run(
+            randomUUID(),
+            turnId,
+            beatIndex + 1,
+            beat.speakerType,
+            beat.characterId,
+            beat.speakerName,
+            beat.text,
+            JSON.stringify(beat.witnessIds),
+            null,
+          );
+        }
+
+        results.push({ id: turnId, seq: turnSeq, role: turn.role });
+      }
+
+      this.#bumpChangeSeq();
+      return results;
     });
   }
 

@@ -1,6 +1,10 @@
 import assert from 'node:assert/strict';
-import { describe, it } from 'node:test';
+import fs from 'node:fs';
+import os from 'node:os';
+import path from 'node:path';
+import { after, describe, it } from 'node:test';
 import { OpenRouterClient } from '../src/openrouter/OpenRouterClient.mjs';
+import { ReplyLog } from '../src/openrouter/ReplyLog.mjs';
 import { RetryPolicy } from '../src/openrouter/RetryPolicy.mjs';
 import { SpendStage } from '../src/store/enums/SpendStage.mjs';
 import { SqliteStore } from '../src/store/SqliteStore.mjs';
@@ -1747,6 +1751,366 @@ describe('OpenRouterClient and RetryPolicy adversarial regressions', () => {
         assert.equal(sanitizedError.cause.bodyText, 'Bearer [REDACTED]');
         return true;
       },
+    );
+  });
+});
+
+const replyLogTempDirs = [];
+
+after(() => {
+  for (const tempDir of replyLogTempDirs) {
+    fs.rmSync(tempDir, { recursive: true, force: true });
+  }
+});
+
+/**
+ * @returns {{logPath: string, replyLog: ReplyLog}}
+ * @throws {Error}
+ */
+function createReplyLogFixture() {
+  const tempDir = fs.mkdtempSync(path.join(os.tmpdir(), 'worlds-reply-log-test-'));
+  replyLogTempDirs.push(tempDir);
+  const logPath = path.join(tempDir, 'nested', 'model-replies.log');
+  return { logPath, replyLog: new ReplyLog(logPath) };
+}
+
+/**
+ * @param {string} logPath
+ * @returns {{header: string, body: string}}
+ * @throws {Error}
+ */
+function readSingleRecord(logPath) {
+  const content = fs.readFileSync(logPath, 'utf8');
+  assert.equal(content.endsWith('\n\n'), true);
+  const headerEnd = content.indexOf('\n');
+  return {
+    header: content.slice(0, headerEnd),
+    body: content.slice(headerEnd + 1, content.length - 2),
+  };
+}
+
+/**
+ * @param {string} content
+ * @returns {Response}
+ */
+function createCompletionResponse(content) {
+  return new Response(
+    JSON.stringify({
+      choices: [{ message: { content }, finish_reason: 'stop' }],
+      usage: { prompt_tokens: 15, completion_tokens: 7 },
+    }),
+    { status: 200, headers: { 'Content-Type': 'application/json' } },
+  );
+}
+
+describe('OpenRouterClient reply log', () => {
+  it('logs a successful complete() reply byte for byte with a full header', async () => {
+    const { logPath, replyLog } = createReplyLogFixture();
+    const reply = '  \n  not json {"a": \n\t trailing  \n\n';
+    const client = new OpenRouterClient({
+      apiKeyProvider: () => 'sk-or-test-key',
+      replyLog,
+      fetchImpl: async () => createCompletionResponse(reply),
+    });
+
+    const result = await client.complete({
+      model: 'openrouter/model',
+      messages: [{ role: 'user', content: 'Secret prompt text' }],
+      stage: SpendStage.Mind,
+      campaignId: 'camp-9',
+    });
+
+    assert.equal(result.text, reply);
+    const record = readSingleRecord(logPath);
+    assert.match(
+      record.header,
+      /^=== \d{4}-\d{2}-\d{2}T[\d:.]+Z \| stage=mind \| campaign=camp-9 \| model=openrouter\/model \| status=ok \| finish=stop \| tokens=15\/7$/,
+    );
+    assert.equal(record.body, reply);
+    assert.equal(fs.readFileSync(logPath, 'utf8').includes('Secret prompt text'), false);
+  });
+
+  it('logs an empty reply and records none for a missing campaign and missing usage', async () => {
+    const { logPath, replyLog } = createReplyLogFixture();
+    const client = new OpenRouterClient({
+      apiKeyProvider: () => 'sk-or-test-key',
+      replyLog,
+      fetchImpl: async () => new Response(
+        JSON.stringify({ choices: [{ message: { content: '' } }] }),
+        { status: 200, headers: { 'Content-Type': 'application/json' } },
+      ),
+    });
+
+    const result = await client.complete({
+      model: 'openrouter/model',
+      messages: [{ role: 'user', content: 'Hi' }],
+      stage: SpendStage.Scribe,
+    });
+
+    assert.equal(result.text, '');
+    const record = readSingleRecord(logPath);
+    assert.match(record.header, /\| campaign=none \| model=openrouter\/model \| status=ok \| finish=none \| tokens=none$/);
+    assert.equal(record.body, '');
+  });
+
+  it('logs a retried 503 body first and then the successful reply', async () => {
+    const { logPath, replyLog } = createReplyLogFixture();
+    const { wait } = createRecordedWait();
+    let attemptCount = 0;
+    const client = new OpenRouterClient({
+      apiKeyProvider: () => 'sk-or-test-key',
+      replyLog,
+      retryOptions: { wait },
+      fetchImpl: async () => {
+        attemptCount += 1;
+        if (attemptCount === 1) {
+          return new Response('<html>upstream down</html>', { status: 503 });
+        }
+        return createCompletionResponse('Second try reply');
+      },
+    });
+
+    const result = await client.complete({
+      model: 'openrouter/model',
+      messages: [{ role: 'user', content: 'Hi' }],
+      stage: SpendStage.Mind,
+      campaignId: 'camp-9',
+    });
+
+    assert.equal(result.text, 'Second try reply');
+    const content = fs.readFileSync(logPath, 'utf8');
+    const recordHeaders = content.split('\n').filter((line) => line.startsWith('=== '));
+    assert.equal(recordHeaders.length, 2);
+    assert.match(recordHeaders[0], /status=http 503 \| finish=none \| tokens=none$/);
+    assert.match(recordHeaders[1], /status=ok \| finish=stop \| tokens=15\/7$/);
+    assert.ok(content.indexOf('<html>upstream down</html>') < content.indexOf('Second try reply'));
+  });
+
+  it('logs a 400 body and still rejects as before', async () => {
+    const { logPath, replyLog } = createReplyLogFixture();
+    const errorBody = JSON.stringify({ error: { message: 'Bad request details', code: 400 } });
+    const client = new OpenRouterClient({
+      apiKeyProvider: () => 'sk-or-test-key',
+      replyLog,
+      fetchImpl: async () => new Response(errorBody, { status: 400 }),
+    });
+
+    await assert.rejects(
+      () => client.complete({
+        model: 'openrouter/model',
+        messages: [{ role: 'user', content: 'Hi' }],
+        stage: SpendStage.Mind,
+      }),
+      (caughtError) => {
+        assert.equal(caughtError.status, 400);
+        assert.equal(caughtError.retryable, false);
+        return true;
+      },
+    );
+
+    const record = readSingleRecord(logPath);
+    assert.match(record.header, /status=http 400 \| finish=none \| tokens=none$/);
+    assert.equal(record.body, errorBody);
+  });
+
+  it('logs a 200 body that is not JSON before rejecting', async () => {
+    const { logPath, replyLog } = createReplyLogFixture();
+    const client = new OpenRouterClient({
+      apiKeyProvider: () => 'sk-or-test-key',
+      replyLog,
+      fetchImpl: async () => new Response('plain words, no json', { status: 200 }),
+    });
+
+    await assert.rejects(
+      () => client.complete({
+        model: 'openrouter/model',
+        messages: [{ role: 'user', content: 'Hi' }],
+        stage: SpendStage.Mind,
+      }),
+      /Malformed JSON response/,
+    );
+
+    const record = readSingleRecord(logPath);
+    assert.match(record.header, /status=http 200 /);
+    assert.equal(record.body, 'plain words, no json');
+  });
+
+  it('redacts the api key from a logged error body', async () => {
+    const { logPath, replyLog } = createReplyLogFixture();
+    const client = new OpenRouterClient({
+      apiKeyProvider: () => 'sk-or-secret-key',
+      replyLog,
+      fetchImpl: async () => new Response('echo sk-or-secret-key here', { status: 400 }),
+    });
+
+    await assert.rejects(() => client.complete({
+      model: 'openrouter/model',
+      messages: [{ role: 'user', content: 'Hi' }],
+      stage: SpendStage.Mind,
+    }));
+
+    assert.equal(fs.readFileSync(logPath, 'utf8').includes('sk-or-secret-key'), false);
+  });
+
+  it('logs the full streamed text once at the end', async () => {
+    const { logPath, replyLog } = createReplyLogFixture();
+    const ssePayload = [
+      'data: {"choices":[{"delta":{"content":" Hello"}}]}\n\n',
+      'data: {"choices":[{"delta":{"content":" world \\n"},"finish_reason":"stop"}],"usage":{"prompt_tokens":4,"completion_tokens":2}}\n\n',
+      'data: [DONE]\n\n',
+    ].join('');
+    const client = new OpenRouterClient({
+      apiKeyProvider: () => 'sk-or-test-key',
+      replyLog,
+      fetchImpl: async () => new Response(createChunkedStream([ssePayload]), {
+        status: 200,
+        headers: { 'Content-Type': 'text/event-stream' },
+      }),
+    });
+
+    const result = await client.stream({
+      model: 'openrouter/composer',
+      messages: [{ role: 'user', content: 'Hi' }],
+      stage: SpendStage.Composer,
+      campaignId: 'camp-3',
+    });
+
+    assert.equal(result.text, ' Hello world \n');
+    const record = readSingleRecord(logPath);
+    assert.match(record.header, /stage=composer \| campaign=camp-3 \| model=openrouter\/composer \| status=ok \| finish=stop \| tokens=4\/2$/);
+    assert.equal(record.body, ' Hello world \n');
+  });
+
+  it('logs the error and the partial text for a mid-stream error frame', async () => {
+    const { logPath, replyLog } = createReplyLogFixture();
+    const ssePayload = [
+      'data: {"choices":[{"delta":{"content":"Half a sent"}}]}\n\n',
+      'data: {"error":{"message":"Provider cut the stream","code":502}}\n\n',
+    ].join('');
+    const client = new OpenRouterClient({
+      apiKeyProvider: () => 'sk-or-test-key',
+      replyLog,
+      fetchImpl: async () => new Response(createChunkedStream([ssePayload]), {
+        status: 200,
+        headers: { 'Content-Type': 'text/event-stream' },
+      }),
+    });
+
+    await assert.rejects(
+      () => client.stream({
+        model: 'openrouter/composer',
+        messages: [{ role: 'user', content: 'Hi' }],
+        stage: SpendStage.Composer,
+      }),
+      /Provider cut the stream/,
+    );
+
+    const record = readSingleRecord(logPath);
+    assert.match(record.header, /status=stream-error \| finish=none \| tokens=none$/);
+    assert.equal(record.body, 'error: Provider cut the stream\npartial text:\nHalf a sent');
+  });
+
+  it('logs what arrived for an aborted stream', async () => {
+    const { logPath, replyLog } = createReplyLogFixture();
+    const controller = new AbortController();
+    const ssePayload = [
+      'data: {"choices":[{"delta":{"content":"Before abort"}}]}\n\n',
+      'data: {"choices":[{"delta":{"content":" never seen"}}]}\n\n',
+    ].join('');
+    const client = new OpenRouterClient({
+      apiKeyProvider: () => 'sk-or-test-key',
+      replyLog,
+      fetchImpl: async () => new Response(createChunkedStream([ssePayload]), {
+        status: 200,
+        headers: { 'Content-Type': 'text/event-stream' },
+      }),
+    });
+
+    await assert.rejects(
+      () => client.stream({
+        model: 'openrouter/composer',
+        messages: [{ role: 'user', content: 'Hi' }],
+        stage: SpendStage.Composer,
+        signal: controller.signal,
+        onDelta: () => {
+          controller.abort();
+        },
+      }),
+      (caughtError) => caughtError.name === 'AbortError',
+    );
+
+    const record = readSingleRecord(logPath);
+    assert.match(record.header, /status=aborted /);
+    assert.ok(record.body.endsWith('partial text:\nBefore abort'));
+  });
+
+  it('logs the text received before a network drop', async () => {
+    const { logPath, replyLog } = createReplyLogFixture();
+    const client = new OpenRouterClient({
+      apiKeyProvider: () => 'sk-or-test-key',
+      replyLog,
+      fetchImpl: async () => new Response(
+        createChunkedStream(
+          ['data: {"choices":[{"delta":{"content":"Partial"}}]}\n\n'],
+          { failAfterIndex: 1 },
+        ),
+        { status: 200, headers: { 'Content-Type': 'text/event-stream' } },
+      ),
+    });
+
+    await assert.rejects(() => client.stream({
+      model: 'openrouter/composer',
+      messages: [{ role: 'user', content: 'Hi' }],
+      stage: SpendStage.Composer,
+    }));
+
+    const record = readSingleRecord(logPath);
+    assert.match(record.header, /status=network-error /);
+    assert.ok(record.body.endsWith('partial text:\nPartial'));
+  });
+
+  it('logs a streaming HTTP failure body', async () => {
+    const { logPath, replyLog } = createReplyLogFixture();
+    const client = new OpenRouterClient({
+      apiKeyProvider: () => 'sk-or-test-key',
+      replyLog,
+      fetchImpl: async () => new Response('{"error":{"message":"No credits"}}', { status: 402 }),
+    });
+
+    await assert.rejects(() => client.stream({
+      model: 'openrouter/composer',
+      messages: [{ role: 'user', content: 'Hi' }],
+      stage: SpendStage.Composer,
+    }));
+
+    const record = readSingleRecord(logPath);
+    assert.match(record.header, /status=http 402 /);
+    assert.equal(record.body, '{"error":{"message":"No credits"}}');
+  });
+
+  it('writes nothing and behaves the same with replyLog null', async () => {
+    const { logPath } = createReplyLogFixture();
+    const client = new OpenRouterClient({
+      apiKeyProvider: () => 'sk-or-test-key',
+      replyLog: null,
+      fetchImpl: async () => createCompletionResponse('Plain'),
+    });
+
+    const result = await client.complete({
+      model: 'openrouter/model',
+      messages: [{ role: 'user', content: 'Hi' }],
+      stage: SpendStage.Mind,
+    });
+
+    assert.equal(result.text, 'Plain');
+    assert.equal(fs.existsSync(logPath), false);
+    assert.equal(fs.existsSync(path.dirname(logPath)), false);
+  });
+
+  it('rejects a replyLog without append()', () => {
+    assert.throws(
+      () => new OpenRouterClient({ apiKeyProvider: () => 'sk-or-test-key', replyLog: {} }),
+      TypeError,
     );
   });
 });

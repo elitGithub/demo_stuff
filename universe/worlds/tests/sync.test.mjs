@@ -257,47 +257,6 @@ test('R2Transport signs SigV4 headers and cleans up AbortSignal listeners', asyn
   assert.equal(activeListeners, 0);
 });
 
-test('WorldSync refuses foreign bucket containing _universe/ or root files and never falls back offline', async (testContext) => {
-  const workDir = makeTempDir(testContext);
-  const dbPath = path.join(workDir, 'worlds.sqlite');
-  const syncStatePath = path.join(workDir, 'sync-state.json');
-  const conflictsDir = path.join(workDir, 'conflicts');
-
-  const seedStore = new SqliteStore(dbPath);
-  seedStore.createCampaign({ title: 'Local World' });
-  seedStore.close();
-
-  const mockR2 = createMockR2();
-  mockR2.bucket.set('_universe/v2/control.json', {
-    body: Buffer.from('{}'),
-    etag: '"u1"',
-    lastModified: Date.now(),
-    contentType: 'application/json',
-  });
-
-  const sync = new WorldSync({
-    transport: new R2Transport(TEST_CREDS, { fetchImpl: mockR2.fetchImpl }),
-    bucket: TEST_CREDS.bucket,
-  });
-
-  await assert.rejects(() => sync.pullOnStartup({ dbPath, syncStatePath, conflictsDir }), /non-Worlds objects/);
-  const checkStore = new SqliteStore(dbPath);
-  try {
-    await assert.rejects(() => sync.pushSnapshot({ store: checkStore, syncStatePath }), /non-Worlds objects/);
-  } finally {
-    checkStore.close();
-  }
-
-  mockR2.bucket.clear();
-  mockR2.bucket.set('stray-file.txt', {
-    body: Buffer.from('foreign'),
-    etag: '"f1"',
-    lastModified: Date.now(),
-    contentType: 'text/plain',
-  });
-  await assert.rejects(() => sync.pullOnStartup({ dbPath, syncStatePath, conflictsDir }), /non-Worlds objects/);
-});
-
 test('WorldSync detects bucket swap via bucketToken, bucket name, and wiped control mismatch', async (testContext) => {
   const workDir = makeTempDir(testContext);
   const dbPath = path.join(workDir, 'worlds.sqlite');

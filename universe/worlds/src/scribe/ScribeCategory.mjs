@@ -168,6 +168,7 @@ export const ScribeCategory = Object.freeze({
   /**
    * @param {object} fact
    * @returns {string}
+   * @throws {TypeError}
    */
   value(fact) {
     const { form, dimension } = ScribeCategory.scope(fact);

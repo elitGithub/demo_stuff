@@ -1,3 +1,6 @@
+import { FocusKeeper } from './FocusKeeper.mjs';
+import { ModelCatalogView } from './ModelCatalogView.mjs';
+
 export class CharacterModal {
   static #AvatarTokens = Object.freeze([
     { value: 'sage', label: 'Sage' },
@@ -10,14 +13,19 @@ export class CharacterModal {
     { value: 'coral', label: 'Coral' },
   ]);
 
+  static #TierDefaultPlaceholder = 'Use tier default (no override)';
+  static #RefreshButtonId = 'char-refresh-models';
+  static #ScrollSelector = '.modal-card';
+
   #modalRoot;
   #documentRef;
   #onSave;
   #state = null;
   #keyHandler = null;
+  #firstWarningElement = null;
 
   /**
-   * @param {{modalRoot: HTMLElement, documentRef?: Document | null, onSave: (payload: Record<string, unknown>, existingCharacter: object | null) => Promise<void>}} options
+   * @param {{modalRoot: HTMLElement, documentRef?: Document | null, onSave: (payload: Record<string, unknown>, existingCharacter: object | null) => Promise<object | void>}} options
    * @throws {TypeError}
    */
   constructor(options = {}) {
@@ -37,34 +45,31 @@ export class CharacterModal {
   }
 
   /**
-   * @param {{character?: object | null, modelCatalog?: object | null, onLoadAllModels?: ((refresh: boolean) => Promise<void>) | null}} [options]
+   * @param {{character?: object | null, modelCatalog?: object | null, modelCatalogLoading?: boolean, modelCatalogError?: string, onRefreshModels?: (() => Promise<void>) | null}} [options]
    * @returns {void}
    */
-  open({ character = null, modelCatalog = null, onLoadAllModels = null } = {}) {
+  open({
+    character = null,
+    modelCatalog = null,
+    modelCatalogLoading = false,
+    modelCatalogError = '',
+    onRefreshModels = null,
+  } = {}) {
     this.close();
     const isEdit = character !== null && typeof character === 'object';
     this.#state = {
       character: isEdit ? character : null,
       modelCatalog,
-      onLoadAllModels,
-      catalogLoading: false,
-      catalogError: '',
+      onRefreshModels,
+      catalogLoading: Boolean(modelCatalogLoading),
+      catalogError: modelCatalogError,
+      refreshFocusPending: false,
       modelFilter: '',
       slugManuallyEdited: isEdit,
-      values: {
-        name: isEdit ? String(character.name ?? '') : '',
-        slug: isEdit ? String(character.slug ?? '') : '',
-        aliasesText: isEdit && Array.isArray(character.aliases) ? character.aliases.join(', ') : '',
-        tier: isEdit && character.tier === 'recurring' ? 'recurring' : 'main',
-        isPlayer: isEdit ? Boolean(character.isPlayer) : false,
-        modelOverride: isEdit && typeof character.modelOverride === 'string' ? character.modelOverride : '',
-        persona: isEdit ? String(character.persona ?? '') : '',
-        voiceNotes: isEdit ? String(character.voiceNotes ?? '') : '',
-        avatarToken: isEdit && typeof character.avatarToken === 'string' ? character.avatarToken : 'slate',
-        avatarInitials: isEdit && typeof character.avatarInitials === 'string' ? character.avatarInitials : '',
-      },
+      values: CharacterModal.#buildValues(isEdit ? character : null),
       busy: false,
       errorMessage: '',
+      warnings: [],
     };
 
     if (this.#documentRef !== null && typeof this.#documentRef.addEventListener === 'function') {
@@ -77,7 +82,7 @@ export class CharacterModal {
       this.#documentRef.addEventListener('keydown', this.#keyHandler);
     }
 
-    this.#render();
+    this.#render({ focusName: true });
   }
 
   /**
@@ -91,7 +96,35 @@ export class CharacterModal {
     this.#state.modelCatalog = modelCatalog;
     this.#state.catalogLoading = false;
     this.#state.catalogError = '';
-    this.#render();
+    this.#renderCatalogUpdate();
+  }
+
+  /**
+   * @param {boolean} isLoading
+   * @returns {void}
+   */
+  setModelCatalogLoading(isLoading) {
+    if (this.#state === null) {
+      return;
+    }
+    this.#state.catalogLoading = Boolean(isLoading);
+    if (this.#state.catalogLoading) {
+      this.#state.catalogError = '';
+    }
+    this.#renderCatalogUpdate();
+  }
+
+  /**
+   * @param {unknown} errorMessage
+   * @returns {void}
+   */
+  setModelCatalogError(errorMessage) {
+    if (this.#state === null) {
+      return;
+    }
+    this.#state.catalogLoading = false;
+    this.#state.catalogError = typeof errorMessage === 'string' ? errorMessage : String(errorMessage ?? '');
+    this.#renderCatalogUpdate();
   }
 
   /**
@@ -109,7 +142,48 @@ export class CharacterModal {
   /**
    * @returns {void}
    */
-  #render() {
+  #renderCatalogUpdate() {
+    const isLoadEnd = !this.#state.catalogLoading;
+    const returnFocusId = isLoadEnd && this.#state.refreshFocusPending ? CharacterModal.#RefreshButtonId : '';
+    if (isLoadEnd) {
+      this.#state.refreshFocusPending = false;
+    }
+    FocusKeeper.keep({
+      documentRef: this.#documentRef,
+      containerElement: this.#modalRoot,
+      scrollSelector: CharacterModal.#ScrollSelector,
+      renderFn: () => {
+        this.#render({ focusName: false });
+      },
+      returnFocusId,
+    });
+  }
+
+  /**
+   * @param {{name?: string, slug?: string, aliases?: Array<string>, tier?: string, isPlayer?: boolean, modelOverride?: string | null, persona?: string, voiceNotes?: string, avatarToken?: string, avatarInitials?: string} | null} character
+   * @returns {{name: string, slug: string, aliasesText: string, tier: string, isPlayer: boolean, modelOverride: string, persona: string, voiceNotes: string, avatarToken: string, avatarInitials: string}}
+   */
+  static #buildValues(character) {
+    const isEdit = character !== null;
+    return {
+      name: isEdit ? String(character.name ?? '') : '',
+      slug: isEdit ? String(character.slug ?? '') : '',
+      aliasesText: isEdit && Array.isArray(character.aliases) ? character.aliases.join(', ') : '',
+      tier: isEdit && character.tier === 'recurring' ? 'recurring' : 'main',
+      isPlayer: isEdit ? Boolean(character.isPlayer) : false,
+      modelOverride: isEdit && typeof character.modelOverride === 'string' ? character.modelOverride : '',
+      persona: isEdit ? String(character.persona ?? '') : '',
+      voiceNotes: isEdit ? String(character.voiceNotes ?? '') : '',
+      avatarToken: isEdit && typeof character.avatarToken === 'string' ? character.avatarToken : 'slate',
+      avatarInitials: isEdit && typeof character.avatarInitials === 'string' ? character.avatarInitials : '',
+    };
+  }
+
+  /**
+   * @param {{focusName?: boolean}} [options]
+   * @returns {void}
+   */
+  #render({ focusName = true } = {}) {
     if (this.#state === null || this.#documentRef === null) {
       return;
     }
@@ -258,6 +332,7 @@ export class CharacterModal {
     const playerLabel = this.#documentRef.createElement('label');
     playerLabel.className = 'checkbox-row';
     const playerCheckbox = this.#documentRef.createElement('input');
+    playerCheckbox.id = 'char-player-checkbox';
     playerCheckbox.type = 'checkbox';
     playerCheckbox.checked = state.values.isPlayer;
     playerCheckbox.disabled = state.busy;
@@ -281,12 +356,12 @@ export class CharacterModal {
     modelInput.placeholder = 'Optional OpenRouter model override';
     modelGroup.append(this.#createField('Model override', modelInput));
 
-    if (state.modelCatalog !== null || typeof state.onLoadAllModels === 'function') {
-      const hasOpenRouter = Array.isArray(state.modelCatalog?.openrouter);
+    if (state.modelCatalog !== null || typeof state.onRefreshModels === 'function') {
       const pickerToolbar = this.#documentRef.createElement('div');
       pickerToolbar.className = 'action-row-split';
 
       const filterInput = this.#documentRef.createElement('input');
+      filterInput.id = 'char-model-filter';
       filterInput.type = 'search';
       filterInput.className = 'field-control';
       filterInput.placeholder = 'Filter models...';
@@ -300,36 +375,22 @@ export class CharacterModal {
       modelSelect.disabled = state.busy;
       this.#populateOverrideSelect(modelSelect, state.values.modelOverride, state.modelFilter);
 
-      if (typeof state.onLoadAllModels === 'function') {
-        const loadBtn = this.#documentRef.createElement('button');
-        loadBtn.type = 'button';
-        loadBtn.className = state.catalogLoading
+      if (typeof state.onRefreshModels === 'function') {
+        const refreshBtn = this.#documentRef.createElement('button');
+        refreshBtn.id = CharacterModal.#RefreshButtonId;
+        refreshBtn.type = 'button';
+        refreshBtn.className = state.catalogLoading
           ? 'btn btn-secondary btn-compact is-loading'
           : 'btn btn-secondary btn-compact';
-        loadBtn.disabled = state.busy || state.catalogLoading;
-        loadBtn.textContent = state.catalogLoading
-          ? 'Loading catalog...'
-          : hasOpenRouter
-            ? 'Refresh OpenRouter models'
-            : 'Load all OpenRouter models';
-        loadBtn.addEventListener('click', async () => {
-          if (state.catalogLoading) {
-            return;
-          }
-          state.catalogLoading = true;
-          state.catalogError = '';
-          this.#render();
-          try {
-            await state.onLoadAllModels(hasOpenRouter);
-          } catch (loadError) {
-            if (this.#state === state) {
-              state.catalogLoading = false;
-              state.catalogError = loadError instanceof Error ? loadError.message : String(loadError);
-              this.#render();
-            }
-          }
+        refreshBtn.disabled = state.busy || state.catalogLoading;
+        refreshBtn.textContent = state.catalogLoading
+          ? ModelCatalogView.RefreshBusyLabel
+          : ModelCatalogView.RefreshLabel;
+        refreshBtn.addEventListener('click', () => {
+          state.refreshFocusPending = true;
+          return state.onRefreshModels();
         });
-        pickerToolbar.append(filterInput, loadBtn);
+        pickerToolbar.append(filterInput, refreshBtn);
       } else {
         pickerToolbar.append(filterInput);
       }
@@ -350,12 +411,26 @@ export class CharacterModal {
       });
 
       modelGroup.append(pickerToolbar, modelSelect);
+
+      const catalogStatusText = ModelCatalogView.statusText(state.modelCatalog, state.catalogLoading);
+      if (catalogStatusText.length > 0) {
+        const catalogStatus = this.#documentRef.createElement('div');
+        catalogStatus.className = 'item-meta';
+        catalogStatus.textContent = catalogStatusText;
+        modelGroup.append(catalogStatus);
+      }
       if (state.catalogError.length > 0) {
         const catalogAlert = this.#documentRef.createElement('div');
         catalogAlert.className = 'inline-alert is-danger';
         catalogAlert.setAttribute('role', 'alert');
         catalogAlert.textContent = state.catalogError;
         modelGroup.append(catalogAlert);
+      }
+      if (typeof state.modelCatalog?.warning === 'string' && state.modelCatalog.warning.length > 0) {
+        const warningAlert = this.#documentRef.createElement('div');
+        warningAlert.className = 'inline-alert is-warning';
+        warningAlert.textContent = state.modelCatalog.warning;
+        modelGroup.append(warningAlert);
       }
     } else {
       modelInput.addEventListener('input', () => {
@@ -433,6 +508,16 @@ export class CharacterModal {
       errorBox.setAttribute('role', 'alert');
       errorBox.textContent = state.errorMessage;
       body.append(errorBox);
+    }
+    this.#firstWarningElement = null;
+    for (const saveWarning of state.warnings) {
+      const warningBox = this.#documentRef.createElement('div');
+      warningBox.className = 'inline-alert is-warning';
+      warningBox.textContent = saveWarning;
+      body.append(warningBox);
+      if (this.#firstWarningElement === null) {
+        this.#firstWarningElement = warningBox;
+      }
     }
 
     const footer = this.#documentRef.createElement('div');
@@ -519,10 +604,22 @@ export class CharacterModal {
 
       state.busy = true;
       state.errorMessage = '';
+      state.warnings = [];
       this.#render();
       try {
-        await this.#onSave(payload, state.character);
-        this.close();
+        const savedCharacter = await this.#onSave(payload, state.character);
+        const saveWarnings = Array.isArray(savedCharacter?.warnings) ? savedCharacter.warnings : [];
+        if (saveWarnings.length === 0) {
+          this.close();
+        } else if (this.#state === state) {
+          state.character = savedCharacter;
+          state.values = CharacterModal.#buildValues(savedCharacter);
+          state.slugManuallyEdited = true;
+          state.warnings = saveWarnings;
+          state.busy = false;
+          this.#render({ focusName: false });
+          FocusKeeper.reveal(this.#firstWarningElement);
+        }
       } catch (saveError) {
         if (this.#state === state) {
           state.busy = false;
@@ -536,7 +633,7 @@ export class CharacterModal {
     backdrop.append(card);
     this.#modalRoot.replaceChildren(backdrop);
 
-    if (!state.busy && typeof nameInput.focus === 'function') {
+    if (focusName && !state.busy && typeof nameInput.focus === 'function') {
       nameInput.focus();
     }
   }
@@ -577,66 +674,14 @@ export class CharacterModal {
    * @returns {void}
    */
   #populateOverrideSelect(selectElement, currentValue, filterQuery) {
-    const normalizedFilter = typeof filterQuery === 'string' ? filterQuery.trim().toLowerCase() : '';
-    const catalog = this.#state?.modelCatalog ?? null;
-    const nodes = [];
-
-    const defaultOpt = this.#documentRef.createElement('option');
-    defaultOpt.value = '';
-    defaultOpt.textContent = 'Use tier default (no override)';
-    nodes.push(defaultOpt);
-
-    const recommendedList = Array.isArray(catalog?.recommended) ? catalog.recommended : [];
-    const matchingRec = recommendedList.filter((item) => {
-      if (normalizedFilter.length === 0) {
-        return true;
-      }
-      return [item.id, item.name, item.recommendedFor].some((field) => {
-        return typeof field === 'string' && field.toLowerCase().includes(normalizedFilter);
-      });
+    ModelCatalogView.populateSelect({
+      documentRef: this.#documentRef,
+      selectElement,
+      catalog: this.#state?.modelCatalog ?? null,
+      currentValue,
+      filterQuery,
+      emptyOptionText: CharacterModal.#TierDefaultPlaceholder,
+      hiddenOptionText: ModelCatalogView.SelectPlaceholder,
     });
-    if (matchingRec.length > 0) {
-      const recGroup = this.#documentRef.createElement('optgroup');
-      recGroup.label = `Suggested (Unrestricted RP) - ${matchingRec.length}`;
-      for (const item of matchingRec) {
-        const option = this.#documentRef.createElement('option');
-        option.value = item.id;
-        option.textContent = item.recommendedFor ? `${item.id} (${item.recommendedFor})` : item.id;
-        recGroup.append(option);
-      }
-      nodes.push(recGroup);
-    }
-
-    const openRouterList = Array.isArray(catalog?.openrouter) ? catalog.openrouter : [];
-    if (openRouterList.length > 0) {
-      const matchingOr = openRouterList
-        .filter((item) => {
-          if (normalizedFilter.length === 0) {
-            return true;
-          }
-          return [item.id, item.name].some((field) => {
-            return typeof field === 'string' && field.toLowerCase().includes(normalizedFilter);
-          });
-        })
-        .slice(0, 60);
-      if (matchingOr.length > 0) {
-        const orGroup = this.#documentRef.createElement('optgroup');
-        orGroup.label = `OpenRouter Catalog (${matchingOr.length})`;
-        for (const item of matchingOr) {
-          const option = this.#documentRef.createElement('option');
-          option.value = item.id;
-          option.textContent = item.isModerated === true ? `${item.id} (moderated)` : item.id;
-          orGroup.append(option);
-        }
-        nodes.push(orGroup);
-      }
-    }
-
-    selectElement.replaceChildren(...nodes);
-    const hasExactOption = [
-      ...matchingRec.map((item) => item.id),
-      ...openRouterList.map((item) => item.id),
-    ].includes(currentValue);
-    selectElement.value = hasExactOption ? currentValue : '';
   }
 }

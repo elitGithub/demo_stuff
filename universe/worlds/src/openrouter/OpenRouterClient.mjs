@@ -1,7 +1,9 @@
 import { SpendStage } from '../store/enums/SpendStage.mjs';
+import { ReplyStatus } from './ReplyStatus.mjs';
 import { RetryPolicy } from './RetryPolicy.mjs';
 
 export class OpenRouterClient {
+  #replyLog;
   #apiKeyProvider;
   #fetchImpl;
   #baseUrl;
@@ -13,7 +15,7 @@ export class OpenRouterClient {
   #appReferer;
 
   /**
-   * @param {{apiKeyProvider: () => string | null | undefined | Promise<string | null | undefined>, fetchImpl?: typeof fetch, baseUrl?: string, retryOptions?: {wait?: (delayMs: number, signal?: AbortSignal | null) => Promise<void>, notify?: (info: {attempt: number, maxRetries: number, delayMs: number, reason: string}) => void | Promise<void>, delaysMs?: ReadonlyArray<number>}, onSpend?: ((dto: {campaignId: string | null, turnId: null, stage: string, model: string, promptTokens: number, completionTokens: number, costUsd: number | null}) => {id?: string} | null | undefined | Promise<{id?: string} | null | undefined>) | null, appTitle?: string, appReferer?: string}} options
+   * @param {{apiKeyProvider: () => string | null | undefined | Promise<string | null | undefined>, fetchImpl?: typeof fetch, baseUrl?: string, retryOptions?: {wait?: (delayMs: number, signal?: AbortSignal | null) => Promise<void>, notify?: (info: {attempt: number, maxRetries: number, delayMs: number, reason: string}) => void | Promise<void>, delaysMs?: ReadonlyArray<number>}, onSpend?: ((dto: {campaignId: string | null, turnId: null, stage: string, model: string, promptTokens: number, completionTokens: number, costUsd: number | null}) => {id?: string} | null | undefined | Promise<{id?: string} | null | undefined>) | null, appTitle?: string, appReferer?: string, replyLog?: import('./ReplyLog.mjs').ReplyLog | null}} options
    * @throws {TypeError | RangeError}
    */
   constructor(options = {}) {
@@ -29,7 +31,12 @@ export class OpenRouterClient {
       onSpend = null,
       appTitle = 'Worlds',
       appReferer = 'http://127.0.0.1',
+      replyLog = null,
     } = options;
+
+    if (replyLog !== null && (typeof replyLog !== 'object' || typeof replyLog.append !== 'function')) {
+      throw new TypeError('replyLog must be null or provide append().');
+    }
 
     if (typeof apiKeyProvider !== 'function') {
       throw new TypeError('apiKeyProvider must be a function.');
@@ -89,6 +96,7 @@ export class OpenRouterClient {
       throw new RangeError('appReferer must be a non-empty valid ByteString header value.');
     }
 
+    this.#replyLog = replyLog;
     this.#apiKeyProvider = apiKeyProvider;
     this.#fetchImpl = fetchImpl;
     this.#baseUrl = trimmedBaseUrl.replace(/\/+$/, '');
@@ -145,6 +153,7 @@ export class OpenRouterClient {
         }
 
         if (!response.ok) {
+          this.#logBody(prepared, response.status, bodyText);
           throw this.#createHttpError(response.status, bodyText, prepared.signal, prepared.apiKey);
         }
 
@@ -152,6 +161,7 @@ export class OpenRouterClient {
         try {
           parsedBody = JSON.parse(bodyText);
         } catch (parseError) {
+          this.#logBody(prepared, response.status, bodyText);
           const safeParseMessage = this.#redactSecret(parseError.message, prepared.apiKey);
           const malformedError = new Error(`Malformed JSON response from OpenRouter: ${safeParseMessage}`);
           malformedError.retryable = false;
@@ -159,6 +169,7 @@ export class OpenRouterClient {
         }
 
         if (parsedBody === null || typeof parsedBody !== 'object' || Array.isArray(parsedBody)) {
+          this.#logBody(prepared, response.status, bodyText);
           const invalidShapeError = new Error('OpenRouter response JSON must be an object.');
           invalidShapeError.retryable = false;
           throw invalidShapeError;
@@ -175,6 +186,7 @@ export class OpenRouterClient {
           (parsedBody.error !== undefined && parsedBody.error !== null) ||
           (firstChoice !== null && firstChoice.error !== undefined && firstChoice.error !== null)
         ) {
+          this.#logBody(prepared, response.status, bodyText);
           throw this.#createHttpError(response.status, bodyText, prepared.signal, prepared.apiKey);
         }
 
@@ -213,6 +225,7 @@ export class OpenRouterClient {
         }
 
         if (typeof messageContent !== 'string') {
+          this.#logBody(prepared, response.status, bodyText);
           const missingContentError = new Error('OpenRouter response is missing choices[0].message.content string.');
           missingContentError.retryable = false;
           throw missingContentError;
@@ -222,6 +235,12 @@ export class OpenRouterClient {
           ? firstChoice.finish_reason
           : null;
         const usage = this.#extractUsage(parsedBody.usage);
+        this.#logReply(prepared, {
+          status: ReplyStatus.Ok,
+          finishReason,
+          usage: parsedBody.usage !== undefined && parsedBody.usage !== null ? usage : null,
+          text: messageContent,
+        });
 
         return {
           text: messageContent,
@@ -298,6 +317,7 @@ export class OpenRouterClient {
             abortError.name = 'AbortError';
             throw abortError;
           }
+          this.#logBody(prepared, response.status, bodyText);
           throw this.#createHttpError(response.status, bodyText, prepared.signal, prepared.apiKey);
         }
 
@@ -315,6 +335,7 @@ export class OpenRouterClient {
             abortError.name = 'AbortError';
             throw abortError;
           }
+          this.#logBody(prepared, response.status, bodyText);
           throw this.#createHttpError(response.status, bodyText, prepared.signal, prepared.apiKey);
         }
 
@@ -344,6 +365,7 @@ export class OpenRouterClient {
         let readerClosed = false;
         let readerCancelled = false;
         let streamDone = false;
+        let readFailed = false;
 
         try {
           while (!streamDone) {
@@ -357,6 +379,7 @@ export class OpenRouterClient {
             try {
               readResult = await reader.read();
             } catch (readError) {
+              readFailed = true;
               throw this.#sanitizeError(readError, prepared.apiKey);
             }
 
@@ -581,6 +604,7 @@ export class OpenRouterClient {
                 parsedNonSse.choices[0].error !== undefined &&
                 parsedNonSse.choices[0].error !== null;
 
+              this.#logBody(prepared, response.status, trimmedNonSse);
               if (hasTopLevelError || hasChoiceError) {
                 throw this.#createHttpError(response.status, trimmedNonSse, prepared.signal, prepared.apiKey);
               }
@@ -597,6 +621,13 @@ export class OpenRouterClient {
             throw emptyStreamError;
           }
 
+          this.#logReply(prepared, {
+            status: ReplyStatus.Ok,
+            finishReason,
+            usage: receivedUsage ? usage : null,
+            text: accumulatedText,
+          });
+
           return {
             text: accumulatedText,
             finishReason,
@@ -608,6 +639,22 @@ export class OpenRouterClient {
             await this.#cancelReaderSafely(reader);
           }
           const sanitizedError = this.#sanitizeError(streamError, prepared.apiKey);
+          const isAborted = streamError?.name === 'AbortError' || prepared.signal?.aborted === true;
+          if (accumulatedText.length > 0 || streamError?.midStreamError === true) {
+            let failureStatus = ReplyStatus.StreamError;
+            if (isAborted) {
+              failureStatus = ReplyStatus.Aborted;
+            } else if (readFailed) {
+              failureStatus = ReplyStatus.NetworkError;
+            }
+            this.#logReply(prepared, {
+              status: failureStatus,
+              finishReason,
+              usage: receivedUsage ? usage : null,
+              text: accumulatedText,
+              errorMessage: this.#redactSecret(String(sanitizedError?.message ?? sanitizedError), prepared.apiKey),
+            });
+          }
           if (receivedUsage) {
             await this.#recordSpend({
               campaignId: prepared.campaignId,
@@ -809,6 +856,42 @@ export class OpenRouterClient {
       },
       payload,
     };
+  }
+
+  /**
+   * @param {{stage: string, campaignId: string | null, model: string, apiKey: string}} prepared
+   * @param {{status: string, finishReason?: string | null, usage?: {promptTokens: number, completionTokens: number} | null, text: string, errorMessage?: string | null}} record
+   * @returns {void}
+   * @throws {Error}
+   */
+  #logReply(prepared, { status, finishReason = null, usage = null, text, errorMessage = null }) {
+    if (this.#replyLog === null) {
+      return;
+    }
+    this.#replyLog.append({
+      stage: prepared.stage,
+      campaignId: prepared.campaignId,
+      model: prepared.model,
+      status,
+      finishReason,
+      usage,
+      text,
+      errorMessage,
+    });
+  }
+
+  /**
+   * @param {{stage: string, campaignId: string | null, model: string, apiKey: string}} prepared
+   * @param {number} httpStatus
+   * @param {string} bodyText
+   * @returns {void}
+   * @throws {Error}
+   */
+  #logBody(prepared, httpStatus, bodyText) {
+    this.#logReply(prepared, {
+      status: ReplyStatus.http(httpStatus),
+      text: this.#redactSecret(bodyText, prepared.apiKey),
+    });
   }
 
   /**

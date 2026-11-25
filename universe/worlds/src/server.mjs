@@ -6,8 +6,10 @@ import { WorldsConfig } from './config.mjs';
 import { RateLimiter } from './http/RateLimiter.mjs';
 import { Router } from './http/Router.mjs';
 import { Security } from './http/Security.mjs';
+import { ModelAvailabilityService } from './openrouter/ModelAvailabilityService.mjs';
 import { ModelCatalog } from './openrouter/ModelCatalog.mjs';
 import { OpenRouterClient } from './openrouter/OpenRouterClient.mjs';
+import { ReplyLog } from './openrouter/ReplyLog.mjs';
 import { MuseService } from './scribe/MuseService.mjs';
 import { PedantService } from './scribe/PedantService.mjs';
 import { ScribeService } from './scribe/ScribeService.mjs';
@@ -22,6 +24,7 @@ export class WorldsServer {
   #ownsStore;
   #syncService;
   #router;
+  #modelCatalog;
   #httpServer;
   #activeControllers;
   #csrfToken;
@@ -30,7 +33,7 @@ export class WorldsServer {
   #stopPromise = null;
 
   /**
-   * @param {{config: object, store: object, ownsStore: boolean, syncService: object | null, router: Router, httpServer: import('node:http').Server, activeControllers: Set<AbortController>, csrfToken: string}} options
+   * @param {{config: object, store: object, ownsStore: boolean, syncService: object | null, router: Router, modelCatalog: ModelCatalog, httpServer: import('node:http').Server, activeControllers: Set<AbortController>, csrfToken: string}} options
    */
   constructor({
     config,
@@ -38,6 +41,7 @@ export class WorldsServer {
     ownsStore,
     syncService,
     router,
+    modelCatalog,
     httpServer,
     activeControllers,
     csrfToken,
@@ -47,6 +51,7 @@ export class WorldsServer {
     this.#ownsStore = ownsStore;
     this.#syncService = syncService;
     this.#router = router;
+    this.#modelCatalog = modelCatalog;
     this.#httpServer = httpServer;
     this.#activeControllers = activeControllers;
     this.#csrfToken = csrfToken;
@@ -70,7 +75,7 @@ export class WorldsServer {
       publicDir = path.resolve(import.meta.dirname, '..', 'public'),
       csrfToken = Security.generateCsrfToken(),
       rateLimiter = new RateLimiter(),
-      modelCatalog = new ModelCatalog(),
+      modelCatalog = null,
     } = options;
 
     const resolvedConfig = config ?? WorldsConfig.load();
@@ -120,14 +125,34 @@ export class WorldsServer {
 
     const activeStore = ownsStore ? new SqliteStore(resolvedConfig.dbPath) : store;
     try {
+      /**
+       * @returns {string[]}
+       */
+      const configuredIdsProvider = () => {
+        const slotModels = Object.values(activeStore.getSettings().models).filter((slotModel) => {
+          return slotModel.length > 0;
+        });
+        return [...new Set([...slotModels, ...activeStore.listModelOverrides()])];
+      };
+      const activeModelCatalog = modelCatalog ?? new ModelCatalog({
+        cachePath: resolvedConfig.modelCachePath,
+        configuredIdsProvider,
+      });
+
       const activeClient = client ?? new OpenRouterClient({
         apiKeyProvider: () => WorldsConfig.resolveApiKey(resolvedConfig).key,
         onSpend: (spendDto) => activeStore.recordSpend(spendDto),
+        replyLog: resolvedConfig.logReplies ? new ReplyLog(resolvedConfig.replyLogPath) : null,
       });
 
       const scribeService = new ScribeService({
         store: activeStore,
         client: activeClient,
+      });
+      const modelAvailability = new ModelAvailabilityService({
+        modelCatalog: activeModelCatalog,
+        store: activeStore,
+        scribeService,
       });
       const pedantService = new PedantService({
         store: activeStore,
@@ -168,7 +193,8 @@ export class WorldsServer {
         rateLimiter,
         activeControllers,
         getSyncStatus,
-        modelCatalog,
+        modelCatalog: activeModelCatalog,
+        modelAvailability,
       });
 
       const httpServer = http.createServer((request, response) => {
@@ -181,6 +207,7 @@ export class WorldsServer {
         ownsStore,
         syncService,
         router,
+        modelCatalog: activeModelCatalog,
         httpServer,
         activeControllers,
         csrfToken,
@@ -217,14 +244,13 @@ export class WorldsServer {
    */
   static async runCli() {
     const config = WorldsConfig.load();
-    const modelCatalog = new ModelCatalog();
     const syncService = config.r2 !== null
       ? new WorldSync({
           transport: new R2Transport(config.r2),
           bucket: config.r2.bucket,
         })
       : null;
-    const server = await WorldsServer.create({ config, syncService, modelCatalog });
+    const server = await WorldsServer.create({ config, syncService });
     try {
       if (syncService !== null) {
         const syncStatus = syncService.getStatus();
@@ -232,7 +258,7 @@ export class WorldsServer {
           process.stderr.write(`Worlds sync warning: ${syncStatus.warning}\n`);
         }
       }
-      WorldsServer.seedDefaultModelsIfEmpty(server.store, modelCatalog);
+      WorldsServer.seedDefaultModelsIfEmpty(server.store, server.modelCatalog);
       const started = await server.start();
       process.stdout.write(`Worlds listening on ${started.url}\n`);
 
@@ -304,6 +330,13 @@ export class WorldsServer {
   }
 
   /**
+   * @returns {ModelCatalog}
+   */
+  get modelCatalog() {
+    return this.#modelCatalog;
+  }
+
+  /**
    * @returns {Promise<Readonly<{host: string, port: number, url: string, csrfToken: string}>>}
    * @throws {Error}
    */
@@ -350,6 +383,13 @@ export class WorldsServer {
     this.#boundPort = address.port;
     this.#router.setPort(this.#boundPort);
 
+    this.#modelCatalog.listModels({ refresh: false }).catch((checkError) => {
+      if (checkError instanceof Error && checkError.name === 'AbortError') {
+        return;
+      }
+      console.error(`Model availability check failed: ${checkError instanceof Error ? checkError.message : String(checkError)}`);
+    });
+
     return Object.freeze({
       host: '127.0.0.1',
       port: this.#boundPort,
@@ -378,6 +418,8 @@ export class WorldsServer {
             controller.abort(new Error('WorldsServer shutting down.'));
           }
         }
+
+        this.#modelCatalog.close();
 
         if (this.#httpServer.listening) {
           await new Promise((resolve, reject) => {

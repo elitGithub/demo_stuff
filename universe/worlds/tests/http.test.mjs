@@ -8,6 +8,7 @@ import { WorldsConfig } from '../src/config.mjs';
 import { RateLimiter } from '../src/http/RateLimiter.mjs';
 import { Security } from '../src/http/Security.mjs';
 import { SseStream } from '../src/http/SseStream.mjs';
+import { ModelAvailability } from '../src/openrouter/ModelAvailability.mjs';
 import { OpenRouterClient } from '../src/openrouter/OpenRouterClient.mjs';
 import { ScribeLogCore } from '../src/scribe/ScribeLogCore.mjs';
 import { ScribeReplay } from '../src/scribe/ScribeReplay.mjs';
@@ -17,6 +18,7 @@ import { CharacterTier } from '../src/store/enums/CharacterTier.mjs';
 import { FindingStatus } from '../src/store/enums/FindingStatus.mjs';
 import { TurnMode } from '../src/store/enums/TurnMode.mjs';
 import { SqliteStore } from '../src/store/SqliteStore.mjs';
+import { createFakeModelCatalog } from './support/createFakeModelCatalog.mjs';
 
 /**
  * @param {string} text
@@ -365,6 +367,7 @@ describe('Hardened WorldsServer HTTP security, body limits, rate limits, and red
       client,
       publicDir: env.publicDir,
       rateLimiter,
+      modelCatalog: createFakeModelCatalog().catalog,
     });
     const started = await server.start();
     cleanups.push(async () => {
@@ -517,6 +520,7 @@ describe('Hardened WorldsServer HTTP security, body limits, rate limits, and red
       store,
       client,
       publicDir: env.publicDir,
+      modelCatalog: createFakeModelCatalog().catalog,
     });
     const started = await server.start();
     cleanups.push(async () => {
@@ -770,6 +774,7 @@ describe('Full REST & SSE lifecycle, concurrency, Scribe sync, and client discon
       store,
       client,
       publicDir: env.publicDir,
+      modelCatalog: createFakeModelCatalog().catalog,
     });
     const started = await server.start();
     cleanups.push(async () => {
@@ -1282,6 +1287,7 @@ describe('Full REST & SSE lifecycle, concurrency, Scribe sync, and client discon
       store,
       client,
       publicDir: env.publicDir,
+      modelCatalog: createFakeModelCatalog().catalog,
     });
     const started = await server.start();
     cleanups.push(async () => {
@@ -1411,6 +1417,7 @@ describe('Full REST & SSE lifecycle, concurrency, Scribe sync, and client discon
       config: env.config,
       syncService: fakeSyncService,
       publicDir: env.publicDir,
+      modelCatalog: createFakeModelCatalog().catalog,
     });
     const started = await server.start();
     let stopped = false;
@@ -1489,6 +1496,7 @@ describe('Task 6 adversarial review regressions', () => {
       store,
       client,
       publicDir: env.publicDir,
+      modelCatalog: createFakeModelCatalog().catalog,
     });
     const started = await server.start();
     cleanups.push(async () => {
@@ -1618,6 +1626,7 @@ describe('Task 6 adversarial review regressions', () => {
       store,
       client,
       publicDir: env.publicDir,
+      modelCatalog: createFakeModelCatalog().catalog,
     });
     const started = await server.start();
     cleanups.push(async () => {
@@ -1844,6 +1853,7 @@ describe('Task 6 adversarial review regressions', () => {
       store,
       client,
       publicDir: env.publicDir,
+      modelCatalog: createFakeModelCatalog().catalog,
     });
     const started = await server.start();
     cleanups.push(async () => {
@@ -2107,6 +2117,7 @@ describe('Task 6 adversarial review regressions', () => {
     const failedStartServer = await WorldsServer.create({
       config: { ...env.config, port: occupiedPort },
       publicDir: env.publicDir,
+      modelCatalog: createFakeModelCatalog().catalog,
     });
 
     try {
@@ -2130,6 +2141,7 @@ describe('Task 6 adversarial review regressions', () => {
       config: envPushErr.config,
       syncService: failingSyncService,
       publicDir: envPushErr.publicDir,
+      modelCatalog: createFakeModelCatalog().catalog,
     });
     await pushFailServer.start();
 
@@ -2143,3 +2155,818 @@ describe('Task 6 adversarial review regressions', () => {
     }
   });
 });
+
+/**
+ * @returns {Response}
+ * @throws {Error}
+ */
+function emptyEndpointsResponse() {
+  return new Response(JSON.stringify({ data: { endpoints: [] } }), { status: 200 });
+}
+
+/**
+ * @returns {Response}
+ * @throws {Error}
+ */
+function serverErrorResponse() {
+  return new Response('upstream broke', { status: 500 });
+}
+
+/**
+ * @param {AbortSignal} signal
+ * @returns {Promise<never>}
+ * @throws {Error}
+ */
+function waitForAbortSignal(signal) {
+  return new Promise((resolve, reject) => {
+    signal.addEventListener('abort', () => reject(signal.reason), { once: true });
+  });
+}
+
+/**
+ * @param {() => boolean} predicate
+ * @param {number} [timeoutMs]
+ * @returns {Promise<void>}
+ * @throws {Error}
+ */
+async function waitUntil(predicate, timeoutMs = 3000) {
+  const deadlineMs = Date.now() + timeoutMs;
+  while (!predicate()) {
+    if (Date.now() > deadlineMs) {
+      throw new Error('Timed out waiting for a condition.');
+    }
+    await new Promise((resolve) => setTimeout(resolve, 10));
+  }
+}
+
+describe('Model availability over HTTP', () => {
+  const cleanups = [];
+  /**
+   * @param {string} modelId
+   * @returns {Response | undefined}
+   * @throws {Error}
+   */
+  const deadAnswer = (modelId) => {
+    if (modelId.startsWith('dead/')) {
+      return emptyEndpointsResponse();
+    }
+    return modelId.startsWith('flaky/') ? serverErrorResponse() : undefined;
+  };
+
+  after(async () => {
+    for (const cleanupFn of cleanups) {
+      await cleanupFn();
+    }
+  });
+
+  /**
+   * @param {{catalogOptions?: object | ((env: object) => object), clientHandlers?: Array<unknown>, beforeStart?: ((env: object) => void) | null}} [options]
+   * @returns {Promise<{env: object, store: SqliteStore, fake: ReturnType<typeof createFakeModelCatalog>, server: WorldsServer, started: {url: string, port: number, csrfToken: string}, headers: Record<string, string>}>}
+   * @throws {Error}
+   */
+  async function startModelServer({ catalogOptions = {}, clientHandlers = [], beforeStart = null } = {}) {
+    const env = createTempEnvironment({ envApiKey: 'sk-model-http-key' });
+    const store = new SqliteStore(env.config.dbPath);
+    const { client } = createScriptedOpenRouterClient(clientHandlers, { store });
+    const fake = createFakeModelCatalog(typeof catalogOptions === 'function' ? catalogOptions(env) : catalogOptions);
+    const server = await WorldsServer.create({
+      config: env.config,
+      store,
+      client,
+      publicDir: env.publicDir,
+      modelCatalog: fake.catalog,
+    });
+    if (beforeStart !== null) {
+      beforeStart(env);
+    }
+    const started = await server.start();
+    cleanups.push(async () => {
+      await server.stop();
+      store.close();
+      fs.rmSync(env.tempRoot, { recursive: true, force: true });
+    });
+    const headers = {
+      origin: started.url,
+      'x-worlds-csrf': started.csrfToken,
+      'content-type': 'application/json',
+    };
+    return { env, store, fake, server, started, headers };
+  }
+
+  /**
+   * @param {{started: {url: string}, headers: Record<string, string>}} context
+   * @param {string} method
+   * @param {string} pathName
+   * @param {unknown} [body]
+   * @returns {Promise<{status: number, json: any, text: string}>}
+   * @throws {Error}
+   * @throws {SyntaxError}
+   */
+  async function send(context, method, pathName, body = undefined) {
+    const response = await fetch(`${context.started.url}${pathName}`, {
+      method,
+      headers: context.headers,
+      body: body === undefined ? undefined : JSON.stringify(body),
+    });
+    const text = await response.text();
+    const isJson = response.headers.get('content-type').startsWith('application/json');
+    const json = isJson ? JSON.parse(text) : null;
+    return { status: response.status, json, text };
+  }
+
+  /**
+   * @param {object} context
+   * @returns {Promise<string>}
+   * @throws {Error}
+   */
+  async function createCampaignId(context) {
+    const created = await send(context, 'POST', '/api/campaigns', { title: 'Model Check Chronicle' });
+    assert.equal(created.status, 201);
+    return created.json.id;
+  }
+
+  it('GET /api/models serves the cached catalog, ignores query parameters and rejects other methods', async () => {
+    const context = await startModelServer({ catalogOptions: { modelIds: ['a/one', 'b/two'] } });
+    await context.fake.catalog.listModels();
+    const listRequestsBefore = context.fake.listRequests;
+
+    const plain = await send(context, 'GET', '/api/models');
+    assert.equal(plain.status, 200);
+    assert.deepEqual(Object.keys(plain.json).toSorted(), ['defaults', 'fetchedAt', 'openrouter', 'stale', 'warning']);
+    assert.deepEqual(plain.json.openrouter.map((model) => model.id), ['a/one', 'b/two']);
+    assert.equal(plain.json.stale, false);
+    assert.equal(plain.json.warning, null);
+    assert.equal(plain.json.defaults.director, 'nousresearch/hermes-4-405b');
+    assert.equal('recommended' in plain.json, false);
+
+    const withQuery = await send(context, 'GET', '/api/models?includeAll=maybe&refresh=true&x=1');
+    assert.equal(withQuery.status, 200);
+    assert.deepEqual(withQuery.json, plain.json);
+    assert.equal(context.fake.listRequests, listRequestsBefore);
+
+    for (const method of ['POST', 'PUT', 'PATCH', 'DELETE']) {
+      const rejected = await send(context, method, '/api/models');
+      assert.equal(rejected.status, 405, method);
+    }
+  });
+
+  it('POST /api/models/refresh needs Origin and CSRF, forces a recheck of the whole catalog and is POST only', async () => {
+    const context = await startModelServer({ catalogOptions: { modelIds: ['a/one', 'b/two'] } });
+    await context.fake.catalog.listModels();
+    const listRequestsBefore = context.fake.listRequests;
+    const providerRequestsBefore = context.fake.providerRequests.length;
+
+    for (const headers of [
+      {},
+      { origin: context.started.url },
+      { 'x-worlds-csrf': context.started.csrfToken },
+      { origin: 'http://evil.example', 'x-worlds-csrf': context.started.csrfToken },
+      { origin: context.started.url, 'x-worlds-csrf': 'wrong' },
+    ]) {
+      const response = await fetch(`${context.started.url}/api/models/refresh`, { method: 'POST', headers });
+      assert.equal(response.status, 403, JSON.stringify(headers));
+      await response.text();
+    }
+    assert.equal(context.fake.listRequests, listRequestsBefore);
+
+    const refreshed = await send(context, 'POST', '/api/models/refresh');
+    assert.equal(refreshed.status, 200);
+    assert.deepEqual(refreshed.json.openrouter.map((model) => model.id), ['a/one', 'b/two']);
+    assert.equal(context.fake.listRequests, listRequestsBefore + 1);
+    assert.equal(context.fake.providerRequests.length, providerRequestsBefore + 2);
+
+    for (const method of ['GET', 'PUT', 'DELETE']) {
+      const rejected = await send(context, method, '/api/models/refresh');
+      assert.equal(rejected.status, 405, method);
+    }
+    assert.equal(context.fake.listRequests, listRequestsBefore + 1);
+  });
+
+  it('runs the check at server start only when the cache is missing or expired, and a rejection does not stop the server', async (testContext) => {
+    const stderr = testContext.mock.method(console, 'error', () => {});
+    const cold = await startModelServer({ catalogOptions: { modelIds: ['a/one'] } });
+    await waitUntil(() => cold.fake.listRequests === 1 && cold.fake.providerRequests.length === 1);
+
+    /**
+     * @param {{config: {localDir: string}}} env
+     * @param {number} fetchedAtMs
+     * @returns {void}
+     * @throws {Error}
+     */
+    const writeFixture = (env, fetchedAtMs) => {
+      fs.writeFileSync(path.join(env.config.localDir, 'cache.json'), JSON.stringify({
+        version: 2,
+        fetchedAtMs,
+        fetchedAt: new Date(fetchedAtMs).toISOString(),
+        models: [],
+        unservedIds: [],
+        uncheckedIds: [],
+        verdicts: {},
+      }), 'utf8');
+    };
+
+    const fresh = await startModelServer({
+      catalogOptions: (env) => {
+        writeFixture(env, Date.now());
+        return { cachePath: path.join(env.config.localDir, 'cache.json'), modelIds: ['a/one'] };
+      },
+    });
+    await new Promise((resolve) => setTimeout(resolve, 100));
+    assert.equal(fresh.fake.listRequests, 0);
+    assert.equal(fresh.fake.providerRequests.length, 0);
+
+    const expired = await startModelServer({
+      catalogOptions: (env) => {
+        writeFixture(env, Date.now() - 14_400_000 - 1000);
+        return { cachePath: path.join(env.config.localDir, 'cache.json'), modelIds: ['a/one'] };
+      },
+    });
+    await waitUntil(() => expired.fake.listRequests === 1 && expired.fake.providerRequests.length === 1);
+
+    const failing = await startModelServer({
+      catalogOptions: (env) => ({ cachePath: path.join(env.config.localDir, 'cache.json'), modelIds: ['a/one'] }),
+      beforeStart: (env) => {
+        fs.symlinkSync(path.join(env.config.localDir, 'nowhere.json'), path.join(env.config.localDir, 'cache.json'));
+      },
+    });
+    await waitUntil(() => stderr.mock.calls.some((call) => String(call.arguments[0]).startsWith('Model availability check failed: ')));
+    const health = await send(failing, 'GET', '/api/health');
+    assert.equal(health.status, 200);
+  });
+
+  it('writes the refresh warning to stderr exactly once when start() runs a refresh with unchecked models and a failed cache write', async (testContext) => {
+    const stderr = testContext.mock.method(console, 'error', () => {});
+    const context = await startModelServer({
+      catalogOptions: (env) => ({
+        cachePath: path.join(env.config.localDir, 'blocker', 'cache.json'),
+        modelIds: ['a/one', 'b/two'],
+        answerProvider: (modelId) => (modelId === 'b/two' ? serverErrorResponse() : undefined),
+      }),
+      beforeStart: (env) => {
+        fs.writeFileSync(path.join(env.config.localDir, 'blocker'), 'a file where a directory should be', 'utf8');
+      },
+    });
+
+    /**
+     * @returns {string[]}
+     */
+    const warningTexts = () => stderr.mock.calls
+      .map((call) => String(call.arguments[0]))
+      .filter((text) => text.includes('could not be checked'));
+
+    await waitUntil(() => context.fake.listRequests === 1 && warningTexts().length > 0);
+    await new Promise((resolve) => setTimeout(resolve, 150));
+    const texts = warningTexts();
+    assert.equal(texts.length, 1);
+    assert.match(
+      texts[0],
+      /^1 of 2 models could not be checked \(first reason: HTTP 500\); they are left out until the next refresh\. Loaded live OpenRouter models, but failed to update local cache: .+/,
+    );
+  });
+
+  it('stop() closes the catalog: the running refresh ends and later checks are refused', async () => {
+    const gate = createGate();
+    const context = await startModelServer({
+      catalogOptions: {
+        modelIds: ['a/one'],
+        answerList: async (init) => {
+          await Promise.race([gate.promise, waitForAbortSignal(init.signal)]);
+          return undefined;
+        },
+      },
+    });
+    await waitUntil(() => context.fake.listRequests === 1);
+    await context.server.stop();
+    gate.open();
+    await assert.rejects(() => context.fake.catalog.checkModel('a/b'), (error) => error.name === 'AbortError');
+    const afterStop = await context.fake.catalog.listModels({ refresh: true });
+    assert.equal(context.fake.listRequests, 1);
+    assert.equal(context.fake.providerRequests.length, 0);
+    assert.deepEqual([...afterStop.openrouter], []);
+  });
+
+  it('PUT /api/settings refuses an unserved slot and saves nothing from the request', async () => {
+    const context = await startModelServer({ catalogOptions: { answerProvider: deadAnswer } });
+    await context.fake.catalog.listModels();
+
+    const refused = await send(context, 'PUT', '/api/settings', {
+      models: { main: 'dead/model', scribe: 'ok/scribe' },
+      publicOdds: 55,
+      scribeInterval: 3,
+      openRouterApiKey: 'sk-refused-key-123',
+    });
+    assert.equal(refused.status, 400);
+    assert.equal(refused.json.error, 'Not saved: the main slot model dead/model is not served by any OpenRouter provider.');
+    assert.equal(refused.text.includes('sk-refused-key-123'), false);
+    assert.equal(fs.existsSync(context.env.config.secretsPath), false);
+    const settings = (await send(context, 'GET', '/api/settings')).json;
+    assert.equal(settings.publicOdds, 8);
+    assert.equal(settings.scribeInterval, 10);
+    assert.equal(settings.models.main, '');
+    assert.equal(settings.models.scribe, '');
+  });
+
+  it('PUT /api/settings saves an unchecked model with a warning and an unchanged slot sends no request', async () => {
+    const context = await startModelServer({ catalogOptions: { answerProvider: deadAnswer } });
+    await context.fake.catalog.listModels();
+    const baseline = context.fake.providerRequests.length;
+
+    const warned = await send(context, 'PUT', '/api/settings', { models: { main: 'flaky/model' } });
+    assert.equal(warned.status, 200);
+    assert.equal(warned.json.models.main, 'flaky/model');
+    assert.deepEqual(warned.json.warnings, ['The main slot model flaky/model could not be checked: HTTP 500.']);
+    assert.deepEqual(context.fake.providerRequests.slice(baseline), ['flaky/model']);
+
+    const unchanged = await send(context, 'PUT', '/api/settings', {
+      models: { main: '  flaky/model  ', director: '', composer: '   ' },
+      publicOdds: 4,
+    });
+    assert.equal(unchanged.status, 200);
+    assert.deepEqual(unchanged.json.warnings, []);
+    assert.equal(unchanged.json.publicOdds, 4);
+    assert.equal(context.fake.providerRequests.length, baseline + 1);
+
+    const noModels = await send(context, 'PUT', '/api/settings', { privateOdds: 12 });
+    assert.equal(noModels.status, 200);
+    assert.deepEqual(noModels.json.warnings, []);
+    assert.equal(context.fake.providerRequests.length, baseline + 1);
+
+    const served = await send(context, 'PUT', '/api/settings', { models: { scribe: 'ok/scribe' } });
+    assert.equal(served.status, 200);
+    assert.deepEqual(served.json.warnings, []);
+    assert.equal(served.json.models.scribe, 'ok/scribe');
+  });
+
+  it('PUT /api/settings answers 400 for bad models shapes and malformed IDs before any request', async () => {
+    const context = await startModelServer();
+    await context.fake.catalog.listModels();
+    const baseline = context.fake.providerRequests.length;
+
+    for (const [models, expectedError] of [
+      ['x', 'models must be an object.'],
+      [null, 'models must be an object.'],
+      [['a/b'], 'models must be an object.'],
+      [5, 'models must be an object.'],
+      [{ bogus: 'a/b' }, 'models.bogus is not a model slot.'],
+      [{ main: 5 }, 'models.main must be a string.'],
+      [{ main: null }, 'models.main must be a string.'],
+      [{ main: ['a/b'] }, 'models.main must be a string.'],
+      [{ main: 'a/b', scribe: 7 }, 'models.scribe must be a string.'],
+      [{ main: "thedrummer/cydonia-24b-v4.1/endpoints?x=" }, "Not saved: the main slot model 'thedrummer/cydonia-24b-v4.1/endpoints?x=' is not a valid OpenRouter model ID."],
+      [{ main: 'a/b#c' }, "Not saved: the main slot model 'a/b#c' is not a valid OpenRouter model ID."],
+      [{ main: 'a b/c' }, "Not saved: the main slot model 'a b/c' is not a valid OpenRouter model ID."],
+      [{ main: 'a/b..c' }, "Not saved: the main slot model 'a/b..c' is not a valid OpenRouter model ID."],
+      [{ main: 'no-slash' }, "Not saved: the main slot model 'no-slash' is not a valid OpenRouter model ID."],
+    ]) {
+      const response = await send(context, 'PUT', '/api/settings', { models, publicOdds: 77 });
+      assert.equal(response.status, 400, JSON.stringify(models));
+      assert.equal(response.json.error, expectedError, JSON.stringify(models));
+    }
+    assert.equal(context.fake.providerRequests.length, baseline);
+    assert.equal((await send(context, 'GET', '/api/settings')).json.publicOdds, 8);
+  });
+
+  it('PUT /api/settings saves nothing when the request aborts during the check', async () => {
+    const gate = createGate();
+    const context = await startModelServer({
+      catalogOptions: {
+        answerProvider: async (modelId) => {
+          if (modelId === 'slow/model') {
+            await gate.promise;
+          }
+          return undefined;
+        },
+      },
+    });
+    await context.fake.catalog.listModels();
+
+    const controller = new AbortController();
+    const pending = fetch(`${context.started.url}/api/settings`, {
+      method: 'PUT',
+      headers: context.headers,
+      body: JSON.stringify({ models: { main: 'slow/model' }, publicOdds: 66 }),
+      signal: controller.signal,
+    });
+    await waitUntil(() => context.fake.providerRequests.includes('slow/model'));
+    controller.abort();
+    await assert.rejects(() => pending);
+    await new Promise((resolve) => setTimeout(resolve, 100));
+    gate.open();
+    await new Promise((resolve) => setTimeout(resolve, 100));
+
+    const settings = (await send(context, 'GET', '/api/settings')).json;
+    assert.equal(settings.models.main, '');
+    assert.equal(settings.publicOdds, 8);
+    assert.equal(context.fake.catalog.modelStatus('slow/model'), null);
+  });
+
+  it('character POST and PATCH save nothing when the request aborts during the check', async () => {
+    const gate = createGate();
+    const context = await startModelServer({
+      catalogOptions: {
+        answerProvider: async (modelId) => {
+          if (modelId === 'slow/model') {
+            await gate.promise;
+          }
+          return undefined;
+        },
+      },
+    });
+    await context.fake.catalog.listModels();
+    const campaignId = await createCampaignId(context);
+    const charactersPath = `/api/campaigns/${campaignId}/characters`;
+    const base = { tier: CharacterTier.Main, avatarToken: AvatarToken.Slate };
+    const maya = (await send(context, 'POST', charactersPath, {
+      ...base, slug: 'maya', name: 'Maya', modelOverride: 'ok/model',
+    })).json;
+
+    /**
+     * @param {string} method
+     * @param {string} pathName
+     * @param {object} body
+     * @returns {Promise<void>}
+     * @throws {Error}
+     */
+    async function sendAndAbort(method, pathName, body) {
+      const controller = new AbortController();
+      const slowRequestsBefore = context.fake.providerRequests.filter((modelId) => modelId === 'slow/model').length;
+      const pending = fetch(`${context.started.url}${pathName}`, {
+        method,
+        headers: context.headers,
+        body: JSON.stringify(body),
+        signal: controller.signal,
+      });
+      await waitUntil(() => {
+        return context.fake.providerRequests.filter((modelId) => modelId === 'slow/model').length > slowRequestsBefore;
+      });
+      controller.abort();
+      await assert.rejects(() => pending);
+    }
+
+    await sendAndAbort('POST', charactersPath, { ...base, slug: 'late', name: 'Late', modelOverride: 'slow/model' });
+    await sendAndAbort('PATCH', `${charactersPath}/${maya.id}`, { name: 'Maya Renamed', modelOverride: 'slow/model' });
+    await new Promise((resolve) => setTimeout(resolve, 100));
+    gate.open();
+    await new Promise((resolve) => setTimeout(resolve, 100));
+
+    const listed = (await send(context, 'GET', charactersPath)).json;
+    assert.equal(listed.total, 1);
+    assert.equal(listed.items[0].id, maya.id);
+    assert.equal(listed.items[0].name, 'Maya');
+    assert.equal(listed.items[0].modelOverride, 'ok/model');
+    assert.equal(context.fake.catalog.modelStatus('slow/model'), null);
+  });
+
+  it('character create and update check modelOverride: refusal, warning, served, unchanged, cleared and type errors', async () => {
+    const context = await startModelServer({ catalogOptions: { answerProvider: deadAnswer } });
+    await context.fake.catalog.listModels();
+    const campaignId = await createCampaignId(context);
+    const charactersPath = `/api/campaigns/${campaignId}/characters`;
+    const baseline = context.fake.providerRequests.length;
+    const base = { tier: CharacterTier.Main, avatarToken: AvatarToken.Slate };
+
+    const refusedNamed = await send(context, 'POST', charactersPath, { ...base, slug: 'maya', name: 'Maya', modelOverride: 'dead/model' });
+    assert.equal(refusedNamed.status, 400);
+    assert.equal(refusedNamed.json.error, "Not saved: Maya's model override dead/model is not served by any OpenRouter provider.");
+    const refusedUnnamed = await send(context, 'POST', charactersPath, { ...base, slug: 'x', modelOverride: 'dead/model' });
+    assert.equal(refusedUnnamed.status, 400);
+    assert.equal(refusedUnnamed.json.error, "Not saved: The new character's model override dead/model is not served by any OpenRouter provider.");
+    const refusedShape = await send(context, 'POST', charactersPath, { ...base, slug: 'x', name: 'Maya', modelOverride: 'a/b?x=' });
+    assert.equal(refusedShape.json.error, "Not saved: Maya's model override 'a/b?x=' is not a valid OpenRouter model ID.");
+    assert.equal((await send(context, 'GET', charactersPath)).json.total, 0);
+
+    for (const badType of [5, ['a/b'], {}, true]) {
+      const response = await send(context, 'POST', charactersPath, { ...base, slug: 'x', name: 'Maya', modelOverride: badType });
+      assert.equal(response.status, 400);
+      assert.equal(response.json.error, 'modelOverride must be a string or null.');
+    }
+    assert.deepEqual(context.fake.providerRequests.slice(baseline), ['dead/model', 'dead/model']);
+
+    const warned = await send(context, 'POST', charactersPath, { ...base, slug: 'pete', name: 'Pete', modelOverride: 'flaky/model' });
+    assert.equal(warned.status, 201);
+    assert.equal(warned.json.modelOverride, 'flaky/model');
+    assert.deepEqual(warned.json.warnings, ["Pete's model override flaky/model could not be checked: HTTP 500."]);
+
+    const served = await send(context, 'POST', charactersPath, { ...base, slug: 'maya', name: 'Maya', modelOverride: 'ok/model' });
+    assert.equal(served.status, 201);
+    assert.deepEqual(served.json.warnings, []);
+    const plain = await send(context, 'POST', charactersPath, { ...base, slug: 'plain', name: 'Plain' });
+    assert.equal(plain.status, 201);
+    assert.deepEqual(plain.json.warnings, []);
+
+    const afterCreates = context.fake.providerRequests.length;
+    const maya = served.json;
+    const patchPath = `${charactersPath}/${maya.id}`;
+    const unchanged = await send(context, 'PATCH', patchPath, { modelOverride: ' ok/model ', persona: 'Sharp.' });
+    assert.equal(unchanged.status, 200);
+    assert.deepEqual(unchanged.json.warnings, []);
+    const noOverrideKey = await send(context, 'PATCH', patchPath, { persona: 'Sharper.' });
+    assert.equal(noOverrideKey.status, 200);
+    assert.deepEqual(noOverrideKey.json.warnings, []);
+    assert.equal(context.fake.providerRequests.length, afterCreates);
+
+    const patchRefused = await send(context, 'PATCH', patchPath, { modelOverride: 'dead/model' });
+    assert.equal(patchRefused.status, 400);
+    assert.equal(patchRefused.json.error, "Not saved: Maya's model override dead/model is not served by any OpenRouter provider.");
+    const patchRefusedRenamed = await send(context, 'PATCH', patchPath, { name: ' Maya Renamed ', modelOverride: 'dead/model' });
+    assert.equal(patchRefusedRenamed.json.error, "Not saved: Maya Renamed's model override dead/model is not served by any OpenRouter provider.");
+    const patchBadType = await send(context, 'PATCH', patchPath, { modelOverride: 5 });
+    assert.equal(patchBadType.status, 400);
+    assert.equal(patchBadType.json.error, 'modelOverride must be a string or null.');
+    const afterRefusals = (await send(context, 'GET', charactersPath)).json.items.find((item) => item.id === maya.id);
+    assert.equal(afterRefusals.modelOverride, 'ok/model');
+    assert.equal(afterRefusals.name, 'Maya');
+
+    const patchWarned = await send(context, 'PATCH', patchPath, { modelOverride: 'flaky/other' });
+    assert.equal(patchWarned.status, 200);
+    assert.deepEqual(patchWarned.json.warnings, ["Maya's model override flaky/other could not be checked: HTTP 500."]);
+
+    const requestsBeforeClear = context.fake.providerRequests.length;
+    const cleared = await send(context, 'PATCH', patchPath, { modelOverride: null });
+    assert.equal(cleared.status, 200);
+    assert.equal(cleared.json.modelOverride, null);
+    assert.deepEqual(cleared.json.warnings, []);
+    assert.equal(context.fake.providerRequests.length, requestsBeforeClear);
+  });
+
+  it('runs the override check before the idle check so a busy campaign still gets the check and keeps its old value', async () => {
+    const gate = createGate();
+    let signalDirectorStarted = null;
+    const directorStarted = new Promise((resolve) => {
+      signalDirectorStarted = resolve;
+    });
+    const context = await startModelServer({
+      clientHandlers: [
+        async () => {
+          signalDirectorStarted();
+          await gate.promise;
+          return new Response(JSON.stringify({ error: { message: 'stopped' } }), { status: 400 });
+        },
+      ],
+    });
+    await context.fake.catalog.listModels();
+    const campaignId = await createCampaignId(context);
+    context.store.updateSettings({
+      models: { director: 'ok/dir', composer: 'ok/comp', main: 'ok/main', recurring: 'ok/rec', scribe: 'ok/scribe' },
+    });
+    const frost = (await send(context, 'POST', `/api/campaigns/${campaignId}/characters`, {
+      slug: 'frost', name: 'Frost', isPlayer: true, tier: CharacterTier.Main, avatarToken: AvatarToken.Slate,
+    })).json;
+    const lize = (await send(context, 'POST', `/api/campaigns/${campaignId}/characters`, {
+      slug: 'lize', name: 'Lize', tier: CharacterTier.Main, avatarToken: AvatarToken.Rose,
+    })).json;
+    assert.equal((await send(context, 'PATCH', `/api/campaigns/${campaignId}`, {
+      sceneState: { presentIds: [frost.id, lize.id], location: 'Harbor' },
+    })).status, 200);
+
+    const turnPending = fetch(`${context.started.url}/api/campaigns/${campaignId}/turns`, {
+      method: 'POST',
+      headers: context.headers,
+      body: JSON.stringify({ text: 'Hello Lize.', mode: TurnMode.Normal }),
+    });
+    await directorStarted;
+
+    const baseline = context.fake.providerRequests.length;
+    const busy = await send(context, 'PATCH', `/api/campaigns/${campaignId}/characters/${lize.id}`, { modelOverride: 'late/model' });
+    assert.equal(busy.status, 409);
+    assert.match(busy.json.error, /A campaign operation is already in flight/);
+    assert.deepEqual(context.fake.providerRequests.slice(baseline), ['late/model']);
+    const busyCreate = await send(context, 'POST', `/api/campaigns/${campaignId}/characters`, {
+      slug: 'late', name: 'Late', tier: CharacterTier.Main, avatarToken: AvatarToken.Amber, modelOverride: 'late/other',
+    });
+    assert.equal(busyCreate.status, 409);
+    assert.deepEqual(context.fake.providerRequests.slice(baseline), ['late/model', 'late/other']);
+    assert.equal(context.store.getCharacter(campaignId, lize.id).modelOverride, null);
+
+    gate.open();
+    const turnResponse = await turnPending;
+    await turnResponse.text();
+  });
+
+  describe('turn and memory block (rulings 6, 10, 11, 12)', () => {
+    const blockedStatuses = [
+      ['POST', 'turns', { text: 'Hello.' }],
+      ['POST', 'turns/regenerate', {}],
+      ['POST', 'memory/update', {}],
+      ['POST', 'memory/tell', { action: 'preview', instruction: 'Remember the key.' }],
+      ['POST', 'memory/tell', { action: 'commit', operations: [] }],
+      ['POST', 'memory/muse', {}],
+    ];
+
+    /**
+     * @param {object} context
+     * @returns {Promise<{campaignId: string, frost: object}>}
+     * @throws {Error}
+     */
+    async function seedCampaign(context) {
+      const campaignId = await createCampaignId(context);
+      const frost = (await send(context, 'POST', `/api/campaigns/${campaignId}/characters`, {
+        slug: 'frost', name: 'Frost', isPlayer: true, tier: CharacterTier.Main, avatarToken: AvatarToken.Slate,
+      })).json;
+      context.store.commitTurnPair({
+        campaignId,
+        userTurn: { mode: TurnMode.Normal, rawText: 'Hello.', witnessIds: [frost.id] },
+        userBeat: { speakerType: 'player', characterId: frost.id, speakerName: 'Frost', text: 'Hello.' },
+        assistantTurn: { mode: TurnMode.Normal, rawText: 'Hi.', witnessIds: [frost.id] },
+        assistantBeats: [{ speakerType: 'narrator', characterId: null, speakerName: 'Narrator', text: 'Hi.' }],
+        nextSceneState: {
+          sceneNumber: 1,
+          day: 1,
+          timeLabel: 'Evening',
+          location: 'Harbor',
+          sceneType: 'public',
+          presentIds: [frost.id],
+          remoteIds: [],
+          offscreenNotes: {},
+          activeWalkOns: [],
+        },
+      });
+      return { campaignId, frost };
+    }
+
+    /**
+     * @param {object} context
+     * @param {string} campaignId
+     * @returns {Promise<number[]>}
+     * @throws {Error}
+     */
+    async function statusesFor(context, campaignId) {
+      const statuses = [];
+      for (const [method, route, body] of blockedStatuses) {
+        statuses.push((await send(context, method, `/api/campaigns/${campaignId}/${route}`, body)).status);
+      }
+      return statuses;
+    }
+
+    it('answers 409 naming the slot on all five routes, Tell preview and commit included', async (testContext) => {
+      testContext.mock.method(console, 'error', () => {});
+      const context = await startModelServer({
+        catalogOptions: { modelIds: ['dead/model', 'ok/model', 'flaky/model'], answerProvider: deadAnswer },
+      });
+      await context.fake.catalog.listModels();
+      const { campaignId } = await seedCampaign(context);
+      context.store.updateSettings({
+        models: { director: 'ok/model', composer: 'ok/model', main: 'dead/model', recurring: 'ok/model', scribe: 'flaky/model' },
+      });
+      const expected = `Refused: the main slot uses dead/model, which no OpenRouter provider serves (checked ${context.fake.catalog.modelCheckedAt('dead/model')}). Change it in Settings or the character window.`;
+
+      for (const [method, route, body] of blockedStatuses) {
+        const response = await send(context, method, `/api/campaigns/${campaignId}/${route}`, body);
+        assert.equal(response.status, 409, route);
+        assert.equal(response.json.error, expected, route);
+        assert.ok(response.text.startsWith('{'), route);
+      }
+
+      const badTurn = await send(context, 'POST', `/api/campaigns/${campaignId}/turns`, { text: '   ' });
+      assert.equal(badTurn.status, 400);
+      const badTell = await send(context, 'POST', `/api/campaigns/${campaignId}/memory/tell`, { action: 'preview' });
+      assert.equal(badTell.status, 400);
+
+      context.store.updateSettings({
+        models: { director: 'ok/model', composer: 'ok/model', main: 'ok/model', recurring: 'ok/model', scribe: 'dead/model' },
+      });
+      const scribeBlocked = await send(context, 'POST', `/api/campaigns/${campaignId}/memory/update`, {});
+      assert.equal(scribeBlocked.status, 409);
+      assert.match(
+        scribeBlocked.json.error,
+        /^Refused: the scribe slot uses dead\/model, which no OpenRouter provider serves \(checked \d{4}-\d{2}-\d{2}T[\d:.]+Z\)\. Change it in Settings or the character window\.$/,
+      );
+    });
+
+    it('blocks on a non-archived override, not on an archived one, and names the character', async () => {
+      const context = await startModelServer({
+        catalogOptions: { modelIds: ['dead/model', 'ok/model'], answerProvider: deadAnswer },
+      });
+      await context.fake.catalog.listModels();
+      const { campaignId } = await seedCampaign(context);
+      context.store.updateSettings({
+        models: { director: 'ok/model', composer: 'ok/model', main: 'ok/model', recurring: 'ok/model', scribe: 'ok/model' },
+      });
+      const maya = context.store.createCharacter(campaignId, {
+        slug: 'maya', name: 'Maya', tier: CharacterTier.Main, avatarToken: AvatarToken.Rose, modelOverride: 'dead/model',
+      });
+
+      const blocked = await send(context, 'POST', `/api/campaigns/${campaignId}/memory/muse`, {});
+      assert.equal(blocked.status, 409);
+      assert.equal(
+        blocked.json.error,
+        `Refused: Maya's model override dead/model is not served by any OpenRouter provider (checked ${context.fake.catalog.modelCheckedAt('dead/model')}). Change it in Settings or the character window.`,
+      );
+
+      context.store.updateCharacter(campaignId, maya.id, { archived: true });
+      for (const status of await statusesFor(context, campaignId)) {
+        assert.notEqual(status, 409);
+      }
+    });
+
+    it('does not block served, unchecked or never-checked configurations, and a turn starts', async (testContext) => {
+      testContext.mock.method(console, 'error', () => {});
+      const context = await startModelServer({
+        catalogOptions: { modelIds: ['ok/model', 'flaky/model'], answerProvider: deadAnswer },
+      });
+      await context.fake.catalog.listModels();
+      const { campaignId } = await seedCampaign(context);
+
+      context.store.updateSettings({
+        models: { director: 'ok/model', composer: 'ok/model', main: 'ok/model', recurring: 'ok/model', scribe: 'ok/model' },
+      });
+      for (const status of await statusesFor(context, campaignId)) {
+        assert.notEqual(status, 409);
+      }
+      const startedTurn = await fetch(`${context.started.url}/api/campaigns/${campaignId}/turns`, {
+        method: 'POST',
+        headers: context.headers,
+        body: JSON.stringify({ text: 'Hello.' }),
+      });
+      assert.equal(startedTurn.status, 200);
+      assert.ok(startedTurn.headers.get('content-type').includes('text/event-stream'));
+      await startedTurn.text();
+
+      context.store.updateSettings({
+        models: { director: 'flaky/model', composer: 'never/seen', main: 'ok/model', recurring: 'ok/model', scribe: 'ok/model' },
+      });
+      for (const status of await statusesFor(context, campaignId)) {
+        assert.notEqual(status, 409);
+      }
+    });
+
+    it('allows everything while no model has been checked at all', async (testContext) => {
+      testContext.mock.method(console, 'error', () => {});
+      const context = await startModelServer({
+        catalogOptions: { answerList: () => new Response('down', { status: 503 }) },
+      });
+      await context.fake.catalog.listModels();
+      assert.equal(context.fake.catalog.modelCheckedAt('dead/model'), null);
+      const { campaignId } = await seedCampaign(context);
+      context.store.updateSettings({
+        models: { director: 'dead/model', composer: 'dead/model', main: 'dead/model', recurring: 'dead/model', scribe: 'dead/model' },
+      });
+      for (const status of await statusesFor(context, campaignId)) {
+        assert.notEqual(status, 409);
+      }
+      const saved = await send(context, 'PUT', '/api/settings', { models: { main: 'typed/dead' } });
+      assert.equal(saved.status, 200);
+      assert.deepEqual(saved.json.warnings, []);
+      assert.equal(context.fake.catalog.modelStatus('dead/model'), null);
+    });
+
+    it('a served save-time result lets turns start while every other slot stays unchecked', async (testContext) => {
+      testContext.mock.method(console, 'error', () => {});
+      const context = await startModelServer({
+        catalogOptions: { answerList: () => new Response('down', { status: 503 }), answerProvider: deadAnswer },
+      });
+      await context.fake.catalog.listModels();
+      const { campaignId } = await seedCampaign(context);
+      context.store.updateSettings({
+        models: { director: 'dead/model', composer: 'dead/model', main: 'dead/model', recurring: 'dead/model', scribe: 'dead/model' },
+      });
+      const saved = await send(context, 'PUT', '/api/settings', { models: { main: 'typed/served' } });
+      assert.equal(saved.status, 200);
+      assert.equal(context.fake.catalog.modelStatus('typed/served'), ModelAvailability.Served);
+      assert.equal(context.fake.catalog.modelStatus('dead/model'), null);
+      for (const status of await statusesFor(context, campaignId)) {
+        assert.notEqual(status, 409);
+      }
+    });
+
+    it('a served save-time result unblocks a model the last refresh found unserved', async () => {
+      let flipped = false;
+      const context = await startModelServer({
+        catalogOptions: {
+          modelIds: ['list/dead', 'ok/model'],
+          answerProvider: (modelId) => (modelId === 'list/dead' && !flipped ? emptyEndpointsResponse() : undefined),
+        },
+      });
+      await context.fake.catalog.listModels();
+      const { campaignId } = await seedCampaign(context);
+      context.store.updateSettings({
+        models: { director: 'ok/model', composer: 'ok/model', main: 'list/dead', recurring: 'ok/model', scribe: 'ok/model' },
+      });
+      assert.equal((await send(context, 'POST', `/api/campaigns/${campaignId}/memory/update`, {})).status, 409);
+
+      flipped = true;
+      const resaved = await send(context, 'PUT', '/api/settings', { models: { main: 'list/dead  ' } });
+      assert.equal(resaved.status, 200);
+      const unchangedStillBlocked = await send(context, 'POST', `/api/campaigns/${campaignId}/memory/update`, {});
+      assert.equal(unchangedStillBlocked.status, 409);
+
+      const moved = await send(context, 'PUT', '/api/settings', { models: { main: 'ok/model' } });
+      assert.equal(moved.status, 200);
+      const reselected = await send(context, 'PUT', '/api/settings', { models: { main: 'list/dead' } });
+      assert.equal(reselected.status, 200);
+      assert.equal(context.fake.catalog.modelStatus('list/dead'), ModelAvailability.Served);
+      assert.notEqual((await send(context, 'POST', `/api/campaigns/${campaignId}/memory/update`, {})).status, 409);
+    });
+  });
+});
+
+/**
+ * @returns {{promise: Promise<void>, open: () => void}}
+ */
+function createGate() {
+  let open = null;
+  const promise = new Promise((resolve) => {
+    open = resolve;
+  });
+  return { promise, open };
+}

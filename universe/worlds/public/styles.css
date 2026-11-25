@@ -1112,6 +1112,7 @@ textarea.field-control {
   .workspace-grid {
     display: grid;
     grid-template-columns: minmax(0, 1fr) 410px;
+    grid-template-rows: minmax(0, 1fr);
   }
 
   .drawer-backdrop {
@@ -1121,6 +1122,7 @@ textarea.field-control {
   .inspector-drawer {
     position: static;
     width: auto;
+    min-height: 0;
     transform: none;
     box-shadow: none;
     z-index: 10;

@@ -4959,3 +4959,152 @@ test('ScribeBoot.exportPlot resolves introId, falls back on /v1/plots error, res
 
     run.boot.stop();
 });
+
+test('malformed stored story triggers on-demand fetch, synchronous delay leaves no stranded timers, profile 500/404 and End.Limit behave cleanly, and pagehide/pageshow cycles plotSession', async () => {
+    const syncListeners = [];
+    const fakeSignal = {
+        aborted: false,
+        addEventListener: (type, listener) => syncListeners.push({ type, listener }),
+        removeEventListener: (type, listener) => {
+            const index = syncListeners.findIndex((entry) => entry.type === type && entry.listener === listener);
+            if (index >= 0) {
+                syncListeners.splice(index, 1);
+            }
+        },
+    };
+    const fakeBoot = {
+        stopped: false,
+        plotTimers: new Set(),
+        environment: {
+            timers: {
+                setTimeout: (callback) => {
+                    callback();
+                    return 77;
+                },
+                clearTimeout: () => {},
+            },
+        },
+    };
+    await ScribeBoot.delay(fakeBoot, 500, fakeSignal);
+    assert.equal(fakeBoot.plotTimers.size, 0);
+    assert.equal(syncListeners.length, 0);
+
+    const throwingSignal = {
+        aborted: false,
+        addEventListener: () => {
+            throw new Error('Listener refused');
+        },
+        removeEventListener: () => {},
+    };
+    const listenerError = await failureOf(ScribeBoot.delay(fakeBoot, 500, throwingSignal));
+    assert.equal(listenerError.message, 'Listener refused');
+    assert.equal(fakeBoot.plotTimers.size, 0);
+
+    const messages = FakeZeta.messages(2);
+    const site = new FakeZeta(messages, 'harbour', TOKEN);
+    site.most = 100;
+    site.plot = 'plot-9';
+    site.plotName = 'Harbour Lights';
+    site.roomTitle = 'Harbour Room';
+    site.about = 'Fetched plot about.';
+    const run = harness();
+    run.page.answer = (url, options) => site.fetch(url, options);
+    start(run);
+    await settle();
+    await run.page.fetch(`${API}/v1/users/me`, { headers: { Authorization: TOKEN } });
+    const exportPlot = run.world.panels[0].options.exportPlot;
+
+    run.world.setupRecord = { story: { name: 'Broken stored story without plotId' }, profile: null, notes: null };
+    const beforeMalformed = site.requests.length;
+    const repaired = await exportPlot(new AbortController().signal);
+    assert.equal(repaired.plot.plotId, 'plot-9');
+    assert.equal(repaired.plot.about, 'Fetched plot about.');
+    assert.equal(
+        site.requests.slice(beforeMalformed).some((entry) => new URL(entry.url).pathname === '/v1/rooms/harbour'),
+        true,
+    );
+
+    site.profile = null;
+    run.world.setupRecord = { story: null, profile: null, notes: null };
+    const noPersona = await exportPlot(new AbortController().signal);
+    assert.equal(noPersona.profile, null);
+
+    run.page.answer = (url, options) => {
+        if (new URL(url).pathname.endsWith('/user-personas/selected')) {
+            return Promise.resolve(FakeZeta.reply(500, 'Persona server error'));
+        }
+        return site.fetch(url, options);
+    };
+    const profileFailurePromise = failureOf(exportPlot(new AbortController().signal));
+    await pass(run, 10000);
+    assert.match((await profileFailurePromise).message, /HTTP 500/);
+
+    site.profile = FakeZeta.Profile;
+    let limitPages = 0;
+    run.page.answer = (url, options) => {
+        if (new URL(url).pathname === '/v1/rooms/harbour/messages') {
+            limitPages++;
+            return Promise.resolve(
+                FakeZeta.reply(
+                    200,
+                    JSON.stringify({
+                        messages: [FakeZeta.message(`limit-${limitPages}`, FakeZeta.time(limitPages))],
+                        nextCursor: `limit-cursor-${limitPages}`,
+                    }),
+                ),
+            );
+        }
+        return site.fetch(url, options);
+    };
+    const limitPromise = failureOf(exportPlot(new AbortController().signal));
+    let limitDone = false;
+    limitPromise.finally(() => {
+        limitDone = true;
+    });
+    for (let step = 0; step < 3000 && !limitDone; step++) {
+        await settle();
+        if (limitDone) {
+            break;
+        }
+        const next = run.timers.next;
+        if (next === null) {
+            break;
+        }
+        run.timers.advance(next - run.timers.now());
+    }
+    const limitError = await limitPromise;
+    assert.equal(limitError.message, 'Chat history was incomplete (Limit).');
+    assert.equal(limitPages, 2000);
+    run.boot.stop();
+
+    const plotRun = harness({ path: '/en/plots/p1/profile' });
+    const panelDocument = new PanelDocument(1280);
+    panelDocument.visibilityState = 'visible';
+    panelDocument.documentElement = rootElement();
+    panelDocument.listeners = [];
+    panelDocument.addEventListener = (type, listener) => panelDocument.listeners.push({ type, listener });
+    panelDocument.removeEventListener = (type, listener) => {
+        panelDocument.listeners = panelDocument.listeners.filter((entry) => entry.type !== type || entry.listener !== listener);
+    };
+    panelDocument.querySelectorAll = () => [];
+    plotRun.document = panelDocument;
+    plotRun.environment.document = panelDocument;
+    start(plotRun);
+    await settle();
+    assert.equal(panelDocument.body.children.some((child) => child.id === ScribePlotExport.Settings.HostId), true);
+    for (const entry of [...plotRun.page.listeners]) {
+        if (entry.type === 'pagehide') {
+            entry.listener({ type: 'pagehide' });
+        }
+    }
+    await settle();
+    assert.equal(panelDocument.body.children.some((child) => child.id === ScribePlotExport.Settings.HostId), false);
+    for (const entry of [...plotRun.page.listeners]) {
+        if (entry.type === 'pageshow') {
+            entry.listener({ type: 'pageshow' });
+        }
+    }
+    await settle();
+    assert.equal(panelDocument.body.children.some((child) => child.id === ScribePlotExport.Settings.HostId), true);
+    plotRun.boot.stop();
+});

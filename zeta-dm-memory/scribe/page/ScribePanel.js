@@ -3994,6 +3994,10 @@ const ScribePanel = Object.freeze({
         const controller = panel.AbortController === null ? null : new panel.AbortController();
         panel.plotExportController = controller;
         panel.parts.ExportPlot.disabled = true;
+        if (panel.troubled === outlets.PlotExport) {
+            panel.trouble = settings.Nothing;
+            panel.troubled = null;
+        }
         ScribePanel.say(panel, outlets.PlotExport, words.ExportingPlot);
         ScribePanel.redraw(panel);
 
@@ -4024,6 +4028,18 @@ const ScribePanel = Object.freeze({
             if (!panel.mounted) {
                 return;
             }
+            if (
+                result === null ||
+                typeof result !== settings.ObjectType ||
+                Array.isArray(result) ||
+                result.plot === null ||
+                typeof result.plot !== settings.ObjectType ||
+                Array.isArray(result.plot) ||
+                typeof result.plot.plotId !== settings.StringType ||
+                result.plot.plotId.trim() === settings.Nothing
+            ) {
+                throw new Error(ZetaSource.Settings.Messages.NoPlot);
+            }
             const exportedAt = new Date(panel.clock.now()).toISOString();
             const bundle = ScribeSetup.exportBundle({ ...result, exportedAt });
             const withChat = result?.chat !== null && result?.chat !== undefined;
@@ -4051,12 +4067,23 @@ const ScribePanel = Object.freeze({
                 outlets.PlotExport,
                 words.Exported + filename + words.Open + counts.join(words.Comma) + words.Close + words.FullStop,
             );
-            panel.trouble = settings.Nothing;
+            if (panel.troubled === outlets.PlotExport) {
+                panel.trouble = settings.Nothing;
+                panel.troubled = null;
+            }
         } catch (error) {
             if (!panel.mounted) {
                 return;
             }
-            ScribePanel.say(panel, outlets.PlotExport, ScribePanel.reason(error));
+            const reason = ScribePanel.reason(error);
+            ScribePanel.say(panel, outlets.PlotExport, reason);
+            if (!panel.shown.has(outlets.PlotExport)) {
+                panel.trouble = reason;
+                panel.troubled = outlets.PlotExport;
+            } else if (panel.troubled === outlets.PlotExport) {
+                panel.trouble = settings.Nothing;
+                panel.troubled = null;
+            }
         } finally {
             if (panel.plotExportController === controller) {
                 panel.plotExportController = null;
@@ -4960,7 +4987,7 @@ const ScribePanel = Object.freeze({
                         const persona =
                             typeof setup.persona === settings.StringType ? setup.persona.trim() : settings.Nothing;
                         if (persona !== settings.Nothing) {
-                            profileLine = words.ProfilePersona + PanelView.said(setup.persona) + words.FullStop;
+                            profileLine = words.ProfilePersona + PanelView.said(persona) + words.FullStop;
                         } else if (setup.source !== null && setup.source !== undefined) {
                             profileLine = words.ProfileSet;
                         } else {

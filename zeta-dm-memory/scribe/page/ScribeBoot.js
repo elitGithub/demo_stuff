@@ -273,6 +273,7 @@ const ScribeBoot = Object.freeze({
      * @param {number} milliseconds
      * @param {AbortSignal|null} signal
      * @return {Promise<void>}
+     * @throws {Error}
      */
     delay(boot, milliseconds, signal = null) {
         const settings = ScribeBoot.Settings;
@@ -293,12 +294,17 @@ const ScribeBoot = Object.freeze({
                     reject(error);
                     return;
                 }
+                let settled = false;
                 const entry = { id: null, cancel: null };
 
                 /**
                  * @return {void}
                  */
                 const stopped = () => {
+                    if (settled) {
+                        return;
+                    }
+                    settled = true;
                     boot.plotTimers.delete(entry);
                     if (entry.id !== null) {
                         boot.environment.timers.clearTimeout(entry.id);
@@ -312,6 +318,10 @@ const ScribeBoot = Object.freeze({
                  * @return {void}
                  */
                 entry.cancel = () => {
+                    if (settled) {
+                        return;
+                    }
+                    settled = true;
                     signal?.removeEventListener(settings.AbortEvent, stopped);
                     boot.plotTimers.delete(entry);
                     if (entry.id !== null) {
@@ -319,19 +329,37 @@ const ScribeBoot = Object.freeze({
                     }
                     reject(new Error(settings.Messages.Left));
                 };
-                entry.id = boot.environment.timers.setTimeout(
-                    /**
-                     * @return {void}
-                     */
-                    () => {
+                try {
+                    signal?.addEventListener(settings.AbortEvent, stopped, settings.Once);
+                    boot.plotTimers.add(entry);
+                    const timerId = boot.environment.timers.setTimeout(
+                        /**
+                         * @return {void}
+                         */
+                        () => {
+                            if (settled) {
+                                return;
+                            }
+                            settled = true;
+                            boot.plotTimers.delete(entry);
+                            signal?.removeEventListener(settings.AbortEvent, stopped);
+                            resolve();
+                        },
+                        milliseconds,
+                    );
+                    if (!settled) {
+                        entry.id = timerId;
+                    }
+                } catch (error) {
+                    if (!settled) {
+                        settled = true;
                         boot.plotTimers.delete(entry);
-                        signal?.removeEventListener(settings.AbortEvent, stopped);
-                        resolve();
-                    },
-                    milliseconds,
-                );
-                boot.plotTimers.add(entry);
-                signal?.addEventListener(settings.AbortEvent, stopped, settings.Once);
+                        try {
+                            signal?.removeEventListener(settings.AbortEvent, stopped);
+                        } catch {}
+                        reject(error);
+                    }
+                }
             },
         );
     },
@@ -400,8 +428,14 @@ const ScribeBoot = Object.freeze({
          */
         const pause = (milliseconds) => ScribeBoot.pause(session, milliseconds, signal);
         const record = session.live?.setupRecord?.() ?? { story: null, profile: null, notes: null };
-        const hadStory = record.story !== null;
-        let story = record.story;
+        const validStory =
+            record.story !== null &&
+            typeof record.story === settings.ObjectType &&
+            !Array.isArray(record.story) &&
+            typeof record.story.plotId === settings.StringType &&
+            record.story.plotId.trim() !== settings.Nothing;
+        const hadStory = validStory;
+        let story = validStory ? record.story : null;
         let profile = record.profile;
         if (story === null) {
             story = await ZetaSource.story({
@@ -695,6 +729,10 @@ const ScribeBoot = Object.freeze({
                  * @return {void}
                  */
                 (resolve) => {
+                    /**
+                     * @param {string} reason
+                     * @return {void}
+                     */
                     waiting.halt = (reason) => {
                         if (waiting.cancelled !== null) {
                             return;
@@ -3212,9 +3250,6 @@ const ScribeBoot = Object.freeze({
                     ScribeBoot.closePlot(boot);
                 }
             } else if (currentPlot === null || currentPlot.plotId !== plotId) {
-                if (currentPlot !== null) {
-                    ScribeBoot.closePlot(boot);
-                }
                 if (environment.document.body !== null) {
                     ScribeBoot.closePlot(boot);
                     const fetch = ScribeBoot.pageFetch(boot);
@@ -3231,6 +3266,10 @@ const ScribeBoot = Object.freeze({
                                 fetch,
                                 token: ScribeBoot.token(boot),
                                 plotId,
+                                /**
+                                 * @param {number} milliseconds
+                                 * @return {Promise<void>}
+                                 */
                                 pause: (milliseconds) => ScribeBoot.delay(boot, milliseconds, signal),
                                 signal,
                             }),
@@ -3239,6 +3278,9 @@ const ScribeBoot = Object.freeze({
                     });
                     boot.plotSession = { plotId, handle, host: handle?.host ?? null };
                 } else {
+                    if (currentPlot !== null) {
+                        ScribeBoot.closePlot(boot);
+                    }
                     if (boot.plotReadyListener === null) {
                         /**
                          * @return {void}

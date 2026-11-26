@@ -260,3 +260,65 @@ test('unmount aborts in-flight fetch and suppresses post-unmount DOM and downloa
     assert.equal(downloads.length, 0);
     assert.equal(status.written.length, beforeWrites);
 });
+
+test('invalid plot payload, download failure, mounted AbortError, and idle unmount are handled cleanly', async () => {
+    const document = new PanelDocument(1280);
+    const clock = new FakeClock(Date.UTC(2026, 10, 26, 16, 0, 0));
+    const downloads = [];
+    let response = null;
+    let failDownload = false;
+    const handle = ScribePlotExport.mount({
+        document,
+        AbortController,
+        plotId: 'plot-42',
+        fetchPlot: async () => {
+            if (response instanceof Error) {
+                throw response;
+            }
+            return response;
+        },
+        download: (name, text) => {
+            if (failDownload) {
+                throw new Error('Disk full');
+            }
+            downloads.push({ name, text });
+        },
+        clock,
+    });
+    const button = handle.host.shadow.descendants().find((element) => element.id === ScribePlotExport.Settings.ButtonId);
+    const status = handle.host.shadow.descendants().find((element) => element.id === ScribePlotExport.Settings.StatusId);
+
+    for (const bad of [null, { name: 'Broken' }, { plotId: '   ', name: 'Blank' }]) {
+        response = bad;
+        button.click();
+        await flush();
+        assert.equal(downloads.length, 0);
+        assert.equal(button.disabled, false);
+        assert.equal(status.classes.has('error'), true);
+        assert.equal(status.textContent, ZetaSource.Settings.Messages.NoPlot);
+    }
+
+    response = samplePlot();
+    failDownload = true;
+    button.click();
+    await flush();
+    assert.equal(downloads.length, 0);
+    assert.equal(button.disabled, false);
+    assert.equal(status.classes.has('error'), true);
+    assert.equal(status.textContent, 'Disk full');
+
+    failDownload = false;
+    const abortError = new Error('Stopped');
+    abortError.name = 'AbortError';
+    response = abortError;
+    button.click();
+    await flush();
+    assert.equal(button.disabled, false);
+    assert.equal(status.hidden, true);
+    assert.equal(status.textContent, '');
+    assert.equal(status.classes.has('error'), false);
+
+    handle.unmount();
+    handle.unmount();
+    assert.equal(document.body.children.includes(handle.host), false);
+});

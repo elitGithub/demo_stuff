@@ -6332,3 +6332,227 @@ test('Settings renders every SetupState and ProfileState combination cleanly', a
         assert.equal(panel.text('scribe-profile-state'), expected.profileText, `${label} profile text`);
     }
 });
+
+test('Export plot + chat validates plot payload, reports off-tab/collapsed errors in trouble, clamps progress, handles download errors and post-unmount rejections, and trims persona', async () => {
+    for (const badResult of [null, { plot: null }, { plot: { name: 'Missing id' } }, { plot: { plotId: '   ' } }]) {
+        const panel = mounted(rulingsBook(), {
+            exportPlot: async () => badResult,
+        });
+        await panel.tab('Progress');
+        panel.click('scribe-export-plot');
+        await panel.flush();
+        assert.equal(panel.downloads.length, 0);
+        assert.equal(panel.text('scribe-plot-export-outcome'), scripts.ZetaSource.Settings.Messages.NoPlot);
+        assert.equal(panel.byId('scribe-export-plot').disabled, false);
+    }
+
+    let offTabMode = 'hold';
+    let rejectOffTab = null;
+    let progressOffTab = null;
+    const offTab = mounted(rulingsBook(), {
+        exportPlot: (signal, onProgress) => {
+            progressOffTab = onProgress;
+            if (offTabMode === 'fail') {
+                return Promise.reject(new Error('Second failure on Progress'));
+            }
+            if (offTabMode === 'ok') {
+                return Promise.resolve({
+                    plot: {
+                        plotId: 'plot-1',
+                        name: 'Harbour Lights',
+                        summary: '',
+                        description: '',
+                        about: '',
+                        creatorComment: '',
+                        language: null,
+                        mode: null,
+                        hashtags: [],
+                        characters: [],
+                        chatProfiles: [],
+                        opening: [],
+                        lore: [],
+                        raw: null,
+                    },
+                    roomId: room,
+                    roomTitle: null,
+                    introId: null,
+                    profile: null,
+                    notes: null,
+                    chat: { completeHistory: true, messages: [] },
+                });
+            }
+            return new Promise((resolve, reject) => {
+                rejectOffTab = reject;
+            });
+        },
+    });
+    await offTab.tab('Progress');
+    offTab.click('scribe-export-plot');
+    progressOffTab(0);
+    assert.equal(offTab.text('scribe-plot-export-outcome'), 'Exporting plot + chat (0 messages)...');
+    progressOffTab(-5);
+    assert.equal(offTab.text('scribe-plot-export-outcome'), 'Exporting plot + chat (0 messages)...');
+    progressOffTab(Number.NaN);
+    assert.equal(offTab.text('scribe-plot-export-outcome'), 'Exporting plot + chat (0 messages)...');
+    await offTab.tab('Summary');
+    rejectOffTab(new Error('Export failed while away'));
+    await offTab.flush();
+    assert.equal(offTab.text('scribe-trouble'), 'Export failed while away');
+    assert.equal(offTab.byId('scribe-trouble').hidden, false);
+    progressOffTab(99);
+    await offTab.tab('Progress');
+    assert.equal(offTab.text('scribe-plot-export-outcome'), 'Export failed while away');
+    offTabMode = 'fail';
+    offTab.click('scribe-export-plot');
+    await offTab.flush();
+    assert.equal(offTab.text('scribe-trouble'), '');
+    assert.equal(offTab.byId('scribe-trouble').hidden, true);
+    assert.equal(offTab.text('scribe-plot-export-outcome'), 'Second failure on Progress');
+
+    offTabMode = 'hold';
+    offTab.click('scribe-export-plot');
+    await offTab.tab('Summary');
+    rejectOffTab(new Error('Off-tab again'));
+    await offTab.flush();
+    assert.equal(offTab.text('scribe-trouble'), 'Off-tab again');
+    await offTab.tab('Progress');
+    offTabMode = 'ok';
+    offTab.click('scribe-export-plot');
+    await offTab.flush();
+    assert.equal(offTab.text('scribe-trouble'), '');
+    assert.equal(offTab.byId('scribe-trouble').hidden, true);
+    assert.equal(offTab.downloads.length, 1);
+
+    let rejectCollapsed = null;
+    const collapsed = mounted(rulingsBook(), {
+        exportPlot: () =>
+            new Promise((resolve, reject) => {
+                rejectCollapsed = reject;
+            }),
+    });
+    await collapsed.tab('Progress');
+    collapsed.click('scribe-export-plot');
+    collapsed.click('scribe-toggle');
+    await collapsed.flush();
+    rejectCollapsed(new Error('Collapsed failure'));
+    await collapsed.flush();
+    assert.equal(collapsed.text('scribe-trouble'), 'Collapsed failure');
+    assert.equal(collapsed.byId('scribe-trouble').hidden, false);
+
+    const failingDownloadHarness = new PanelHarness(scripts, {
+        keeper: keeperView(rulingsBook()),
+        live: liveView(),
+        exportPlot: async () => ({
+            plot: {
+                plotId: 'plot-1',
+                name: 'Harbour Lights',
+                summary: '',
+                description: '',
+                about: '',
+                creatorComment: '',
+                language: null,
+                mode: null,
+                hashtags: [],
+                characters: [],
+                chatProfiles: [],
+                opening: [],
+                lore: [],
+                raw: null,
+            },
+            roomId: room,
+            roomTitle: null,
+            introId: null,
+            profile: null,
+            notes: null,
+            chat: { completeHistory: true, messages: [] },
+        }),
+    });
+    failingDownloadHarness.downloads.push = () => {
+        throw new Error('Download blocked');
+    };
+    failingDownloadHarness.mount();
+    await failingDownloadHarness.tab('Progress');
+    failingDownloadHarness.click('scribe-export-plot');
+    await failingDownloadHarness.flush();
+    assert.equal(failingDownloadHarness.text('scribe-plot-export-outcome'), 'Download blocked');
+    assert.equal(failingDownloadHarness.byId('scribe-export-plot').disabled, false);
+
+    let rejectAfterUnmount = null;
+    let progressAfterUnmount = null;
+    const unmountedReject = mounted(rulingsBook(), {
+        exportPlot: (signal, onProgress) => {
+            progressAfterUnmount = onProgress;
+            return new Promise((resolve, reject) => {
+                rejectAfterUnmount = reject;
+            });
+        },
+    });
+    await unmountedReject.tab('Progress');
+    unmountedReject.click('scribe-export-plot');
+    const outcomeNode = unmountedReject.byId('scribe-plot-export-outcome');
+    const writesBefore = outcomeNode.written.length;
+    unmountedReject.handle.unmount();
+    progressAfterUnmount(12);
+    rejectAfterUnmount(new Error('The chat has been left'));
+    await unmountedReject.flush();
+    assert.equal(outcomeNode.written.length, writesBefore);
+
+    const paddedPersona = mounted(rulingsBook(), {
+        live: liveView([], {
+            setup: {
+                read: true,
+                reading: false,
+                storyRead: true,
+                storyFailed: false,
+                shown: 10,
+                whole: 10,
+                profileRead: true,
+                profileFailed: false,
+                source: 'Persona',
+                persona: '  Orla  ',
+            },
+        }),
+    });
+    await paddedPersona.tab('Settings');
+    assert.equal(paddedPersona.text('scribe-profile-state'), 'Profile: your persona Orla.');
+
+    const uncheckedStorage = new FakeStorage();
+    ScribeStore.write(uncheckedStorage, room, ScribeStore.Kind.Setup, {
+        plotId: 'plot-1',
+        roomTitle: 'Harbour',
+        introId: null,
+        story: { plotId: 'plot-1', name: 'Harbour Lights' },
+        profile: null,
+        notes: 'kept notes',
+        fetchedAt: '2026-11-26T00:00:00.000Z',
+    });
+    const uncheckedPanel = mounted(rulingsBook(), {
+        storage: uncheckedStorage,
+        cloud: { phase: 'Leading', keyed: true, checkedNotes: false, rawNotes: 'ignored', conflict: null, notes: null, unsent: 0, problem: null },
+    });
+    await uncheckedPanel.tab('Progress');
+    uncheckedPanel.click('scribe-export');
+    await uncheckedPanel.flush();
+    assert.equal(JSON.parse(uncheckedPanel.downloads[0].text).setup.notes, 'kept notes');
+
+    const writeErrorStorage = new FakeStorage();
+    ScribeStore.write(writeErrorStorage, room, ScribeStore.Kind.Setup, {
+        plotId: 'plot-1',
+        roomTitle: 'Harbour',
+        introId: null,
+        story: { plotId: 'plot-1', name: 'Harbour Lights' },
+        profile: null,
+        notes: 'old notes',
+        fetchedAt: '2026-11-26T00:00:00.000Z',
+    });
+    writeErrorStorage.refuseSetsMatching(/setup/);
+    const writeErrorPanel = mounted(rulingsBook(), {
+        storage: writeErrorStorage,
+        cloud: { phase: 'Leading', keyed: true, checkedNotes: true, rawNotes: 'fresh notes', conflict: null, notes: null, unsent: 0, problem: null },
+    });
+    await writeErrorPanel.tab('Progress');
+    writeErrorPanel.click('scribe-export');
+    await writeErrorPanel.flush();
+    assert.equal(writeErrorPanel.downloads.length, 1);
+    assert.equal(writeErrorPanel.text('scribe-controls-outcome'), 'Exported scribe-harbour-room.json.');
+});

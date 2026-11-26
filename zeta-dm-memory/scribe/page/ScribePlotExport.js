@@ -38,6 +38,7 @@ const ScribePlotExport = Object.freeze({
             Exporting: 'Exporting plot...',
             Exported: 'Exported ',
             NoLogin: 'No login seen yet — wait a moment or refresh, then try again.',
+            NoPlot: 'Zeta named no story for this chat',
             CharacterOne: ' character',
             CharacterMany: ' characters',
             LoreOne: ' lore entry',
@@ -133,6 +134,20 @@ const ScribePlotExport = Object.freeze({
                 const plot = await fetchPlot(active === null ? null : active.signal);
                 if (unmounted) {
                     return;
+                }
+                if (
+                    plot === null ||
+                    typeof plot !== settings.ObjectType ||
+                    Array.isArray(plot) ||
+                    typeof plot.plotId !== settings.StringType ||
+                    plot.plotId.trim() === settings.Nothing
+                ) {
+                    const noPlot =
+                        typeof ZetaSource !== 'undefined' &&
+                        typeof ZetaSource?.Settings?.Messages?.NoPlot === settings.StringType
+                            ? ZetaSource.Settings.Messages.NoPlot
+                            : words.NoPlot;
+                    throw new Error(noPlot);
                 }
                 const exportedAt = new Date(clock.now()).toISOString();
                 const bundle = ScribeSetup.exportBundle({ plot, exportedAt });

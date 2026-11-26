@@ -667,6 +667,7 @@ const ScribeCloud = Object.freeze({
         cloud.retries = ScribeCloud.Settings.NoCount;
         cloud.sent = null;
         cloud.notes = null;
+        cloud.rawNotes = null;
         cloud.checkedNotes = false;
         cloud.notesAt = null;
         cloud.conflict = null;
@@ -1741,11 +1742,16 @@ const ScribeCloud = Object.freeze({
         const previous = cloud.notes;
         cloud.checkedNotes = false;
         if (result.status === statuses.Ok && typeof notes === settings.StringType) {
-            cloud.notes = notes.trim() === settings.Nothing ? null : ScribeCloud.trimmed(notes);
+            const blank = notes.trim() === settings.Nothing;
+            cloud.rawNotes = blank ? null : notes;
+            cloud.notes = blank ? null : ScribeCloud.trimmed(notes);
             cloud.checkedNotes = true;
         } else if (result.status === statuses.NotFound && ScribeCloud.code(result) === settings.Codes.NoNotes) {
+            cloud.rawNotes = null;
             cloud.notes = null;
             cloud.checkedNotes = true;
+        } else {
+            cloud.rawNotes = null;
         }
         if (cloud.checkedNotes !== previouslyChecked || previous?.length !== cloud.notes?.length || previous?.cut !== cloud.notes?.cut) {
             cloud.notify();
@@ -1806,6 +1812,14 @@ const ScribeCloud = Object.freeze({
 
     /**
      * @param {object} cloud
+     * @return {string|null}
+     */
+    rawNotes(cloud) {
+        return cloud.rawNotes;
+    },
+
+    /**
+     * @param {object} cloud
      * @return {Readonly<{ phase: string, keyed: boolean, conflict: Readonly<{ here: number|null, there: number|null }>|null, notes: Readonly<{ length: number, cut: number|null }>|null, unsent: number, problem: string|null }>}
      * @throws {Error}
      */
@@ -1840,7 +1854,7 @@ const ScribeCloud = Object.freeze({
 
     /**
      * @param {{ storage: object, roomId: string, notesRoom: string, xmlHttpRequest: Function, clock: { now: () => number, today: () => string }, random: () => string, later: (milliseconds: number, action: Function) => void, chosen: () => boolean, reader: () => boolean, busy: () => boolean, reading: () => boolean, notify: () => void }} options
-     * @return {Readonly<{ view: Function, tick: Function, stir: Function, leads: Function, notes: Function, keep: Function, useCloud: Function, close: Function }>}
+     * @return {Readonly<{ view: Function, forkBook: Function, tick: Function, stir: Function, leads: Function, notes: Function, rawNotes: Function, notesChecked: Function, keep: Function, useCloud: Function, close: Function }>}
      */
     open(options) {
         const settings = ScribeCloud.Settings;
@@ -1865,6 +1879,7 @@ const ScribeCloud = Object.freeze({
             seen: new Map(),
             changedAt: null,
             timer: false,
+            rawNotes: null,
             closed: false,
         };
         ScribeCloud.restart(cloud, ScribeStore.cloudKey(options.storage));
@@ -1900,6 +1915,16 @@ const ScribeCloud = Object.freeze({
              * @return {string|null}
              */
             notes: () => ScribeCloud.notes(cloud),
+
+            /**
+             * @return {string|null}
+             */
+            rawNotes: () => ScribeCloud.rawNotes(cloud),
+
+            /**
+             * @return {boolean}
+             */
+            notesChecked: () => cloud.checkedNotes,
 
             /**
              * @return {Promise<void>}

@@ -1669,3 +1669,49 @@ test('the DM key goes only to the Worker and an answer from elsewhere is refused
     assert.equal(redirected.view().problem, 'An answer did not come straight from your Worker');
     assert.equal(redirected.view().problem.includes(KEY), false);
 });
+
+test('rawNotes keeps untruncated notes, notesChecked tracks 200/404/500, restart clears rawNotes, and Synced excludes setup', async () => {
+    assert.equal(ScribeCloud.Settings.Synced.includes(ScribeStore.Kind.Setup), false);
+    assert.deepEqual([...ScribeCloud.Settings.Synced], [ScribeStore.Kind.Settings, ScribeStore.Kind.Book, ScribeStore.Kind.Live]);
+
+    const place = world();
+    const fullNotes = `${'n'.repeat(3900)}\n${'m'.repeat(6099)}`;
+    assert.equal(fullNotes.length, 10000);
+    place.worker.setNotes(NOTES_ROOM, fullNotes);
+    const pc = computer(place, { kinds: { settings: SETTINGS, book: BOOK, live: LIVE, setup: { plotId: 'plot-1' } } });
+    assert.equal(pc.cloud.rawNotes(), null);
+    assert.equal(pc.cloud.notesChecked(), false);
+
+    await pc.cloud.tick();
+    assert.equal(pc.cloud.notesChecked(), true);
+    assert.equal(pc.cloud.rawNotes(), fullNotes);
+    assert.equal(Array.from(pc.cloud.notes()).length <= 4000, true);
+    assert.equal(pc.cloud.notes(), 'n'.repeat(3900));
+    assert.equal(place.worker.textOf(CLOUD_ROOM, ScribeStore.Kind.Setup), null);
+
+    place.worker.answer(NOTES, 500, DOWN_BODY);
+    await pass(place.timers, 300000);
+    await pc.cloud.tick();
+    assert.equal(pc.cloud.notesChecked(), false);
+    assert.equal(pc.cloud.rawNotes(), null);
+    assert.equal(pc.cloud.notes(), 'n'.repeat(3900));
+
+    place.worker.memories.delete(NOTES_ROOM);
+    await pass(place.timers, 300000);
+    await pc.cloud.tick();
+    assert.equal(pc.cloud.notesChecked(), true);
+    assert.equal(pc.cloud.rawNotes(), null);
+    assert.equal(pc.cloud.notes(), null);
+
+    place.worker.setNotes(NOTES_ROOM, fullNotes);
+    await pass(place.timers, 300000);
+    await pc.cloud.tick();
+    assert.equal(pc.cloud.notesChecked(), true);
+    assert.equal(pc.cloud.rawNotes(), fullNotes);
+
+    ScribeStore.setCloudKey(pc.storage, '');
+    await pc.cloud.tick();
+    assert.equal(pc.cloud.rawNotes(), null);
+    assert.equal(pc.cloud.notes(), null);
+    assert.equal(pc.cloud.notesChecked(), false);
+});

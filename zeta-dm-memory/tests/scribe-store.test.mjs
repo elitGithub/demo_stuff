@@ -963,13 +963,14 @@ test('the export holds everything but the key', () => {
     assert.equal(text.includes(KEY), false);
     assert.deepEqual(JSON.parse(text), {
         roomId: 'a:b',
-        generations: { campaign: 1, book: 2, live: 1, settings: null },
+        generations: { campaign: 1, book: 2, live: 1, settings: null, setup: null },
         damaged: [],
         raw: {},
         campaign: plain(sample('campaign')),
         book: plain(sample('book')),
         live: plain(sample('live')),
         settings: null,
+        setup: null,
     });
 
     const bookHead = storage.values.get(headName('a:b', Kind.Book));
@@ -979,7 +980,7 @@ test('the export holds everything but the key', () => {
     assert.equal(damaged.includes(KEY), false);
     assert.deepEqual(JSON.parse(damaged), {
         roomId: 'a:b',
-        generations: { campaign: 1, book: null, live: null, settings: null },
+        generations: { campaign: 1, book: null, live: null, settings: null, setup: null },
         damaged: [Kind.Book, Kind.Live],
         raw: {
             book: { head: bookHead, parts: [] },
@@ -992,6 +993,7 @@ test('the export holds everything but the key', () => {
         book: null,
         live: null,
         settings: null,
+        setup: null,
     });
 });
 
@@ -1875,4 +1877,46 @@ test('the new names leave rooms, sweep and the export as they were', () => {
     }
     ScribeStore.drop(busy, 'harbour');
     assert.deepEqual(names(busy), ['scribe:browser', 'scribe:cloudkey']);
+});
+
+test('setup kind round-trips, appears in rooms and exportText, reports damage, and is removed by drop', () => {
+    assert.equal(Kind.Setup, 'setup');
+    const storage = new FakeStorage();
+    const record = {
+        plotId: 'plot-harbour',
+        roomTitle: 'Harbour Night',
+        introId: 'intro-1',
+        story: { name: 'Harbour Lights', description: 'Fog rolls in.' },
+        profile: { source: 'Persona', name: 'Frost', description: 'Surveyor' },
+        notes: 'Untruncated notes',
+        fetchedAt: '2026-11-26T10:00:00.000Z',
+    };
+    const written = ScribeStore.write(storage, 'harbour', Kind.Setup, record);
+    assert.equal(written, JSON.stringify(record).length);
+    assertSame(ScribeStore.read(storage, 'harbour', Kind.Setup), record, 'setup read');
+
+    const listed = plain(ScribeStore.rooms(storage));
+    assert.deepEqual(listed, [
+        { roomId: 'harbour', kinds: [Kind.Setup], characters: written, damaged: [] },
+    ]);
+
+    const bundle = JSON.parse(ScribeStore.exportText(storage, 'harbour'));
+    assert.deepEqual(bundle.setup, record);
+    assert.equal(bundle.generations.setup, 1);
+    assert.deepEqual(bundle.damaged, []);
+
+    const setupPart = partOf('harbour', Kind.Setup, 1, record, 0);
+    storage.values.set(headName('harbour', Kind.Setup), 'broken-head');
+    const damagedBundle = JSON.parse(ScribeStore.exportText(storage, 'harbour'));
+    assert.deepEqual(damagedBundle.damaged, [Kind.Setup]);
+    assert.equal(damagedBundle.setup, null);
+    assert.equal(damagedBundle.generations.setup, null);
+    assert.deepEqual(damagedBundle.raw.setup, {
+        head: 'broken-head',
+        parts: [{ name: setupPart, text: JSON.stringify(record) }],
+    });
+
+    ScribeStore.drop(storage, 'harbour');
+    assert.deepEqual(names(storage), []);
+    assert.equal(ScribeStore.read(storage, 'harbour', Kind.Setup), null);
 });

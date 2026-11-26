@@ -22,6 +22,7 @@ const ScribeStore = Object.freeze({
         Book: 'book',
         Live: 'live',
         Settings: 'settings',
+        Setup: 'setup',
     }),
 
     Settings: Object.freeze({

@@ -38,6 +38,7 @@ const {
     ScribeReminder,
     ScribeMuse,
     ScribeSender,
+    ScribeSetup,
     ScribeLive,
 } = load(
     [
@@ -58,6 +59,7 @@ const {
         'ScribePedant',
         'ScribeMuse',
         'ScribeSender',
+        'ScribeSetup',
         'ScribeLive',
     ],
 );
@@ -527,7 +529,17 @@ function following(keeper, live) {
 function castOf() {
     const cast = {
         reads: { story: 0, profile: 0 },
+        plotId: 'plot-harbour',
+        roomTitle: 'Harbour Lights',
+        introId: 'intro-1',
+        name: 'Harbour Lights',
+        summary: 'A quiet mill by the tide.',
+        description: '',
+        about: '',
         characters: [],
+        opening: [],
+        lore: [],
+        persona: 'Orla',
         text: 'Orla is a sellsword from the northern marches.',
         storyFailures: [],
         profileFailures: [],
@@ -543,7 +555,18 @@ function castOf() {
         if (cast.gate !== null) {
             await cast.gate;
         }
-        return { characters: cast.characters, plotId: 'plot-harbour' };
+        return {
+            plotId: cast.plotId,
+            roomTitle: cast.roomTitle,
+            introId: cast.introId,
+            name: cast.name,
+            summary: cast.summary,
+            description: cast.description,
+            about: cast.about,
+            characters: cast.characters,
+            opening: cast.opening,
+            lore: cast.lore,
+        };
     };
     cast.profile = async (plotId) => {
         cast.reads.profile++;
@@ -555,12 +578,19 @@ function castOf() {
         if (cast.gate !== null) {
             await cast.gate;
         }
-        return cast.text;
+        if (cast.text === null) {
+            return null;
+        }
+        return {
+            source: 'Persona',
+            name: cast.persona,
+            description: cast.text,
+            text: cast.persona ? `${cast.persona}: ${cast.text}` : cast.text,
+        };
     };
     cast.unseen = (count) => {
         for (let read = 0; read < count; read++) {
             cast.storyFailures.push(new Error(ZetaSource.Settings.Messages.NoLogin));
-            cast.profileFailures.push(new Error(ZetaSource.Settings.Messages.NoLogin));
         }
     };
     cast.hold = () => {
@@ -582,26 +612,29 @@ const QUIET = castOf();
 /**
  * @param {object} fields
  * @param {FakeStorage} storage
+ * @param {object} extra
  * @return {{ keeper: object, storage: object, model: object, notices: object, live: object, raw: object, cast: object }}
  */
-function rig(fields = {}, storage = new FakeStorage()) {
+function rig(fields = {}, storage = new FakeStorage(), extra = {}) {
     const keeper = keeperOf(fields);
     const model = modelOf();
     keeper.savedAlerts = (message, current) => savedAlerts(model, message, current);
-    const cast = castOf();
+    const cast = extra.cast ?? castOf();
     const notices = { count: 0 };
     const notify = () => {
         notices.count++;
+        extra.onNotify?.();
     };
     const raw = ScribeLive.open({
         keeper,
         storage,
         roomId: ROOM,
         ask: model.ask,
-        clock: CLOCK,
+        clock: extra.clock ?? CLOCK,
         notify,
         story: cast.story,
         profile: cast.profile,
+        ...(extra.rawNotes !== undefined ? { rawNotes: extra.rawNotes } : {}),
     });
     const live = following(keeper, raw);
     return { keeper, storage, model, notices, live, raw, notify, cast };
@@ -916,6 +949,7 @@ test("a regenerated reply takes back the old one's findings", async () => {
 
 test('the same reply twice is handled once', async () => {
     const { storage, model, notices, live } = rig();
+    await live.setup();
     await live.reply(at(41));
     const calls = model.calls.length;
     const saves = storage.count('set');
@@ -1232,7 +1266,9 @@ test('a watching tab does nothing', async () => {
             profile: QUIET.profile,
         }),
     );
+    await ticks();
     const saves = storage.count('set');
+    const told = notices.count;
     await watcher.reply(at(43));
     assert.equal(watcherModel.calls.length, 0);
     assert.equal(storage.count('set'), saves);
@@ -1256,7 +1292,7 @@ test('a watching tab does nothing', async () => {
     assert.equal(storage.count('set'), saves);
     assert.equal(watcherKeeper.ruled.length, 0);
     assert.equal(watcherKeeper.filed.length, 0);
-    assert.equal(notices.count, 0);
+    assert.equal(notices.count, told);
     assert.equal(watcher.view().findings[0].status, 'Open');
 
     readerModel.scene = TENT;
@@ -2837,15 +2873,13 @@ test('one told at a time', async () => {
 test('a result for an untrusted book is thrown away', async () => {
     const big = bookState(BIG);
     const refreshing = rig({ state: big, messages: [] });
-    refreshing.cast.unseen(2);
+    await refreshing.live.setup();
     await refreshing.live.force();
     await refreshing.live.reply(at(41));
-    assert.equal(refreshing.cast.reads.story, 2);
-    const release = refreshing.cast.hold();
+    const release = refreshing.model.holdSystem(ScribeReminder.StoryPrompt);
     refreshing.keeper.change({ state: revised(bookState(BIG.map((fact) => fact.replace('skin | pale', 'skin | dark')))) });
     refreshing.live.view();
     await ticks();
-    assert.equal(refreshing.cast.reads.story, 3);
     const saves = refreshing.storage.count('set');
     const ready = ScribeStore.read(refreshing.storage, ROOM, ScribeStore.Kind.Live).ready;
     assert.notEqual(ready, null);
@@ -2858,17 +2892,15 @@ test('a result for an untrusted book is thrown away', async () => {
     assert.equal(ScribeStore.read(refreshing.storage, ROOM, ScribeStore.Kind.Live).ready, ready);
 
     const replying = rig({ state: big, messages: [] });
-    replying.cast.unseen(4);
+    await replying.live.setup();
     await replying.live.force();
     await replying.live.reply(at(41));
     replying.live.outgoing('One.');
     replying.live.sent();
     await replying.live.force();
-    assert.equal(replying.cast.reads.story, 3);
-    const hold = replying.cast.hold();
+    const hold = replying.model.holdSystem(ScribeScene.Prompt);
     const pending = replying.live.reply(at(43));
     await ticks();
-    assert.equal(replying.cast.reads.story, 5);
     assert.deepEqual(plain(replying.model.roles().slice(-1)), ['Scribe']);
     const before = statuses(replying.live);
     const quiet = replying.storage.count('set');
@@ -3131,7 +3163,7 @@ test('a refused call is said', async () => {
 test('a step ending never undoes the player', async () => {
     const big = bookState(BIG);
     const { keeper, model, storage, live, cast } = rig({ state: big, messages: [] });
-    cast.unseen(3);
+    cast.unseen(2);
     await live.force();
     await live.reply(at(41));
     live.use(GULL);
@@ -3140,7 +3172,7 @@ test('a step ending never undoes the player', async () => {
     const release = cast.hold();
     const pending = live.reply(at(43));
     await ticks();
-    assert.equal(cast.reads.story, 4);
+    assert.equal(cast.reads.story, 3);
     assert.deepEqual(plain(model.roles().slice(-1)), ['Scribe']);
     assert.equal(live.outgoing('I wave.').includes(lineOf(GULL)), true);
     live.sent();
@@ -3169,7 +3201,7 @@ test('a step ending never undoes the player', async () => {
     assert.equal(reopened.live.outgoing('Hello.').includes(GULL), false);
 
     const steady = rig({ state: big, messages: [] });
-    steady.cast.unseen(3);
+    steady.cast.unseen(2);
     await steady.live.force();
     await steady.live.reply(variant(41, [['Narrator', 'Halvart, forty winters old, hums by the fire.']], null));
     steady.live.use(GULL);
@@ -3181,7 +3213,7 @@ test('a step ending never undoes the player', async () => {
     const free = steady.cast.hold();
     const going = steady.live.reply(at(43));
     await ticks();
-    assert.equal(steady.cast.reads.story, 4);
+    assert.equal(steady.cast.reads.story, 3);
     assert.equal(steady.live.outgoing('I wave.').includes(lineOf(GULL)), true);
     steady.live.sent();
     steady.live.dismiss(spelt);
@@ -3877,7 +3909,7 @@ test('a forced reminder is made when the check it was pressed in discards its ow
 test('force does not start a second rebuild while one is running', async () => {
     const big = bookState(BIG);
     const { live, keeper, model, cast } = rig({ settings: { refresh: 1, budget: 3 }, state: big });
-    cast.unseen(3);
+    cast.unseen(2);
     await live.reply(at(41));
     live.sent();
     await live.reply(at(43));
@@ -3885,13 +3917,13 @@ test('force does not start a second rebuild while one is running', async () => {
     keeper.change({ state: revised(bookState(BIG.map((fact) => fact.replace('skin | pale', 'skin | dark')))) });
     live.view();
     await ticks();
-    assert.equal(cast.reads.story, 4);
+    assert.equal(cast.reads.story, 3);
     await live.force();
-    assert.equal(cast.reads.story, 4);
+    assert.equal(cast.reads.story, 3);
     assert.equal(live.view().forced, true);
     release();
     await ticks();
-    assert.equal(cast.reads.story, 4);
+    assert.equal(cast.reads.story, 3);
     assert.notEqual(live.view().ready, null);
     assert.equal(live.view().ready.includes('skin: dark'), true, live.view().ready);
     assert.equal(chooses(model), 0);
@@ -4007,7 +4039,7 @@ test('a clear or a send while a reminder is being made keeps what that check mak
         ],
     ]) {
         const { storage, model, live, cast } = rig({ state: big });
-        cast.unseen(3);
+        cast.unseen(2);
         await live.reply(at(41));
         await live.force();
         assert.notEqual(live.view().ready, null, name);
@@ -4015,14 +4047,14 @@ test('a clear or a send while a reminder is being made keeps what that check mak
         const hold = cast.hold();
         const pending = live.reply(at(43));
         await ticks();
-        assert.equal(cast.reads.story, 4, name);
+        assert.equal(cast.reads.story, 3, name);
         act(live);
         hold();
         await pending;
         await ticks();
         const view = live.view();
         assert.equal(view.now.place, 'The tent', name);
-        assert.equal(cast.reads.story, 4, name);
+        assert.equal(cast.reads.story, 3, name);
         assert.equal(chooses(model), 0, name);
         if (name === 'clear') {
             assert.equal(view.ready, null, name);
@@ -4632,39 +4664,40 @@ function inputsOf(model, system) {
 test('the story and the profile are read once, for many preparations and for two at once', async () => {
     const { live, raw, cast, model, keeper } = rig();
     const release = cast.hold();
+    assert.equal(live.view().setup.reading, true);
     const replying = live.reply(at(41));
     await ticks();
     assert.deepEqual(plain(cast.reads), { story: 1, profile: 0 });
-    assert.equal(model.calls.length, 0);
-    const asked = raw.profile();
+    assert.equal(model.calls.length, 1);
+    const asked = raw.setup();
     const forcing = live.force();
     await ticks();
     assert.deepEqual(plain(cast.reads), { story: 1, profile: 0 });
     release();
     await replying;
     await forcing;
-    assert.equal(await asked, cast.text);
+    const expectedProfile = `Orla: ${cast.text}`;
+    assert.equal((await asked).profileText, expectedProfile);
     assert.deepEqual(plain(cast.plots), ['plot-harbour']);
     await live.force();
     await live.reply(at(47));
     keeper.change({ state: revised(state) });
     live.view();
     await ticks();
-    assert.equal(await raw.profile(), cast.text);
+    assert.equal((await raw.setup()).profileText, expectedProfile);
     assert.deepEqual(plain(cast.reads), { story: 1, profile: 1 });
     assert.equal(live.view().notice, null);
     assert.notEqual(live.view().ready, null);
-    const profiled = `${PROFILE_HEADING}\n${cast.text}`;
     assert.equal(inputsOf(model, ScribePedant.Prompt).length, 0);
     for (const system of [ScribeScene.Prompt]) {
         const inputs = inputsOf(model, system);
         assert.equal(inputs.length, 2, system);
         for (const input of inputs) {
-            assert.equal(input.startsWith(`PLAYER CHARACTER:\nOrla\n\n${profiled}\n\n`), true, input.slice(0, 200));
+            assert.equal(input.includes(PROFILE_HEADING), false, input.slice(0, 200));
         }
     }
     raw.close();
-    assert.equal(await raw.profile(), cast.text);
+    assert.equal((await raw.setup()).profileText, expectedProfile);
 });
 
 test('a failed read makes everyone custom with a notice, leaves the profile out and is not tried again', async () => {
@@ -4674,15 +4707,17 @@ test('a failed read makes everyone custom with a notice, leaves the profile out 
     cast.profileFailures.push(new Error('Zeta gave no profile text for this chat'));
     await live.reply(at(41));
     await live.force();
-    const notice =
-        "The story's characters could not be read, so every character counts as custom: Zeta answered HTTP 404 " +
-        'The chat profile could not be read, so it is left out of the calls: Zeta gave no profile text for this chat';
+    const notice = 'The story setup could not be read: Zeta answered HTTP 404';
     assert.equal(live.view().notice, notice);
+    assert.equal(live.view().setup.storyRead, false);
+    assert.equal(live.view().setup.storyFailed, true);
+    assert.equal(live.view().setup.profileRead, false);
+    assert.equal(live.view().setup.profileFailed, true);
     assert.equal(live.view().ready.includes('Mirelle: eyes: brown.'), true, live.view().ready);
     await live.reply(at(47));
-    assert.deepEqual(plain(cast.reads), { story: 1, profile: 1 });
-    assert.deepEqual(plain(cast.plots), [null]);
-    assert.equal(await raw.profile(), null);
+    assert.deepEqual(plain(cast.reads), { story: 1, profile: 0 });
+    assert.deepEqual(plain(cast.plots), []);
+    assert.equal((await raw.setup()).text, null);
     for (const system of [ScribeScene.Prompt, ScribePedant.Prompt]) {
         for (const input of inputsOf(model, system)) {
             assert.equal(input.includes(PROFILE_HEADING), false, system);
@@ -4699,12 +4734,16 @@ test('a failed read makes everyone custom with a notice, leaves the profile out 
 
     const halfway = rig();
     halfway.cast.profileFailures.push(new Error('Zeta answered HTTP 500'));
+    await halfway.raw.setup();
     await halfway.live.reply(at(41));
     assert.equal(
         halfway.live.view().notice,
         'The chat profile could not be read, so it is left out of the calls: Zeta answered HTTP 500',
     );
-    assert.equal(await halfway.raw.profile(), null);
+    assert.equal((await halfway.raw.setup()).profileText, null);
+    assert.equal(halfway.live.view().setup.storyRead, true);
+    assert.equal(halfway.live.view().setup.profileRead, false);
+    assert.equal(halfway.live.view().setup.profileFailed, true);
     assert.deepEqual(plain(halfway.cast.reads), { story: 1, profile: 1 });
 });
 
@@ -4712,27 +4751,27 @@ test('a missing login gives no notice, and the next preparation reads again', as
     const { live, raw, cast, model } = rig();
     cast.unseen(1);
     await live.reply(at(41));
+    await ticks();
     assert.equal(live.view().notice, null);
-    assert.deepEqual(plain(cast.reads), { story: 1, profile: 1 });
+    assert.deepEqual(plain(cast.reads), { story: 1, profile: 0 });
     assert.equal(inputsOf(model, ScribeScene.Prompt)[0].includes(PROFILE_HEADING), false);
     await live.force();
-    assert.deepEqual(plain(cast.reads), { story: 2, profile: 2 });
+    assert.deepEqual(plain(cast.reads), { story: 2, profile: 1 });
     assert.notEqual(live.view().ready, null);
     await live.reply(at(47));
-    assert.deepEqual(plain(cast.reads), { story: 2, profile: 2 });
-    assert.equal(inputsOf(model, ScribeScene.Prompt)[1].includes(PROFILE_HEADING), true);
+    assert.deepEqual(plain(cast.reads), { story: 2, profile: 1 });
     assert.equal(live.view().notice, null);
-    assert.equal(await raw.profile(), cast.text);
+    assert.equal((await raw.setup()).profileText, `Orla: ${cast.text}`);
 
     const closing = rig();
     const release = closing.cast.hold();
-    const late = closing.raw.profile();
+    const late = closing.raw.setup();
     closing.raw.close();
     release();
-    assert.equal(await late, null);
+    assert.equal((await late).text, null);
     assert.equal(closing.raw.view().notice, null);
-    assert.equal(await closing.raw.profile(), null);
-    assert.deepEqual(plain(closing.cast.reads), { story: 2, profile: 2 });
+    assert.equal((await closing.raw.setup()).text, null);
+    assert.deepEqual(plain(closing.cast.reads), { story: 1, profile: 1 });
 });
 
 test('saved appearance notes keep their original reminder behavior without collecting new ones', async () => {
@@ -5564,15 +5603,16 @@ test('one story call per key at a time', async () => {
 });
 
 test('a room without its characters still gives the plot id, so the profile is read and only the story notice shows', async () => {
-    const { live, cast } = rig();
+    const { live, raw, cast } = rig();
     cast.storyFailures.push(
         Object.assign(new Error('Zeta answered in an unexpected shape'), { status: 200, plotId: 'plot-9' }),
     );
+    await raw.setup();
     await live.reply(at(41));
     assert.deepEqual(plain(cast.plots), ['plot-9']);
     assert.equal(
         live.view().notice,
-        "The story's characters could not be read, so every character counts as custom: Zeta answered in an unexpected shape",
+        'The story setup could not be read: Zeta answered in an unexpected shape',
     );
 });
 
@@ -6706,4 +6746,510 @@ test('a late receipt cannot clear text selected for a later send', async () => {
     assert.deepEqual(plain(ScribeStore.read(storage, ROOM, ScribeStore.Kind.Live).settled), [reminder]);
     assert.equal(opened.live.lines().ready, text);
     assert.equal(opened.live.outgoing('After confirmation.'), 'After confirmation.' + lineOf('[Scribe] ' + text));
+});
+
+test('open validates rawNotes and keeps unadopted rooms silent until booked', async () => {
+    const storage = new FakeStorage();
+    const keeper = keeperOf({ booked: false, trusted: false });
+    const model = modelOf();
+    const cast = castOf();
+    assert.throws(
+        () =>
+            ScribeLive.open({
+                keeper,
+                storage,
+                roomId: ROOM,
+                ask: model.ask,
+                clock: CLOCK,
+                notify: () => {},
+                story: cast.story,
+                profile: cast.profile,
+                rawNotes: 'not-a-function',
+            }),
+        /^Error: The argument is not valid: rawNotes$/,
+    );
+
+    const observations = [];
+    let rawRef = null;
+    const { keeper: roomKeeper, live, raw, notices } = rig(
+        { booked: false, trusted: false },
+        storage,
+        {
+            cast,
+            clock: { now: () => Date.UTC(2026, 10, 26, 9, 30, 0) },
+            rawNotes: () => ({ checked: true, text: 'Full DM notes for harbour.' }),
+            onNotify: () => {
+                if (rawRef !== null) {
+                    observations.push(plain(rawRef.view().setup));
+                }
+            },
+        },
+    );
+    rawRef = raw;
+    assert.equal(raw.profile, undefined);
+    await ticks();
+    assert.deepEqual(plain(cast.reads), { story: 0, profile: 0 });
+    assert.equal(ScribeStore.read(storage, ROOM, ScribeStore.Kind.Setup), null);
+    assert.deepEqual(plain(live.view().setup), {
+        read: false,
+        reading: false,
+        storyRead: false,
+        storyFailed: false,
+        shown: 0,
+        whole: 0,
+        profileRead: false,
+        profileFailed: false,
+        source: null,
+        persona: null,
+    });
+    raw.ensureCast();
+    await ticks();
+    assert.deepEqual(plain(cast.reads), { story: 0, profile: 0 });
+    assert.equal(ScribeStore.read(storage, ROOM, ScribeStore.Kind.Setup), null);
+    assert.equal(notices.count, 0);
+
+    const unadoptedSetup = rig({ booked: false, trusted: false });
+    const builtUnadopted = await unadoptedSetup.raw.setup();
+    assert.equal(builtUnadopted.persona, 'Orla');
+    assert.equal(ScribeStore.read(unadoptedSetup.storage, ROOM, ScribeStore.Kind.Setup), null);
+
+    const release = cast.hold();
+    roomKeeper.change({ booked: true, trusted: true });
+    raw.ensureCast();
+    assert.equal(live.view().setup.reading, true);
+    assert.equal(live.view().setup.read, false);
+    raw.ensureCast();
+    await ticks();
+    assert.deepEqual(plain(cast.reads), { story: 1, profile: 0 });
+    release();
+    await ticks();
+    assert.deepEqual(plain(cast.reads), { story: 1, profile: 1 });
+    assert.equal(observations.length, 1);
+    assert.equal(observations[0].reading, false);
+    assert.equal(observations[0].read, true);
+    assert.equal(observations[0].storyRead, true);
+    assert.equal(observations[0].profileRead, true);
+    assert.equal(observations[0].persona, 'Orla');
+    assert.equal(observations[0].source, 'Persona');
+    assert.ok(observations[0].shown > 0);
+    assert.equal(observations[0].shown, observations[0].whole);
+    const saved = ScribeStore.read(storage, ROOM, ScribeStore.Kind.Setup);
+    assert.equal(saved.plotId, 'plot-harbour');
+    assert.equal(saved.roomTitle, 'Harbour Lights');
+    assert.equal(saved.introId, 'intro-1');
+    assert.equal(saved.story.name, 'Harbour Lights');
+    assert.equal(saved.profile.name, 'Orla');
+    assert.equal(saved.notes, 'Full DM notes for harbour.');
+    assert.equal(saved.fetchedAt, '2026-11-26T09:30:00.000Z');
+});
+
+test('merge-safe setup persistence preserves prior fields, handles notes flags, and never resurrects a 404 persona', async () => {
+    const storage = new FakeStorage();
+    const priorStory = {
+        plotId: 'plot-old',
+        roomTitle: 'Old Harbour',
+        introId: 'intro-old',
+        name: 'Old Harbour',
+        summary: 'Saved earlier.',
+        description: 'Fog over the pier.',
+        about: '',
+        characters: [{ id: 'c1', name: 'Mirelle', description: 'A captain.' }],
+        opening: [],
+        lore: [],
+    };
+    const priorProfile = {
+        source: 'Persona',
+        name: 'Old Persona',
+        description: 'Stale persona description.',
+        text: 'Old Persona: Stale persona description.',
+    };
+    ScribeStore.write(storage, ROOM, ScribeStore.Kind.Setup, {
+        plotId: 'plot-old',
+        roomTitle: 'Old Harbour',
+        introId: 'intro-old',
+        story: priorStory,
+        profile: priorProfile,
+        notes: 'Original worker notes.',
+        fetchedAt: '2026-11-25T00:00:00.000Z',
+    });
+
+    const partialCast = castOf();
+    partialCast.persona = 'Frost';
+    partialCast.text = 'A quiet scout.';
+    partialCast.storyFailures.push(Object.assign(new Error('HTTP 500'), { status: 500, plotId: 'plot-old' }));
+    const partial = rig({}, storage, {
+        cast: partialCast,
+        clock: { now: () => Date.UTC(2026, 10, 26, 10, 0, 0) },
+        rawNotes: () => ({ checked: false, text: null }),
+    });
+    await partial.raw.setup();
+    const afterPartial = ScribeStore.read(storage, ROOM, ScribeStore.Kind.Setup);
+    assert.equal(afterPartial.plotId, 'plot-old');
+    assert.equal(afterPartial.roomTitle, 'Old Harbour');
+    assert.equal(afterPartial.introId, 'intro-old');
+    assert.deepEqual(plain(afterPartial.story), priorStory);
+    assert.equal(afterPartial.profile.name, 'Frost');
+    assert.equal(afterPartial.notes, 'Original worker notes.');
+    assert.equal(afterPartial.fetchedAt, '2026-11-26T10:00:00.000Z');
+    const partialRecord = partial.raw.setupRecord();
+    assert.deepEqual(plain(partialRecord.story), priorStory);
+    assert.equal(partialRecord.profile.name, 'Frost');
+    assert.equal(partialRecord.notes, 'Original worker notes.');
+    partial.raw.close();
+
+    const clearedNotesCast = castOf();
+    clearedNotesCast.text = null;
+    const cleared = rig({}, storage, {
+        cast: clearedNotesCast,
+        clock: { now: () => Date.UTC(2026, 10, 26, 11, 0, 0) },
+        rawNotes: () => ({ checked: true, text: null }),
+    });
+    await cleared.raw.setup();
+    const afterCleared = ScribeStore.read(storage, ROOM, ScribeStore.Kind.Setup);
+    assert.equal(afterCleared.notes, null);
+    assert.equal(afterCleared.profile, null);
+    assert.equal(cleared.raw.setupRecord().profile, null);
+    assert.equal(cleared.raw.view().setup.profileRead, true);
+    assert.equal(cleared.raw.view().setup.profileFailed, false);
+    cleared.raw.close();
+
+    const failedWriteStorage = new FakeStorage();
+    ScribeStore.write(failedWriteStorage, ROOM, ScribeStore.Kind.Setup, {
+        plotId: 'plot-harbour',
+        roomTitle: 'Harbour Lights',
+        introId: 'intro-1',
+        story: priorStory,
+        profile: priorProfile,
+        notes: 'Kept note.',
+        fetchedAt: '2026-11-25T00:00:00.000Z',
+    });
+    failedWriteStorage.refuseSetsMatching(/setup/);
+    const notFoundCast = castOf();
+    notFoundCast.text = null;
+    const unresurrected = rig({}, failedWriteStorage, { cast: notFoundCast });
+    const built = await unresurrected.raw.setup();
+    assert.equal(built.profileText, null);
+    assert.equal(ScribeStore.read(failedWriteStorage, ROOM, ScribeStore.Kind.Setup).profile.name, 'Old Persona');
+    assert.equal(unresurrected.raw.setupRecord().profile, null);
+    assert.equal(unresurrected.raw.setupRecord().notes, 'Kept note.');
+    unresurrected.raw.close();
+});
+
+test('failed story without plotId skips profile without spurious notice and NoLogin notifies then retries via ensureCast', async () => {
+    const failedStorage = new FakeStorage();
+    const missingPlotCast = castOf();
+    missingPlotCast.storyFailures.push(new Error('Zeta named no story for this chat'));
+    const failed = rig({}, failedStorage, { cast: missingPlotCast });
+    await failed.raw.setup();
+    assert.deepEqual(plain(missingPlotCast.reads), { story: 1, profile: 0 });
+    assert.equal(ScribeStore.read(failedStorage, ROOM, ScribeStore.Kind.Setup), null);
+    assert.equal(failed.live.view().notice, 'The story setup could not be read: Zeta named no story for this chat');
+    assert.equal(failed.live.view().notice.includes('profile'), false);
+    assert.equal(failed.live.view().notice.includes('undefined'), false);
+    assert.deepEqual(plain(failed.live.view().setup), {
+        read: true,
+        reading: false,
+        storyRead: false,
+        storyFailed: true,
+        shown: 0,
+        whole: 0,
+        profileRead: false,
+        profileFailed: true,
+        source: null,
+        persona: null,
+    });
+    failed.raw.close();
+
+    const profileNoLoginStorage = new FakeStorage();
+    const profileNoLoginCast = castOf();
+    profileNoLoginCast.profileFailures.push(new Error(ZetaSource.Settings.Messages.NoLogin));
+    const notifyStates = [];
+    let handleRef = null;
+    const retrying = rig({}, profileNoLoginStorage, {
+        cast: profileNoLoginCast,
+        onNotify: () => {
+            if (handleRef !== null) {
+                notifyStates.push(plain(handleRef.view().setup));
+            }
+        },
+    });
+    handleRef = retrying.raw;
+    await ticks();
+    assert.deepEqual(plain(profileNoLoginCast.reads), { story: 1, profile: 1 });
+    assert.equal(ScribeStore.read(profileNoLoginStorage, ROOM, ScribeStore.Kind.Setup), null);
+    assert.equal(notifyStates.length, 1);
+    assert.equal(notifyStates[0].read, false);
+    assert.equal(notifyStates[0].reading, false);
+    retrying.raw.ensureCast();
+    await ticks();
+    assert.deepEqual(plain(profileNoLoginCast.reads), { story: 2, profile: 2 });
+    assert.equal(notifyStates.length, 2);
+    assert.equal(notifyStates[1].read, true);
+    assert.equal(notifyStates[1].reading, false);
+    assert.notEqual(ScribeStore.read(profileNoLoginStorage, ROOM, ScribeStore.Kind.Setup), null);
+    retrying.raw.ensureCast();
+    await ticks();
+    assert.deepEqual(plain(profileNoLoginCast.reads), { story: 2, profile: 2 });
+    retrying.raw.close();
+
+    const closedCast = castOf();
+    closedCast.unseen(1);
+    const closedRoom = rig({}, new FakeStorage(), { cast: closedCast });
+    await ticks();
+    assert.deepEqual(plain(closedCast.reads), { story: 1, profile: 0 });
+    closedRoom.raw.close();
+    closedRoom.raw.ensureCast();
+    await ticks();
+    assert.deepEqual(plain(closedCast.reads), { story: 1, profile: 0 });
+});
+
+test('damaged setup storage does not crash persistSetup or setupRecord and player updates re-evaluate {{user}}', async () => {
+    const damagedStorage = new FakeStorage();
+    damagedStorage.set(`scribe:head:${ROOM}:setup`, '{not-json');
+    const damagedCast = castOf();
+    const release = damagedCast.hold();
+    const damaged = rig({ player: 'unknown' }, damagedStorage, { cast: damagedCast });
+    assert.deepEqual(plain(damaged.raw.setupRecord()), { story: null, profile: null, notes: null });
+    damagedCast.description = 'The watchman greets {{user}} at the gate.';
+    damagedCast.persona = null;
+    damagedCast.text = null;
+    release();
+    await damaged.raw.setup();
+    const stored = ScribeStore.read(damagedStorage, ROOM, ScribeStore.Kind.Setup);
+    assert.equal(stored.plotId, 'plot-harbour');
+    assert.equal(stored.story.description, 'The watchman greets {{user}} at the gate.');
+
+    const beforePlayer = await damaged.raw.setup();
+    assert.equal(beforePlayer.storyText.includes('{{user}}'), true, beforePlayer.storyText);
+    const beforeShown = damaged.live.view().setup.shown;
+    damaged.keeper.change({ player: 'Frost' });
+    const afterPlayer = await damaged.raw.setup();
+    assert.equal(afterPlayer.storyText.includes('greets Frost at the gate.'), true, afterPlayer.storyText);
+    assert.equal(afterPlayer.storyText.includes('{{user}}'), false, afterPlayer.storyText);
+    assert.equal(damaged.live.view().setup.shown, beforeShown - '{{user}}'.length + 'Frost'.length);
+    damaged.raw.close();
+});
+
+test('remind and generateReminder classify story characters identically with story.characters', async () => {
+    const { live, raw, cast } = rig();
+    cast.characters = [{ id: 'char-1', name: 'Mirelle', description: 'A tall woman with brown eyes.' }];
+    await raw.setup();
+    await live.reply(at(41));
+    await live.force();
+    const reminded = live.view().ready;
+    const generated = await raw.generateReminder();
+    assert.equal(reminded, generated);
+    assert.equal(reminded.includes('brown eyes'), false, reminded);
+    assert.equal(reminded.includes('Halvard'), true, reminded);
+    raw.close();
+});
+
+test('unadopted settlement does not cache cast, so adopting later with ensureCast persists setup', async () => {
+    const storage = new FakeStorage();
+    const cast = castOf();
+    const release = cast.hold();
+    const notifyStates = [];
+    let handleRef = null;
+    const { keeper, raw } = rig({ booked: true, trusted: true }, storage, {
+        cast,
+        onNotify: () => {
+            if (handleRef !== null) {
+                notifyStates.push(plain(handleRef.view().setup));
+            }
+        },
+    });
+    handleRef = raw;
+    assert.equal(raw.view().setup.reading, true);
+    keeper.change({ booked: false, trusted: false });
+    release();
+    await ticks();
+    assert.deepEqual(plain(cast.reads), { story: 1, profile: 1 });
+    assert.equal(ScribeStore.read(storage, ROOM, ScribeStore.Kind.Setup), null);
+    assert.equal(notifyStates.length, 1);
+    assert.equal(notifyStates[0].read, false);
+    assert.equal(notifyStates[0].reading, false);
+    assert.equal(raw.view().setup.read, false);
+
+    keeper.change({ booked: true, trusted: true });
+    raw.ensureCast();
+    await ticks();
+    assert.deepEqual(plain(cast.reads), { story: 2, profile: 2 });
+    assert.equal(notifyStates.length, 2);
+    assert.equal(notifyStates[1].read, true);
+    assert.equal(notifyStates[1].reading, false);
+    const saved = ScribeStore.read(storage, ROOM, ScribeStore.Kind.Setup);
+    assert.equal(saved.plotId, 'plot-harbour');
+    assert.equal(saved.profile.name, 'Orla');
+    raw.close();
+});
+
+test('throwing or null rawNotes preserves prior notes while persisting story and profile, and profile 500 preserves prior profile', async () => {
+    const storage = new FakeStorage();
+    const priorProfile = {
+        source: 'Persona',
+        name: 'Saved Persona',
+        description: 'Prior saved persona.',
+        text: 'Saved Persona: Prior saved persona.',
+    };
+    ScribeStore.write(storage, ROOM, ScribeStore.Kind.Setup, {
+        plotId: 'plot-prior',
+        roomTitle: 'Prior Room',
+        introId: 'intro-prior',
+        story: { plotId: 'plot-prior', name: 'Prior Plot', summary: '', description: '', characters: [], opening: [], lore: [] },
+        profile: priorProfile,
+        notes: 'Kept across rawNotes issues.',
+        fetchedAt: '2026-11-25T00:00:00.000Z',
+    });
+
+    const throwingCast = castOf();
+    throwingCast.name = 'Harbour After Throw';
+    throwingCast.persona = 'Kestrel';
+    const throwingRoom = rig({}, storage, {
+        cast: throwingCast,
+        rawNotes: () => {
+            throw new Error('cloud unavailable');
+        },
+    });
+    await throwingRoom.raw.setup();
+    const afterThrow = ScribeStore.read(storage, ROOM, ScribeStore.Kind.Setup);
+    assert.equal(afterThrow.story.name, 'Harbour After Throw');
+    assert.equal(afterThrow.profile.name, 'Kestrel');
+    assert.equal(afterThrow.notes, 'Kept across rawNotes issues.');
+    throwingRoom.raw.close();
+
+    const nullNotesCast = castOf();
+    nullNotesCast.name = 'Harbour After Null';
+    nullNotesCast.persona = 'Rowan';
+    const nullNotesRoom = rig({}, storage, {
+        cast: nullNotesCast,
+        rawNotes: () => null,
+    });
+    await nullNotesRoom.raw.setup();
+    const afterNull = ScribeStore.read(storage, ROOM, ScribeStore.Kind.Setup);
+    assert.equal(afterNull.story.name, 'Harbour After Null');
+    assert.equal(afterNull.profile.name, 'Rowan');
+    assert.equal(afterNull.notes, 'Kept across rawNotes issues.');
+    nullNotesRoom.raw.close();
+
+    const profileFailCast = castOf();
+    profileFailCast.plotId = 'plot-fresh';
+    profileFailCast.roomTitle = 'Fresh Room';
+    profileFailCast.introId = 'intro-fresh';
+    profileFailCast.name = 'Fresh Story';
+    profileFailCast.profileFailures.push(new Error('Zeta answered HTTP 500'));
+    const profileFailRoom = rig({}, storage, {
+        cast: profileFailCast,
+        rawNotes: () => ({ checked: false, text: null }),
+    });
+    await profileFailRoom.raw.setup();
+    const afterProfileFail = ScribeStore.read(storage, ROOM, ScribeStore.Kind.Setup);
+    assert.equal(afterProfileFail.plotId, 'plot-fresh');
+    assert.equal(afterProfileFail.roomTitle, 'Fresh Room');
+    assert.equal(afterProfileFail.introId, 'intro-fresh');
+    assert.equal(afterProfileFail.story.name, 'Fresh Story');
+    assert.equal(afterProfileFail.profile.name, 'Rowan');
+    assert.equal(afterProfileFail.notes, 'Kept across rawNotes issues.');
+    const record = profileFailRoom.raw.setupRecord();
+    assert.equal(record.story.name, 'Fresh Story');
+    assert.equal(record.profile.name, 'Rowan');
+    assert.equal(record.notes, 'Kept across rawNotes issues.');
+    profileFailRoom.raw.close();
+});
+
+test('non-object fulfilled story fails cleanly with Shape notice and preserves prior Kind.Setup', async () => {
+    for (const malformed of [null, 42, 'bad', []]) {
+        const storage = new FakeStorage();
+        const priorStory = { plotId: 'plot-kept', name: 'Kept Plot', summary: '', description: '', characters: [], opening: [], lore: [] };
+        ScribeStore.write(storage, ROOM, ScribeStore.Kind.Setup, {
+            plotId: 'plot-kept',
+            roomTitle: 'Kept Room',
+            introId: 'intro-kept',
+            story: priorStory,
+            profile: null,
+            notes: 'Kept notes.',
+            fetchedAt: '2026-11-25T00:00:00.000Z',
+        });
+        const profileCalls = { count: 0 };
+        const room = rig({}, storage, {
+            cast: {
+                story: async () => malformed,
+                profile: async () => {
+                    profileCalls.count++;
+                    return null;
+                },
+            },
+        });
+        const built = await room.raw.setup();
+        assert.equal(built.text, null);
+        assert.equal(profileCalls.count, 0);
+        assert.equal(
+            room.raw.view().notice,
+            `The story setup could not be read: ${ZetaSource.Settings.Messages.Shape}`,
+        );
+        assert.equal(room.raw.view().setup.storyRead, false);
+        assert.equal(room.raw.view().setup.storyFailed, true);
+        assert.equal(room.raw.view().setup.profileRead, false);
+        assert.equal(room.raw.view().setup.profileFailed, true);
+        const saved = ScribeStore.read(storage, ROOM, ScribeStore.Kind.Setup);
+        assert.deepEqual(plain(saved.story), priorStory);
+        assert.equal(saved.notes, 'Kept notes.');
+        room.raw.close();
+    }
+});
+
+test('non-stringifiable rejections and throwing keeper.view during cast produce no unhandled rejections', async () => {
+    const unhandled = [];
+    const onUnhandled = (reason) => {
+        unhandled.push(reason);
+    };
+    process.on('unhandledRejection', onUnhandled);
+    try {
+        const nullProtoCast = castOf();
+        nullProtoCast.storyFailures.push(Object.create(null));
+        const nullProtoRoom = rig({}, new FakeStorage(), { cast: nullProtoCast });
+        await ticks();
+        assert.equal(nullProtoRoom.raw.view().setup.read, true);
+        assert.equal(nullProtoRoom.raw.view().setup.reading, false);
+        assert.equal(nullProtoRoom.raw.view().setup.storyFailed, true);
+        assert.equal(nullProtoRoom.raw.view().notice, 'The story setup could not be read: ');
+        nullProtoRoom.raw.close();
+
+        const symbolCast = castOf();
+        symbolCast.storyFailures.push(Symbol('opaque'));
+        const symbolRoom = rig({}, new FakeStorage(), { cast: symbolCast });
+        await ticks();
+        assert.equal(symbolRoom.raw.view().setup.storyFailed, true);
+        assert.equal(symbolRoom.raw.view().notice, 'The story setup could not be read: Symbol(opaque)');
+        symbolRoom.raw.close();
+
+        const throwingCast = castOf();
+        const release = throwingCast.hold();
+        const throwingKeeper = keeperOf({ booked: true, trusted: true });
+        const model = modelOf();
+        const storage = new FakeStorage();
+        const raw = ScribeLive.open({
+            keeper: throwingKeeper,
+            storage,
+            roomId: ROOM,
+            ask: model.ask,
+            clock: CLOCK,
+            notify: () => {},
+            story: throwingCast.story,
+            profile: throwingCast.profile,
+        });
+        const originalView = throwingKeeper.view.bind(throwingKeeper);
+        throwingKeeper.view = () => {
+            throw new Error('keeper unavailable');
+        };
+        release();
+        await ticks();
+        throwingKeeper.view = originalView;
+        assert.equal(raw.view().setup.read, false);
+        assert.equal(raw.view().setup.reading, false);
+        assert.equal(ScribeStore.read(storage, ROOM, ScribeStore.Kind.Setup), null);
+        raw.close();
+        assert.deepEqual(unhandled, []);
+    } finally {
+        process.off('unhandledRejection', onUnhandled);
+    }
 });

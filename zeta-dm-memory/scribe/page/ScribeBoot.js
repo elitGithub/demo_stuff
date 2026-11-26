@@ -23,6 +23,7 @@ const ScribeBoot = Object.freeze({
             Pedant: 'pedant',
         }),
         Budget: 'budget',
+        SetupSeparator: '\n\n',
         NotesOpen: '\n\nOPERATOR NOTES:\n',
         Parts: Object.freeze([
             Object.freeze({ name: 'sender', ending: 'detach' }),
@@ -34,6 +35,8 @@ const ScribeBoot = Object.freeze({
         IfAvailable: Object.freeze({ ifAvailable: true }),
         Once: Object.freeze({ once: true }),
         AbortEvent: 'abort',
+        AbortError: 'AbortError',
+        ReadyEvent: 'DOMContentLoaded',
         KeyEvents: Object.freeze(['keydown', 'keyup', 'keypress']),
         VisibilityEvent: 'visibilitychange',
         MessageEvent: 'message',
@@ -69,6 +72,7 @@ const ScribeBoot = Object.freeze({
         DatePad: '0',
         DateJoint: '-',
         FirstEntry: 0,
+        Single: 1,
         NotFound: -1,
         Last: -1,
         NoSpending: 0,
@@ -108,6 +112,12 @@ const ScribeBoot = Object.freeze({
             NoToken: 'no usable token was made',
             NoStore: 'the token could not be read, made or saved',
             NotSynced: 'The book could not be synced: ',
+            IncompleteChatProblem: 'Chat history was incomplete: ',
+            IncompleteChatSkippedOpen: 'Chat history was incomplete (',
+            UnreadableOne: ' unreadable message skipped).',
+            UnreadableMany: ' unreadable messages skipped).',
+            IncompleteChatEndOpen: 'Chat history was incomplete (',
+            IncompleteChatEndClose: ').',
         }),
     }),
 
@@ -231,6 +241,249 @@ const ScribeBoot = Object.freeze({
         );
         session.timers.set(timer, ended);
         return timer;
+    },
+
+    /**
+     * @param {object} boot
+     * @return {(url: string, init?: object) => Promise<object>}
+     */
+    pageFetch(boot) {
+        const environment = boot.environment;
+
+        /**
+         * @param {string} url
+         * @param {object} init
+         * @return {Promise<object>}
+         */
+        return (url, init = {}) => {
+            if (environment.clone === null) {
+                return boot.pageFetch.call(environment.pageWindow, url, init);
+            }
+            const { signal, ...fields } = init;
+            const pageInit = environment.clone(fields);
+            if (signal) {
+                pageInit.signal = signal;
+            }
+            return boot.pageFetch.call(environment.pageWindow, url, pageInit);
+        };
+    },
+
+    /**
+     * @param {object} boot
+     * @param {number} milliseconds
+     * @param {AbortSignal|null} signal
+     * @return {Promise<void>}
+     */
+    delay(boot, milliseconds, signal = null) {
+        const settings = ScribeBoot.Settings;
+        return new Promise(
+            /**
+             * @param {Function} resolve
+             * @param {Function} reject
+             * @return {void}
+             */
+            (resolve, reject) => {
+                if (boot.stopped) {
+                    reject(new Error(settings.Messages.Left));
+                    return;
+                }
+                if (signal?.aborted) {
+                    const error = new Error(settings.Messages.Stopped);
+                    error.name = settings.AbortError;
+                    reject(error);
+                    return;
+                }
+                const entry = { id: null, cancel: null };
+
+                /**
+                 * @return {void}
+                 */
+                const stopped = () => {
+                    boot.plotTimers.delete(entry);
+                    if (entry.id !== null) {
+                        boot.environment.timers.clearTimeout(entry.id);
+                    }
+                    const error = new Error(settings.Messages.Stopped);
+                    error.name = settings.AbortError;
+                    reject(error);
+                };
+
+                /**
+                 * @return {void}
+                 */
+                entry.cancel = () => {
+                    signal?.removeEventListener(settings.AbortEvent, stopped);
+                    boot.plotTimers.delete(entry);
+                    if (entry.id !== null) {
+                        boot.environment.timers.clearTimeout(entry.id);
+                    }
+                    reject(new Error(settings.Messages.Left));
+                };
+                entry.id = boot.environment.timers.setTimeout(
+                    /**
+                     * @return {void}
+                     */
+                    () => {
+                        boot.plotTimers.delete(entry);
+                        signal?.removeEventListener(settings.AbortEvent, stopped);
+                        resolve();
+                    },
+                    milliseconds,
+                );
+                boot.plotTimers.add(entry);
+                signal?.addEventListener(settings.AbortEvent, stopped, settings.Once);
+            },
+        );
+    },
+
+    /**
+     * @param {object} boot
+     * @return {void}
+     */
+    closePlot(boot) {
+        const settings = ScribeBoot.Settings;
+        const environment = boot.environment;
+        if (boot.plotRetry !== null) {
+            environment.timers.clearTimeout(boot.plotRetry);
+            boot.plotRetry = null;
+        }
+        if (boot.plotReadyListener !== null) {
+            environment.document.removeEventListener(settings.ReadyEvent, boot.plotReadyListener);
+            boot.plotReadyListener = null;
+        }
+        for (const entry of [...boot.plotTimers]) {
+            entry.cancel();
+        }
+        boot.plotTimers.clear();
+        if (boot.plotSession !== null) {
+            const currentPlot = boot.plotSession;
+            boot.plotSession = null;
+            ScribeBoot.attempt(
+                boot,
+                settings.Messages.NotClosed,
+                /**
+                 * @return {*}
+                 */
+                () => currentPlot.handle.unmount(),
+            );
+        }
+    },
+
+    /**
+     * @param {object} session
+     * @param {AbortSignal|null} signal
+     * @param {((count: number) => void)|null} onProgress
+     * @return {Promise<object>}
+     * @throws {Error}
+     */
+    async exportPlot(session, signal, onProgress = null) {
+        const settings = ScribeBoot.Settings;
+        const messages = settings.Messages;
+        const boot = session.boot;
+
+        /**
+         * @return {void}
+         * @throws {Error}
+         */
+        const ensureActive = () => {
+            signal?.throwIfAborted();
+            if (!ScribeBoot.currentRoom(session)) {
+                throw new Error(messages.Left);
+            }
+        };
+        ensureActive();
+        const fetch = ScribeBoot.pageFetch(boot);
+
+        /**
+         * @param {number} milliseconds
+         * @return {Promise<void>}
+         */
+        const pause = (milliseconds) => ScribeBoot.pause(session, milliseconds, signal);
+        const record = session.live?.setupRecord?.() ?? { story: null, profile: null, notes: null };
+        const hadStory = record.story !== null;
+        let story = record.story;
+        let profile = record.profile;
+        if (story === null) {
+            story = await ZetaSource.story({
+                fetch,
+                token: ScribeBoot.token(boot),
+                roomId: session.roomId,
+                pause,
+                signal,
+            });
+            ensureActive();
+        }
+        const plotId =
+            typeof story?.plotId === settings.StringType && story.plotId !== settings.Nothing ? story.plotId : null;
+        const roomTitle = typeof story?.roomTitle === settings.StringType ? story.roomTitle : null;
+        const introId = typeof story?.introId === settings.StringType ? story.introId : null;
+        const profileRead = session.live?.view?.().setup?.profileRead === true;
+        if (plotId !== null && (!hadStory || (profile === null && !profileRead))) {
+            profile = await ZetaSource.profile(
+                {
+                    fetch,
+                    token: ScribeBoot.token(boot),
+                    roomId: session.roomId,
+                    pause,
+                    signal,
+                },
+                plotId,
+            );
+            ensureActive();
+        }
+        let plot = story;
+        if (plotId !== null) {
+            try {
+                plot = await ZetaSource.plot({
+                    fetch,
+                    token: ScribeBoot.token(boot),
+                    plotId,
+                    introId,
+                    pause,
+                    signal,
+                });
+                ensureActive();
+            } catch (error) {
+                ensureActive();
+                if (error?.name === settings.AbortError || error?.message === messages.Left) {
+                    throw error;
+                }
+                plot = story;
+            }
+        }
+        const history = await ZetaSource.history({
+            fetch,
+            token: ScribeBoot.token(boot),
+            roomId: session.roomId,
+            pause,
+            signal,
+            onPage: typeof onProgress === settings.FunctionType ? onProgress : undefined,
+        });
+        ensureActive();
+        if (history.completeHistory !== true) {
+            if (typeof history.problem === settings.StringType && history.problem !== settings.Nothing) {
+                throw new Error(`${messages.IncompleteChatProblem}${history.problem}`);
+            }
+            if (history.skipped > settings.FirstEntry) {
+                const label = history.skipped === settings.Single ? messages.UnreadableOne : messages.UnreadableMany;
+                throw new Error(`${messages.IncompleteChatSkippedOpen}${history.skipped}${label}`);
+            }
+            throw new Error(`${messages.IncompleteChatEndOpen}${history.end}${messages.IncompleteChatEndClose}`);
+        }
+        const notes =
+            session.cloud?.notesChecked?.() === true ? (session.cloud.rawNotes?.() ?? null) : (record.notes ?? null);
+        return {
+            plot,
+            roomId: session.roomId,
+            roomTitle,
+            introId,
+            profile,
+            notes,
+            chat: {
+                completeHistory: true,
+                messages: history.messages,
+            },
+        };
     },
 
     /**
@@ -427,9 +680,99 @@ const ScribeBoot = Object.freeze({
         const dispatchedKeys = new Set();
         const historicalCheck = role === ScribeBoot.Role.Pedant && helper === 'keeper';
         const singleAttempt = historicalCheck || helper === 'reminder';
+        let setup = null;
+        if (!historicalCheck && typeof session.live?.setup === settings.FunctionType) {
+            const waiting = {
+                cancelled: null,
+                keyVersion: null,
+                stopper: new environment.pageWindow.AbortController(),
+                dispatchError: null,
+                halt: null,
+            };
+            const halted = new Promise(
+                /**
+                 * @param {Function} resolve
+                 * @return {void}
+                 */
+                (resolve) => {
+                    waiting.halt = (reason) => {
+                        if (waiting.cancelled !== null) {
+                            return;
+                        }
+                        waiting.cancelled = reason;
+                        waiting.stopper.abort();
+                        resolve({ setup: null, error: new Error(reason) });
+                    };
+                },
+            );
+            session.running.add(waiting);
+            ScribeBoot.redraw(session);
+            const reading = new Promise(
+                /**
+                 * @param {Function} resolve
+                 * @return {void}
+                 */
+                (resolve) => {
+                    resolve(session.live.setup());
+                },
+            ).then(
+                /**
+                 * @param {*} result
+                 * @return {{ setup: *, error: null }}
+                 */
+                (result) => ({ setup: result, error: null }),
+                /**
+                 * @param {*} error
+                 * @return {{ setup: null, error: * }}
+                 */
+                (error) => ({ setup: null, error }),
+            );
+            const outcome = await Promise.race([reading, halted]);
+            session.running.delete(waiting);
+            ScribeBoot.redraw(session);
+            if (outcome.error !== null) {
+                const error =
+                    outcome.error instanceof Error ? outcome.error : new Error(ScribeBoot.words(outcome.error));
+                error.source = 'Scribe';
+                error.message = ScribeStore.diagnostic(environment.storage, error.message);
+                error.stopped = settings.NoneStopped;
+                throw error;
+            }
+            if (!ScribeBoot.currentRoom(session)) {
+                const left = new Error(messages.Left);
+                left.source = 'Scribe';
+                left.stopped = settings.NoneStopped;
+                throw left;
+            }
+            if (session.pauseEpoch !== epoch) {
+                const paused = new Error(messages.Paused);
+                paused.source = 'Scribe';
+                paused.stopped = settings.NoneStopped;
+                throw paused;
+            }
+            const afterSetup = session.keeper?.view();
+            if (afterSetup?.stop?.reason === ScribeAdoption.Stop.Paused) {
+                const paused = new Error(messages.Paused);
+                paused.source = 'Scribe';
+                paused.stopped = settings.NoneStopped;
+                throw paused;
+            }
+            if (afterSetup && !afterSetup.booked) {
+                const unbooked = new Error(ScribeKeeper.Settings.Messages.NoBook);
+                unbooked.source = 'Scribe';
+                unbooked.stopped = settings.NoneStopped;
+                throw unbooked;
+            }
+            setup = outcome.setup;
+        }
         const notes = historicalCheck || session.cloud === null ? null : session.cloud.notes();
         const noted = typeof notes === settings.StringType && notes !== settings.Nothing;
-        const told = noted ? `${user}${settings.NotesOpen}${notes}` : user;
+        const background =
+            !historicalCheck && typeof setup?.text === settings.StringType && setup.text !== settings.Nothing
+                ? setup.text
+                : null;
+        const prefixed = background === null ? user : `${background}${settings.SetupSeparator}${user}`;
+        const told = noted ? `${prefixed}${settings.NotesOpen}${notes}` : prefixed;
         for (;;) {
             if (session.pauseEpoch !== epoch) {
                 throw new Error(messages.Paused);
@@ -933,9 +1276,17 @@ const ScribeBoot = Object.freeze({
     shield(boot, event) {
         const settings = ScribeBoot.Settings;
         try {
-            const panel = boot.session === null ? null : boot.session.panel;
-            const host = panel === null ? null : (panel.host ?? null);
-            if (host === null) {
+            const hosts = [
+                boot.session?.panel?.host ?? null,
+                boot.plotSession?.host ?? null,
+            ].filter(
+                /**
+                 * @param {object|null} host
+                 * @return {boolean}
+                 */
+                (host) => host !== null,
+            );
+            if (hosts.length === settings.FirstEntry) {
                 return;
             }
             let path = [];
@@ -946,7 +1297,15 @@ const ScribeBoot = Object.freeze({
                     path.push(node);
                 }
             }
-            if (path.includes(host)) {
+            if (
+                hosts.some(
+                    /**
+                     * @param {object} host
+                     * @return {boolean}
+                     */
+                    (host) => path.includes(host),
+                )
+            ) {
                 event.stopImmediatePropagation();
             }
         } catch {
@@ -2081,8 +2440,14 @@ const ScribeBoot = Object.freeze({
      * @return {void}
      */
     look(session) {
-        if (!session.closed && session.locking) {
+        if (session.closed) {
+            return;
+        }
+        if (session.locking) {
             ScribeBoot.wait(session);
+        }
+        if (ScribeBoot.token(session.boot) !== null && session.keeper?.view().booked === true) {
+            session.live?.ensureCast?.();
         }
     },
 
@@ -2304,23 +2669,7 @@ const ScribeBoot = Object.freeze({
             if (session.closed) {
                 return;
             }
-
-            /**
-             * @param {string} url
-             * @param {object} init
-             * @return {Promise<object>}
-             */
-            const fetch = (url, init) => {
-                if (environment.clone === null) {
-                    return boot.pageFetch.call(environment.pageWindow, url, init);
-                }
-                const { signal, ...fields } = init;
-                const pageInit = environment.clone(fields);
-                if (signal) {
-                    pageInit.signal = signal;
-                }
-                return boot.pageFetch.call(environment.pageWindow, url, pageInit);
-            };
+            const fetch = ScribeBoot.pageFetch(boot);
 
             /**
              * @param {number} milliseconds
@@ -2448,9 +2797,9 @@ const ScribeBoot = Object.freeze({
                 clock: environment.clock,
 
                 /**
-                 * @return {Promise<string|null>}
+                 * @return {Promise<object|null>}
                  */
-                profile: async () => (session.live === null ? null : session.live.profile()),
+                setup: async () => (session.live === null ? null : session.live.setup()),
 
                 /**
                  * @param {{ kind: string, message?: * }} event
@@ -2459,6 +2808,9 @@ const ScribeBoot = Object.freeze({
                 notify: (event) => {
                     if (session.closed) {
                         return;
+                    }
+                    if (session.keeper?.view().booked === true) {
+                        session.live?.ensureCast?.();
                     }
                     if (event.kind === ScribeKeeper.Event.Reply) {
                         const live = session.live;
@@ -2548,10 +2900,18 @@ const ScribeBoot = Object.freeze({
 
                 /**
                  * @param {string|null} plotId
-                 * @return {Promise<string|null>}
+                 * @return {Promise<object|null>}
                  */
                 profile: (plotId) =>
                     ZetaSource.profile({ fetch, token: ScribeBoot.token(boot), roomId: session.roomId, pause }, plotId),
+
+                /**
+                 * @return {{ checked: boolean, text: string|null }}
+                 */
+                rawNotes: () => ({
+                    checked: session.cloud?.notesChecked?.() ?? false,
+                    text: session.cloud?.rawNotes?.() ?? null,
+                }),
 
                 /**
                  * @return {void}
@@ -2673,6 +3033,13 @@ const ScribeBoot = Object.freeze({
                 confirm: environment.confirm,
                 download: environment.download,
                 clock: environment.clock,
+                AbortController: environment.pageWindow.AbortController,
+                /**
+                 * @param {AbortSignal|null} signal
+                 * @param {((count: number) => void)|null} onProgress
+                 * @return {Promise<object>}
+                 */
+                exportPlot: (signal, onProgress) => ScribeBoot.exportPlot(session, signal, onProgress),
             });
             session.sender = ScribeSender.attach({
                 document: environment.document,
@@ -2765,13 +3132,16 @@ const ScribeBoot = Object.freeze({
      * @return {void}
      */
     follow(boot) {
+        const settings = ScribeBoot.Settings;
         const environment = boot.environment;
         if (boot.suspended || boot.stopped) {
             return;
         }
         try {
             ScribeBoot.token(boot);
-            const roomId = ZetaSource.room(environment.pageWindow.location.pathname);
+            const pathname = environment.pageWindow.location.pathname;
+            const roomId = ZetaSource.room(pathname);
+            const plotId = roomId === null ? ZetaSource.plotPage(pathname) : null;
             if (boot.intake?.room !== roomId) {
                 boot.intake = roomId === null ? null : { room: roomId, pages: [], reader: false, relaying: false,
                     signal: ScribeStore.name('observations', ScribeStore.room(roomId)) };
@@ -2781,58 +3151,124 @@ const ScribeBoot = Object.freeze({
                 if (current !== null) {
                     ScribeBoot.look(current);
                 }
-                return;
+            } else {
+                ScribeBoot.forget(boot);
+                if (current !== null) {
+                    boot.session = null;
+                    ScribeBoot.close(current);
+                }
+                if (roomId !== null && environment.document.body !== null) {
+                    const session = {
+                        boot,
+                        roomId,
+                        closed: false,
+                        keyPending: null,
+                        recoveringKey: false,
+                        keyRecoveryProblem: false,
+                        ticking: false,
+                        locking: false,
+                        reader: false,
+                        release: null,
+                        asking: null,
+                        resting: false,
+                        warned: false,
+                        wanted: false,
+                        cloud: null,
+                        keeper: null,
+                        live: null,
+                        reservedDelivery: null,
+                        panel: null,
+                        running: new Set(),
+                        reminderWaits: new Map(),
+                        reminderSignals: new Map(),
+                        roomReminderWatches: [],
+                        generationWork: null,
+                        /** @type {(() => void)|null} */
+                        inspectGeneration: null,
+                        historyRequest: null,
+                        forkController: null,
+                        forkOrigin: null,
+                        stopForkOrigin: null,
+                        pauseEpoch: 0,
+                        sender: null,
+                        held: null,
+                        interval: null,
+                        timers: new Map(),
+                        gapping: false,
+                        owed: false,
+                    };
+                    boot.session = session;
+                    ScribeBoot.begin(session);
+                }
             }
-            ScribeBoot.forget(boot);
-            if (current !== null) {
-                boot.session = null;
-                ScribeBoot.close(current);
-            }
-            if (roomId !== null && environment.document.body !== null) {
-                const session = {
-                    boot,
-                    roomId,
-                    closed: false,
-                    keyPending: null,
-                    recoveringKey: false,
-                    keyRecoveryProblem: false,
-                    ticking: false,
-                    locking: false,
-                    reader: false,
-                    release: null,
-                    asking: null,
-                    resting: false,
-                    warned: false,
-                    wanted: false,
-                    cloud: null,
-                    keeper: null,
-                    live: null,
-                    reservedDelivery: null,
-                    panel: null,
-                    running: new Set(),
-                    reminderWaits: new Map(),
-                    reminderSignals: new Map(),
-                    roomReminderWatches: [],
-                    generationWork: null,
-                    /** @type {(() => void)|null} */
-                    inspectGeneration: null,
-                    historyRequest: null,
-                    forkController: null,
-                    forkOrigin: null,
-                    stopForkOrigin: null,
-                    pauseEpoch: 0,
-                    sender: null,
-                    held: null,
-                    interval: null,
-                    timers: new Map(),
-                    gapping: false,
-                    owed: false,
-                };
-                boot.session = session;
-                ScribeBoot.begin(session);
+            const currentPlot = boot.plotSession;
+            if (plotId === null) {
+                if (
+                    currentPlot !== null ||
+                    boot.plotRetry !== null ||
+                    boot.plotReadyListener !== null ||
+                    boot.plotTimers.size > settings.FirstEntry
+                ) {
+                    ScribeBoot.closePlot(boot);
+                }
+            } else if (currentPlot === null || currentPlot.plotId !== plotId) {
+                if (currentPlot !== null) {
+                    ScribeBoot.closePlot(boot);
+                }
+                if (environment.document.body !== null) {
+                    ScribeBoot.closePlot(boot);
+                    const fetch = ScribeBoot.pageFetch(boot);
+                    const handle = ScribePlotExport.mount({
+                        document: environment.document,
+                        AbortController: environment.pageWindow.AbortController,
+                        plotId,
+                        /**
+                         * @param {AbortSignal|null} signal
+                         * @return {Promise<object>}
+                         */
+                        fetchPlot: (signal) =>
+                            ZetaSource.plot({
+                                fetch,
+                                token: ScribeBoot.token(boot),
+                                plotId,
+                                pause: (milliseconds) => ScribeBoot.delay(boot, milliseconds, signal),
+                                signal,
+                            }),
+                        download: environment.download,
+                        clock: environment.clock,
+                    });
+                    boot.plotSession = { plotId, handle, host: handle?.host ?? null };
+                } else {
+                    if (boot.plotReadyListener === null) {
+                        /**
+                         * @return {void}
+                         */
+                        const ready = () => {
+                            if (boot.plotReadyListener === ready) {
+                                environment.document.removeEventListener(settings.ReadyEvent, ready);
+                                boot.plotReadyListener = null;
+                            }
+                            ScribeBoot.follow(boot);
+                        };
+                        boot.plotReadyListener = ready;
+                        environment.document.addEventListener(settings.ReadyEvent, ready);
+                    }
+                    if (boot.plotRetry === null) {
+                        boot.plotRetry = environment.timers.setTimeout(
+                            /**
+                             * @return {void}
+                             */
+                            () => {
+                                boot.plotRetry = null;
+                                ScribeBoot.follow(boot);
+                            },
+                            settings.RouteMs,
+                        );
+                    }
+                }
             }
         } catch (error) {
-            ScribeBoot.say(boot, `${ScribeBoot.Settings.Messages.NotFollowed}${ScribeBoot.words(error)}`);
+            ScribeBoot.say(boot, `${settings.Messages.NotFollowed}${ScribeBoot.words(error)}`);
         }
     },
 
@@ -2875,6 +3311,10 @@ const ScribeBoot = Object.freeze({
             suspended: false,
             request: null,
             session: null,
+            plotSession: null,
+            plotRetry: null,
+            plotTimers: new Set(),
+            plotReadyListener: null,
             intake: null,
             relaySequence: 0,
             route: null,
@@ -2949,6 +3389,7 @@ const ScribeBoot = Object.freeze({
                 boot.session = null;
                 ScribeBoot.close(session);
             }
+            ScribeBoot.closePlot(boot);
         };
         const pageShown = () => {
             boot.suspended = false;
@@ -3044,6 +3485,7 @@ const ScribeBoot = Object.freeze({
                     ScribeBoot.close(boot.session);
                     boot.session = null;
                 }
+                ScribeBoot.closePlot(boot);
                 environment.timers.clearInterval(boot.route);
                 ScribeBoot.forget(boot);
                 if (boot.watcher !== null) {

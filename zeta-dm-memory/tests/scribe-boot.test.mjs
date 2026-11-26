@@ -10,6 +10,7 @@ import FakeStorage from './support/FakeStorage.mjs';
 import FakeTextArea from './support/FakeTextArea.mjs';
 import FakeTimers from './support/FakeTimers.mjs';
 import FakeZeta from './support/FakeZeta.mjs';
+import PanelDocument from './support/PanelDocument.mjs';
 
 const context = vm.createContext({ URL, URLSearchParams, TextEncoder });
 
@@ -23,8 +24,11 @@ function load() {
         ['core', 'ScribeGateway'],
         ['core', 'ScribeAdoption'],
         ['page', 'ZetaSource'],
+        ['page', 'PanelStyle'],
         ['page', 'ScribeStore'],
         ['page', 'ScribeFrame'],
+        ['page', 'ScribeSetup'],
+        ['page', 'ScribePlotExport'],
         ['page', 'ScribeBoot'],
     ];
     for (const [folder, name] of files) {
@@ -35,7 +39,7 @@ function load() {
     return loaded;
 }
 
-const { ScribeStore, ScribeFrame, ScribeBoot } = load();
+const { ScribeStore, ScribeFrame, ScribeSetup, ScribePlotExport, ScribeBoot } = load();
 
 test('fork sources look up the selected Worker room even with a local Book and never request origin chat history', async () => {
     const isolated = vm.createContext({TextEncoder, URL, URLSearchParams});
@@ -352,7 +356,15 @@ function standIns(timers) {
         offerAtOpen: null,
         clouds: [],
         notes: null,
+        rawNotes: null,
+        notesChecked: false,
         leads: true,
+        booked: true,
+        setupResult: null,
+        setupHold: null,
+        setupFailure: null,
+        setupRecord: null,
+        liveSetupView: null,
     };
     context.ScribeCloud = {
         Settings: RealCloud.Settings,
@@ -404,6 +416,16 @@ function standIns(timers) {
                 notes: () => world.notes,
 
                 /**
+                 * @return {string|null}
+                 */
+                rawNotes: () => world.rawNotes,
+
+                /**
+                 * @return {boolean}
+                 */
+                notesChecked: () => world.notesChecked,
+
+                /**
                  * @return {void}
                  */
                 close: () => {
@@ -424,7 +446,7 @@ function standIns(timers) {
          * @return {Promise<object>}
          */
         open(options) {
-            const record = { roomId: options.roomId, options, ticks: [], observations: [], closes: 0, claimed: null, finish: null, handle: null, phase: 'Idle' };
+            const record = { roomId: options.roomId, options, ticks: [], observations: [], closes: 0, claimed: null, finish: null, handle: null, phase: 'Idle', booked: world.booked };
             record.claimed = typeof options.claim === 'function' ? options.claim() : null;
             world.order.push(`keeper ${options.roomId}`);
             world.keepers.push(record);
@@ -433,7 +455,7 @@ function standIns(timers) {
                 /**
                  * @return {{ phase: string, reader: boolean }}
                  */
-                view: () => ({ phase: record.phase, reader: record.reader, booked: true, stop: record.stop }),
+                view: () => ({ phase: record.phase, reader: record.reader, booked: record.booked, stop: record.stop }),
                 pause: () => {
                     record.stop = { reason: 'Paused' };
                     options.pauseCalls();
@@ -511,7 +533,8 @@ function standIns(timers) {
                 starting: [],
                 cancelled: [],
                 uncertain: [],
-                profiles: 0,
+                setups: 0,
+                ensureCasts: 0,
             };
             world.order.push(`live ${options.roomId}`);
             world.lives.push(record);
@@ -519,11 +542,27 @@ function standIns(timers) {
                 keyWork: () => () => true,
                 rekey: () => { record.rekeys = (record.rekeys ?? 0) + 1; },
                 /**
-                 * @return {Promise<string>}
+                 * @return {Promise<object|null>}
                  */
-                profile: () => {
-                    record.profiles++;
-                    return Promise.resolve(`the profile held for ${record.roomId}`);
+                setup: () => {
+                    record.setups++;
+                    if (world.setupHold !== null) {
+                        return world.setupHold;
+                    }
+                    if (world.setupFailure !== null) {
+                        return Promise.reject(world.setupFailure);
+                    }
+                    return Promise.resolve(world.setupResult);
+                },
+                /**
+                 * @return {{ story: object|null, profile: object|null, notes: string|null }}
+                 */
+                setupRecord: () => world.setupRecord ?? { story: null, profile: null, notes: null },
+                /**
+                 * @return {void}
+                 */
+                ensureCast: () => {
+                    record.ensureCasts++;
                 },
 
                 /**
@@ -535,7 +574,7 @@ function standIns(timers) {
                         record.ready = record.afterView;
                         record.afterView = null;
                     }
-                    return { ready: record.ready };
+                    return { ready: record.ready, ...(world.liveSetupView !== null ? { setup: world.liveSetupView } : {}) };
                 },
 
                 /**
@@ -1277,8 +1316,8 @@ test('the story and the profile are read through the page fetch, a cloned init a
     start(run);
     await settle();
     const keeperOptions = run.world.keepers[0].options;
-    assert.equal(typeof keeperOptions.profile, 'function');
-    assert.equal(await keeperOptions.profile(), null);
+    assert.equal(typeof keeperOptions.setup, 'function');
+    assert.equal(await keeperOptions.setup(), null);
     run.world.keepers[0].finish();
     await settle();
     await run.page.fetch(`${API}/v1/users/me`, { headers: { Authorization: TOKEN } });
@@ -1310,10 +1349,12 @@ test('the story and the profile are read through the page fetch, a cloned init a
     const options = run.world.lives[0].options;
     const before = run.page.fetchCalls.length;
     const story = await options.story();
-    assert.deepEqual(JSON.parse(JSON.stringify(story)), {
-        characters: [{ name: 'Mavan the Gray', description: 'An old wizard.' }],
-        plotId: 'p 1',
-    });
+    assert.equal(story.plotId, 'p 1');
+    assert.equal(story.name, 'The harbour tale');
+    assert.equal(story.roomTitle, 'The harbour');
+    assert.deepEqual(JSON.parse(JSON.stringify(story.characters)), [
+        { id: null, name: 'Mavan the Gray', description: 'An old wizard.' },
+    ]);
     const storyReads = run.page.fetchCalls.slice(before);
     assert.deepEqual(
         storyReads.map((call) => call.values[0]),
@@ -1327,7 +1368,12 @@ test('the story and the profile are read through the page fetch, a cloned init a
     const renewed = 'Bearer RENEWEDRENEWEDRENEWED';
     await run.page.fetch(`${API}/v1/users/me`, { headers: { Authorization: renewed } });
     const after = run.page.fetchCalls.length;
-    assert.equal(await options.profile('p 1'), 'Orla: A sellsword.');
+    assert.deepEqual(JSON.parse(JSON.stringify(await options.profile('p 1'))), {
+        source: 'Persona',
+        name: 'Orla',
+        description: 'A sellsword.',
+        text: 'Orla: A sellsword.',
+    });
     const profileReads = run.page.fetchCalls.slice(after);
     assert.equal(profileReads.length, 1);
     assert.equal(profileReads[0].values[0], `${API}/v1/plots/p%201/rooms/harbour/user-personas/selected`);
@@ -1342,9 +1388,13 @@ test('the story and the profile are read through the page fetch, a cloned init a
     const unplotted = run.page.fetchCalls.length;
     assert.equal(await options.profile(null), null);
     assert.equal(run.page.fetchCalls.length, unplotted);
-    assert.equal(run.world.lives[0].profiles, 0);
-    assert.equal(await keeperOptions.profile(), 'the profile held for harbour');
-    assert.equal(run.world.lives[0].profiles, 1);
+    run.world.setupResult = { text: 'BACKGROUND...', storyText: 'Harbour', profileText: 'Orla', shown: 7, whole: 7, source: 'Persona', persona: 'Orla' };
+    assert.equal(run.world.lives[0].setups, 0);
+    assert.deepEqual(await keeperOptions.setup(), run.world.setupResult);
+    assert.equal(run.world.lives[0].setups, 1);
+    run.world.notesChecked = true;
+    run.world.rawNotes = 'Full raw notes';
+    assert.deepEqual(JSON.parse(JSON.stringify(options.rawNotes())), { checked: true, text: 'Full raw notes' });
     run.boot.stop();
 });
 
@@ -4530,5 +4580,382 @@ test('the budget counts what the other PCs spent', async () => {
     assert.equal(run.sent.calls.length, 2);
     answer(run.sent.calls[1], 200, completion('Another day counts apart.', 0.1));
     await elsewhere;
+    run.boot.stop();
+});
+
+test('text calls prepend BACKGROUND once before user content and keep historicalCheck strict JSON', async () => {
+    const run = harness();
+    start(run);
+    await settle();
+    ScribeStore.setKey(run.storage, KEY);
+    const background = 'BACKGROUND:\n\nSTORY SETUP:\nHarbour Lights.';
+    run.world.setupResult = { text: background, storyText: 'Harbour Lights.', profileText: null, shown: 15, whole: 15, source: null, persona: null };
+    run.world.notes = 'Keep the lantern lit.';
+    const keeper = run.world.keepers[0].options;
+    const live = run.world.lives[0].options;
+    const payloads = [];
+    for (const invoke of [
+        () => keeper.ask(ScribeBoot.Role.Analyzer, SYSTEM, USER),
+        () => live.ask(ScribeBoot.Role.Scribe, SYSTEM, USER, false),
+        () => live.ask(ScribeBoot.Role.Pedant, SYSTEM, USER, false),
+        () => live.ask(ScribeBoot.Role.Scribe, SYSTEM, USER, true),
+    ]) {
+        const pending = invoke();
+        await settle();
+        const call = run.sent.calls.at(-1);
+        payloads.push(JSON.parse(call.details.data).messages[1].content);
+        answer(call, 200, completion('OK', 0.01));
+        await pending;
+    }
+    const expectedText = `${background}\n\n${USER}\n\nOPERATOR NOTES:\nKeep the lantern lit.`;
+    for (const content of payloads) {
+        assert.equal(content, expectedText);
+    }
+    const strictJson = JSON.stringify({ page: 1, storySetup: 'Harbour Lights.' });
+    const checkerCall = keeper.askChecker(SYSTEM, strictJson);
+    await settle();
+    const sentChecker = JSON.parse(run.sent.calls.at(-1).details.data).messages[1].content;
+    assert.equal(sentChecker, strictJson);
+    assert.deepEqual(JSON.parse(sentChecker), { page: 1, storySetup: 'Harbour Lights.' });
+    answer(run.sent.calls.at(-1), 200, completion('{}', 0.01));
+    await checkerCall;
+    run.boot.stop();
+});
+
+test('Pause, Force stop, and room close abort a stalled setup() wait immediately without billing or leaking secrets', async () => {
+    const run = harness();
+    start(run);
+    await settle();
+    ScribeStore.setKey(run.storage, KEY);
+    let releaseSetup = null;
+    run.world.setupHold = new Promise((resolve) => {
+        releaseSetup = resolve;
+    });
+    const panelCalls = run.world.panels[0].options.calls;
+    const liveAsk = run.world.lives[0].options.ask;
+    const waiting = failureOf(liveAsk(ScribeBoot.Role.Scribe, SYSTEM, USER));
+    assert.equal(panelCalls.due(), true);
+    panelCalls.stop();
+    const stoppedError = await waiting;
+    assert.equal(stoppedError.message, 'The book is paused');
+    assert.equal(stoppedError.stopped, 0);
+    assert.equal(run.sent.calls.length, 0);
+    assert.equal(ScribeStore.spent(run.storage, 'harbour', DAY), 0);
+    assert.equal(panelCalls.due(), false);
+    releaseSetup({ text: 'Late' });
+    await settle();
+
+    run.world.keepers[0].stop = null;
+    run.world.setupHold = null;
+    run.world.setupFailure = new Error(`setup blew up with ${KEY}`);
+    const failedSetup = await failureOf(liveAsk(ScribeBoot.Role.Scribe, SYSTEM, USER));
+    assert.equal(failedSetup.stopped, 0);
+    assert.equal(failedSetup.message.includes(KEY), false);
+    assert.equal(run.sent.calls.length, 0);
+
+    run.world.setupFailure = null;
+    let releaseClose = null;
+    run.world.setupHold = new Promise((resolve) => {
+        releaseClose = resolve;
+    });
+    const leaving = failureOf(liveAsk(ScribeBoot.Role.Scribe, SYSTEM, USER));
+    go(run, '/');
+    await pass(run, 1000);
+    const leftError = await leaving;
+    assert.equal(leftError.message, 'The chat has been left');
+    assert.equal(leftError.stopped, 0);
+    assert.equal(run.sent.calls.length, 0);
+    releaseClose({ text: 'After leave' });
+    await settle();
+    run.boot.stop();
+});
+
+test('plot-page routing mounts, switches, retries document-start, shields keys, and cleans up timers/listeners', async () => {
+    const run = harness({ path: '/' });
+    const panelDocument = new PanelDocument(1280);
+    panelDocument.body = null;
+    panelDocument.visibilityState = 'visible';
+    panelDocument.documentElement = rootElement();
+    panelDocument.listeners = [];
+    panelDocument.addEventListener = (type, listener) => {
+        panelDocument.listeners.push({ type, listener });
+    };
+    panelDocument.removeEventListener = (type, listener) => {
+        panelDocument.listeners = panelDocument.listeners.filter((entry) => entry.type !== type || entry.listener !== listener);
+    };
+    panelDocument.querySelectorAll = () => [];
+    run.document = panelDocument;
+    run.environment.document = panelDocument;
+    const downloads = [];
+    run.environment.download = (name, text) => downloads.push({ name, text });
+    let customAbortConstructed = 0;
+    class PageAbortController extends AbortController {
+        constructor() {
+            super();
+            customAbortConstructed++;
+        }
+    }
+    run.page.AbortController = PageAbortController;
+    const site = new FakeZeta([], 'other-room', TOKEN);
+    site.plot = 'p1';
+    site.plotName = 'Lantern Wharf';
+    site.about = 'Plot-only about text.';
+    site.characters = [{ name: 'Mavan', description: 'Watcher.' }];
+    run.page.answer = (url, options) => site.fetch(url, options);
+
+    start(run);
+    await settle();
+    assert.equal(run.world.keepers.length, 0);
+
+    go(run, '/en/plots/p1/profile?fromRoom=true');
+    await pass(run, 1000);
+    assert.equal(panelDocument.listeners.some((entry) => entry.type === 'DOMContentLoaded'), true);
+
+    go(run, '/');
+    await pass(run, 1000);
+    assert.equal(panelDocument.listeners.some((entry) => entry.type === 'DOMContentLoaded'), false);
+
+    go(run, '/en/plots/p1/profile');
+    await pass(run, 1000);
+    assert.equal(panelDocument.listeners.some((entry) => entry.type === 'DOMContentLoaded'), true);
+    panelDocument.body = panelDocument.createElement('body');
+    for (const entry of [...panelDocument.listeners]) {
+        if (entry.type === 'DOMContentLoaded') {
+            entry.listener({ type: 'DOMContentLoaded' });
+        }
+    }
+    await settle();
+    assert.equal(panelDocument.listeners.some((entry) => entry.type === 'DOMContentLoaded'), false);
+    const firstHost = panelDocument.body.children.find((child) => child.id === ScribePlotExport.Settings.HostId);
+    assert.notEqual(firstHost, undefined);
+
+    const shielded = key(run, 'keydown', { path: [firstHost] });
+    assert.equal(shielded.stops, 1);
+
+    await run.page.fetch(`${API}/v2/plots/p1/likes/summary`, { headers: { Authorization: TOKEN } });
+    const button = firstHost.shadow.descendants().find((element) => element.id === ScribePlotExport.Settings.ButtonId);
+    button.click();
+    await settle();
+    await settle();
+    assert.equal(customAbortConstructed, 1);
+    assert.equal(downloads.length, 1);
+    assert.equal(downloads[0].name, 'zeta-plot-lantern-wharf.json');
+    const parsed = JSON.parse(downloads[0].text);
+    assert.equal(parsed.chat, null);
+    assert.equal(parsed.plot.about, 'Plot-only about text.');
+
+    go(run, '/plots/p2/profile');
+    await pass(run, 1000);
+    const secondHost = panelDocument.body.children.find((child) => child.id === ScribePlotExport.Settings.HostId);
+    assert.notEqual(secondHost, undefined);
+    assert.notEqual(secondHost, firstHost);
+    assert.equal(panelDocument.body.children.includes(firstHost), false);
+
+    go(run, '/rooms/harbour');
+    await pass(run, 1000);
+    assert.equal(panelDocument.body.children.includes(secondHost), false);
+    assert.equal(run.world.keepers.length, 1);
+
+    go(run, '/');
+    await pass(run, 1000);
+    assert.equal(run.world.keepers[0].closes, 1);
+    run.boot.stop();
+});
+
+test('both token-before-adopt and token-after-adopt trigger ensureCast on booked rooms only', async () => {
+    const beforeAdopt = harness();
+    beforeAdopt.world.booked = false;
+    start(beforeAdopt);
+    await settle();
+    await beforeAdopt.page.fetch(`${API}/v1/users/me`, { headers: { Authorization: TOKEN } });
+    await pass(beforeAdopt, 1000);
+    assert.equal(beforeAdopt.world.lives[0].ensureCasts, 0);
+    beforeAdopt.world.keepers[0].booked = true;
+    beforeAdopt.world.keepers[0].options.notify({ kind: 'Changed' });
+    assert.equal(beforeAdopt.world.lives[0].ensureCasts, 1);
+    beforeAdopt.boot.stop();
+
+    const afterAdopt = harness();
+    afterAdopt.world.booked = true;
+    start(afterAdopt);
+    await settle();
+    await pass(afterAdopt, 1000);
+    assert.equal(afterAdopt.world.lives[0].ensureCasts, 0);
+    await afterAdopt.page.fetch(`${API}/v1/users/me`, { headers: { Authorization: TOKEN } });
+    await pass(afterAdopt, 1000);
+    assert.equal(afterAdopt.world.lives[0].ensureCasts, 1);
+    afterAdopt.boot.stop();
+});
+
+test('ScribeBoot.exportPlot resolves introId, falls back on /v1/plots error, respects cleared notes, paginates history, and rejects incomplete history', async () => {
+    const messages = FakeZeta.messages(35);
+    const site = new FakeZeta(messages, 'harbour', TOKEN);
+    site.most = 100;
+    site.plot = 'plot-9';
+    site.plotName = 'Harbour Lights';
+    site.roomTitle = 'Harbour Room';
+    site.about = 'Full plot about.';
+    site.introId = 'intro-2';
+    site.intros = [
+        { id: 'intro-1', conversation: { messages: [{ content: 'First intro', senderId: '_NARRATOR_' }] } },
+        { id: 'intro-2', conversation: { messages: [{ content: 'Second intro', senderId: '_NARRATOR_' }] } },
+    ];
+    site.characters = [{ id: 'c1', name: 'Mavan', description: 'Keeper.' }];
+    const run = harness();
+    run.page.answer = (url, options) => site.fetch(url, options);
+    start(run);
+    await settle();
+    await run.page.fetch(`${API}/v1/users/me`, { headers: { Authorization: TOKEN } });
+    const exportPlot = run.world.panels[0].options.exportPlot;
+
+    run.world.notesChecked = true;
+    run.world.rawNotes = null;
+    run.world.setupRecord = { story: null, profile: null, notes: 'stale saved notes' };
+    const progress = [];
+    const controller = new AbortController();
+    const firstExport = exportPlot(controller.signal, (count) => progress.push(count));
+    await pass(run, 1000);
+    const bundleInput = await firstExport;
+    assert.equal(bundleInput.plot.about, 'Full plot about.');
+    assert.equal(bundleInput.introId, 'intro-2');
+    assert.equal(bundleInput.plot.opening[0].text, 'Second intro');
+    assert.equal(bundleInput.profile.name, 'Orla');
+    assert.equal(bundleInput.notes, null);
+    assert.equal(bundleInput.chat.completeHistory, true);
+    assert.equal(bundleInput.chat.messages.length, 35);
+    assert.deepEqual(progress, [31, 35]);
+
+    site.plotFailure = 500;
+    const cachedStory = {
+        plotId: 'plot-9',
+        name: 'Harbour Lights',
+        summary: 'Short.',
+        description: 'Long.',
+        about: '',
+        creatorComment: '',
+        language: 'en',
+        mode: 'STORY',
+        hashtags: [],
+        characters: [],
+        chatProfiles: [],
+        opening: [{ speaker: 'Narrator', text: 'Cached intro' }],
+        lore: [],
+        raw: {},
+        roomTitle: 'Harbour Room',
+        introId: 'intro-2',
+    };
+    run.world.setupRecord = { story: cachedStory, profile: null, notes: 'kept notes' };
+    run.world.liveSetupView = { profileRead: true };
+    run.world.notesChecked = false;
+    const requestsBeforeFallback = site.requests.length;
+    const fallbackPromise = exportPlot(new AbortController().signal);
+    await pass(run, 10000);
+    const fallbackResult = await fallbackPromise;
+    assert.equal(fallbackResult.plot, cachedStory);
+    assert.equal(fallbackResult.profile, null);
+    assert.equal(fallbackResult.notes, 'kept notes');
+    assert.equal(
+        site.requests.slice(requestsBeforeFallback).some((entry) => entry.url.includes('user-personas/selected')),
+        false,
+    );
+
+    site.plotFailure = null;
+    site.messages = [];
+    const emptyResult = await exportPlot(new AbortController().signal);
+    assert.equal(emptyResult.chat.completeHistory, true);
+    assert.deepEqual(JSON.parse(JSON.stringify(emptyResult.chat.messages)), []);
+
+    let repeatCalls = 0;
+    run.page.answer = (url, options) => {
+        if (new URL(url).pathname === '/v1/rooms/harbour/messages') {
+            repeatCalls++;
+            return Promise.resolve(
+                FakeZeta.reply(
+                    200,
+                    JSON.stringify({
+                        messages: [FakeZeta.message(`repeat-${repeatCalls}`, FakeZeta.time(10 - repeatCalls))],
+                        nextCursor: 'stuck-cursor',
+                    }),
+                ),
+            );
+        }
+        return site.fetch(url, options);
+    };
+    const repeatPromise = failureOf(exportPlot(new AbortController().signal));
+    await pass(run, 2000);
+    assert.equal((await repeatPromise).message, 'Chat history was incomplete (RepeatedCursor).');
+
+    site.messages = FakeZeta.messages(35);
+    let pageCalls = 0;
+    run.page.answer = (url, options) => {
+        if (new URL(url).pathname === '/v1/rooms/harbour/messages') {
+            pageCalls++;
+            if (pageCalls >= 2) {
+                return Promise.resolve(FakeZeta.reply(500, 'Boom'));
+            }
+        }
+        return site.fetch(url, options);
+    };
+    const pageTwoPromise = failureOf(exportPlot(new AbortController().signal));
+    await pass(run, 10000);
+    assert.match((await pageTwoPromise).message, /^Chat history was incomplete: /);
+
+    run.page.answer = (url, options) => {
+        if (new URL(url).pathname === '/v1/rooms/harbour/messages') {
+            return Promise.resolve(
+                FakeZeta.reply(
+                    200,
+                    JSON.stringify({
+                        messages: [FakeZeta.message('m1', FakeZeta.time(1)), { bad: true }],
+                        nextCursor: null,
+                    }),
+                ),
+            );
+        }
+        return site.fetch(url, options);
+    };
+    const skippedError = await failureOf(exportPlot(new AbortController().signal));
+    assert.equal(skippedError.message, 'Chat history was incomplete (1 unreadable message skipped).');
+
+    let nothingNewCalls = 0;
+    run.page.answer = (url, options) => {
+        if (new URL(url).pathname === '/v1/rooms/harbour/messages') {
+            nothingNewCalls++;
+            return Promise.resolve(
+                FakeZeta.reply(
+                    200,
+                    JSON.stringify({
+                        messages: [FakeZeta.message('m1', FakeZeta.time(1))],
+                        nextCursor: `cursor-${nothingNewCalls}`,
+                    }),
+                ),
+            );
+        }
+        return site.fetch(url, options);
+    };
+    const nothingNewPromise = failureOf(exportPlot(new AbortController().signal));
+    await pass(run, 1000);
+    assert.equal((await nothingNewPromise).message, 'Chat history was incomplete (NothingNew).');
+
+    run.page.answer = (url, options) => site.fetch(url, options);
+    const abortDuringHistory = new AbortController();
+    const abortingPromise = failureOf(exportPlot(abortDuringHistory.signal));
+    await settle();
+    abortDuringHistory.abort();
+    const abortError = await abortingPromise;
+    assert.equal(abortError.name, 'AbortError');
+
+    run.page.answer = (url, options) => {
+        if (new URL(url).pathname === '/v1/plots/plot-9') {
+            return new Promise((resolve) => {
+                go(run, '/');
+                resolve(FakeZeta.reply(404, 'Late plot error'));
+            });
+        }
+        return site.fetch(url, options);
+    };
+    const leftDuringPlot = await failureOf(exportPlot(new AbortController().signal));
+    assert.equal(leftDuringPlot.message, 'The chat has been left');
+
     run.boot.stop();
 });

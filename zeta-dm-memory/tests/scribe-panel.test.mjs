@@ -184,6 +184,8 @@ function mounted(log, options = {}) {
         forkOrigin: options.forkOrigin,
         listForkRooms: options.listForkRooms,
         recoverFork: options.recoverFork,
+        ...(Object.hasOwn(options, 'exportPlot') ? { exportPlot: options.exportPlot } : {}),
+        ...(Object.hasOwn(options, 'AbortController') ? { AbortController: options.AbortController } : {}),
     }).mount();
 }
 
@@ -2010,7 +2012,7 @@ test('everything is locked while the keeper is busy', async () => {
             'Send a reminder with my next message',
             'Suggest one',
         ],
-        Progress: ['Export', 'Pause'],
+        Progress: ['Export', 'Export plot + chat', 'Pause'],
         Settings: ['Save key'],
     };
     /**
@@ -2119,7 +2121,7 @@ test('a watching tab can edit the reminder and save the shared key', async () =>
     assert.equal(field.readOnly, true);
     assert.deepEqual(panel.live.calls, []);
     await panel.tab('Progress');
-    assert.deepEqual(panel.actionsWhere('Progress', false), ['Export']);
+    assert.deepEqual(panel.actionsWhere('Progress', false), ['Export', 'Export plot + chat']);
     assert.deepEqual(panel.actionsWhere('Progress', true).sort(), [
         'Check history',
         'Pause',
@@ -3400,7 +3402,7 @@ test('destructive actions are never primary or rightmost', async () => {
     const controls = panel.byId('scribe-adopt').parent.children;
     assert.deepEqual(
         controls.map((element) => element.textContent),
-        ['Pull the chat again', 'Pause', 'Resume', 'Export', 'Start the book over'],
+        ['Pull the chat again', 'Pause', 'Resume', 'Export', 'Export plot + chat', 'Start the book over'],
     );
     assert.equal(panel.byId('scribe-adopt').classes.has('primary'), false);
     const fresh = mounted(ScribeLog.create(), { keeper: { phase: Phase.NoBook } });
@@ -6058,4 +6060,275 @@ test('a missing Worker Book keeps Choose a different origin and Pull chat data a
     assert.equal(panel.byId('scribe-fork-picker').hidden, false);
     assert.equal(panel.byId('scribe-fork-open').hidden, false);
     assert.equal(panel.text('scribe-fork-open'), 'Pull Book');
+});
+
+test('Export preserves its label, refreshes Kind.Setup notes on adopted rooms, skips unadopted rooms, and survives damaged setup', async () => {
+    const longNotes = 'N'.repeat(5000);
+    const storage = new FakeStorage();
+    ScribeStore.write(storage, room, ScribeStore.Kind.Setup, {
+        plotId: 'plot-1',
+        roomTitle: 'Harbour',
+        introId: null,
+        story: { plotId: 'plot-1', name: 'Harbour Lights' },
+        profile: null,
+        notes: 'old notes',
+        fetchedAt: '2026-11-26T00:00:00.000Z',
+    });
+    const panel = mounted(rulingsBook(), {
+        storage,
+        cloud: { phase: 'Leading', keyed: true, checkedNotes: true, rawNotes: longNotes, conflict: null, notes: { length: 4000, cut: 5000 }, unsent: 0, problem: null },
+    });
+    await panel.tab('Progress');
+    assert.equal(panel.byId('scribe-export').textContent, 'Export');
+    panel.click('scribe-export');
+    await panel.flush();
+    assert.equal(panel.downloads.length, 1);
+    const exported = JSON.parse(panel.downloads[0].text);
+    assert.equal(exported.setup.notes, longNotes);
+
+    const unadoptedStorage = new FakeStorage();
+    const unadopted = mounted(ScribeLog.create(), {
+        storage: unadoptedStorage,
+        keeper: { phase: Phase.NoBook, booked: false },
+        cloud: { phase: 'Leading', keyed: true, checkedNotes: true, rawNotes: 'fresh notes', conflict: null, notes: { length: 11, cut: null }, unsent: 0, problem: null },
+    });
+    await unadopted.tab('Progress');
+    unadopted.click('scribe-export');
+    await unadopted.flush();
+    assert.equal(unadopted.downloads.length, 1);
+    assert.equal(ScribeStore.read(unadoptedStorage, room, ScribeStore.Kind.Setup), null);
+
+    const damagedStorage = new FakeStorage();
+    damagedStorage.set(ScribeStore.name('head', ScribeStore.room(room), ScribeStore.Kind.Setup), 'not-valid-json');
+    const damaged = mounted(rulingsBook(), {
+        storage: damagedStorage,
+        cloud: { phase: 'Leading', keyed: true, checkedNotes: true, rawNotes: 'new notes', conflict: null, notes: { length: 9, cut: null }, unsent: 0, problem: null },
+    });
+    await damaged.tab('Progress');
+    damaged.click('scribe-export');
+    await damaged.flush();
+    assert.equal(damaged.downloads.length, 1);
+    assert.equal(damaged.text('scribe-controls-outcome'), 'Exported scribe-harbour-room.json.');
+});
+
+test('Export plot + chat handles omitted handler, omitted AbortController, live progress, concurrent controls, errors, book lock, and unmount', async () => {
+    const disabledPanel = mounted(rulingsBook(), { exportPlot: null });
+    await disabledPanel.tab('Progress');
+    assert.equal(disabledPanel.byId('scribe-export-plot').disabled, true);
+    disabledPanel.byId('scribe-export-plot').dispatchEvent({ type: 'click' });
+    await disabledPanel.flush();
+    assert.equal(disabledPanel.downloads.length, 0);
+
+    let seenNullSignal = 'unset';
+    const noAbortPanel = mounted(rulingsBook(), {
+        AbortController: null,
+        exportPlot: async (signal) => {
+            seenNullSignal = signal;
+            return {
+                plot: {
+                    plotId: 'plot-1',
+                    name: 'Solo Tale',
+                    summary: '',
+                    description: '',
+                    about: '',
+                    creatorComment: '',
+                    language: null,
+                    mode: null,
+                    hashtags: [],
+                    characters: [{ id: 'c1', name: 'Mavan', description: 'Keeper.' }],
+                    chatProfiles: [],
+                    opening: [],
+                    lore: [{ name: 'Bell', text: 'Bronze.' }],
+                    raw: {},
+                },
+                roomId: room,
+                roomTitle: 'Solo',
+                introId: null,
+                profile: null,
+                notes: null,
+                chat: { completeHistory: true, messages: [{ id: 'm1', sender: { type: 'BOT' }, contents: [], messageTime: '2026-01-01T00:00:00.000Z' }] },
+            };
+        },
+    });
+    await noAbortPanel.tab('Progress');
+    noAbortPanel.click('scribe-export-plot');
+    await noAbortPanel.flush();
+    assert.equal(seenNullSignal, null);
+    assert.equal(noAbortPanel.downloads.length, 1);
+    assert.equal(noAbortPanel.downloads[0].name, 'zeta-plot-chat-solo-tale.json');
+    assert.equal(
+        noAbortPanel.text('scribe-plot-export-outcome'),
+        'Exported zeta-plot-chat-solo-tale.json (1 character, 1 lore entry, 1 message).',
+    );
+
+    let release = null;
+    let progressCallback = null;
+    let calls = 0;
+    const lockedPanel = mounted(rulingsBook(), {
+        keeper: { phase: Phase.Watching, reader: false },
+        exportPlot: (signal, onProgress) => {
+            calls++;
+            progressCallback = onProgress;
+            return new Promise((resolve) => {
+                release = resolve;
+            });
+        },
+    });
+    await lockedPanel.tab('Progress');
+    assert.equal(lockedPanel.byId('scribe-export-plot').disabled, false);
+    lockedPanel.click('scribe-export-plot');
+    assert.equal(calls, 1);
+    assert.equal(lockedPanel.byId('scribe-export-plot').disabled, true);
+    assert.equal(lockedPanel.text('scribe-plot-export-outcome'), 'Exporting plot + chat...');
+    lockedPanel.byId('scribe-export-plot').dispatchEvent({ type: 'click' });
+    assert.equal(calls, 1);
+    progressCallback(1);
+    assert.equal(lockedPanel.text('scribe-plot-export-outcome'), 'Exporting plot + chat (1 message)...');
+    lockedPanel.click('scribe-export');
+    await lockedPanel.flush();
+    assert.equal(lockedPanel.text('scribe-controls-outcome'), 'Exported scribe-harbour-room.json.');
+    assert.equal(lockedPanel.text('scribe-plot-export-outcome'), 'Exporting plot + chat (1 message)...');
+    progressCallback(62);
+    assert.equal(lockedPanel.text('scribe-plot-export-outcome'), 'Exporting plot + chat (62 messages)...');
+    release({
+        plot: {
+            plotId: 'plot-2',
+            name: 'Harbour Lights',
+            summary: '',
+            description: '',
+            about: '',
+            creatorComment: '',
+            language: null,
+            mode: null,
+            hashtags: [],
+            characters: [
+                { id: 'c1', name: 'A', description: '' },
+                { id: 'c2', name: 'B', description: '' },
+                { id: 'c3', name: 'C', description: '' },
+            ],
+            chatProfiles: [],
+            opening: [],
+            lore: [
+                { name: 'L1', text: 'T1' },
+                { name: 'L2', text: 'T2' },
+            ],
+            raw: {},
+        },
+        roomId: room,
+        roomTitle: 'Harbour',
+        introId: 'intro-2',
+        profile: { source: 'Persona', name: 'Orla', description: 'Sellsword.' },
+        notes: 'Full notes.',
+        chat: {
+            completeHistory: true,
+            messages: Array.from({ length: 48 }, (_, index) => ({
+                id: `m${index + 1}`,
+                sender: { type: 'BOT' },
+                contents: [],
+                messageTime: '2026-01-01T00:00:00.000Z',
+            })),
+        },
+    });
+    await lockedPanel.flush();
+    assert.equal(lockedPanel.byId('scribe-export-plot').disabled, false);
+    assert.equal(lockedPanel.downloads.length, 2);
+    assert.equal(lockedPanel.downloads[1].name, 'zeta-plot-chat-harbour-lights.json');
+    assert.equal(
+        lockedPanel.text('scribe-plot-export-outcome'),
+        'Exported zeta-plot-chat-harbour-lights.json (3 characters, 2 lore entries, 48 messages).',
+    );
+
+    const failingPanel = mounted(rulingsBook(), {
+        exportPlot: async () => {
+            throw new Error('Chat history was incomplete (RepeatedCursor).');
+        },
+    });
+    await failingPanel.tab('Progress');
+    failingPanel.click('scribe-export-plot');
+    await failingPanel.flush();
+    assert.equal(failingPanel.downloads.length, 0);
+    assert.equal(failingPanel.byId('scribe-export-plot').disabled, false);
+    assert.equal(failingPanel.text('scribe-plot-export-outcome'), 'Chat history was incomplete (RepeatedCursor).');
+
+    let unmountSignal = null;
+    let resolveAfterUnmount = null;
+    const unmountingPanel = mounted(rulingsBook(), {
+        exportPlot: (signal) => {
+            unmountSignal = signal;
+            return new Promise((resolve) => {
+                resolveAfterUnmount = resolve;
+            });
+        },
+    });
+    await unmountingPanel.tab('Progress');
+    unmountingPanel.click('scribe-export-plot');
+    const outcomeElement = unmountingPanel.byId('scribe-plot-export-outcome');
+    const writesBefore = outcomeElement.written.length;
+    unmountingPanel.handle.unmount();
+    assert.equal(unmountSignal.aborted, true);
+    resolveAfterUnmount({
+        plot: { plotId: 'p1', name: 'Late', summary: '', description: '', about: '', creatorComment: '', language: null, mode: null, hashtags: [], characters: [], chatProfiles: [], opening: [], lore: [], raw: null },
+        roomId: room,
+        roomTitle: null,
+        introId: null,
+        profile: null,
+        notes: null,
+        chat: { completeHistory: true, messages: [] },
+    });
+    await unmountingPanel.flush();
+    assert.equal(unmountingPanel.downloads.length, 0);
+    assert.equal(outcomeElement.written.length, writesBefore);
+});
+
+test('Settings renders every SetupState and ProfileState combination cleanly', async () => {
+    const cases = [
+        [
+            'undefined setup',
+            undefined,
+            { setupHidden: true, setupText: '', profileHidden: true, profileText: '' },
+        ],
+        [
+            'unadopted unread',
+            { read: false, reading: false, storyRead: false, storyFailed: false, shown: 0, whole: 0, profileRead: false, profileFailed: false, source: null, persona: null },
+            { setupHidden: true, setupText: '', profileHidden: true, profileText: '' },
+        ],
+        [
+            'reading',
+            { read: false, reading: true, storyRead: false, storyFailed: false, shown: 0, whole: 0, profileRead: false, profileFailed: false, source: null, persona: null },
+            { setupHidden: false, setupText: 'Reading the story setup...', profileHidden: false, profileText: 'Reading the profile...' },
+        ],
+        [
+            'both failed',
+            { read: true, reading: false, storyRead: false, storyFailed: true, shown: 0, whole: 0, profileRead: false, profileFailed: true, source: null, persona: null },
+            { setupHidden: false, setupText: 'Story setup: could not be read.', profileHidden: false, profileText: 'Profile: could not be read.' },
+        ],
+        [
+            'none on story and none set',
+            { read: true, reading: false, storyRead: true, storyFailed: false, shown: 0, whole: 0, profileRead: true, profileFailed: false, source: null, persona: null },
+            { setupHidden: false, setupText: 'Story setup: none on this story.', profileHidden: false, profileText: 'Profile: none set for this chat.' },
+        ],
+        [
+            'singular character and unnamed persona',
+            { read: true, reading: false, storyRead: true, storyFailed: false, shown: 1, whole: 1, profileRead: true, profileFailed: false, source: 'Persona', persona: null },
+            { setupHidden: false, setupText: 'Story setup: 1 character goes with every call.', profileHidden: false, profileText: 'Profile: set for this chat.' },
+        ],
+        [
+            'plural characters and named persona',
+            { read: true, reading: false, storyRead: true, storyFailed: false, shown: 2140, whole: 2140, profileRead: true, profileFailed: false, source: 'Persona', persona: 'Orla' },
+            { setupHidden: false, setupText: 'Story setup: 2,140 characters go with every call.', profileHidden: false, profileText: 'Profile: your persona Orla.' },
+        ],
+        [
+            'cut count',
+            { read: true, reading: false, storyRead: true, storyFailed: false, shown: 2140, whole: 7310, profileRead: true, profileFailed: false, source: 'Persona', persona: 'Orla' },
+            { setupHidden: false, setupText: 'Story setup: 2,140 characters go with every call (cut from 7,310).', profileHidden: false, profileText: 'Profile: your persona Orla.' },
+        ],
+    ];
+    for (const [label, setup, expected] of cases) {
+        const panel = mounted(rulingsBook(), { live: liveView([], setup === undefined ? {} : { setup }) });
+        await panel.tab('Settings');
+        assert.equal(panel.byId('scribe-setup-state').hidden, expected.setupHidden, `${label} setup hidden`);
+        assert.equal(panel.text('scribe-setup-state'), expected.setupText, `${label} setup text`);
+        assert.equal(panel.byId('scribe-profile-state').hidden, expected.profileHidden, `${label} profile hidden`);
+        assert.equal(panel.text('scribe-profile-state'), expected.profileText, `${label} profile text`);
+    }
 });

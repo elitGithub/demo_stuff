@@ -24,6 +24,8 @@ const ScribePanel = Object.freeze({
         Unfocusable: '-1',
         FileOpen: 'scribe-',
         FileClose: '.json',
+        JsonIndent: 2,
+        Locale: 'en-US',
         ObjectType: 'object',
         StringType: 'string',
         NumberType: 'number',
@@ -138,6 +140,8 @@ const ScribePanel = Object.freeze({
             Understood: 'scribe-understood',
             CloudState: 'scribe-cloud-state',
             Notes: 'scribe-notes',
+            SetupState: 'scribe-setup-state',
+            ProfileState: 'scribe-profile-state',
             KeyState: 'scribe-key-state',
             Key: 'scribe-key',
             SaveKey: 'scribe-save-key',
@@ -154,6 +158,7 @@ const ScribePanel = Object.freeze({
             ForkSource: 'scribe-fork-source',
             ForkOutcome: 'scribe-fork-outcome',
             Export: 'scribe-export',
+            ExportPlot: 'scribe-export-plot',
             Pull: 'scribe-pull',
             HistoryRange: 'scribe-history-range',
             HistoryFrom: 'scribe-history-from',
@@ -164,6 +169,7 @@ const ScribePanel = Object.freeze({
             StoryRetry: 'scribe-story-retry',
             InputRetry: 'scribe-input-retry',
             ControlsOutcome: 'scribe-controls-outcome',
+            PlotExportOutcome: 'scribe-plot-export-outcome',
             Pulled: 'scribe-pulled',
             Checked: 'scribe-checked',
         }),
@@ -194,6 +200,7 @@ const ScribePanel = Object.freeze({
             Key: 'key',
             Settings: 'settings',
             Controls: 'controls',
+            PlotExport: 'PlotExport',
             Next: 'next',
             Fork: 'fork',
             Offer: 'offer',
@@ -563,6 +570,28 @@ const ScribePanel = Object.freeze({
             Resume: 'Resume',
             Pull: 'Pull the chat again',
             Export: 'Export',
+            ExportPlot: 'Export plot + chat',
+            ExportingPlot: 'Exporting plot + chat...',
+            ExportingPlotCountOpen: 'Exporting plot + chat (',
+            ExportingPlotOne: ' message)...',
+            ExportingPlotMany: ' messages)...',
+            CharacterOne: ' character',
+            CharacterMany: ' characters',
+            LoreOne: ' lore entry',
+            LoreMany: ' lore entries',
+            SetupReading: 'Reading the story setup...',
+            SetupFailed: 'Story setup: could not be read.',
+            SetupNone: 'Story setup: none on this story.',
+            SetupPrefix: 'Story setup: ',
+            SetupOne: ' character goes with every call',
+            SetupMany: ' characters go with every call',
+            SetupCutOpen: ' (cut from ',
+            SetupCutClose: ').',
+            ProfileReading: 'Reading the profile...',
+            ProfileFailed: 'Profile: could not be read.',
+            ProfilePersona: 'Profile: your persona ',
+            ProfileSet: 'Profile: set for this chat.',
+            ProfileNone: 'Profile: none set for this chat.',
             Exported: 'Exported ',
             LastPullOpen: 'Last pull: ',
             MessageOne: ' message',
@@ -637,7 +666,7 @@ const ScribePanel = Object.freeze({
     }),
 
     /**
-     * @param {{ document: object, keeper: object, live: object, cloud: object, calls: { due: () => boolean, stop: () => void }, storage: object, forkOrigin?: () => {parentRoomId: string, messageId: string}|null, listForkRooms?: () => Promise<object>, recoverFork?: (sourceRoomId: string, messageId: string|null) => Promise<object>, generateReminder: () => Promise<string>, readReminderDraft: () => string|null, writeReminderDraft: (text: string) => void, readReminderPreview: () => string|null, clearReminderPreview: (text: string) => void, reminderGeneration: () => string|null, reminderGenerationError: () => string|null, confirm: (text: string) => boolean, download: (name: string, text: string) => void, clock: { now: () => number } }} environment
+     * @param {{ document: object, keeper: object, live: object, cloud: object, calls: { due: () => boolean, stop: () => void }, storage: object, forkOrigin?: () => {parentRoomId: string, messageId: string}|null, listForkRooms?: () => Promise<object>, recoverFork?: (sourceRoomId: string, messageId: string|null) => Promise<object>, generateReminder: () => Promise<string>, readReminderDraft: () => string|null, writeReminderDraft: (text: string) => void, readReminderPreview: () => string|null, clearReminderPreview: (text: string) => void, reminderGeneration: () => string|null, reminderGenerationError: () => string|null, exportPlot?: ((signal: AbortSignal|null, onProgress?: (count: number) => void) => Promise<object>)|null, AbortController?: Function|null, confirm: (text: string) => boolean, download: (name: string, text: string) => void, clock: { now: () => number } }} environment
      * @return {Readonly<{ redraw: () => void, redrawReminder: () => boolean, unmount: () => void, host: object }>}
      */
     mount(environment) {
@@ -687,6 +716,12 @@ const ScribePanel = Object.freeze({
             confirm: environment.confirm,
             download: environment.download,
             clock: environment.clock,
+            exportPlotHandler:
+                typeof environment.exportPlot === settings.FunctionType ? environment.exportPlot : null,
+            AbortController:
+                typeof environment.AbortController === settings.FunctionType ? environment.AbortController : null,
+            exportingPlot: false,
+            plotExportController: null,
             host,
             root: host.attachShadow({ mode: settings.ShadowMode }),
             open: wide && remembered !== settings.Shown.Collapsed,
@@ -815,6 +850,11 @@ const ScribePanel = Object.freeze({
             return;
         }
         panel.mounted = false;
+        if (panel.plotExportController !== null) {
+            const controller = panel.plotExportController;
+            panel.plotExportController = null;
+            controller.abort();
+        }
         ScribePanel.stopClock(panel);
         panel.host.remove();
     },
@@ -2323,6 +2363,20 @@ const ScribePanel = Object.freeze({
                 ),
                 ScribePanel.own(
                     panel,
+                    'ExportPlot',
+                    ScribePanel.button(
+                        panel,
+                        words.ExportPlot,
+                        /**
+                         * @return {Promise<void>}
+                         */
+                        () => ScribePanel.exportPlot(panel),
+                        guards.Free,
+                        ids.ExportPlot,
+                    ),
+                ),
+                ScribePanel.own(
+                    panel,
                     'Adopt',
                     ScribePanel.button(
                         panel,
@@ -2396,7 +2450,16 @@ const ScribePanel = Object.freeze({
             }, true), guards.Book, ids.CheckHistory));
             range.append(from.label, to.label, check);
             range.hidden = true;
-            section.append(ScribePanel.outlet(panel, 'ControlsOutcome', outlets.Controls), details, retry, inputRetry, checked, story, pulled);
+            section.append(
+                ScribePanel.outlet(panel, 'ControlsOutcome', outlets.Controls),
+                ScribePanel.outlet(panel, 'PlotExportOutcome', outlets.PlotExport),
+                details,
+                retry,
+                inputRetry,
+                checked,
+                story,
+                pulled,
+            );
             const filing = ScribePanel.own(panel, 'FilingGroup', ScribePanel.group(panel, section, 'Pending book entries, checker rows and operator input'));
             filing.hidden = true;
             ScribePanel.pager(panel, settings.Lists.Filing, filing);
@@ -2428,9 +2491,23 @@ const ScribePanel = Object.freeze({
             const outlets = settings.Outlets;
             const notes = ScribePanel.own(panel, 'Notes', ScribePanel.make(panel, tags.Paragraph, settings.Nothing));
             notes.hidden = true;
+            const setupState = ScribePanel.own(
+                panel,
+                'SetupState',
+                ScribePanel.make(panel, tags.Paragraph, settings.Nothing),
+            );
+            setupState.hidden = true;
+            const profileState = ScribePanel.own(
+                panel,
+                'ProfileState',
+                ScribePanel.make(panel, tags.Paragraph, settings.Nothing),
+            );
+            profileState.hidden = true;
             section.append(
                 ScribePanel.own(panel, 'CloudState', ScribePanel.make(panel, tags.Paragraph, settings.Nothing)),
                 notes,
+                setupState,
+                profileState,
                 ScribePanel.own(panel, 'KeyState', ScribePanel.make(panel, tags.Paragraph, settings.Nothing)),
             );
             const key = ScribePanel.field(panel, settings.InputTypes.Password, words.KeyLabel, ids.Key, false, false);
@@ -2635,6 +2712,7 @@ const ScribePanel = Object.freeze({
                 forceBlock: mask(heard.forceBlock),
                 suggestion: heard.suggestion ?? null,
                 notice: mask(heard.notice),
+                setup: heard.setup ?? null,
                 held: mask(heard.held),
                 draft: heard.draft ?? null,
                 stale: heard.stale ?? false,
@@ -3017,6 +3095,7 @@ const ScribePanel = Object.freeze({
         }
         parts.HistoryRange.hidden = !(view.historyCheckCount > 0);
         parts.CheckHistory.disabled ||= !view.canCheckHistory;
+        parts.ExportPlot.disabled = panel.exportPlotHandler === null || panel.exportingPlot;
         for (const field of [parts.HistoryFrom, parts.HistoryTo]) {
             field.disabled = !view.canCheckHistory;
             field.setAttribute('max', String(view.historyCheckCount ?? 0));
@@ -3879,6 +3958,17 @@ const ScribePanel = Object.freeze({
         const name = settings.FileOpen + safe + settings.FileClose;
         let outcome = words.Exported + name + words.FullStop;
         try {
+            if (panel.cloud?.notesChecked?.() === true) {
+                try {
+                    const saved = ScribeStore.read(panel.storage, roomId, ScribeStore.Kind.Setup);
+                    if (saved !== null && typeof saved === settings.ObjectType && !Array.isArray(saved)) {
+                        const raw = panel.cloud.rawNotes?.() ?? null;
+                        if (saved.notes !== raw) {
+                            ScribeStore.write(panel.storage, roomId, ScribeStore.Kind.Setup, { ...saved, notes: raw });
+                        }
+                    }
+                } catch {}
+            }
             panel.download(name, ScribeStore.exportText(panel.storage, roomId));
             panel.last.set(settings.Ids.Export, panel.clock.now());
             panel.trouble = settings.Nothing;
@@ -3887,6 +3977,95 @@ const ScribePanel = Object.freeze({
         }
         ScribePanel.say(panel, settings.Outlets.Controls, outcome);
         ScribePanel.redraw(panel);
+    },
+
+    /**
+     * @param {object} panel
+     * @return {Promise<void>}
+     */
+    async exportPlot(panel) {
+        const settings = ScribePanel.Settings;
+        const words = settings.Words;
+        const outlets = settings.Outlets;
+        if (!panel.mounted || panel.exportPlotHandler === null || panel.exportingPlot) {
+            return;
+        }
+        panel.exportingPlot = true;
+        const controller = panel.AbortController === null ? null : new panel.AbortController();
+        panel.plotExportController = controller;
+        panel.parts.ExportPlot.disabled = true;
+        ScribePanel.say(panel, outlets.PlotExport, words.ExportingPlot);
+        ScribePanel.redraw(panel);
+
+        /**
+         * @param {number} count
+         * @return {void}
+         */
+        const onProgress = (count) => {
+            if (
+                panel.mounted &&
+                panel.exportingPlot &&
+                panel.plotExportController === controller &&
+                Number.isFinite(count)
+            ) {
+                const whole = Math.max(settings.NoCount, Math.floor(count));
+                ScribePanel.say(
+                    panel,
+                    outlets.PlotExport,
+                    words.ExportingPlotCountOpen +
+                        whole.toLocaleString(settings.Locale) +
+                        (whole === settings.Single ? words.ExportingPlotOne : words.ExportingPlotMany),
+                );
+                ScribePanel.redraw(panel);
+            }
+        };
+        try {
+            const result = await panel.exportPlotHandler(controller === null ? null : controller.signal, onProgress);
+            if (!panel.mounted) {
+                return;
+            }
+            const exportedAt = new Date(panel.clock.now()).toISOString();
+            const bundle = ScribeSetup.exportBundle({ ...result, exportedAt });
+            const withChat = result?.chat !== null && result?.chat !== undefined;
+            const filename = ScribeSetup.filename(result?.plot?.name, result?.plot?.plotId, withChat);
+            panel.download(filename, JSON.stringify(bundle, null, settings.JsonIndent));
+            const characterCount = Array.isArray(bundle.plot?.characters)
+                ? bundle.plot.characters.length
+                : settings.NoCount;
+            const loreCount = Array.isArray(bundle.plot?.lore) ? bundle.plot.lore.length : settings.NoCount;
+            const counts = [
+                characterCount.toLocaleString(settings.Locale) +
+                    (characterCount === settings.Single ? words.CharacterOne : words.CharacterMany),
+                loreCount.toLocaleString(settings.Locale) +
+                    (loreCount === settings.Single ? words.LoreOne : words.LoreMany),
+            ];
+            if (bundle.chat !== null) {
+                const messageCount = bundle.chat.messageCount;
+                counts.push(
+                    messageCount.toLocaleString(settings.Locale) +
+                        (messageCount === settings.Single ? words.MessageOne : words.MessageMany),
+                );
+            }
+            ScribePanel.say(
+                panel,
+                outlets.PlotExport,
+                words.Exported + filename + words.Open + counts.join(words.Comma) + words.Close + words.FullStop,
+            );
+            panel.trouble = settings.Nothing;
+        } catch (error) {
+            if (!panel.mounted) {
+                return;
+            }
+            ScribePanel.say(panel, outlets.PlotExport, ScribePanel.reason(error));
+        } finally {
+            if (panel.plotExportController === controller) {
+                panel.plotExportController = null;
+            }
+            panel.exportingPlot = false;
+            if (panel.mounted) {
+                ScribePanel.redraw(panel);
+            }
+        }
     },
 
     Drawers: Object.freeze({
@@ -4742,6 +4921,58 @@ const ScribePanel = Object.freeze({
                 }
             }
             ScribePanel.write(parts.Notes, told);
+            const setup = live.setup;
+            const showSetup =
+                setup !== null &&
+                (setup.reading === true ||
+                    setup.read === true ||
+                    setup.storyFailed === true ||
+                    setup.profileFailed === true);
+            let setupLine = settings.Nothing;
+            let profileLine = settings.Nothing;
+            if (showSetup) {
+                if (setup.reading === true) {
+                    setupLine = words.SetupReading;
+                    profileLine = words.ProfileReading;
+                } else {
+                    if (setup.storyFailed === true) {
+                        setupLine = words.SetupFailed;
+                    } else if (setup.storyRead === true) {
+                        const shown = Number.isFinite(setup.shown) ? setup.shown : settings.NoCount;
+                        const whole = Number.isFinite(setup.whole) ? setup.whole : shown;
+                        if (shown === settings.NoCount) {
+                            setupLine = words.SetupNone;
+                        } else {
+                            setupLine =
+                                words.SetupPrefix +
+                                shown.toLocaleString(settings.Locale) +
+                                (shown === settings.Single ? words.SetupOne : words.SetupMany);
+                            if (whole > shown) {
+                                setupLine += words.SetupCutOpen + whole.toLocaleString(settings.Locale) + words.SetupCutClose;
+                            } else {
+                                setupLine += words.FullStop;
+                            }
+                        }
+                    }
+                    if (setup.profileFailed === true) {
+                        profileLine = words.ProfileFailed;
+                    } else if (setup.profileRead === true) {
+                        const persona =
+                            typeof setup.persona === settings.StringType ? setup.persona.trim() : settings.Nothing;
+                        if (persona !== settings.Nothing) {
+                            profileLine = words.ProfilePersona + PanelView.said(setup.persona) + words.FullStop;
+                        } else if (setup.source !== null && setup.source !== undefined) {
+                            profileLine = words.ProfileSet;
+                        } else {
+                            profileLine = words.ProfileNone;
+                        }
+                    }
+                }
+            }
+            parts.SetupState.hidden = setupLine === settings.Nothing;
+            ScribePanel.write(parts.SetupState, setupLine);
+            parts.ProfileState.hidden = profileLine === settings.Nothing;
+            ScribePanel.write(parts.ProfileState, profileLine);
             ScribePanel.write(panel.parts.KeyState, view.hasKey === null ? words.KeyUnreadable : view.hasKey ? words.KeySaved : words.NoKey);
         },
     }),

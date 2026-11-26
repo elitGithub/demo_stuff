@@ -44,12 +44,22 @@ const ScribeLive = Object.freeze({
         Nothing: '',
         Space: ' ',
         Fulfilled: 'fulfilled',
-        Uncast: Object.freeze({ characters: null, profile: null, notice: null }),
+        Uncast: Object.freeze({
+            story: null,
+            profile: null,
+            storyRead: false,
+            storyFailed: false,
+            profileRead: false,
+            profileFailed: false,
+            notice: null,
+        }),
+        DefaultNotes: Object.freeze({ checked: false, text: null }),
         StoppedPhase: 'Stopped',
         DoneStop: 'Done',
         ObjectType: 'object',
         StringType: 'string',
         BooleanType: 'boolean',
+        FunctionType: 'function',
         Roles: Object.freeze({
             Scribe: 'Scribe',
             Pedant: 'Pedant',
@@ -90,8 +100,9 @@ const ScribeLive = Object.freeze({
             Unmarked: 'the scene was saved before replies were told apart by their text',
             ChangedOpen: 'No reminder: the latest reply #',
             ChangedClose: ' changed and is being read again.',
-            StoryUnread: "The story's characters could not be read, so every character counts as custom: ",
+            StoryUnread: 'The story setup could not be read: ',
             ProfileUnread: 'The chat profile could not be read, so it is left out of the calls: ',
+            BadRawNotes: 'The argument is not valid: rawNotes',
             Budget: "The day's budget is spent: replies are not checked and no new reminder is made until tomorrow.",
         }),
         NothingAppended: Object.freeze({
@@ -116,9 +127,13 @@ const ScribeLive = Object.freeze({
      */
     words(error) {
         const settings = ScribeLive.Settings;
-        const described =
-            error !== null && typeof error === settings.ObjectType && typeof error.message === settings.StringType;
-        return described ? error.message : String(error);
+        try {
+            const described =
+                error !== null && typeof error === settings.ObjectType && typeof error.message === settings.StringType;
+            return described ? error.message : String(error);
+        } catch {
+            return settings.Nothing;
+        }
     },
 
     /**
@@ -1931,13 +1946,72 @@ const ScribeLive = Object.freeze({
 
     /**
      * @param {object} live
-     * @return {Promise<Readonly<{ characters: readonly object[]|null, profile: string|null, notice: string|null }>>}
+     * @return {object|null}
+     */
+    savedSetup(live) {
+        try {
+            const saved = ScribeStore.read(live.storage, live.roomId, ScribeStore.Kind.Setup);
+            return ScribeLive.isObject(saved) ? saved : null;
+        } catch {
+            return null;
+        }
+    },
+
+    /**
+     * @param {object} live
+     * @param {Readonly<object>} cast
+     * @return {void}
+     */
+    persistSetup(live, cast) {
+        try {
+            const prior = ScribeLive.savedSetup(live) ?? {};
+            let notesInfo = null;
+            try {
+                notesInfo = live.rawNotes();
+            } catch {
+                notesInfo = null;
+            }
+            const merged = {
+                plotId: cast.storyRead ? (cast.story?.plotId ?? null) : (prior.plotId ?? null),
+                roomTitle: cast.storyRead ? (cast.story?.roomTitle ?? null) : (prior.roomTitle ?? null),
+                introId: cast.storyRead ? (cast.story?.introId ?? null) : (prior.introId ?? null),
+                story: cast.storyRead ? cast.story : (prior.story ?? null),
+                profile: cast.profileRead ? cast.profile : (prior.profile ?? null),
+                notes: notesInfo?.checked === true ? (notesInfo.text ?? null) : (prior.notes ?? null),
+                fetchedAt: new Date(live.clock.now()).toISOString(),
+            };
+            ScribeStore.write(live.storage, live.roomId, ScribeStore.Kind.Setup, merged);
+        } catch {
+            return;
+        }
+    },
+
+    /**
+     * @param {object} live
+     * @return {Readonly<{ story: object|null, profile: object|null, notes: string|null }>}
+     */
+    setupRecord(live) {
+        const saved = ScribeLive.savedSetup(live);
+        const cast = live.cast;
+        return Object.freeze({
+            story: cast?.storyRead ? cast.story : (saved?.story ?? null),
+            profile: cast?.profileRead ? cast.profile : (saved?.profile ?? null),
+            notes: saved?.notes ?? null,
+        });
+    },
+
+    /**
+     * @param {object} live
+     * @return {Promise<Readonly<{ story: object|null, profile: object|null, storyRead: boolean, storyFailed: boolean, profileRead: boolean, profileFailed: boolean, notice: string|null }>>}
      */
     cast(live) {
         const settings = ScribeLive.Settings;
         const messages = settings.Messages;
         if (live.cast !== null) {
             return Promise.resolve(live.cast);
+        }
+        if (live.closed) {
+            return Promise.resolve(settings.Uncast);
         }
         if (live.casting !== null) {
             return live.casting;
@@ -1952,29 +2026,34 @@ const ScribeLive = Object.freeze({
         };
 
         /**
-         * @return {Promise<Array<{ status: string, value?: *, reason?: * }>>}
+         * @return {Promise<{ story: { status: string, value?: *, reason?: * }, profile: { status: string, value?: *, reason?: * }|null }>}
          */
         const reads = async () => {
             const story = await settle(live.story);
             const told = story.status === settings.Fulfilled ? story.value : story.reason;
-            const plotId = ScribeLive.isObject(told) && ScribeLive.isText(told.plotId) ? told.plotId : null;
+            const rawPlotId = ScribeLive.isObject(told) && ScribeLive.isText(told.plotId) ? told.plotId.trim() : settings.Nothing;
+            const plotId = rawPlotId === settings.Nothing ? null : rawPlotId;
+            if (plotId === null) {
+                return { story, profile: null };
+            }
             const profile = await settle(
                 /**
-                 * @return {Promise<string|null>}
+                 * @return {Promise<object|null>}
                  */
                 () => live.profile(plotId),
             );
-            return [story, profile];
+            return { story, profile };
         };
-        live.casting = reads().then(
-            /**
-             * @param {Array<{ status: string, value?: *, reason?: * }>} settled
-             * @return {Readonly<{ characters: readonly object[]|null, profile: string|null, notice: string|null }>}
-             */
-            (settled) => {
-                const [story, profile] = settled;
+
+        /**
+         * @return {Promise<Readonly<{ story: object|null, profile: object|null, storyRead: boolean, storyFailed: boolean, profileRead: boolean, profileFailed: boolean, notice: string|null }>>}
+         */
+        const run = async () => {
+            try {
+                const { story, profile } = await reads();
                 live.casting = null;
-                const failed = [story, profile].filter(
+                const settled = profile === null ? [story] : [story, profile];
+                const failed = settled.filter(
                     /**
                      * @param {{ status: string }} result
                      * @return {boolean}
@@ -1989,26 +2068,61 @@ const ScribeLive = Object.freeze({
                     (result) => ScribeLive.words(result.reason) === ZetaSource.Settings.Messages.NoLogin,
                 );
                 if (live.closed || unseen) {
+                    if (!live.closed) {
+                        ScribeLive.announce(live);
+                    }
                     return settings.Uncast;
                 }
-                const read = story.status === settings.Fulfilled;
-                const profiled = profile.status === settings.Fulfilled;
+                const storyRead = story.status === settings.Fulfilled && ScribeLive.isObject(story.value);
+                const storyFailed = !storyRead;
+                const profileRead = profile !== null && profile.status === settings.Fulfilled;
+                const profileFailed = profile === null ? true : !profileRead;
                 const notices = [];
-                if (!read) {
-                    notices.push(messages.StoryUnread + ScribeLive.words(story.reason));
+                if (storyFailed) {
+                    const reason =
+                        story.status === settings.Fulfilled
+                            ? ZetaSource.Settings.Messages.Shape
+                            : ScribeLive.words(story.reason);
+                    notices.push(messages.StoryUnread + reason);
                 }
-                if (!profiled) {
+                if (profile !== null && !profileRead) {
                     notices.push(messages.ProfileUnread + ScribeLive.words(profile.reason));
                 }
-                live.cast = Object.freeze({
-                    characters: read ? story.value.characters : null,
-                    profile: profiled ? profile.value : null,
+                const cast = Object.freeze({
+                    story: storyRead ? story.value : null,
+                    profile: profileRead ? profile.value : null,
+                    storyRead,
+                    storyFailed,
+                    profileRead,
+                    profileFailed,
                     notice: notices.length === settings.NoCount ? null : notices.join(settings.Space),
                 });
-                return live.cast;
-            },
-        );
-        return live.casting;
+                let booked = false;
+                try {
+                    booked = live.keeper.view().booked === true;
+                } catch {
+                    booked = false;
+                }
+                if (booked) {
+                    live.cast = cast;
+                    if (storyRead || profileRead) {
+                        ScribeLive.persistSetup(live, cast);
+                    }
+                }
+                if (!live.closed) {
+                    ScribeLive.announce(live);
+                }
+                return cast;
+            } finally {
+                if (live.casting === pending) {
+                    live.casting = null;
+                }
+            }
+        };
+
+        const pending = run();
+        live.casting = pending;
+        return pending;
     },
 
     /**
@@ -2043,7 +2157,7 @@ const ScribeLive = Object.freeze({
             player: view.player,
             unread: view.unread,
             notes: given,
-            characters: cast.characters,
+            characters: cast.story?.characters ?? null,
             first: [...first],
             story,
         });
@@ -2076,7 +2190,7 @@ const ScribeLive = Object.freeze({
         }
         return ScribeReminder.compose({
             state: view.state, now, player: view.player, unread: view.unread,
-            notes: ScribeLive.standing(notes, view), characters: live.cast?.characters ?? null,
+            notes: ScribeLive.standing(notes, view), characters: live.cast?.story?.characters ?? null,
             first: ScribeLive.first(findings, view.state), story: recap.text,
         }).text;
     },
@@ -2299,15 +2413,6 @@ const ScribeLive = Object.freeze({
         let raised = [];
         let notes = null;
         if (remembered === undefined) {
-            let profile = null;
-            try {
-                profile = (await ScribeLive.cast(live)).profile;
-            } catch (error) {
-                live.problem = ScribeLive.words(error);
-            }
-            if (!ScribeLive.current(live, epoch)) {
-                return;
-            }
             if (asking.scene) {
                 const sceneNoted = { failure: null, retryable: false };
                 try {
@@ -2317,7 +2422,6 @@ const ScribeLive = Object.freeze({
                         messages: view.messages,
                         previous,
                         ask: ScribeLive.asker(live, roles.Scribe, sceneNoted),
-                        profile,
                     });
                 } catch (error) {
                     if (live.epoch === epoch && !sceneNoted.keyChanged) {
@@ -3790,6 +3894,33 @@ const ScribeLive = Object.freeze({
         }
         const latest = ScribeLive.answered(keeperView);
         const offer = ScribeLive.lines(live);
+        const builtSetup = live.cast === null ? null : ScribeSetup.build(live.cast.story, live.cast.profile, keeperView.player);
+        const setup =
+            live.cast === null
+                ? Object.freeze({
+                      read: false,
+                      reading: live.casting !== null,
+                      storyRead: false,
+                      storyFailed: false,
+                      shown: settings.NoCount,
+                      whole: settings.NoCount,
+                      profileRead: false,
+                      profileFailed: false,
+                      source: null,
+                      persona: null,
+                  })
+                : Object.freeze({
+                      read: true,
+                      reading: false,
+                      storyRead: live.cast.storyRead,
+                      storyFailed: live.cast.storyFailed,
+                      shown: builtSetup.shown,
+                      whole: builtSetup.whole,
+                      profileRead: live.cast.profileRead,
+                      profileFailed: live.cast.profileFailed,
+                      source: builtSetup.source,
+                      persona: builtSetup.persona,
+                  });
         return Object.freeze({
             now: record.now,
             ready: offer.ready,
@@ -3838,6 +3969,7 @@ const ScribeLive = Object.freeze({
             suggestion: record.suggestion,
             offer: live.offer,
             notice: live.cast === null ? null : live.cast.notice,
+            setup,
             understood:
                 understood === null
                     ? null
@@ -4062,9 +4194,26 @@ const ScribeLive = Object.freeze({
             },
 
             /**
-             * @return {Promise<string|null>}
+             * @return {Promise<Readonly<{ text: string|null, storyText: string|null, profileText: string|null, shown: number, whole: number, source: string|null, persona: string|null }>>}
              */
-            profile: async () => (await ScribeLive.cast(live)).profile,
+            setup: async () => {
+                const cast = await ScribeLive.cast(live);
+                return ScribeSetup.build(cast.story, cast.profile, live.keeper.view().player);
+            },
+
+            /**
+             * @return {Readonly<{ story: object|null, profile: object|null, notes: string|null }>}
+             */
+            setupRecord: () => ScribeLive.setupRecord(live),
+
+            /**
+             * @return {void}
+             */
+            ensureCast: () => {
+                if (!live.closed && live.keeper.view().booked === true && live.cast === null && live.casting === null) {
+                    void ScribeLive.cast(live);
+                }
+            },
 
             /**
              * @return {Promise<void>}
@@ -4112,12 +4261,16 @@ const ScribeLive = Object.freeze({
     },
 
     /**
-     * @param {{ keeper: { view: Function, rule: Function, file: Function, preview: Function }, storage: { get: Function, set: Function, remove: Function, list: Function }, roomId: string, ask: Function, clock: { now: Function }, notify: Function, story: () => Promise<object>, profile: (plotId: string|null) => Promise<string|null> }} options
+     * @param {{ keeper: { view: Function, rule: Function, file: Function, preview: Function }, storage: { get: Function, set: Function, remove: Function, list: Function }, roomId: string, ask: Function, clock: { now: Function }, notify: Function, story: () => Promise<object>, profile: (plotId: string|null) => Promise<object|null>, rawNotes?: (() => { checked: boolean, text: string|null })|null }} options
      * @return {Readonly<object>}
+     * @throws {Error}
      */
     open(options) {
-        const { keeper, storage, roomId, ask, clock, notify, story, profile } = options;
+        const { keeper, storage, roomId, ask, clock, notify, story, profile, rawNotes = null } = options;
         const settings = ScribeLive.Settings;
+        if (rawNotes !== null && typeof rawNotes !== settings.FunctionType) {
+            throw new Error(settings.Messages.BadRawNotes);
+        }
         const live = {
             keeper,
             storage,
@@ -4127,6 +4280,7 @@ const ScribeLive = Object.freeze({
             notify,
             story,
             profile,
+            rawNotes: rawNotes ?? (() => settings.DefaultNotes),
             calls: [],
             again: null,
             recounting: null,
@@ -4161,7 +4315,11 @@ const ScribeLive = Object.freeze({
             cans: { state: null, byKey: new Map() },
         };
         ScribeLive.load(live);
-        live.watching = !keeper.view().reader;
+        const initialView = keeper.view();
+        live.watching = !initialView.reader;
+        if (initialView.booked === true) {
+            void ScribeLive.cast(live);
+        }
         return ScribeLive.handle(live);
     },
 });

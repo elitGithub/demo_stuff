@@ -1,5 +1,5 @@
-const PanelStyle = Object.freeze({
-    Text: `:host {
+const PanelStyle = (() => {
+    const tokens = `:host {
     all: initial;
     --scribe-width: 360px;
     --scribe-tab-width: 3rem;
@@ -41,7 +41,9 @@ const PanelStyle = Object.freeze({
         --scribe-shadow: rgba(0, 0, 0, 0.6);
     }
 }
-
+`;
+    return Object.freeze({
+        Text: `${tokens}
 *,
 *::before,
 *::after {
@@ -466,4 +468,93 @@ details summary {
     }
 }
 `,
-});
+        PlotText: `${tokens}
+*,
+*::before,
+*::after {
+    box-sizing: border-box;
+}
+
+[hidden] {
+    display: none !important;
+}
+
+p,
+button {
+    unicode-bidi: isolate;
+}
+
+.plot-export {
+    position: fixed;
+    right: var(--scribe-gap);
+    bottom: var(--scribe-gap);
+    z-index: var(--scribe-layer);
+    max-width: calc(100vw - 1.5rem);
+    display: flex;
+    flex-wrap: wrap;
+    align-items: center;
+    gap: var(--scribe-gap-small);
+    padding: var(--scribe-gap-small) var(--scribe-gap);
+    background: var(--scribe-panel);
+    color: var(--scribe-ink);
+    border: 1px solid var(--scribe-line);
+    border-radius: var(--scribe-radius);
+    box-shadow: 0 2px 8px var(--scribe-shadow);
+    font-family: var(--scribe-font);
+    font-size: 14px;
+    line-height: 1.45;
+    text-align: left;
+}
+
+.plot-export-button {
+    font: inherit;
+    color: var(--scribe-accent-ink);
+    background: var(--scribe-accent);
+    border: 1px solid var(--scribe-accent);
+    border-radius: var(--scribe-radius);
+    padding: var(--scribe-gap-small) var(--scribe-gap);
+    min-height: 2.25rem;
+    cursor: pointer;
+    transition: background-color 120ms ease, border-color 120ms ease;
+}
+
+.plot-export-button:hover:not(:disabled) {
+    background: var(--scribe-accent-hover);
+    border-color: var(--scribe-accent-hover);
+}
+
+.plot-export-button:disabled {
+    color: var(--scribe-disabled);
+    border-color: var(--scribe-line);
+    background: var(--scribe-surface);
+    cursor: not-allowed;
+}
+
+.plot-export-button:focus-visible {
+    outline: 3px solid var(--scribe-focus);
+    outline-offset: 2px;
+}
+
+.plot-export-status {
+    margin: 0;
+    min-width: 0;
+    color: var(--scribe-muted);
+    overflow-wrap: anywhere;
+}
+
+.plot-export-status.error {
+    color: var(--scribe-danger);
+}
+
+@media (prefers-reduced-motion: reduce) {
+    *,
+    *::before,
+    *::after {
+        transition: none !important;
+        animation: none !important;
+        scroll-behavior: auto !important;
+    }
+}
+`,
+    });
+})();

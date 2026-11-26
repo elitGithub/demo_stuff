@@ -23,6 +23,7 @@ export default class PanelHarness {
         'bench/BenchView',
         'page/ScribeStore',
         'page/ScribeCloud',
+        'page/ScribeSetup',
     ]);
 
     static StandIns = Object.freeze({
@@ -136,6 +137,33 @@ export default class PanelHarness {
         this.forkOrigin = options.forkOrigin ?? (() => null);
         this.listForkRooms = options.listForkRooms ?? (async () => ({ rooms: [], nextCursor: null }));
         this.recoverFork = options.recoverFork ?? (async () => ({ ok: false, reason: 'Unavailable' }));
+        this.exportPlot = Object.hasOwn(options, 'exportPlot')
+            ? options.exportPlot
+            : async () => ({
+                  plot: {
+                      plotId: 'plot-1',
+                      name: 'Harbour Lights',
+                      summary: '',
+                      description: '',
+                      about: '',
+                      creatorComment: '',
+                      language: null,
+                      mode: null,
+                      hashtags: [],
+                      characters: [],
+                      chatProfiles: [],
+                      opening: [],
+                      lore: [],
+                      raw: null,
+                  },
+                  roomId: 'harbour-room',
+                  roomTitle: null,
+                  introId: null,
+                  profile: null,
+                  notes: null,
+                  chat: { completeHistory: true, messages: [] },
+              });
+        this.AbortController = Object.hasOwn(options, 'AbortController') ? options.AbortController : AbortController;
     }
 
     /**
@@ -216,6 +244,8 @@ export default class PanelHarness {
                 this.downloads.push({ name, text });
             },
             clock: this.clock,
+            exportPlot: this.exportPlot,
+            AbortController: this.AbortController,
         });
         return this;
     }

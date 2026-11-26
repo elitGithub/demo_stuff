@@ -19,6 +19,20 @@ export default class PanelCloud {
     }
 
     /**
+     * @return {boolean}
+     */
+    notesChecked() {
+        return this.current.checkedNotes === true;
+    }
+
+    /**
+     * @return {string|null}
+     */
+    rawNotes() {
+        return this.current.rawNotes ?? null;
+    }
+
+    /**
      * @param {string} name
      * @return {Array<Array<*>>}
      */

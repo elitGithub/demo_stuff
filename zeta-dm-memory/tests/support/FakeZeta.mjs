@@ -25,7 +25,24 @@ export default class FakeZeta {
         this.room = room;
         this.token = token;
         this.plot = FakeZeta.Plot;
+        this.roomTitle = 'The harbour tale';
+        this.plotName = 'Harbour Lights';
+        this.shortDescription = 'A short tale of a harbour.';
+        this.longDescription = 'A longer tale of a harbour and its lamps.';
+        this.about = '';
+        this.isAboutPublic = false;
+        this.creatorComment = '';
+        this.language = 'en';
+        this.mode = 'STORY';
+        this.hashtags = [];
         this.characters = [];
+        this.chatProfiles = [];
+        this.introId = null;
+        this.intros = [];
+        this.lorebooks = [];
+        this.conversations = [];
+        this.plugins = [];
+        this.plotFailure = null;
         this.profile = FakeZeta.Profile;
         this.persona = FakeZeta.Persona;
         this.repeat = null;
@@ -139,6 +156,42 @@ export default class FakeZeta {
     }
 
     /**
+     * @param {boolean} includePlotOnly
+     * @return {object}
+     */
+    plotBody(includePlotOnly = false) {
+        const body = {
+            id: this.plot,
+            name: this.plotName,
+            shortDescription: this.shortDescription,
+            longDescription: this.longDescription,
+            characters: this.characters.map((character, index) => ({
+                id: `character-${index + 1}`,
+                plotId: this.plot,
+                imageUrl: null,
+                isProfileImageDeletedByAbusing: false,
+                ...character,
+            })),
+            chatProfiles: this.chatProfiles,
+            conversations: this.conversations,
+            intros: this.intros,
+            lorebooks: this.lorebooks,
+            creatorComment: this.creatorComment,
+            hashtags: this.hashtags,
+            language: this.language,
+            mode: this.mode,
+            isLongDescriptionPublic: true,
+            isExampleConversationPublic: false,
+        };
+        if (includePlotOnly) {
+            body.isAboutPublic = this.isAboutPublic;
+            body.about = this.about;
+            body.plugins = this.plugins;
+        }
+        return body;
+    }
+
+    /**
      * @return {object}
      */
     roomBody() {
@@ -147,23 +200,10 @@ export default class FakeZeta {
             createdAt: '2026-01-01T00:00:00.000Z',
             lastMessage: this.messages.length ? { id: this.messages.at(-1).id } : null,
             isActive: true,
-            title: 'The harbour tale',
+            title: this.roomTitle,
+            introId: this.introId,
             unreadCount: 0,
-            plot: {
-                id: this.plot,
-                name: 'Harbour Lights',
-                shortDescription: 'A short tale of a harbour.',
-                longDescription: 'A longer tale of a harbour and its lamps.',
-                characters: this.characters.map((character, index) => ({
-                    id: `character-${index + 1}`,
-                    plotId: this.plot,
-                    imageUrl: null,
-                    isProfileImageDeletedByAbusing: false,
-                    ...character,
-                })),
-                intros: [],
-                lorebooks: [],
-            },
+            plot: this.plotBody(false),
             savedAt: null,
             penalty: null,
         };
@@ -186,9 +226,10 @@ export default class FakeZeta {
         const story = {
             [room]: () => (this.plot === null ? null : this.roomBody()),
         };
-        if (this.plot !== null) {
-            const plot = `/v1/plots/${encodeURIComponent(this.plot)}`;
-            story[`${plot}/rooms/${encodeURIComponent(this.room)}/user-personas/selected`] = () =>
+        const plotRoute = this.plot === null ? null : `/v1/plots/${encodeURIComponent(this.plot)}`;
+        if (plotRoute !== null) {
+            story[plotRoute] = () => this.plotBody(true);
+            story[`${plotRoute}/rooms/${encodeURIComponent(this.room)}/user-personas/selected`] = () =>
                 this.profile === null ? null : { name: this.persona, profileImageUrl: null, description: this.profile };
         }
         const known = address.pathname === `${room}/messages` || Object.hasOwn(story, address.pathname);
@@ -199,6 +240,15 @@ export default class FakeZeta {
             return FakeZeta.reply(401, 'Login required.');
         }
         if (Object.hasOwn(story, address.pathname)) {
+            if (plotRoute !== null && address.pathname === plotRoute && this.plotFailure !== null) {
+                if (typeof this.plotFailure === 'number') {
+                    return FakeZeta.reply(this.plotFailure, 'Plot failed.');
+                }
+                if (this.plotFailure instanceof Error) {
+                    throw this.plotFailure;
+                }
+                return this.plotFailure;
+            }
             const body = story[address.pathname]();
             return body === null ? FakeZeta.reply(404, 'Nothing here.') : FakeZeta.reply(200, JSON.stringify(body));
         }

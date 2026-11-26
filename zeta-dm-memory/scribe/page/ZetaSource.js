@@ -35,7 +35,52 @@ const ZetaSource = Object.freeze({
         NameSeparator: ': ',
         PlotIdPaths: Object.freeze([Object.freeze(['plotId']), Object.freeze(['plot', 'id'])]),
         PlotField: 'plot',
+        IdField: 'id',
+        TitleField: 'title',
+        IntroIdField: 'introId',
+        CreatedAtField: 'createdAt',
+        ShortDescriptionField: 'shortDescription',
+        LongDescriptionField: 'longDescription',
+        AboutField: 'about',
+        CreatorCommentField: 'creatorComment',
+        LanguageField: 'language',
+        ModeField: 'mode',
+        HashtagsField: 'hashtags',
         CharactersField: 'characters',
+        ChatProfilesField: 'chatProfiles',
+        SummaryField: 'summary',
+        IntrosField: 'intros',
+        ConversationField: 'conversation',
+        MessagesField: 'messages',
+        ContentField: 'content',
+        TextField: 'text',
+        SpeakerNameField: 'speakerName',
+        SenderIdField: 'senderId',
+        SenderTypeField: 'senderType',
+        NarratorSenderId: '_NARRATOR_',
+        NarratorSpeaker: 'Narrator',
+        UserSenderType: 'USER',
+        UserPlaceholder: '{{user}}',
+        LorebooksField: 'lorebooks',
+        LoreNameFields: Object.freeze(['name', 'title', 'key']),
+        LoreKeysField: 'keys',
+        LoreTextFields: Object.freeze(['content', 'description', 'text', 'value']),
+        PersonaSource: 'Persona',
+        RawPlotFields: Object.freeze([
+            'characters',
+            'chatProfiles',
+            'intros',
+            'lorebooks',
+            'conversations',
+            'plugins',
+            'infoBoxSetting',
+            'cyoaSetting',
+            'creator',
+            'isLongDescriptionPublic',
+            'isExampleConversationPublic',
+            'isAboutPublic',
+        ]),
+        ListSeparator: ', ',
         NameField: 'name',
         DescriptionField: 'description',
         LongestProfile: 2000,
@@ -64,6 +109,20 @@ const ZetaSource = Object.freeze({
          */
         get RoomPath() {
             return /^(?:\/[a-z]{2,3}(?:-[a-z0-9]{2,8})?)?\/rooms\/([^/]+)/i;
+        },
+
+        /**
+         * @return {RegExp}
+         */
+        get PlotPath() {
+            return /^(?:\/[a-z]{2,3}(?:-[a-z0-9]{2,8})?)?\/plots\/([^/]+)/i;
+        },
+
+        /**
+         * @return {RegExp}
+         */
+        get QueryOrHash() {
+            return /[?#]/;
         },
 
         /**
@@ -111,6 +170,54 @@ const ZetaSource = Object.freeze({
     },
 
     /**
+     * @param {*} pathname
+     * @return {string|null}
+     */
+    plotPage(pathname) {
+        const settings = ZetaSource.Settings;
+        if (typeof pathname !== settings.StringType) {
+            return null;
+        }
+        const cleanPath = pathname.split(settings.QueryOrHash, 1)[0];
+        const match = settings.PlotPath.exec(cleanPath);
+        if (match === null) {
+            return null;
+        }
+        const decoded = ZetaSource.quietly(null, decodeURIComponent, match[settings.IdGroup]);
+        return ZetaSource.roomId(decoded) ? decoded : null;
+    },
+
+    /**
+     * @param {*} value
+     * @return {string}
+     */
+    trimmed(value) {
+        const settings = ZetaSource.Settings;
+        return typeof value === settings.StringType ? value.trim() : settings.Nothing;
+    },
+
+    /**
+     * @param {*} value
+     * @return {string|null}
+     */
+    optionalText(value) {
+        const text = ZetaSource.trimmed(value);
+        return text === ZetaSource.Settings.Nothing ? null : text;
+    },
+
+    /**
+     * @param {*} value
+     * @return {string|null}
+     */
+    identifier(value) {
+        const settings = ZetaSource.Settings;
+        if (typeof value === settings.NumberType && Number.isFinite(value)) {
+            return String(value);
+        }
+        return ZetaSource.optionalText(value);
+    },
+
+    /**
      * @param {*} value
      * @return {boolean}
      */
@@ -132,7 +239,12 @@ const ZetaSource = Object.freeze({
      * @return {boolean}
      */
     roomId(value) {
-        return typeof value === 'string' && value.trim() !== '' && value !== '.' && value !== '..' &&
+        const settings = ZetaSource.Settings;
+        if (typeof value !== settings.StringType) {
+            return false;
+        }
+        const trimmed = value.trim();
+        return trimmed !== settings.Nothing && trimmed !== '.' && trimmed !== '..' &&
             ZetaSource.quietly(null, encodeURIComponent, value) !== null;
     },
 
@@ -1000,14 +1112,37 @@ const ZetaSource = Object.freeze({
     },
 
     /**
-     * @param {{ token: *, roomId: *, pause: * }} request
+     * @param {{ token: *, pause: *, signal?: AbortSignal }} request
+     * @return {void}
+     * @throws {Error}
+     */
+    readyRequest(request) {
+        const settings = ZetaSource.Settings;
+        const words = settings.Messages;
+        if (!ZetaSource.isObject(request)) {
+            throw ZetaSource.failure(words.NoLogin, null, false);
+        }
+        request.signal?.throwIfAborted();
+        if (!ZetaSource.filled(request.token)) {
+            throw ZetaSource.failure(words.NoLogin, null, false);
+        }
+        if (typeof request.pause !== settings.FunctionType) {
+            throw ZetaSource.failure(words.NoPause, null, false);
+        }
+    },
+
+    /**
+     * @param {{ token: *, roomId: *, pause: *, signal?: AbortSignal }} request
      * @return {void}
      * @throws {Error}
      */
     ready(request) {
-        request.signal?.throwIfAborted();
         const settings = ZetaSource.Settings;
         const words = settings.Messages;
+        if (!ZetaSource.isObject(request)) {
+            throw ZetaSource.failure(words.NoLogin, null, false);
+        }
+        request.signal?.throwIfAborted();
         if (!ZetaSource.filled(request.token)) {
             throw ZetaSource.failure(words.NoLogin, null, false);
         }
@@ -1105,7 +1240,7 @@ const ZetaSource = Object.freeze({
         };
         const answered = await ZetaSource.abortable(request.signal, () => Promise.race([
             reach(),
-            ZetaSource.wait({ pause: request.pause }, settings.TimeoutMs).then(
+            ZetaSource.wait({ pause: request.pause, signal: request.signal }, settings.TimeoutMs).then(
                 /**
                  * @return {null}
                  */
@@ -1239,13 +1374,220 @@ const ZetaSource = Object.freeze({
     plotOf(body) {
         const settings = ZetaSource.Settings;
         for (const path of settings.PlotIdPaths) {
-            const value = ZetaSource.at(body, path);
-            const finite = typeof value === settings.NumberType && Number.isFinite(value);
-            if (finite || ZetaSource.filled(value)) {
-                return String(value);
+            const resolved = ZetaSource.identifier(ZetaSource.at(body, path));
+            if (resolved !== null) {
+                return resolved;
             }
         }
         return null;
+    },
+
+    /**
+     * @param {*} rawPlot
+     * @param {string|number|null} fallbackPlotId
+     * @param {string|number|null} introId
+     * @return {Readonly<{ plotId: string, name: string, summary: string, description: string, about: string, creatorComment: string, language: string|null, mode: string|null, hashtags: ReadonlyArray<string>, characters: ReadonlyArray<Readonly<{ id: string|null, name: string, description: string }>>, chatProfiles: ReadonlyArray<Readonly<{ id: string|null, name: string, summary: string, description: string }>>, opening: ReadonlyArray<Readonly<{ speaker: string, text: string }>>, lore: ReadonlyArray<Readonly<{ name: string, text: string }>>, raw: Readonly<object> }>}
+     * @throws {Error}
+     */
+    parsePlot(rawPlot, fallbackPlotId = null, introId = null) {
+        const settings = ZetaSource.Settings;
+        const words = settings.Messages;
+        if (!ZetaSource.isObject(rawPlot)) {
+            throw ZetaSource.failure(words.NoPlot, null, false);
+        }
+        const plotId = ZetaSource.identifier(rawPlot[settings.IdField]) ?? ZetaSource.identifier(fallbackPlotId);
+        if (plotId === null) {
+            throw ZetaSource.failure(words.NoPlot, null, false);
+        }
+        const name = ZetaSource.trimmed(rawPlot[settings.NameField]);
+        const summary = ZetaSource.trimmed(rawPlot[settings.ShortDescriptionField]);
+        const description = ZetaSource.trimmed(rawPlot[settings.LongDescriptionField]);
+        const about = ZetaSource.trimmed(rawPlot[settings.AboutField]);
+        const creatorComment = ZetaSource.trimmed(rawPlot[settings.CreatorCommentField]);
+        const language = ZetaSource.optionalText(rawPlot[settings.LanguageField]);
+        const mode = ZetaSource.optionalText(rawPlot[settings.ModeField]);
+        const hashtags = [];
+        if (Array.isArray(rawPlot[settings.HashtagsField])) {
+            for (const tag of rawPlot[settings.HashtagsField]) {
+                const clean = ZetaSource.trimmed(tag);
+                if (clean !== settings.Nothing) {
+                    hashtags.push(clean);
+                }
+            }
+        }
+        const characters = [];
+        const characterNames = new Map();
+        if (Array.isArray(rawPlot[settings.CharactersField])) {
+            for (const item of rawPlot[settings.CharactersField]) {
+                if (!ZetaSource.isObject(item)) {
+                    continue;
+                }
+                const characterName = ZetaSource.trimmed(item[settings.NameField]);
+                if (characterName === settings.Nothing) {
+                    continue;
+                }
+                const characterId = ZetaSource.identifier(item[settings.IdField]);
+                const characterDescription = ZetaSource.trimmed(item[settings.DescriptionField]);
+                characters.push(
+                    Object.freeze({
+                        id: characterId,
+                        name: characterName,
+                        description: characterDescription,
+                    }),
+                );
+                if (characterId !== null && !characterNames.has(characterId)) {
+                    characterNames.set(characterId, characterName);
+                }
+            }
+        }
+        const chatProfiles = [];
+        if (Array.isArray(rawPlot[settings.ChatProfilesField])) {
+            for (const item of rawPlot[settings.ChatProfilesField]) {
+                if (!ZetaSource.isObject(item)) {
+                    continue;
+                }
+                const profileName = ZetaSource.trimmed(item[settings.NameField]);
+                const profileSummary = ZetaSource.trimmed(item[settings.SummaryField]);
+                const profileDescription = ZetaSource.trimmed(item[settings.DescriptionField]);
+                if (
+                    profileName === settings.Nothing &&
+                    profileSummary === settings.Nothing &&
+                    profileDescription === settings.Nothing
+                ) {
+                    continue;
+                }
+                chatProfiles.push(
+                    Object.freeze({
+                        id: ZetaSource.identifier(item[settings.IdField]),
+                        name: profileName,
+                        summary: profileSummary,
+                        description: profileDescription,
+                    }),
+                );
+            }
+        }
+        const opening = [];
+        const intros = rawPlot[settings.IntrosField];
+        if (Array.isArray(intros) && intros.length > 0) {
+            const wantedIntroId = ZetaSource.identifier(introId);
+            let chosenIntro = null;
+            if (wantedIntroId !== null) {
+                for (const candidate of intros) {
+                    if (ZetaSource.isObject(candidate) && ZetaSource.identifier(candidate[settings.IdField]) === wantedIntroId) {
+                        chosenIntro = candidate;
+                        break;
+                    }
+                }
+            }
+            if (chosenIntro === null) {
+                chosenIntro = intros[0];
+            }
+            const conversation = ZetaSource.isObject(chosenIntro) ? chosenIntro[settings.ConversationField] : null;
+            const introMessages =
+                ZetaSource.isObject(conversation) && Array.isArray(conversation[settings.MessagesField])
+                    ? conversation[settings.MessagesField]
+                    : [];
+            for (const entry of introMessages) {
+                if (!ZetaSource.isObject(entry)) {
+                    continue;
+                }
+                const content = entry[settings.ContentField];
+                let messageText = settings.Nothing;
+                if (typeof content === settings.StringType) {
+                    messageText = content.trim();
+                } else if (ZetaSource.isObject(content)) {
+                    messageText = ZetaSource.trimmed(content[settings.TextField]);
+                }
+                if (messageText === settings.Nothing) {
+                    continue;
+                }
+                let speaker = ZetaSource.trimmed(entry[settings.SpeakerNameField]);
+                if (speaker === settings.Nothing) {
+                    const senderId = ZetaSource.identifier(entry[settings.SenderIdField]);
+                    if (senderId === settings.NarratorSenderId) {
+                        speaker = settings.NarratorSpeaker;
+                    } else if (senderId !== null && characterNames.has(senderId)) {
+                        speaker = characterNames.get(senderId);
+                    } else if (entry[settings.SenderTypeField] === settings.UserSenderType) {
+                        speaker = settings.UserPlaceholder;
+                    }
+                }
+                opening.push(Object.freeze({ speaker, text: messageText }));
+            }
+        }
+        const lore = [];
+        if (Array.isArray(rawPlot[settings.LorebooksField])) {
+            for (const entry of rawPlot[settings.LorebooksField]) {
+                if (!ZetaSource.isObject(entry)) {
+                    continue;
+                }
+                let loreText = settings.Nothing;
+                for (const field of settings.LoreTextFields) {
+                    const candidate = ZetaSource.trimmed(entry[field]);
+                    if (candidate !== settings.Nothing) {
+                        loreText = candidate;
+                        break;
+                    }
+                }
+                if (loreText === settings.Nothing) {
+                    continue;
+                }
+                let loreName = settings.Nothing;
+                for (const field of settings.LoreNameFields) {
+                    const candidate = ZetaSource.trimmed(entry[field]);
+                    if (candidate !== settings.Nothing) {
+                        loreName = candidate;
+                        break;
+                    }
+                }
+                if (loreName === settings.Nothing && Array.isArray(entry[settings.LoreKeysField])) {
+                    const keys = [];
+                    for (const key of entry[settings.LoreKeysField]) {
+                        const clean = ZetaSource.trimmed(key);
+                        if (clean !== settings.Nothing) {
+                            keys.push(clean);
+                        }
+                    }
+                    loreName = keys.join(settings.ListSeparator);
+                }
+                lore.push(Object.freeze({ name: loreName, text: loreText }));
+            }
+        }
+        const raw = {};
+        for (const field of settings.RawPlotFields) {
+            if (!Object.hasOwn(rawPlot, field)) {
+                continue;
+            }
+            const cloned = ZetaSource.quietly(
+                undefined,
+                /**
+                 * @return {*}
+                 */
+                () => {
+                    const encoded = JSON.stringify(rawPlot[field]);
+                    return encoded === undefined ? undefined : JSON.parse(encoded);
+                },
+            );
+            if (cloned !== undefined) {
+                raw[field] = cloned;
+            }
+        }
+        return Object.freeze({
+            plotId,
+            name,
+            summary,
+            description,
+            about,
+            creatorComment,
+            language,
+            mode,
+            hashtags: Object.freeze(hashtags),
+            characters: Object.freeze(characters),
+            chatProfiles: Object.freeze(chatProfiles),
+            opening: Object.freeze(opening),
+            lore: Object.freeze(lore),
+            raw: Object.freeze(raw),
+        });
     },
 
     /**
@@ -1279,8 +1621,8 @@ const ZetaSource = Object.freeze({
     },
 
     /**
-     * @param {{ fetch: Function, token: string|null, roomId: string|null, pause: Function }} request
-     * @return {Promise<Readonly<{ characters: ReadonlyArray<Readonly<{ name: string, description: string }>>, plotId: string }>>}
+     * @param {{ fetch: Function, token: string|null, roomId: string|null, pause: Function, signal?: AbortSignal }} request
+     * @return {Promise<Readonly<object>>}
      * @throws {Error}
      */
     async story(request) {
@@ -1294,40 +1636,57 @@ const ZetaSource = Object.freeze({
              */
             () => ZetaSource.get(request, settings.RoomsPath + encodeURIComponent(request.roomId)),
         );
-        const plot = ZetaSource.plotOf(room.body);
-        if (plot === null) {
+        const plotId = ZetaSource.plotOf(room.body);
+        if (plotId === null) {
             throw ZetaSource.failure(words.NoPlot, room.status, false);
         }
-        const listed = ZetaSource.at(room.body, [settings.PlotField, settings.CharactersField]);
-        if (!Array.isArray(listed)) {
-            throw Object.assign(ZetaSource.failure(words.Shape, room.status, false), { plotId: plot });
+        const rawPlot = room.body[settings.PlotField];
+        if (!ZetaSource.isObject(rawPlot)) {
+            throw Object.assign(ZetaSource.failure(words.NoPlot, room.status, false), { plotId });
         }
-        const characters = [];
-        for (const item of listed) {
-            if (!ZetaSource.isObject(item) || !ZetaSource.filled(item[settings.NameField])) {
-                continue;
-            }
-            const description = item[settings.DescriptionField];
-            characters.push(
-                Object.freeze({
-                    name: item[settings.NameField],
-                    description: typeof description === settings.StringType ? description : settings.Nothing,
-                }),
-            );
-        }
-        return Object.freeze({ characters: Object.freeze(characters), plotId: plot });
+        const roomTitle = ZetaSource.optionalText(room.body[settings.TitleField]);
+        const introId = ZetaSource.identifier(room.body[settings.IntroIdField]);
+        const createdAt = ZetaSource.optionalText(room.body[settings.CreatedAtField]);
+        const parsed = ZetaSource.parsePlot(rawPlot, plotId, introId);
+        return Object.freeze({ ...parsed, roomTitle, introId, createdAt });
     },
 
     /**
-     * @param {{ fetch: Function, token: string|null, roomId: string|null, pause: Function }} request
+     * @param {{ fetch: Function, token: string|null, plotId: string|null, introId?: string|number|null, pause: Function, signal?: AbortSignal }} request
+     * @return {Promise<Readonly<object>>}
+     * @throws {Error}
+     */
+    async plot(request) {
+        const settings = ZetaSource.Settings;
+        const words = settings.Messages;
+        ZetaSource.readyRequest(request);
+        if (!ZetaSource.roomId(request.plotId)) {
+            throw ZetaSource.failure(words.NoPlot, null, false);
+        }
+        const path = settings.PlotsPath + encodeURIComponent(request.plotId);
+        const read = await ZetaSource.retried(
+            request,
+            /**
+             * @return {Promise<{ status: number, body: * }>}
+             */
+            () => ZetaSource.get(request, path),
+        );
+        if (!ZetaSource.isObject(read.body)) {
+            throw ZetaSource.failure(words.Shape, read.status, false);
+        }
+        return ZetaSource.parsePlot(read.body, request.plotId, request.introId ?? null);
+    },
+
+    /**
+     * @param {{ fetch: Function, token: string|null, roomId: string|null, pause: Function, signal?: AbortSignal }} request
      * @param {string|null} plotId
-     * @return {Promise<string|null>}
+     * @return {Promise<Readonly<{ source: string, name: string|null, description: string, text: string }>|null>}
      * @throws {Error}
      */
     async profile(request, plotId = null) {
         const settings = ZetaSource.Settings;
         ZetaSource.ready(request);
-        if (!ZetaSource.filled(plotId)) {
+        if (!ZetaSource.roomId(plotId)) {
             return null;
         }
         const path =
@@ -1360,10 +1719,15 @@ const ZetaSource = Object.freeze({
         if (detail === settings.Nothing) {
             return null;
         }
-        const name = ZetaSource.at(read.body, [settings.NameField]);
-        const title = typeof name === settings.StringType ? name.trim() : settings.Nothing;
-        const text = title === settings.Nothing ? detail : `${title}${settings.NameSeparator}${detail}`;
-        return Array.from(text).slice(0, settings.LongestProfile).join(settings.Nothing);
+        const name = ZetaSource.optionalText(read.body[settings.NameField]);
+        const combined = name === null ? detail : `${name}${settings.NameSeparator}${detail}`;
+        const text = Array.from(combined).slice(0, settings.LongestProfile).join(settings.Nothing);
+        return Object.freeze({
+            source: settings.PersonaSource,
+            name,
+            description: detail,
+            text,
+        });
     },
 
     /**

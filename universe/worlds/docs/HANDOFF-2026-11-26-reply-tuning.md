@@ -1,4 +1,4 @@
-# Handoff 2026-11-26: Worlds reply tuning, project 1 (Task 2 under review)
+# Handoff 2026-11-26: Worlds reply tuning, project 1 (Task 2 committed, fix round 2 open)
 
 For the next agent session on another PC. That session will not have this PC's agent memory
 (`~/.claude/projects/-var-www-demo-stuff/memory/`) or the loop files (`~/.claude/projects/-var-www-demo-stuff/
@@ -8,23 +8,30 @@ sdd-snapshots/reply-tuning/`), so everything needed is in this file. Read it in 
 
 ## 1. Where things stand
 
-- HEAD `90cfe3c` ("universe: add character cards and reply tuning") = reply tuning Task 1 plus the catalog fix
-  rounds 3-6. The operator commits; agents never do.
-- **Task 2 (character card end to end, appearance filed into the book): NOT commit-ready: scoped re-review of fix
-  round 1 running.** Built by a Sonnet implementer (section 5). Opus review: 2 High, 4 Medium, 9 Low, 1 Nit,
-  checked against the code (section 6). Fix round 1 (section 6a, operator's rulings included) is done: all 10 test
-  files pass (ui 56, http 36, catalog 54, config 14, engine 24, scribe 84, store 30, openrouter 49, seed 37, sync
-  8). Implementer's calls for the re-review to check: a Pin older than the newest decided value is skipped
-  outright (no longer sets `pinned`); a build saying "dragon form" with no height/length wording stays in the
-  unscoped slot (`ScribeCategory.scope` only returns a form together with a dimension); `?` -> `unknown` matches an
-  exact `?` only; `decided`/`exact` are accepted through `tellCommit`. If the tree moved before the re-review
-  reported, rerun it (section 7, limited to the fix round and these calls), then the own checks.
-- **Pending question to the operator (2026-11-26), after "Again with "broken code against tests" loop?":** for
-  Tasks 3-8, (a) the plan maps every existing feature that touches the task's data (for the book: decided values,
-  pins, build scope, strike marks, refinements, merges, splits) with a test case each; (b) the implementer gets the
-  review's attack list up front; (c) implementers stop running mutant checks, the reviewer keeps them. Cause given
-  to the operator: the Task 2 plan did not map the book's existing features, so the implementer's passing tests
-  covered only the listed cases.
+- Commits: `90cfe3c` reply tuning Task 1 plus the catalog fix rounds 3-6; `0691ddc` ("universe: expand character
+  cards and clarify unknown values") Task 2 plus its fix round 1, this handoff and `PROMPTS-TO-CHECK.md`. The
+  operator commits; agents never do. Later edits to this file (sections 1-3 and 6b) are uncommitted until the
+  operator commits them.
+- **Task 2 (character card end to end, appearance filed into the book): NOT commit-ready: fix round 2 open.**
+  - Built by a Sonnet implementer (section 5); Opus review: 2 High, 4 Medium, 9 Low, 1 Nit, checked against the
+    code (section 6).
+  - Fix round 1 (section 6a, the operator's rulings included) built: all 10 test files pass (ui 56, http 36,
+    catalog 54, config 14, engine 24, scribe 84, store 30, openrouter 49, seed 37, sync 8). Committed in `0691ddc`
+    while its scoped re-review was still running.
+  - Scoped re-review of fix round 1: 3 Medium, 4 Low, 1 law hit left (section 6b). Seeder dry-run counts unchanged
+    on `0691ddc`.
+  - **Fix round 2 proposed (section 6b), not dispatched.** On 2026-11-26 the operator said "no, file everything in
+    the handoff" instead of a go: the next session asks the operator for the go before dispatching.
+- **Open question to the operator** (asked 2026-11-26, after "Again with "broken code against tests" loop?" and
+  "Did it fix, or is it doing loops against code it breaks intentionally?"; not answered). Proposed way of working
+  for fix round 2 and Tasks 3-8:
+  - (a) the plan maps every existing feature that touches the task's data, with a test case each (for the book:
+    decided values, pins, build scope, strike marks, refinements, merges, splits);
+  - (b) the implementer gets the review's attack list up front;
+  - (c) implementers stop running mutant checks (breaking each fix in memory to see its test fail); the reviewer
+    keeps them.
+  Cause given to the operator: the Task 2 plan did not map the book's existing features, so the implementer's
+  passing tests covered only the listed cases, and the review found the rest.
 - Tasks 3-8: not started. One task at a time, each only after the operator commits the one before.
 
 ## 2. Documents
@@ -33,8 +40,8 @@ sdd-snapshots/reply-tuning/`), so everything needed is in this file. Read it in 
   Read "Addendum: scene styles" and "Addendum: decisions (operator, 2026-11-26)".
 - Plan (approved 2026-11-25; Task 2 rewritten and Task 3 Step 1 updated 2026-11-26 after the ruling in section 4):
   `universe/worlds/docs/superpowers/plans/2026-11-25-reply-tuning.md`. 8 tasks:
-  1. storage, schema upgrades, card, settings (committed);
-  2. card end to end with book filing (built, under review);
+  1. storage, schema upgrades, card, settings (committed, `90cfe3c`);
+  2. card end to end with book filing (committed with fix round 1, `0691ddc`; fix round 2 open);
   3. book rules for player-stated changes and model-written fixed values;
   4. RequestBudget, StorySlice, HistoryWindow, `modelCatalog.contextLength`;
   5. TagReader, Director tags, `SceneStyle` enum and the `sceneStyles` setting;
@@ -47,9 +54,11 @@ sdd-snapshots/reply-tuning/`), so everything needed is in this file. Read it in 
 
 ## 3. Open items, in order
 
-1. **Task 2 fix round 1:** rulings given (6a items 3 and 6). Finish the fix round (section 1), scoped Opus
-   re-review, own checks (all 10 test files one at a time, seeder dry-run, docblock sweep, PhpStorm on changed
-   lines), hand-off opening "Commit-ready." or "NOT commit-ready: ...".
+1. **Task 2 fix round 2:** ask the operator for the go on section 6b and the answer to the open question in
+   section 1. Then write the brief from 6b (rules as section 8; the fix round 1 brief did not travel, 6a holds its
+   content), dispatch (Sonnet), scoped Opus re-review of round 2 (section 7, limited to 6b), own checks (all 10
+   test files one at a time, seeder dry-run, docblock sweep, PhpStorm on changed lines), hand-off opening
+   "Commit-ready." or "NOT commit-ready: ...".
 2. **Tasks 3-8**, one at a time, same loop. Task 3 must reuse Task 2's latest-decision rule (plan Task 3 Step 1).
 3. **Later (operator-listed, not this project):** project 2 character brain (reflection/dream, budgeted feelings
    summary, timed runs every few hours for characters not in the scene); project 3 book pass at intervals,
@@ -86,7 +95,7 @@ sdd-snapshots/reply-tuning/`), so everything needed is in this file. Read it in 
 - The operator's model of appearance, for Task 4 (request assembly): appearance in requests is built from the
   facts about the character, with history, e.g. "scar on shoulder, hair dyed black (originally red)".
 
-## 5. What Task 2 built (implementer's report, not yet verified by review)
+## 5. What Task 2 built (first build; fix round 1 changes are in sections 6a and 6b)
 
 Working tree, uncommitted: `src/scribe/CardFiling.mjs` (new), `src/scribe/ScribeLogCore.mjs`,
 `src/scribe/ScribeReplay.mjs`, `src/scribe/ScribeService.mjs`, `src/scribe/ScribeCategory.mjs`,
@@ -159,7 +168,7 @@ Findings:
 - **Nit** `fileCardAppearance` has no `characterId` parameter: unused, keep it out; the plan's interface line is
   to be corrected.
 
-## 6a. Proposed fix round 1 (waiting for the operator's ruling on items marked RULING)
+## 6a. Fix round 1 (rulings given, built, committed in `0691ddc`)
 
 1. **H1:** Pins take part in the latest-decision order by their entry sequence: a Pin older than the newest decided
    value in its slot does not override it; a newer Pin still wins. Test both orders.
@@ -191,6 +200,65 @@ Findings:
 
 After the ruling: fix-round brief (Sonnet, rules as section 8), scoped Opus re-review of the round, own checks,
 hand-off.
+
+## 6b. Scoped re-review of fix round 1, and proposed fix round 2 (2026-11-26)
+
+Re-review result: H2, M2, M3, M4, L1-L4, L6-L9 fixed; every fix-round mutant caught; all 10 test files pass (ui 56,
+http 36, catalog 54, config 14, engine 24, scribe 84, store 30, openrouter 49, seed 37, sync 8); no import cycle;
+`CharacterCard` normalisation covers every `card_json` writer and the reader. Seeder dry-run on `0691ddc`: counts
+unchanged. Orchestrator checked N1, N2, N3, N6, N7 against the code. Reviewer process slip: ran `git stash list`
+once (read-only, but outside the allowed git commands).
+
+Findings:
+- **N1 (Medium) Pins and card decisions on builds still both stay in force.** `book.decidedSlots` is keyed by the
+  scoped slot key (`ScribeReplay.mjs` ~1442-1447) while decisions use the build field without dimension; the Pin
+  check (`:946-949`) looks up its own scoped slot. Older Pin build "slim" then card "tall; slim": both in force;
+  card "tall; slim" then a newer Pin "athletic": both in force. Hair is fixed.
+- **N2 (Medium) A build with no worded part still fails with 500:** height "?" and body "-" join to "?; ?"
+  (`CardFiling.mjs` ~77-80), which `AddFact` refuses (it accepts only an exact "?").
+- **N3 (Medium) A bare "?" reaches requests through a build with one unknown part:** "?; slim" and "5'6\"; ?" are
+  shown as written (`CharacterCard.requestValue` maps only an exact "?").
+- **N4 (Low)** The kept form only counts when the text also has a dimension (`ScribeCategory.scope` returns a form
+  only together with a dimension): card "slim" turns a story "In dragon form she is covered in black scales"
+  `Reported`; imported "In human form she is 5 ft 6" plus card "5'6\"; slim" leaves both in force.
+- **N5 (Low)** An older Pin is skipped outright, so a value only the pin created vanishes from the book instead of
+  staying readable as `Reported`.
+- **N6 (Low)** A failing Edit throws (unhandled TypeError) when the user switched tab or campaign before the GET
+  failed: `InspectorDrawer.mjs:952-953` focuses a button that is not rendered; the campaign-change drop covers only
+  successful responses.
+- **N7 (law)** `CardFiling.operations` docblock lacks `@throws {TypeError}` (it calls `ScribeCategory.value`).
+- **N8 (Low, test)** "removes a fact exactly without striking the wording of other facts" passes even when replay
+  ignores `exact`: its second fact is an operator fact, which is never struck. Use a story fact.
+- Implementer calls, as the re-review found them: `?` -> `unknown` exact-match only (gap N3); dimension-less
+  "dragon form" (N4); older Pin skipped (N5); `decided`/`exact` through `tellCommit` accepted, only a hand-built
+  CSRF-protected request can send them and Tell preview never produces them (no change proposed); no import cycle
+  (`CharacterCard` -> `ScribeAnswer` -> `ScribeCategory` -> `ScribeText`, no path back).
+- Reviewer's note on existing books (why item 6 below): the seeder imports Zeta edits as `EditFact`, so with the new
+  rule an operator edit of one build reports that subject's other builds whatever their tall/long wording, and an
+  older Pin is skipped where a newer EditFact sits in its slot.
+- What fix round 1 changed (for orientation): `ScribeReplay` (pin decision sequence, build decision field without
+  dimension, exact removal), `ScribeLogCore` (`AddFact` accepts an exact `?`; `RemoveFact` `exact`), `CardFiling`
+  (refinement chain, subject/category check, duplicate skip), `CharacterCard` (`Unknown`, `UnknownLabel`,
+  `normalise`, `requestValue`; normalised in the constructor), `Router` (first subject files the whole card), the
+  five request builders (Director roster, CharacterMind identity and fact lines, NarratorComposer voice, Scribe
+  statement, Pedant ledger), `CharacterModal` (focus after removing an example), `InspectorDrawer` (Edit IDs
+  `cast-edit-{id}`, error in the row), `app.mjs` (stale GET dropped), `styles.css` (`display: list-item`).
+
+Proposed fix round 2 (waiting for the operator's go):
+1. **N1, N5:** Pins are decisions in the same latest-decision rule: a pin's sequence is its entry sequence; in a
+   decision field (build: subject, category, form) the newest decision among card values, edits and pins is in
+   force, the others `Reported` and readable (a pin's made value is kept as `Reported`, not dropped). Tests for the
+   three build cases above and the hair cases.
+2. **N2, N3 (orchestrator's call, within the M1 ruling):** a build part that is "?" is left out of the build text;
+   when every part is "?", the build is filed as "?". So requests never carry a "?" inside a build, and the exact
+   "?" rule stays as it is.
+3. **N4:** the decision field reads the form from the text (human/dragon form) even without a dimension; slot keys
+   elsewhere unchanged.
+4. **N6:** focus the Edit button only when it is rendered; drop a failed GET too when the campaign changed.
+5. **N7:** `@throws`. **N8:** the test uses a story fact.
+6. **Real-export check:** compare the seeded Hero Gone book's fact statuses replayed with HEAD~1 (`90cfe3c`) code
+   against the fixed code (temporary database or pure replay of the exported log, never the app database); report
+   every status that changed, for the operator.
 
 ## 7. Task 2 review brief (for a rerun)
 

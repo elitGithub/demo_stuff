@@ -736,19 +736,18 @@ test('sections are in order', () => {
     );
 });
 
-test('the chat profile follows the player character when it was read, and is left out when not', () => {
+test('analyzer inputs never emit a standalone player character profile heading', () => {
     const state = richBook();
     const messages = storyWith({ 60: 'Mirelle waves.' }).slice(59, 62);
     const plainText = ScribeAnalyzer.input(state, 'Orla', messages);
-    assert.equal(ScribeAnalyzer.input(state, 'Orla', messages, null), plainText);
+    assert.equal(ScribeAnalyzer.Settings.Headings.Profile, undefined);
+    assert.equal(plainText.startsWith('PLAYER CHARACTER:\nOrla\n\nSUBJECTS:\n'), true);
     assert.equal(plainText.includes('PLAYER CHARACTER PROFILE:'), false);
-    const profile = 'Orla is a sellsword from the north.\nShe carries a scarred shield.';
-    const profiled = ScribeAnalyzer.input(state, 'Orla', messages, profile);
-    assert.equal(profiled.startsWith(`PLAYER CHARACTER:\nOrla\n\nPLAYER CHARACTER PROFILE:\n${profile}\n\nSUBJECTS:\n`), true);
-    assert.equal(profiled.replace(`PLAYER CHARACTER PROFILE:\n${profile}\n\n`, ''), plainText);
-    assert.equal(ScribeAnalyzer.Settings.Headings.Profile, 'PLAYER CHARACTER PROFILE:');
+    assert.equal(ScribeAnalyzer.input(state, 'Orla', messages, 'ignored profile'), plainText);
     const notes = [{ text: 'Mirelle is tired', position: 12 }];
     assert.equal(ScribeAnalyzer.notesInput(state, 'Orla', notes).includes('PLAYER CHARACTER PROFILE:'), false);
+    const answered = [{ id: 'Q1', text: 'What colour?', answer: 'Blue.', position: 12 }];
+    assert.equal(ScribeAnalyzer.answersInput(state, 'Orla', answered).includes('PLAYER CHARACTER PROFILE:'), false);
 });
 
 test('the notes input lists numbered notes', () => {
@@ -1312,8 +1311,8 @@ test('the prompts are exact', () => {
             ScribeAnalyzer.Settings.PromptLines.join('\n'),
             '14. Preserve each account and its speaker when sources disagree. The independent Checker raises material disputes with the operator. Record what the story establishes and leave unknowns open.',
             14,
-            8940,
-            'd73c7b71',
+            8834,
+            'd2d9de43',
         ],
         [
             ScribeAnalyzer.NotesPrompt,
@@ -1344,11 +1343,7 @@ test('the prompts are exact', () => {
         assert.equal(/ $/m.test(prompt), false);
         assert.deepEqual([prompt.length, ScribeText.fingerprint(prompt)], [length, fingerprint]);
     }
-    const profiled =
-        "PLAYER CHARACTER PROFILE is the player's own description of their character; trust it for that character.";
-    const lines = ScribeAnalyzer.Prompt.split('\n');
-    const received = lines.findIndex((line) => line.startsWith('You receive PLAYER CHARACTER,'));
-    assert.equal(lines[received + 1], profiled);
+    assert.equal(ScribeAnalyzer.Prompt.includes('PLAYER CHARACTER PROFILE'), false);
     assert.equal(ScribeAnalyzer.NotesPrompt.includes('PLAYER CHARACTER PROFILE'), false);
     assert.equal(ScribeAnalyzer.AnswersPrompt.includes('PLAYER CHARACTER PROFILE'), false);
 });

@@ -60,7 +60,6 @@ const ScribeAdoption = Object.freeze({
             ReadThrough: 'readThrough is not a whole number within the message list.',
             Notes: 'notes is not a list.',
             Player: 'player is not a string.',
-            Profile: 'profile is neither a string nor null.',
             Log: 'log is not an object.',
             Size: 'size is not a positive whole number.',
         }),
@@ -195,10 +194,6 @@ const ScribeAdoption = Object.freeze({
         }
         if (typeof options.player !== 'string') {
             return problems.Player;
-        }
-        const profile = options.profile;
-        if (profile !== undefined && profile !== null && typeof profile !== 'string') {
-            return problems.Profile;
         }
         if (options.log === null || typeof options.log !== 'object') {
             return problems.Log;
@@ -710,7 +705,7 @@ const ScribeAdoption = Object.freeze({
     },
 
     /**
-     * @param {{ messages: readonly object[], readThrough?: number, notes: readonly object[], player: string, profile?: string|null, log: object, size: number, budget: number, spent: number, atBudget?: Function, ask: Function, save: Function, record: Function, progress: Function, paused: Function }} options
+     * @param {{ messages: readonly object[], readThrough?: number, notes: readonly object[], player: string, log: object, size: number, budget: number, spent: number, atBudget?: Function, ask: Function, save: Function, record: Function, progress: Function, paused: Function }} options
      * @return {Promise<Readonly<{ stop: string, problem: string|null, spent: number, calls: number, unpriced: number }>>}
      */
     async run(options) {
@@ -751,7 +746,7 @@ const ScribeAdoption = Object.freeze({
                     }
                     const stop = await ScribeAdoption.consult(job, { pass: passes.Story, origin: origins.Story,
                         first: batch[0].position, last: batch.at(-1).position, system: ScribeAnalyzer.Prompt,
-                        user: ScribeAnalyzer.input(state, job.player, batch, job.profile), messages: batch, state,
+                        user: ScribeAnalyzer.input(state, job.player, batch), messages: batch, state,
                         questions: [], notes: [], retry: true });
                     return stop ?? ScribeAdoption.finish(job, stops.Done, null);
                 }
@@ -896,7 +891,7 @@ const ScribeAdoption = Object.freeze({
                     first,
                     last,
                     system: ScribeAnalyzer.Prompt,
-                    user: ScribeAnalyzer.input(state, job.player, stretch, job.profile),
+                    user: ScribeAnalyzer.input(state, job.player, stretch),
                     messages: stretch,
                     state,
                     notes: [],

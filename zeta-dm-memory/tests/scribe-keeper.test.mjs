@@ -910,7 +910,7 @@ function ranges(model) {
 /**
  * @param {FakeChat} chat
  * @param {{ ask: Function }} model
- * @param {{ storage?: FakeStorage, clock?: object, tabId?: string, roomId?: string, claim?: Function, lease?: Function, profile?: Function, wait?: boolean, onNotify?: Function, pauseCalls?: Function, checkPassage?: (work: object) => Promise<object>, askChecker?: (system: string, input: string, beforeDispatch: Function) => Promise<object> }} extra
+ * @param {{ storage?: FakeStorage, clock?: object, tabId?: string, roomId?: string, claim?: Function, lease?: Function, setup?: Function, wait?: boolean, onNotify?: Function, pauseCalls?: Function, checkPassage?: (work: object) => Promise<object>, askChecker?: (system: string, input: string, beforeDispatch: Function) => Promise<object> }} extra
  * @return {Promise<{ keeper: object, events: object[], storage: FakeStorage, clock: object }>}
  */
 async function opened(chat, model, extra = {}) {
@@ -959,8 +959,8 @@ async function opened(chat, model, extra = {}) {
     if (extra.lease !== undefined) {
         options.lease = extra.lease;
     }
-    if (extra.profile !== undefined) {
-        options.profile = extra.profile;
+    if (extra.setup !== undefined) {
+        options.setup = extra.setup;
     }
     const opening = ScribeKeeper.open(options);
     assert.equal(await returns(opening), true, 'open never resolved');
@@ -2604,77 +2604,177 @@ test("an injected claim replaces the store's", async () => {
     );
 });
 
-test('the chat profile is asked for before each reading and goes to the reading model', async () => {
-    const profile = 'Orla is a sellsword from the north.';
-    /**
-     * @param {(() => Promise<string|null>)|undefined} given
-     * @return {Promise<{ users: string[], asked: number, keeper: object }>}
-     */
-    const read = async (given) => {
-        const model = analyst();
-        const users = [];
-        const counted = { asked: 0 };
-        const watched = {
-            /**
-             * @param {string} role
-             * @param {string} system
-             * @param {string} user
-             * @return {Promise<{ text: string, cost: number }>}
-             */
-            ask: async (role, system, user) => {
-                users.push(user);
-                return model.ask(role, system, user);
-            },
-        };
-        const extra =
-            given === undefined
-                ? {}
-                : {
-                      /**
-                       * @return {Promise<string|null>}
-                       */
-                      profile: async () => {
-                          counted.asked++;
-                          return given();
-                      },
-                  };
-        const { keeper } = await opened(new FakeChat(100), watched, extra);
-        await keeper.adopt({});
-        await keeper.tick();
-        return { users, asked: counted.asked, keeper };
+test('setup validates on open, is not called during adopt, and injects valid JSON into historical checks with invariant inputStamp', async () => {
+    const baseChat = new FakeChat(10);
+    for (const invalid of ['Orla', 7, {}, []]) {
+        await assert.rejects(
+            ScribeKeeper.open({
+                storage: new FakeStorage(),
+                roomId: ROOM,
+                tabId: 'tab-bad-setup',
+                zeta: baseChat.zeta('tab-bad-setup'),
+                ask: analyst().ask,
+                clock: clockAt(),
+                /**
+                 * @return {void}
+                 */
+                notify: () => {},
+                setup: invalid,
+            }),
+            { message: 'The argument is not valid: setup' },
+        );
+    }
+    const readUsers = [];
+    let setupCalls = 0;
+    const adoptModel = analyst({ blank: true });
+    const adoptWatched = {
+        /**
+         * @param {string} role
+         * @param {string} system
+         * @param {string} user
+         * @return {Promise<{ text: string, cost: number }>}
+         */
+        ask: async (role, system, user) => {
+            readUsers.push(user);
+            return adoptModel.ask(role, system, user);
+        },
     };
-    const heading = `\n\nPLAYER CHARACTER PROFILE:\n${profile}\n\nSUBJECTS:`;
-    const told = await read(async () => profile);
-    assert.equal(told.users.length >= 3, true);
-    assert.equal(told.users.every((user) => user.includes(heading)), true);
-    assert.equal(told.asked >= 1, true);
-    assert.equal(told.keeper.view().phase, 'Idle');
-    const untold = await read(async () => null);
-    const bare = await read(undefined);
-    assert.equal(untold.users.length, told.users.length);
-    assert.equal(untold.users.some((user) => user.includes('PLAYER CHARACTER PROFILE:')), false);
-    assert.deepEqual(untold.users, bare.users);
-    assert.deepEqual(
-        told.users.map((user) => user.replace(`PLAYER CHARACTER PROFILE:\n${profile}\n\n`, '')),
-        bare.users,
-    );
-    const chat = new FakeChat(100);
-    await assert.rejects(
-        ScribeKeeper.open({
-            storage: new FakeStorage(),
-            roomId: ROOM,
-            tabId: 'tab-9',
-            zeta: chat.zeta('tab-9'),
-            ask: analyst().ask,
-            clock: clockAt(),
-            /**
-             * @return {void}
-             */
-            notify: () => {},
-            profile: 'Orla',
-        }),
-        { message: 'The argument is not valid: profile' },
-    );
+    const { keeper: adoptKeeper } = await opened(new FakeChat(6), adoptWatched, {
+        setup: async () => {
+            setupCalls++;
+            return { storyText: 'Harbour lights', profileText: 'Orla the scout' };
+        },
+    });
+    await adoptKeeper.adopt({});
+    await adoptKeeper.tick();
+    assert.equal(setupCalls, 0);
+    assert.equal(readUsers.length >= 1, true);
+    assert.equal(readUsers.some((user) => user.includes('PLAYER CHARACTER PROFILE:')), false);
+    adoptKeeper.close();
+
+    /**
+     * @param {(() => Promise<*>)|null|undefined} setupFn
+     * @return {Promise<{ sent: object[], stamp: string }>}
+     */
+    const runCheckWithSetup = async (setupFn) => {
+        const chat = new FakeChat(2);
+        const sent = [];
+        let capturedStamp = null;
+        const model = checkedModel((page) => {
+            sent.push(page);
+            return { claims: [] };
+        });
+        const storage = new FakeStorage();
+        const { keeper } = await opened(chat, model, {
+            storage,
+            checkPassage: ScribePedant.checkPassage,
+            setup: setupFn,
+            askChecker: async (system, input, beforeDispatch) => {
+                beforeDispatch();
+                const requests = savedBook(storage).log.checkRequests ?? {};
+                capturedStamp = Object.values(requests)[0]?.inputStamp ?? null;
+                return model.ask('Pedant', system, input);
+            },
+        });
+        await keeper.adopt({});
+        await keeper.pull();
+        await keeper.checkHistory(1, 1);
+        keeper.close();
+        return { sent, stamp: capturedStamp };
+    };
+
+    const both = await runCheckWithSetup(async () => ({
+        storyText: 'Harbour setup text.',
+        profileText: 'Orla is a sellsword.',
+    }));
+    assert.equal(both.sent.length, 1);
+    assert.equal(both.sent[0].storySetup, 'Harbour setup text.');
+    assert.equal(both.sent[0].playerCharacterProfile, 'Orla is a sellsword.');
+    assert.equal(typeof both.stamp, 'string');
+
+    const storyOnly = await runCheckWithSetup(async () => ({
+        storyText: 'Different harbour setup.',
+        profileText: null,
+    }));
+    assert.equal(storyOnly.sent[0].storySetup, 'Different harbour setup.');
+    assert.equal(Object.hasOwn(storyOnly.sent[0], 'playerCharacterProfile'), false);
+    assert.equal(storyOnly.stamp, both.stamp);
+
+    const profileOnly = await runCheckWithSetup(async () => ({
+        storyText: '   ',
+        profileText: 'Orla only.',
+    }));
+    assert.equal(Object.hasOwn(profileOnly.sent[0], 'storySetup'), false);
+    assert.equal(profileOnly.sent[0].playerCharacterProfile, 'Orla only.');
+    assert.equal(profileOnly.stamp, both.stamp);
+
+    for (const emptyValue of [null, [], { storyText: '', profileText: '  ' }, { storyText: 99, profileText: null }]) {
+        const empty = await runCheckWithSetup(async () => emptyValue);
+        assert.equal(Object.hasOwn(empty.sent[0], 'storySetup'), false);
+        assert.equal(Object.hasOwn(empty.sent[0], 'playerCharacterProfile'), false);
+        assert.equal(empty.stamp, both.stamp);
+    }
+
+    const noSetup = await runCheckWithSetup(null);
+    assert.equal(Object.hasOwn(noSetup.sent[0], 'storySetup'), false);
+    assert.equal(Object.hasOwn(noSetup.sent[0], 'playerCharacterProfile'), false);
+    assert.equal(noSetup.stamp, both.stamp);
+
+    const yieldChat = new FakeChat(2);
+    const waitSetup = gate();
+    let setupEntered = false;
+    let checkerCalled = 0;
+    const yieldStorage = new FakeStorage();
+    const { keeper: yieldKeeper } = await opened(yieldChat, checkedModel(() => ({ claims: [] })), {
+        storage: yieldStorage,
+        checkPassage: ScribePedant.checkPassage,
+        setup: async () => {
+            setupEntered = true;
+            await waitSetup.promise;
+            return { storyText: 'Late setup', profileText: 'Late profile' };
+        },
+        askChecker: async (system, input, beforeDispatch) => {
+            checkerCalled++;
+            beforeDispatch();
+            return { text: JSON.stringify({ page: JSON.parse(input).page, complete: true, claims: [], findings: [] }), cost: 0 };
+        },
+    });
+    await yieldKeeper.adopt({});
+    await yieldKeeper.pull();
+    const pendingCheck = yieldKeeper.checkHistory(1, 1);
+    await until(() => setupEntered);
+    yieldKeeper.pause();
+    waitSetup.release();
+    await pendingCheck;
+    assert.equal(checkerCalled, 0);
+    assert.deepEqual(savedBook(yieldStorage).log.checkRequests ?? {}, {});
+    assert.equal(yieldKeeper.view().checkerProblem, null);
+    yieldKeeper.close();
+
+    const failChat = new FakeChat(2);
+    const failStorage = new FakeStorage();
+    const secret = 'provider-secret-setup-failure';
+    ScribeStore.setKey(failStorage, secret);
+    let failCheckerCalled = 0;
+    const { keeper: failKeeper } = await opened(failChat, checkedModel(() => ({ claims: [] })), {
+        storage: failStorage,
+        checkPassage: ScribePedant.checkPassage,
+        setup: async () => {
+            throw new Error(`setup failed with ${secret}`);
+        },
+        askChecker: async () => {
+            failCheckerCalled++;
+            return { text: '', cost: 0 };
+        },
+    });
+    await failKeeper.adopt({});
+    await failKeeper.pull();
+    await failKeeper.checkHistory(1, 1);
+    assert.equal(failCheckerCalled, 0);
+    assert.equal(failKeeper.view().busy, null);
+    assert.match(failKeeper.view().checkerProblem.reason, /setup failed with \[key\]/);
+    assert.equal(failKeeper.view().checkerProblem.reason.includes(secret), false);
+    failKeeper.close();
 });
 
 test('a new failed book read keeps both credentials out of stored settings after rotation and reopen', async () => {

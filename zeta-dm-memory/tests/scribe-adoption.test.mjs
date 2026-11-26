@@ -880,7 +880,6 @@ async function adopt(chosen = {}) {
         diagnostic: chosen.diagnostic,
         notes: book.notes,
         player: book.player,
-        profile: chosen.profile,
         log: context.log,
         size: chosen.size ?? 40,
         budget: chosen.budget ?? 100,
@@ -1961,8 +1960,6 @@ test('bad arguments stop before any call', async () => {
         [{ notes: null }, 'notes is not a list.'],
         [{ atBudget: true }, 'atBudget is not a function.'],
         [{ player: 7 }, 'player is not a string.'],
-        [{ profile: 7 }, 'profile is neither a string nor null.'],
-        [{ profile: { text: 'Orla' } }, 'profile is neither a string nor null.'],
         [{ log: null }, 'log is not an object.'],
         [{ log: 'the book' }, 'log is not an object.'],
         [{ size: Number.POSITIVE_INFINITY }, 'size is not a positive whole number.'],
@@ -1995,26 +1992,57 @@ test('bad arguments stop before any call', async () => {
     await assert.doesNotReject(ScribeAdoption.run());
 });
 
-test('the chat profile goes to every story reading and to no other pass', async () => {
-    const profile = 'Orla is a sellsword from the north.';
-    const read = await adopt({ campaign: notedCampaign, profile });
-    const passes = [...new Set(read.calls.map((call) => call.pass))].sort();
-    assert.deepEqual(passes, ['Notes', 'Story']);
-    for (const call of read.calls) {
-        const carries = call.user.includes(`PLAYER CHARACTER:\nOrla\n\nPLAYER CHARACTER PROFILE:\n${profile}\n\nSUBJECTS:`);
-        assert.equal(carries, call.pass === 'Story', call.pass);
-    }
-    const bare = await adopt({ campaign: notedCampaign });
-    const empty = await adopt({ campaign: notedCampaign, profile: null });
-    assert.deepEqual(
-        bare.calls.map((call) => call.user),
-        empty.calls.map((call) => call.user),
-    );
-    assert.equal(bare.calls.some((call) => call.user.includes('PLAYER CHARACTER PROFILE:')), false);
-    assert.deepEqual(
-        read.calls.map((call) => call.user.replace(`PLAYER CHARACTER PROFILE:\n${profile}\n\n`, '')),
-        bare.calls.map((call) => call.user),
-    );
+test('adoption has no profile option and emits no standalone profile heading on any pass', async () => {
+    assert.equal(ScribeAdoption.Settings.Arguments.Profile, undefined);
+    const read = await adopt({ campaign: notedCampaign, withQuestions: true });
+    assert.equal(read.result.stop, 'Done');
+    reply(read.log, 'Q1', 'The gatekeeper held the key');
+    const answered = await adopt({ campaign: notedCampaign, log: read.log });
+    assert.equal(answered.result.stop, 'Done');
+    const allCalls = [...read.calls, ...answered.calls];
+    const passes = [...new Set(allCalls.map((call) => call.pass))].sort();
+    assert.deepEqual(passes, ['Answers', 'Notes', 'Story']);
+    assert.equal(allCalls.some((call) => call.user.includes('PLAYER CHARACTER PROFILE:')), false);
+    const log = ScribeLog.create();
+    const calls = [];
+    const ignored = await ScribeAdoption.run({
+        messages: plainCampaign.messages.slice(0, 2),
+        notes: [],
+        player: plainCampaign.player,
+        profile: 7,
+        log,
+        size: 40,
+        budget: 10,
+        spent: 0,
+        /**
+         * @param {string} system
+         * @param {string} user
+         * @return {Promise<{ text: string, cost: number }>}
+         */
+        ask: async (system, user) => {
+            calls.push(user);
+            return { text: '=== READ\n#1 | no change\n#2 | no change', cost: 0 };
+        },
+        /**
+         * @return {void}
+         */
+        save: () => {},
+        /**
+         * @return {void}
+         */
+        record: () => {},
+        /**
+         * @return {void}
+         */
+        progress: () => {},
+        /**
+         * @return {boolean}
+         */
+        paused: () => false,
+    });
+    assert.equal(ignored.stop, 'Done');
+    assert.equal(calls.length, 1);
+    assert.equal(calls[0].includes('PLAYER CHARACTER PROFILE:'), false);
 });
 
 test('callbacks may be asynchronous', async () => {

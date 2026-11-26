@@ -748,7 +748,6 @@ const scenes = [
 const promptLines = [
     'You are the Pedant: a proofreader for an ongoing adult fiction roleplay between consenting adult characters. You never write story.',
     'You receive PLAYER CHARACTER, a LEDGER of facts with their IDs, what speakers DO NOT KNOW, RECENT MESSAGES, messages SINCE THE BOOK WAS LAST READ, the storyteller’s REPLY, and the book’s subject roster with IDs, kinds and aliases.',
-    "PLAYER CHARACTER PROFILE is the player's own description of their character; trust it for that character.",
     'Find contradictions, leaks, misspelled names, situation clashes and current appearance in the REPLY.',
     '',
     'Answer with these five blocks, each starting with its === line. Leave a block out if it has nothing. Write nothing else.',
@@ -1232,16 +1231,15 @@ test('the input shows the ledger and who does not know', () => {
     ]);
 });
 
-test('the chat profile follows the player character when it was read, and is left out when not', async () => {
+test('live pedant input and review omit standalone player character profile headings', async () => {
     const { state } = book();
     const reply = at(50);
-    const profile = 'Orla is a sellsword from the north.\nShe owes Brandt a crossing.';
     const plainText = ScribePedant.input(state, 'Orla', reply, [reply], [], story);
-    assert.equal(ScribePedant.input(state, 'Orla', reply, [reply], [], story, null), plainText);
+    assert.equal(ScribePedant.Settings.Headings.Profile, undefined);
+    assert.equal(ScribePedant.Prompt.includes('PLAYER CHARACTER PROFILE'), false);
+    assert.equal(plainText.startsWith('PLAYER CHARACTER:\nOrla\n\nSUBJECT ROSTER\n'), true);
     assert.equal(plainText.includes('PLAYER CHARACTER PROFILE:'), false);
-    const profiled = ScribePedant.input(state, 'Orla', reply, [reply], [], story, profile);
-    assert.equal(profiled.startsWith(`PLAYER CHARACTER:\nOrla\n\nPLAYER CHARACTER PROFILE:\n${profile}\n\nSUBJECT ROSTER\n`), true);
-    assert.equal(profiled.replace(`PLAYER CHARACTER PROFILE:\n${profile}\n\n`, ''), plainText);
+    assert.equal(ScribePedant.input(state, 'Orla', reply, [reply], [], story, 'ignored profile'), plainText);
     const asked = [];
     /**
      * @param {string} prompt
@@ -1252,14 +1250,70 @@ test('the chat profile follows the player character when it was read, and is lef
         asked.push(input);
         return { text: '=== CONTRADICTIONS\n(none)', cost: 0 };
     };
-    const request = { state, player: 'Orla', message: reply, unread: [reply], messages: story, ask };
-    await ScribePedant.review({ ...request, profile });
-    await ScribePedant.review({ ...request, profile: null });
-    await ScribePedant.review(request);
-    assert.equal(asked[0].includes(`PLAYER CHARACTER PROFILE:\n${profile}\n\nSUBJECT ROSTER\n`), true);
-    assert.equal(asked[0].replace(`PLAYER CHARACTER PROFILE:\n${profile}\n\n`, ''), asked[1]);
-    assert.equal(asked[1], asked[2]);
-    assert.equal(asked[1].includes('PLAYER CHARACTER PROFILE:'), false);
+    await ScribePedant.review({ state, player: 'Orla', message: reply, unread: [reply], messages: story, ask });
+    assert.deepEqual(asked, [plainText]);
+});
+
+test('historical check prompt documents background-only storySetup and inputWithSetup emits valid JSON omitting blank or invalid fields', async () => {
+    assert.equal(
+        ScribePedant.CheckPrompt.split('\n')[2],
+        'storySetup (background only; never a source for Book claims on its own — verify claims strictly against cited messages) and playerCharacterProfile (the player’s description of their character), when present, provide context.',
+    );
+    const target = passage(12, [['Frost', 'I kept the harbour keys.']]);
+    let capturedBase = null;
+    let capturedCallback = null;
+    await ScribePedant.incoming({
+        targeted: true,
+        message: target,
+        batchMessages: [target],
+        pendingEntries: [],
+        written: [],
+        earlierClaims: [],
+        rulings: [],
+        /**
+         * @param {string} system
+         * @param {string} input
+         * @param {Set<number>} positions
+         * @param {string} id
+         * @param {number} planBytes
+         * @param {Function} inputWithSetup
+         * @return {Promise<{ text: string }>}
+         */
+        ask: async (system, input, positions, id, planBytes, inputWithSetup) => {
+            assert.equal(system, ScribePedant.CheckPrompt);
+            capturedBase = JSON.parse(input);
+            capturedCallback = inputWithSetup;
+            return {
+                text: JSON.stringify({
+                    page: capturedBase.page,
+                    complete: true,
+                    claims: [],
+                    findings: [],
+                    links: [],
+                    alerts: { leaks: [], misspellings: [], situations: [] },
+                }),
+            };
+        },
+    });
+    assert.equal(typeof capturedCallback, 'function');
+    assert.equal(Object.hasOwn(capturedBase, 'storySetup'), false);
+    assert.equal(Object.hasOwn(capturedBase, 'playerCharacterProfile'), false);
+    assert.deepEqual(JSON.parse(capturedCallback({ storyText: 'Harbour setup', profileText: 'Orla profile' })), {
+        ...capturedBase,
+        storySetup: 'Harbour setup',
+        playerCharacterProfile: 'Orla profile',
+    });
+    assert.deepEqual(JSON.parse(capturedCallback({ storyText: 'Harbour setup', profileText: null })), {
+        ...capturedBase,
+        storySetup: 'Harbour setup',
+    });
+    assert.deepEqual(JSON.parse(capturedCallback({ storyText: '   ', profileText: 'Orla profile' })), {
+        ...capturedBase,
+        playerCharacterProfile: 'Orla profile',
+    });
+    for (const empty of [null, undefined, [], 'raw', { storyText: '', profileText: '  ' }, { storyText: 42, profileText: {} }]) {
+        assert.deepEqual(JSON.parse(capturedCallback(empty)), capturedBase);
+    }
 });
 
 test('the answer is read', () => {

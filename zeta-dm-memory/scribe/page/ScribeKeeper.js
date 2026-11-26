@@ -96,7 +96,7 @@ const ScribeKeeper = Object.freeze({
             BadClaim: 'The argument is not valid: claim',
             CheckDispatched: 'The Checker already requested this comparison. Its answer is unavailable. The passage remains pending.',
             CheckAuth: 'The Checker request was rejected before billing. Replace the saved API key to continue.',
-            BadProfile: 'The argument is not valid: profile',
+            BadSetup: 'The argument is not valid: setup',
         }),
         Flight: Object.freeze({
             PullOpen: 'Reading chat history from Zeta · ',
@@ -1852,7 +1852,6 @@ const ScribeKeeper = Object.freeze({
             job.recorded =
                 ScribeStore.spent(keeper.storage, keeper.roomId, today) +
                 ScribeStore.others(keeper.storage, keeper.roomId, today);
-            const profile = keeper.profile === null ? null : await keeper.profile();
             result = await ScribeAdoption.run({
                 messages: room,
                 readThrough: end,
@@ -1861,7 +1860,6 @@ const ScribeKeeper = Object.freeze({
                 diagnostic,
                 notes,
                 player: keeper.intake.player,
-                profile,
                 log: ScribeKeeper.copy(book.log),
                 size,
                 budget: keeper.settings.budget,
@@ -2380,7 +2378,7 @@ const ScribeKeeper = Object.freeze({
                 requests: pending, planBytes: Object.values(pending)[0]?.planBytes,
                 savePage: save, saveSegment: save, learnLimit,
                 ...(Number.isSafeInteger(limit?.bytes) && limit.bytes > 0 ? { pageBytes: limit.bytes } : {}),
-                ask: async (system, input, sources, id, planBytes, inputWithProfile = null) => {
+                ask: async (system, input, sources, id, planBytes, inputWithSetup = null) => {
                     if (!current()) {
                         throw yieldPage;
                     }
@@ -2408,13 +2406,19 @@ const ScribeKeeper = Object.freeze({
                         throw new Error(failure ?? keeper.owing ?? "The day's budget is spent");
                     }
                     let outgoing = input;
-                    if (inputWithProfile && keeper.profile) {
-                        const profile = await keeper.profile();
+                    if (inputWithSetup && keeper.setup) {
+                        const setup = await keeper.setup();
                         if (!current()) {
                             throw yieldPage;
                         }
-                        if (profile) {
-                            outgoing = inputWithProfile(profile);
+                        if (
+                            ScribeKeeper.isObject(setup) &&
+                            ((typeof setup.storyText === ScribeKeeper.Settings.StringType &&
+                                setup.storyText.trim() !== ScribeKeeper.Settings.Nothing) ||
+                                (typeof setup.profileText === ScribeKeeper.Settings.StringType &&
+                                    setup.profileText.trim() !== ScribeKeeper.Settings.Nothing))
+                        ) {
+                            outgoing = inputWithSetup(setup);
                         }
                     }
                     let dispatched = false;
@@ -3722,7 +3726,7 @@ const ScribeKeeper = Object.freeze({
     },
 
     /**
-     * @param {{ storage: { get: Function, set: Function, remove: Function, list: Function }, roomId: string, tabId: string, zeta: { history: Function, abort?: Function }, ask: Function, askChecker?: (system: string, input: string, beforeDispatch: Function) => Promise<object>, pauseCalls?: Function, checkPassage?: Function, clock: { now: Function, today: Function }, notify: Function, claim?: () => boolean, lease?: () => boolean, profile?: () => Promise<string|null> }} options
+     * @param {{ storage: { get: Function, set: Function, remove: Function, list: Function }, roomId: string, tabId: string, zeta: { history: Function, abort?: Function }, ask: Function, askChecker?: (system: string, input: string, beforeDispatch: Function) => Promise<object>, pauseCalls?: Function, checkPassage?: Function, clock: { now: Function, today: Function }, notify: Function, claim?: () => boolean, lease?: () => boolean, setup?: () => Promise<{ storyText: string|null, profileText: string|null }|null> }} options
      * @return {Promise<Readonly<object>>}
      * @throws {Error}
      */
@@ -3737,9 +3741,9 @@ const ScribeKeeper = Object.freeze({
         if (lease !== null && typeof lease !== settings.FunctionType) {
             throw new Error(settings.Messages.BadClaim);
         }
-        const profile = options.profile === undefined || options.profile === null ? null : options.profile;
-        if (profile !== null && typeof profile !== settings.FunctionType) {
-            throw new Error(settings.Messages.BadProfile);
+        const setup = options.setup === undefined || options.setup === null ? null : options.setup;
+        if (setup !== null && typeof setup !== settings.FunctionType) {
+            throw new Error(settings.Messages.BadSetup);
         }
         const keeper = {
             storage,
@@ -3766,7 +3770,7 @@ const ScribeKeeper = Object.freeze({
             notify,
             claim,
             lease,
-            profile,
+            setup,
             phase: ScribeKeeper.Phase.Loading,
             reader: false,
             authorityBlocked: false,

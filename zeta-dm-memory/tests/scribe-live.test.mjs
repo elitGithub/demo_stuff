@@ -7253,3 +7253,116 @@ test('non-stringifiable rejections and throwing keeper.view during cast produce 
         process.off('unhandledRejection', onUnhandled);
     }
 });
+
+test('kick returns a real Promise on synchronous re-entry and drain clears running on unexpected error', async () => {
+    const unhandled = [];
+    const onUnhandled = (reason) => {
+        unhandled.push(reason);
+    };
+    process.on('unhandledRejection', onUnhandled);
+    try {
+        let reentrant = null;
+        let seenDuringKick = null;
+        const liveState = {
+            keeper: keeperOf({ booked: true, trusted: true }),
+            storage: new FakeStorage(),
+            roomId: ROOM,
+            ask: () => {
+                seenDuringKick = liveState.running;
+                reentrant = ScribeLive.kick(liveState);
+                return Promise.resolve({ text: 'Day 1 | The mill | public | present: Orla | Quiet.\nCHANGED: no' });
+            },
+            clock: CLOCK,
+            notify: () => {},
+            story: () => Promise.resolve(null),
+            profile: () => Promise.resolve(null),
+            rawNotes: () => ({ checked: false, text: null }),
+            calls: [],
+            again: null,
+            recounting: null,
+            crowded: false,
+            attemptUnsaved: false,
+            localWarnings: {},
+            owed: false,
+            awaiting: false,
+            recovering: new Set(),
+            issue: 0,
+            cast: { story: null, profile: null, storyRead: true, storyFailed: false, profileRead: true, profileFailed: false, notice: null },
+            casting: null,
+            record: null,
+            problem: null,
+            shown: null,
+            loaded: false,
+            closed: false,
+            watching: false,
+            epoch: 0,
+            running: null,
+            waiting: at(43),
+            refreshing: false,
+            appended: ScribeLive.Settings.NothingAppended,
+            offer: null,
+            excluded: [],
+            understood: null,
+            suggesting: false,
+            telling: false,
+            confirming: false,
+            preparationFailure: null,
+            repairRulings: false,
+            editAuthority: null,
+        };
+        /**
+         * @param {*} value
+         * @return {boolean}
+         */
+        const isPromise = (value) =>
+            value !== null &&
+            typeof value === 'object' &&
+            typeof value.then === 'function' &&
+            Object.prototype.toString.call(value) === '[object Promise]';
+        const firstRun = ScribeLive.kick(liveState);
+        assert.equal(isPromise(firstRun), true);
+        assert.equal(isPromise(seenDuringKick), true);
+        assert.notEqual(seenDuringKick, true);
+        assert.equal(isPromise(reentrant), true);
+        assert.equal(reentrant, seenDuringKick);
+        await Promise.all([firstRun, reentrant]);
+        assert.equal(liveState.running, null);
+        assert.equal(isPromise(ScribeLive.kick(liveState)), true);
+
+        const exploding = {
+            closed: false,
+            running: null,
+            waiting: at(43),
+            again: null,
+            refreshing: false,
+            shown: null,
+            notify: () => {},
+            keeper: {
+                view: () => {
+                    throw new Error('keeper failed inside consider');
+                },
+            },
+        };
+        Object.defineProperty(exploding, 'problem', {
+            /**
+             * @return {never}
+             * @throws {Error}
+             */
+            get() {
+                throw new Error('unexpected state explosion');
+            },
+            /**
+             * @return {void}
+             */
+            set() {},
+        });
+        const failedRun = ScribeLive.kick(exploding);
+        assert.equal(isPromise(failedRun), true);
+        await assert.rejects(() => failedRun, /unexpected state explosion/);
+        assert.equal(exploding.running, null);
+        await ticks();
+        assert.deepEqual(unhandled, []);
+    } finally {
+        process.off('unhandledRejection', onUnhandled);
+    }
+});

@@ -279,8 +279,18 @@ export default class WholeTab {
      * @return {string}
      */
     room() {
-        const found = /^\/rooms\/([^/]+)/.exec(this.window.location.pathname);
+        const pathname = this.window.location.pathname.split(/[?#]/)[0];
+        const found = /^(?:\/[a-z]{2,3}(?:-[a-z0-9]{2,8})?)?\/rooms\/([^/]+)/i.exec(pathname);
         return found === null ? WholeSite.Room : decodeURIComponent(found[1]);
+    }
+
+    /**
+     * @return {string|null}
+     */
+    plot() {
+        const pathname = this.window.location.pathname.split(/[?#]/)[0];
+        const found = /^(?:\/[a-z]{2,3}(?:-[a-z0-9]{2,8})?)?\/plots\/([^/]+)/i.exec(pathname);
+        return found === null ? null : decodeURIComponent(found[1]);
     }
 
     /**
@@ -480,6 +490,22 @@ export default class WholeTab {
      */
     openPage() {
         return this.pageGet();
+    }
+
+    /**
+     * @param {string|null} plotId
+     * @param {WholeWindow} window
+     * @return {Promise<object>}
+     * @throws {Error}
+     */
+    openPlotPage(plotId = this.plot(), window = this.window) {
+        if (plotId === null || plotId === '') {
+            throw new Error('No plot id is open in this tab');
+        }
+        return window.fetch(WholeSite.likesSummaryOf(plotId), {
+            headers: { Authorization: WholeSite.Token },
+            own: true,
+        });
     }
 
     /**

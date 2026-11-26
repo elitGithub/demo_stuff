@@ -16,6 +16,7 @@ export default class WholeSite {
      */
     constructor(builder) {
         this.rooms = new Map();
+        this.plots = new Map();
         this.requests = [];
         this.clock = null;
         this.open(WholeSite.Room, builder);
@@ -27,6 +28,14 @@ export default class WholeSite {
      */
     static messagesOf(room) {
         return `${WholeSite.Api}/v1/rooms/${room}/messages`;
+    }
+
+    /**
+     * @param {string} plotId
+     * @return {string}
+     */
+    static likesSummaryOf(plotId) {
+        return `${WholeSite.Api}/v2/plots/${encodeURIComponent(plotId)}/likes/summary`;
     }
 
     /**
@@ -48,6 +57,42 @@ export default class WholeSite {
         zeta.profile = WholeSite.Profile;
         zeta.persona = '';
         this.rooms.set(room, { builder, zeta });
+    }
+
+    /**
+     * @param {string} plotId
+     * @param {FakeZeta|object} config
+     * @return {FakeZeta}
+     */
+    addPlot(plotId, config = {}) {
+        if (config instanceof FakeZeta) {
+            config.plot = plotId;
+            this.plots.set(plotId, config);
+            return config;
+        }
+        const zeta = new FakeZeta([], '', WholeSite.Token);
+        zeta.most = WholeSite.MostRequests;
+        zeta.plot = plotId;
+        Object.assign(zeta, config);
+        this.plots.set(plotId, zeta);
+        return zeta;
+    }
+
+    /**
+     * @param {string} plotId
+     * @return {FakeZeta|undefined}
+     */
+    plotZeta(plotId) {
+        const standalone = this.plots.get(plotId);
+        if (standalone !== undefined) {
+            return standalone;
+        }
+        for (const entry of this.rooms.values()) {
+            if (entry.zeta.plot === plotId) {
+                return entry.zeta;
+            }
+        }
+        return undefined;
     }
 
     /**
@@ -93,6 +138,35 @@ export default class WholeSite {
     }
 
     /**
+     * @param {string} segment
+     * @return {string|null}
+     */
+    static decode(segment) {
+        try {
+            return decodeURIComponent(segment);
+        } catch {
+            return null;
+        }
+    }
+
+    /**
+     * @param {*} url
+     * @param {object} options
+     * @param {number} status
+     * @param {string} payload
+     * @param {string} contentType
+     * @return {Response|{ status: number, ok: boolean, text: () => Promise<string> }}
+     */
+    static answer(url, options, status, payload, contentType) {
+        if (options?.own) {
+            const native = new Response(payload, { status, headers: { 'Content-Type': contentType } });
+            Object.defineProperty(native, 'url', { value: String(url) });
+            return native;
+        }
+        return FakeZeta.reply(status, payload);
+    }
+
+    /**
      * @param {*} receiver
      * @param {*} url
      * @param {object} options
@@ -111,6 +185,39 @@ export default class WholeSite {
             headers: JSON.stringify(headers),
             body: typeof options?.body === 'string' ? options.body : null,
         });
+        const address = new URL(url);
+        const likes = /^\/v2\/plots\/([^/]+)\/likes\/summary$/.exec(address.pathname);
+        if (likes !== null && method === 'GET') {
+            const plotId = WholeSite.decode(likes[1]);
+            if (plotId === null) {
+                return WholeSite.answer(url, options, 400, 'Bad plot id.', 'text/plain');
+            }
+            const zeta = this.plotZeta(plotId);
+            if (zeta === undefined) {
+                return WholeSite.answer(url, options, 404, 'No such plot.', 'text/plain');
+            }
+            if (headers.Authorization !== zeta.token) {
+                return WholeSite.answer(url, options, 401, 'Login required.', 'text/plain');
+            }
+            return WholeSite.answer(url, options, 200, JSON.stringify({ likeCount: 0, isLiked: false }), 'application/json');
+        }
+        const plotMatch = /^\/v1\/plots\/([^/]+)$/.exec(address.pathname);
+        if (plotMatch !== null && method === 'GET') {
+            const plotId = WholeSite.decode(plotMatch[1]);
+            if (plotId === null) {
+                return WholeSite.answer(url, options, 400, 'Bad plot id.', 'text/plain');
+            }
+            const zeta = this.plotZeta(plotId);
+            if (zeta === undefined) {
+                return WholeSite.answer(url, options, 404, 'No such plot.', 'text/plain');
+            }
+            const response = await zeta.respond(receiver, url, options);
+            if (options?.own) {
+                const payload = await response.text();
+                return WholeSite.answer(url, options, response.status, payload, response.ok ? 'application/json' : 'text/plain');
+            }
+            return response;
+        }
         const kept = this.keptFor(url);
         if (kept === undefined) {
             return FakeZeta.reply(404, 'No such room.');
@@ -121,7 +228,6 @@ export default class WholeSite {
             }
             return FakeZeta.reply(200, '{}');
         }
-        const address = new URL(url);
         const single = /^\/v1\/rooms\/[^/]+\/messages\/([^/]+)$/.exec(address.pathname);
         if (single && options?.own && headers.Authorization === WholeSite.Token) {
             const message = kept.builder.messages.find((row) => row.id === decodeURIComponent(single[1]));

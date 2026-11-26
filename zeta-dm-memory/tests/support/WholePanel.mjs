@@ -1,6 +1,12 @@
 export default class WholePanel {
     static HostId = 'scribe-host';
 
+    static PlotHostId = 'scribe-plot-host';
+
+    static PlotButtonId = 'scribe-plot-export-button';
+
+    static PlotStatusId = 'scribe-plot-export-status';
+
     static MostElements = 20000;
 
     static MostDepth = 60;
@@ -27,6 +33,80 @@ export default class WholePanel {
      */
     hosts() {
         return this.document.body.children.filter((child) => child.id === WholePanel.HostId).length;
+    }
+
+    /**
+     * @return {object|null}
+     */
+    plotHost() {
+        if (this.document.body === null) {
+            return null;
+        }
+        const hosts = this.document.body.children.filter((child) => child.id === WholePanel.PlotHostId);
+        return hosts.length === 1 ? hosts[0] : null;
+    }
+
+    /**
+     * @return {number}
+     */
+    plotHosts() {
+        if (this.document.body === null) {
+            return 0;
+        }
+        return this.document.body.children.filter((child) => child.id === WholePanel.PlotHostId).length;
+    }
+
+    /**
+     * @return {object}
+     * @throws {Error}
+     */
+    plotRoot() {
+        const host = this.plotHost();
+        if (host === null || host.shadow === null) {
+            throw new Error('There is no plot export host on the page');
+        }
+        return host.shadow;
+    }
+
+    /**
+     * @param {string} id
+     * @return {object}
+     * @throws {Error}
+     */
+    plotById(id) {
+        const found = this.walk(this.plotRoot()).filter((element) => element.id === id);
+        if (found.length !== 1) {
+            throw new Error(`Expected one plot element with the id ${id}, found ${found.length}`);
+        }
+        return found[0];
+    }
+
+    /**
+     * @return {object}
+     */
+    plotButton() {
+        return this.plotById(WholePanel.PlotButtonId);
+    }
+
+    /**
+     * @return {object}
+     */
+    plotStatus() {
+        return this.plotById(WholePanel.PlotStatusId);
+    }
+
+    /**
+     * @return {string}
+     */
+    plotStatusText() {
+        return this.plotStatus().textContent;
+    }
+
+    /**
+     * @return {void}
+     */
+    clickPlotExport() {
+        this.plotButton().click();
     }
 
     /**

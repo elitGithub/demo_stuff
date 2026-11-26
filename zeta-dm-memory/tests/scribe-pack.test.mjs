@@ -195,14 +195,19 @@ test('a missing file passes through with its path', () => {
 
 test('the real files pack and compile', () => {
     const delivered = realRead(ScribePack.Settings.Output).replaceAll('\r\n', '\n');
-    const output = ScribePack.build(realRead, ScribePack.version(delivered));
+    const deliveredVersion = ScribePack.version(delivered);
+    const output = ScribePack.build(realRead, deliveredVersion);
     assert.ok(delivered === output, 'the delivered userscript must match the current sources');
+    assert.equal(deliveredVersion, '0.3.50');
     assert.equal(output.length > 0, true);
     assert.doesNotThrow(() => new vm.Script(output));
     for (const file of ScribePack.Files) {
         assert.equal(count(output, markerOf(file)), 1, file);
     }
+    assert.equal(count(output, '/** @file '), 30);
     assert.equal(count(output, '/** @file '), ScribePack.Files.length);
+    assert.equal(/^const ScribeSetup = /m.test(output), true);
+    assert.equal(/^const ScribePlotExport = /m.test(output), true);
     assert.equal(/^ *(import|export) /m.test(output), false);
     assert.equal(output.startsWith('// ==UserScript==\n'), true);
     assert.equal(output.endsWith(`\n${CLOSING}\n`), true);
@@ -550,19 +555,23 @@ test('the list is the list', () => {
         'ScribeReminder',
         'ScribePedant',
         'ScribeMuse',
+        'ScribeSetup',
         'ScribeLive',
         'ScribeSender',
         'ScribeFrame',
         'PanelStyle',
         'PanelView',
         'ScribePanel',
+        'ScribePlotExport',
         'ScribeBoot',
         'ScribeStart',
     ]) {
         wanted.push(`scribe/page/${name}.js`);
     }
-    assert.equal(wanted.length, 28);
-    assert.equal(ScribePack.Files.length, 28);
+    assert.equal(wanted.length, 30);
+    assert.equal(ScribePack.Files.length, 30);
+    assert.equal(wanted.indexOf('scribe/page/ScribeLive.js'), wanted.indexOf('scribe/page/ScribeSetup.js') + 1);
+    assert.equal(wanted.indexOf('scribe/page/ScribeBoot.js'), wanted.indexOf('scribe/page/ScribePlotExport.js') + 1);
     assert.equal(wanted.indexOf('scribe/page/ScribeFrame.js'), wanted.indexOf('scribe/page/ScribeSender.js') + 1);
     assert.equal(wanted.indexOf('scribe/page/ScribeCloud.js'), wanted.indexOf('scribe/page/ScribeStore.js') + 1);
     assert.equal(wanted.at(-1), 'scribe/page/ScribeStart.js');
@@ -597,7 +606,7 @@ function without(built, file) {
 test('every object the sources call is packed', () => {
     const output = ScribePack.build(realRead);
     assert.deepEqual(undeclaredNames(output), []);
-    for (const name of ['ScribeSender', 'ScribePanel', 'ScribeKeeper']) {
+    for (const name of ['ScribeSender', 'ScribePanel', 'ScribeKeeper', 'ScribeSetup', 'ScribePlotExport']) {
         const file = ScribePack.Files.find((entry) => entry.endsWith(`/${name}.js`));
         assert.deepEqual(undeclaredNames(without(output, file)), [name]);
         assert.throws(

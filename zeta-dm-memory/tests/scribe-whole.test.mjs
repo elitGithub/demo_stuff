@@ -86,6 +86,7 @@ function reference() {
         'page/ScribeReminder',
         'page/ScribePedant',
         'page/ScribeMuse',
+        'page/ScribeSetup',
         'page/ScribeLive',
     ];
     for (const file of files) {
@@ -909,6 +910,7 @@ test('opening a room without a Book sends no Scribe requests during room activit
     assert.equal(walk.site.scribeRequests().length, 0);
     assert.equal(walk.model.calls.length, 0);
     assert.equal(stored(walk, 'book'), null);
+    assert.equal(stored(walk, 'setup'), null);
 });
 
 test('3. the key', async () => {
@@ -2508,11 +2510,13 @@ test('6. a new reply arrives', async () => {
     assert.equal(asked(walk, 'Story', from), 1);
     const pedant = walk.model.of('HistoryCheck').at(-1);
     assert.equal(JSON.parse(pedant.user).position, 93);
-    const profiled = `PLAYER CHARACTER PROFILE:\n${WholeSite.Profile}`;
+    const profiled = `${REFERENCE.ScribeSetup.Settings.Headings.Profile}\n${WholeSite.Profile}`;
+    const background = REFERENCE.ScribeSetup.Settings.Headings.Background;
     for (const role of ['Story', 'Scene']) {
         const calls = walk.model.calls.filter((call) => call.role === role);
         assert.equal(calls.length > 0, true, role);
         assert.equal(calls.every((call) => call.user.includes(profiled)), true, role);
+        assert.equal(calls.every((call) => call.user.split(background).length - 1 === 1), true, role);
     }
     const comparison = JSON.parse(pedant.user);
     assert.ok(comparison.target.some((block) => block.ref === 'm93b1' && block.quote === REPLY[0][1]));
@@ -2580,14 +2584,15 @@ test('6. a character profile preserves the model’s appearance claims, and an u
     assert.equal(lost.panel.byId('scribe-story').hidden, false);
     assert.equal(
         lost.panel.text('scribe-story'),
-        "The story's characters could not be read, so every character counts as custom: Zeta answered HTTP 404",
+        'The story setup could not be read: Zeta answered HTTP 404',
     );
     const story = unread.site.scribeRequests().filter((request) => !WholeSite.paged(request.url));
     assert.deepEqual(
         story.map((request) => new URL(request.url).pathname).sort(),
         ['/v1/rooms/harbour'],
     );
-    assert.equal(unread.model.calls.some((call) => call.user.includes('PLAYER CHARACTER PROFILE:')), false);
+    assert.equal(unread.model.calls.some((call) => call.user.includes('PLAYER CHARACTER PROFILE')), false);
+    assert.equal(unread.model.calls.some((call) => call.user.includes(REFERENCE.ScribeSetup.Settings.Headings.Background)), false);
 });
 
 test('installed scene, recap, note and suggestion use delivered model text when the provider reports length', async () => {
@@ -8683,4 +8688,325 @@ test('a page missing the last saved message preserves all 1,034 receipts after r
     assert.equal(walk.site.pageRequests().length, history);
     assert.equal(walk.model.calls.length, paid);
     assert.deepEqual(plain(stored(walk, 'book').log.read), before);
+});
+
+test('adopted room loads story setup and persona, sends background once, and exports plot+chat and full backup', async () => {
+    const walk = world();
+    const zeta = walk.site.rooms.get(ROOM).zeta;
+    zeta.plotName = 'Harbour Lights & Salt';
+    zeta.roomTitle = 'Harbour Watch';
+    zeta.shortDescription = 'Lanterns guide {{user}} through the fog.';
+    zeta.longDescription = 'A salt-worn port where {{user}} walks the pier.';
+    zeta.about = 'Author note on the harbour setting for {{user}}.';
+    zeta.isAboutPublic = true;
+    zeta.creatorComment = 'Enjoy the mist.';
+    zeta.hashtags = ['harbour', 'mystery'];
+    zeta.persona = PLAYER;
+    zeta.profile = WholeSite.Profile;
+    zeta.characters = [
+        { id: 'char-mirelle', name: 'Mirelle', description: 'Money-changer who knows {{user}}.' },
+        { id: 'char-oswin', name: 'Oswin', description: 'Harbourmaster of the pier.' },
+    ];
+    zeta.chatProfiles = [
+        { id: 'cp-1', name: 'Guard', summary: 'Harbour watch', description: 'Keeps the peace.' },
+    ];
+    zeta.introId = 'intro-2';
+    zeta.intros = [
+        {
+            id: 'intro-1',
+            name: 'First',
+            conversation: {
+                messages: [
+                    { type: 'TEXT', content: 'Ignored opening.', senderType: 'BOT', senderId: '_NARRATOR_', speakerName: null },
+                ],
+            },
+        },
+        {
+            id: 'intro-2',
+            name: 'Second',
+            conversation: {
+                messages: [
+                    { type: 'TEXT', content: 'Fog rolls over {{user}}.', senderType: 'BOT', senderId: '_NARRATOR_', speakerName: null },
+                    { type: 'TEXT', content: { text: 'Mind the ledger, {{user}}.' }, senderType: 'BOT', senderId: 'char-mirelle', speakerName: null },
+                    { type: 'TEXT', content: 'I keep watch.', senderType: 'USER', senderId: 'user-1', speakerName: null },
+                ],
+            },
+        },
+    ];
+    zeta.lorebooks = [
+        { name: 'Red Ledger', keys: ['ledger', 'debt'], content: 'Tracks every harbour coin owed to {{user}}.', priority: 10 },
+    ];
+    zeta.plugins = [{ id: 'plugin-harbour', enabled: true }];
+    const longNotes = 'DM Memory note: ' + 'harbour ledger clue. '.repeat(230);
+    assert.equal(longNotes.length > 4000, true);
+    walk.worker.setNotes(CHAT, longNotes);
+
+    const tab = await opened(walk);
+    tab.setDmKey(DM_KEY);
+    tab.panel.tab('Settings');
+    await until(
+        walk,
+        'the room Worker notes to load',
+        () => tab.panel.text('scribe-notes').startsWith('4,000 characters'),
+        2 * TICK_MS,
+    );
+    await saveKey(walk, tab);
+    await adopt(walk, tab, '3');
+    await arrive(walk, tab, ASKED, REPLY);
+    await until(
+        walk,
+        'the live reply to be checked with story setup',
+        () => stored(walk, 'live')?.seen?.id === walk.site.messages.at(-1).id,
+        TICK_MS * 2,
+    );
+    await quiet(walk, 'after live reply with story setup');
+
+    const nonPageReads = walk.site
+        .scribeRequests()
+        .filter((request) => !WholeSite.paged(request.url))
+        .map((request) => new URL(request.url).pathname)
+        .sort();
+    assert.deepEqual(nonPageReads, ['/v1/plots/plot-harbour/rooms/harbour/user-personas/selected', '/v1/rooms/harbour']);
+
+    tab.panel.tab('Settings');
+    assert.equal(tab.panel.byId('scribe-setup-state').hidden, false);
+    assert.match(tab.panel.text('scribe-setup-state'), /^Story setup: [\d,]+ characters go with every call\.$/);
+    assert.equal(tab.panel.byId('scribe-profile-state').hidden, false);
+    assert.equal(tab.panel.text('scribe-profile-state'), `Profile: your persona ${PLAYER}.`);
+
+    const background = REFERENCE.ScribeSetup.Settings.Headings.Background;
+    for (const role of ['Story', 'Scene']) {
+        const calls = walk.model.of(role);
+        assert.equal(calls.length > 0, true, role);
+        for (const call of calls) {
+            assert.equal(call.user.split(background).length - 1, 1, role);
+            assert.equal(call.user.includes('Harbour Lights & Salt'), true, role);
+            assert.equal(call.user.includes('Lanterns guide Halvard through the fog.'), true, role);
+            assert.equal(call.user.includes('{{user}}'), false, role);
+            assert.equal(call.user.includes(`${PLAYER}: ${WholeSite.Profile}`), true, role);
+        }
+    }
+    const checks = walk.model.of('HistoryCheck');
+    assert.equal(checks.length > 0, true);
+    for (const check of checks) {
+        assert.equal(check.user.includes(background), false);
+        assert.equal(check.user.includes('OPERATOR NOTES:'), false);
+        const parsed = JSON.parse(check.user);
+        assert.equal(typeof parsed.storySetup, 'string');
+        assert.equal(parsed.storySetup.includes('Harbour Lights & Salt'), true);
+        assert.equal(parsed.storySetup.includes('{{user}}'), false);
+        assert.equal(parsed.playerCharacterProfile, `${PLAYER}: ${WholeSite.Profile}`);
+    }
+
+    const callsBeforeExport = walk.model.calls.length;
+    const downloadsBeforePlotChat = tab.document.downloads.length;
+    tab.panel.tab('Progress');
+    tab.panel.click('scribe-export-plot');
+    await until(
+        walk,
+        'plot+chat export to download',
+        () => tab.document.downloads.length === downloadsBeforePlotChat + 1 &&
+            tab.panel.text('scribe-plot-export-outcome').startsWith('Exported zeta-plot-chat-harbour-lights-salt.json'),
+        TICK_MS,
+    );
+    assert.equal(walk.model.calls.length, callsBeforeExport);
+    const plotChatDownload = tab.document.downloads.at(-1);
+    assert.equal(plotChatDownload.name, 'zeta-plot-chat-harbour-lights-salt.json');
+    const exportedPlotChat = JSON.parse(await resolveObjectURL(plotChatDownload.href).text());
+    assert.equal(exportedPlotChat.format, 'zeta-scribe-plot');
+    assert.equal(exportedPlotChat.version, 1);
+    assert.equal(exportedPlotChat.plotId, 'plot-harbour');
+    assert.equal(exportedPlotChat.roomId, ROOM);
+    assert.equal(exportedPlotChat.roomTitle, 'Harbour Watch');
+    assert.equal(exportedPlotChat.introId, 'intro-2');
+    assert.equal(exportedPlotChat.plot.about, 'Author note on the harbour setting for {{user}}.');
+    assert.equal(exportedPlotChat.plot.shortDescription, 'Lanterns guide {{user}} through the fog.');
+    assert.deepEqual(exportedPlotChat.plot.opening, [
+        { speaker: 'Narrator', text: 'Fog rolls over {{user}}.' },
+        { speaker: 'Mirelle', text: 'Mind the ledger, {{user}}.' },
+        { speaker: '{{user}}', text: 'I keep watch.' },
+    ]);
+    assert.deepEqual(exportedPlotChat.plot.lore, [
+        { name: 'Red Ledger', text: 'Tracks every harbour coin owed to {{user}}.' },
+    ]);
+    assert.deepEqual(exportedPlotChat.plot.raw.lorebooks, zeta.lorebooks);
+    assert.deepEqual(exportedPlotChat.plot.raw.plugins, zeta.plugins);
+    assert.deepEqual(exportedPlotChat.profile, {
+        source: 'Persona',
+        name: PLAYER,
+        description: WholeSite.Profile,
+    });
+    assert.equal(exportedPlotChat.notes, longNotes);
+    assert.equal(exportedPlotChat.chat.completeHistory, true);
+    assert.equal(exportedPlotChat.chat.messageCount, walk.site.messages.length);
+    assert.deepEqual(
+        exportedPlotChat.chat.messages.map((message) => message.id),
+        walk.site.messages.map((message) => message.id),
+    );
+    assert.equal(Object.hasOwn(exportedPlotChat, 'book'), false);
+    assert.equal(Object.hasOwn(exportedPlotChat, 'live'), false);
+    assert.equal(Object.hasOwn(exportedPlotChat, 'settings'), false);
+    assert.equal(JSON.stringify(exportedPlotChat).includes(KEY), false);
+    assert.equal(JSON.stringify(exportedPlotChat).includes(DM_KEY), false);
+
+    const backupText = await exportFromProgress(tab);
+    const backup = JSON.parse(backupText);
+    assert.equal(backup.setup.plotId, 'plot-harbour');
+    assert.equal(backup.setup.roomTitle, 'Harbour Watch');
+    assert.equal(backup.setup.introId, 'intro-2');
+    assert.equal(backup.setup.story.name, 'Harbour Lights & Salt');
+    assert.equal(backup.setup.profile.name, PLAYER);
+    assert.equal(backup.setup.notes, longNotes);
+    assert.equal(typeof backup.setup.fetchedAt, 'string');
+    assert.deepEqual(tab.logs, []);
+});
+
+test('unadopted room stays silent until explicit Export plot + chat runs on demand with zero LLM calls', async () => {
+    const walk = world();
+    REFERENCE.ScribeStore.setKey(walk.storage, KEY);
+    const zeta = walk.site.rooms.get(ROOM).zeta;
+    zeta.plotName = 'Quiet Pier';
+    zeta.about = 'Still water at dusk.';
+    zeta.isAboutPublic = true;
+    zeta.persona = PLAYER;
+    zeta.characters = [{ id: 'char-1', name: 'Mirelle', description: 'Money-changer.' }];
+    zeta.lorebooks = [{ title: 'Tide Bell', text: 'Rings at ebb tide.' }];
+
+    const tab = await opened(walk);
+    await pass(walk, 2 * TICK_MS);
+    assert.equal(walk.site.scribeRequests().length, 0);
+    assert.equal(walk.model.calls.length, 0);
+    assert.equal(stored(walk, 'setup'), null);
+    tab.panel.tab('Settings');
+    assert.equal(tab.panel.byId('scribe-setup-state').hidden, true);
+    assert.equal(tab.panel.byId('scribe-profile-state').hidden, true);
+
+    tab.panel.tab('Progress');
+    const beforeDownloads = tab.document.downloads.length;
+    tab.panel.click('scribe-export-plot');
+    await until(
+        walk,
+        'unadopted plot+chat export to finish',
+        () => tab.document.downloads.length === beforeDownloads + 1 &&
+            tab.panel.text('scribe-plot-export-outcome').startsWith('Exported zeta-plot-chat-quiet-pier.json'),
+        TICK_MS,
+    );
+    assert.equal(walk.model.calls.length, 0);
+    assert.equal(stored(walk, 'book'), null);
+    assert.equal(stored(walk, 'setup'), null);
+    const downloaded = tab.document.downloads.at(-1);
+    assert.equal(downloaded.name, 'zeta-plot-chat-quiet-pier.json');
+    const bundle = JSON.parse(await resolveObjectURL(downloaded.href).text());
+    assert.equal(bundle.format, 'zeta-scribe-plot');
+    assert.equal(bundle.version, 1);
+    assert.equal(bundle.roomId, ROOM);
+    assert.equal(bundle.plotId, 'plot-harbour');
+    assert.equal(bundle.plot.about, 'Still water at dusk.');
+    assert.deepEqual(bundle.profile, { source: 'Persona', name: PLAYER, description: WholeSite.Profile });
+    assert.equal(bundle.chat.completeHistory, true);
+    assert.equal(bundle.chat.messageCount, walk.site.messages.length);
+    assert.deepEqual(
+        bundle.chat.messages.map((message) => message.id),
+        walk.site.messages.map((message) => message.id),
+    );
+    assert.equal(Object.hasOwn(bundle, 'book'), false);
+    assert.equal(Object.hasOwn(bundle, 'live'), false);
+    assert.equal(Object.hasOwn(bundle, 'settings'), false);
+    assert.deepEqual(tab.logs, []);
+});
+
+test('plot page captures login token, mounts Export plot, downloads plot JSON, and unmounts on navigation', async () => {
+    const walk = world();
+    const plotId = 'standalone-plot-42';
+    walk.site.addPlot(plotId, {
+        plotName: 'Lanterns at Low Tide',
+        shortDescription: 'A lone lighthouse welcomes {{user}}.',
+        longDescription: 'Waves strike the stone pier beneath the tower.',
+        about: 'Built for standalone plot export.',
+        isAboutPublic: true,
+        creatorComment: 'No room required.',
+        hashtags: ['lighthouse'],
+        characters: [
+            { id: 'char-keeper', name: 'Bram', description: 'Keeper of the lamp.' },
+        ],
+        chatProfiles: [
+            { id: 'cp-traveler', name: 'Traveler', summary: 'Arriving by boat', description: 'Carries a sealed letter.' },
+        ],
+        intros: [
+            {
+                id: 'intro-main',
+                name: 'Dock',
+                conversation: {
+                    messages: [
+                        { type: 'TEXT', content: 'The beacon sweeps the harbour.', senderType: 'BOT', senderId: '_NARRATOR_', speakerName: null },
+                        { type: 'TEXT', content: 'Come inside, {{user}}.', senderType: 'BOT', senderId: 'char-keeper', speakerName: null },
+                    ],
+                },
+            },
+        ],
+        lorebooks: [
+            { name: 'Oil Vault', keys: ['oil', 'lamp'], content: 'Holds three barrels of whale oil.' },
+        ],
+        plugins: [{ id: 'plugin-beacon', version: 2 }],
+    });
+
+    const tab = install(walk, `/en/plots/${plotId}/profile`, WIDE, { layout: 'none' });
+    tab.ready();
+    await tab.openPlotPage();
+    await until(walk, 'the plot export widget to mount', () => tab.panel.plotHosts() === 1, 5000);
+    assert.equal(tab.panel.hosts(), 0);
+    assert.equal(tab.panel.plotButton().textContent, 'Export plot');
+    assert.equal(walk.site.scribeRequests().length, 0);
+    assert.equal(walk.model.calls.length, 0);
+
+    const beforeDownloads = tab.document.downloads.length;
+    tab.panel.clickPlotExport();
+    await until(
+        walk,
+        'the plot-page export to download',
+        () => tab.document.downloads.length === beforeDownloads + 1 &&
+            tab.panel.plotStatusText() === 'Exported zeta-plot-lanterns-at-low-tide.json (1 character, 1 lore entry).',
+        5000,
+    );
+    assert.equal(walk.model.calls.length, 0);
+    assert.deepEqual(
+        walk.site.scribeRequests().map((request) => new URL(request.url).pathname),
+        [`/v1/plots/${plotId}`],
+    );
+    const downloaded = tab.document.downloads.at(-1);
+    assert.equal(downloaded.name, 'zeta-plot-lanterns-at-low-tide.json');
+    const bundle = JSON.parse(await resolveObjectURL(downloaded.href).text());
+    assert.equal(bundle.format, 'zeta-scribe-plot');
+    assert.equal(bundle.version, 1);
+    assert.equal(bundle.plotId, plotId);
+    assert.equal(bundle.roomId, null);
+    assert.equal(bundle.roomTitle, null);
+    assert.equal(bundle.introId, null);
+    assert.equal(bundle.profile, null);
+    assert.equal(bundle.notes, null);
+    assert.equal(bundle.chat, null);
+    assert.equal(bundle.plot.name, 'Lanterns at Low Tide');
+    assert.equal(bundle.plot.about, 'Built for standalone plot export.');
+    assert.deepEqual(bundle.plot.raw.plugins, [{ id: 'plugin-beacon', version: 2 }]);
+    assert.deepEqual(bundle.plot.characters, [
+        { id: 'char-keeper', name: 'Bram', description: 'Keeper of the lamp.' },
+    ]);
+    assert.deepEqual(bundle.plot.opening, [
+        { speaker: 'Narrator', text: 'The beacon sweeps the harbour.' },
+        { speaker: 'Bram', text: 'Come inside, {{user}}.' },
+    ]);
+    assert.deepEqual(bundle.plot.lore, [
+        { name: 'Oil Vault', text: 'Holds three barrels of whale oil.' },
+    ]);
+    assert.deepEqual(bundle.plot.raw.lorebooks, [
+        { name: 'Oil Vault', keys: ['oil', 'lamp'], content: 'Holds three barrels of whale oil.' },
+    ]);
+    assert.equal(Object.hasOwn(bundle, 'book'), false);
+    assert.equal(Object.hasOwn(bundle, 'live'), false);
+    assert.equal(Object.hasOwn(bundle, 'settings'), false);
+
+    tab.go('/');
+    await until(walk, 'the plot export widget to unmount on navigation', () => tab.panel.plotHosts() === 0, 5000);
+    assert.equal(tab.panel.hosts(), 0);
+    assert.deepEqual(tab.logs, []);
 });

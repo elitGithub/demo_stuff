@@ -2870,34 +2870,37 @@ const ScribeLive = Object.freeze({
      * @return {Promise<void>}
      */
     async drain(live) {
-        while (!live.closed && (live.waiting !== null || live.again !== null || live.refreshing)) {
-            if (live.waiting !== null) {
-                const next = live.waiting;
-                live.waiting = null;
-                try {
-                    await ScribeLive.consider(live, next);
-                } catch (error) {
-                    live.problem = ScribeLive.words(error);
+        try {
+            while (!live.closed && (live.waiting !== null || live.again !== null || live.refreshing)) {
+                if (live.waiting !== null) {
+                    const next = live.waiting;
+                    live.waiting = null;
+                    try {
+                        await ScribeLive.consider(live, next);
+                    } catch (error) {
+                        live.problem = ScribeLive.words(error);
+                    }
+                } else if (live.again !== null) {
+                    const retry = live.again;
+                    live.again = null;
+                    try {
+                        await ScribeLive.consider(live, retry.message, retry.entry);
+                    } catch (error) {
+                        live.problem = ScribeLive.words(error);
+                    }
+                } else {
+                    live.refreshing = false;
+                    try {
+                        await ScribeLive.refresh(live);
+                    } catch (error) {
+                        live.problem = ScribeLive.words(error);
+                    }
                 }
-            } else if (live.again !== null) {
-                const retry = live.again;
-                live.again = null;
-                try {
-                    await ScribeLive.consider(live, retry.message, retry.entry);
-                } catch (error) {
-                    live.problem = ScribeLive.words(error);
-                }
-            } else {
-                live.refreshing = false;
-                try {
-                    await ScribeLive.refresh(live);
-                } catch (error) {
-                    live.problem = ScribeLive.words(error);
-                }
+                ScribeLive.heard(live);
             }
-            ScribeLive.heard(live);
+        } finally {
+            live.running = null;
         }
-        live.running = null;
     },
 
     /**
@@ -2906,9 +2909,35 @@ const ScribeLive = Object.freeze({
      */
     kick(live) {
         if (live.running === null && (live.waiting !== null || live.again !== null || live.refreshing)) {
-            live.running = ScribeLive.drain(live);
+            let finish = null;
+            let fail = null;
+            const pending = new Promise(
+                /**
+                 * @param {Function} resolve
+                 * @param {Function} reject
+                 * @return {void}
+                 */
+                (resolve, reject) => {
+                    finish = resolve;
+                    fail = reject;
+                },
+            );
+            pending.then(
+                null,
+                /**
+                 * @return {void}
+                 */
+                () => undefined,
+            );
+            live.running = pending;
+            const run = ScribeLive.drain(live);
+            if (live.running === pending) {
+                live.running = run;
+            }
+            run.then(finish, fail);
+            return run;
         }
-        return live.running;
+        return live.running ?? Promise.resolve();
     },
 
     /**

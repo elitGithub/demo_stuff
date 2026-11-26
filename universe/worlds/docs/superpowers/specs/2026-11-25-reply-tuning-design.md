@@ -270,8 +270,9 @@ aliases, tier, player flag, model override and avatar. Stored as one `card_json`
   `age` to `age`, `hair` to `hair`, `eyes` to `eyes` (fixed slots), `height` and `body` together as one `build` fact
   (`{height}; {body}`, fixed slot; the Scribe defines build as height and body shape), `face` to `appearance`,
   `features` to `feature` (list categories).
-- On save, only fields whose value changed from the stored card are filed. For a fixed slot the new fact replaces
-  the live value (as an edited, decided fact does today: the old value becomes `Reported`). For a list category the
+- On save, only fields whose value changed from the stored card are filed. For a fixed slot the new fact is filed as
+  decided (operator ruling 2026-11-26, see "Addendum: decisions"): it replaces the live value, the old value becomes
+  `Reported`. For a list category the
   card remembers which fact each field filed (`card_json` keeps the fact id per field) and the new fact replaces that
   one fact only, leaving story-added appearance and features alone. Unchanged fields are never re-filed, so a later
   save never overwrites what the story changed.
@@ -382,11 +383,37 @@ descriptions; in fighting scenes more advanced detailing") and approved these st
 - **Scene state** keeps `style` (the style in force this turn, shown in the Scene tab) and `pinnedStyle` (`null`
   when automatic).
 
+## Addendum: decisions (operator, 2026-11-26)
+
+The operator's word decides a fixed value: the card, and what the player states happened (rule 10). A model can
+not change it without that basis; its second value stays `Reported` (rule 11).
+
+- A card save files a changed fixed value (age, hair, eyes, build) as a decided operator fact, directly (no edit
+  step: the book ignores an edit with unchanged text).
+- When two decided values share a fixed or moving slot, the later decision wins; the older becomes `Reported`
+  and stays readable as the earlier value ("originally red"). Later means later in the book's log (the entry that
+  made the decision: the card save, the operator's edit, or, from Task 3, the story entry of the player's
+  statement).
+- Example: card hair red (in force); the player narrates "she dyed her hair black" (decided, later: black in force,
+  red `Reported`); a reply mentions blonde hair (model, no basis: `Reported`); the operator then edits the card's
+  hair (newest decision: in force).
+- The card window keeps the card's own value and shows "In the book now: ..." under the field when the book
+  differs.
+- **Unknown values:** a card text value with no letter or digit ("?", "-", "...") is saved as `?` and filed into the
+  book as `?`. Every model request shows a `?` value as `unknown` ("I think a LLM would react incorrect to it, so in
+  the requests any "?" becomes "unknown""). Speech examples are kept as written.
+- A card change to a list field replaces the card's own fact even after the story refined it (operator: "card
+  changes to explain").
+
 ## Later (not this project)
 
 - Styles the operator defines (names beyond the fixed list).
 
 - The player can speak as any character (as in Zeta).
+
+- Short book data (operator, 2026-11-26): appearance stays a short summary ("black hair, scar on left cheek, green
+  eyes"); detail goes into features ("has an old scar, silvery, from a long sword from a long forgotten battle").
+  About how the Scribe writes refinements: project 3.
 
 ## Calls I made (operator to check)
 

@@ -1,3 +1,4 @@
+import { CharacterCard } from '../store/CharacterCard.mjs';
 import { SceneType } from '../store/enums/SceneType.mjs';
 import { SpendStage } from '../store/enums/SpendStage.mjs';
 import { TurnMode } from '../store/enums/TurnMode.mjs';
@@ -177,7 +178,7 @@ export const Director = Object.freeze({
       const aliases = Array.isArray(character.aliases) && character.aliases.length > 0
         ? ` | aliases: ${character.aliases.join(', ')}`
         : '';
-      const rawPersona = character.card.personalitySummary.replace(/\s+/g, ' ').trim();
+      const rawPersona = CharacterCard.requestValue(character.card.personalitySummary).replace(/\s+/g, ' ').trim();
       const personaSummary = rawPersona.length > 220 ? `${rawPersona.slice(0, 217)}...` : rawPersona;
       return `- slug: ${character.slug} | name: ${character.name}${aliases} | tier: ${character.tier} | isPlayer: ${String(isPlayer)} | presence: ${presence}${personaSummary.length > 0 ? ` | summary: ${personaSummary}` : ''}`;
     });

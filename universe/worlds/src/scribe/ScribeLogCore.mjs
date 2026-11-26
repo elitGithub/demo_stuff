@@ -1,3 +1,4 @@
+import { CharacterCard } from '../store/CharacterCard.mjs';
 import { ScribeAnswer } from './ScribeAnswer.mjs';
 import { ScribeCategory } from './ScribeCategory.mjs';
 import { ScribeIntakeAdapter } from './ScribeIntakeAdapter.mjs';
@@ -1191,9 +1192,14 @@ export const ScribeLogCore = Object.freeze({
      */
     AddFact(operation, view, outcome) {
       const settings = ScribeLogCore.Settings;
-      const { subject, category, target, text, hidden, cite, position, evidence, reported, audience } = operation;
+      const { subject, category, target, text, hidden, cite, position, evidence, reported, audience, decided } = operation;
       const relation = category === ScribeCategory.Settings.RelationCategory;
       const reportable = reported === undefined || reported === true;
+      const decidable =
+        decided === undefined ||
+        (decided === true &&
+          reported === undefined &&
+          [ScribeCategory.Kind.Fixed, ScribeCategory.Kind.Moving].includes(ScribeLogCore.categoryKind(category)));
       const audible =
         audience === undefined ||
         (Array.isArray(audience) &&
@@ -1217,13 +1223,14 @@ export const ScribeLogCore = Object.freeze({
         typeof category === 'string' &&
         Boolean(ScribeCategory.parse(category)) &&
         (relation ? typeof target === 'string' : target === null) &&
-        ScribeLogCore.worded(text) &&
+        (ScribeLogCore.worded(text) || text === CharacterCard.Unknown) &&
         typeof hidden === 'boolean' &&
         (cite === null || typeof cite === 'string') &&
         Number.isSafeInteger(position) &&
         position >= settings.LeastPosition &&
         attested &&
         reportable &&
+        decidable &&
         audible;
       if (!valid) {
         return settings.InvalidOperation;
@@ -1245,6 +1252,7 @@ export const ScribeLogCore = Object.freeze({
         fact: ScribeLogCore.nextFactId(outcome.counters),
         ...(evidence === undefined ? {} : { evidence: { attribution: evidence.attribution, speaker: evidence.speaker } }),
         ...(reported === true ? { reported: true } : {}),
+        ...(decided === true ? { decided: true } : {}),
         ...(audience === undefined ? {} : { audience: [...audience] }),
       };
       return null;
@@ -1257,15 +1265,24 @@ export const ScribeLogCore = Object.freeze({
      * @returns {string | null}
      */
     RemoveFact(operation, view, outcome) {
-      const { fact } = operation;
+      const { fact, exact } = operation;
       const named = view.facts.get(fact);
-      if (typeof fact !== 'string' || ScribeLogCore.unnamed(named)) {
+      if (
+        typeof fact !== 'string' ||
+        ScribeLogCore.unnamed(named) ||
+        (exact !== undefined && exact !== true)
+      ) {
         return ScribeLogCore.Settings.InvalidOperation;
       }
       if (named === undefined) {
         return ScribeLogCore.Reason.Reference;
       }
-      outcome.stored = { type: operation.type, fact, mark: ScribeLogCore.mark(named) };
+      outcome.stored = {
+        type: operation.type,
+        fact,
+        mark: ScribeLogCore.mark(named),
+        ...(exact === true ? { exact: true } : {}),
+      };
       return null;
     },
 

@@ -117,48 +117,84 @@ before any task; this plan only fixes names, files, values and tests.
 
 ### Task 2: Character card end to end, appearance filed into the book
 
+Operator ruling 2026-11-26 (spec "Addendum: decisions") replaces the earlier AddFact-then-EditFact idea, which the
+book ignores (`ScribeLogCore.mjs:977`, an edit with unchanged text stores nothing) and which left two decided values
+in force (`ScribeReplay.mjs:1418-1426` only demotes undecided values).
+
 **Files:**
-- Modify: `src/http/Router.mjs` (character routes, `#syncCharacterInBook`), `src/scribe/ScribeService.mjs`,
-  `public/components/CharacterModal.mjs`, `public/styles.css`, `public/api.mjs` (if payload helpers name fields)
+- Modify: `src/scribe/ScribeLogCore.mjs` (`Rulers.AddFact`), `src/scribe/ScribeReplay.mjs` (`file`, decided pass,
+  edits collection), `src/http/Router.mjs` (character routes, `#syncCharacterInBook`), `src/scribe/ScribeService.mjs`,
+  `public/components/CharacterModal.mjs`, `public/app.mjs` (opening the window), `public/styles.css`, `public/api.mjs`
 - Create: `src/scribe/CardFiling.mjs`
 - Test: `tests/http.test.mjs`, `tests/scribe.test.mjs`, `tests/ui.test.mjs`
 
 **Interfaces:**
-- Consumes: `CharacterCard` (Task 1).
+- Consumes: `CharacterCard`, `store.setCardFiledFactIds` (Task 1).
 - Produces:
-  - `CardFiling.operations({state, subjectId, before: CharacterCard, after: CharacterCard}): {operations:
-    readonly object[], filedFactIds: Readonly<Record<string, string>>}`: Scribe log operations for each appearance
-    field whose value changed. Mapping: `age`->`age`, `hair`->`hair`, `eyes`->`eyes`, `height`+`body` -> one `build`
-    fact text `{height}; {body}` (either changed refiles it; an empty part is left out with its separator),
-    `face`->`appearance`, `features`->`feature`. Fixed slots: `AddFact` (origin Operator) then `EditFact` on the new
-    fact so it is decided. List slots: `RemoveFact` on `before.filedFactIds[field]` when present, then `AddFact`. A
-    field changed to empty files nothing and only removes its remembered list fact.
-  - `ScribeService.fileCardAppearance({campaignId, characterId, before: CharacterCard, after: CharacterCard}):
-    CharacterCard` (returns the card with updated `filedFactIds`); creates an empty book first when the campaign has
-    none.
-  - Character API payload: `card` object replaces `persona`/`voiceNotes`; responses include `card` and
-    `bookAppearance: Record<string, string>` (the book's current in-force text per appearance field, for the hint).
+  - `AddFact` ruling accepts optional `decided: true` (only `true` or absent; only fixed or moving categories; not
+    with `reported: true`; anything else `InvalidOperation`); stored on the entry as `decided: true`.
+  - Replay: an `AddFact` with `decided: true` joins `book.decided`. Each decided fact has a decision sequence: the log
+    entry sequence of that `AddFact`, or of the latest `EditFact` that edited it. Decided pass: among live decided
+    facts sharing a decision field, the one with the highest decision sequence stays; the others become `Reported`
+    (leaving their keys when in force); undecided live facts in that field become `Reported` as today. Task 3 adds
+    player-stated facts to the same rule.
+  - `CardFiling.operations({state, subjectId, before: CharacterCard, after: CharacterCard}): readonly {field: string,
+    operation: object}[]`: operations for each appearance field whose value changed (trimmed comparison). Mapping:
+    `age`->`age`, `hair`->`hair`, `eyes`->`eyes`, `height`+`body` -> one `build` fact text `{height}; {body}` (either
+    changed refiles it; an empty part is left out with its separator; both empty files nothing), `face`->`appearance`,
+    `features`->`feature`. Fixed: one `AddFact` with `decided: true`. List: `RemoveFact` on
+    `before.filedFactIds[field]` when that fact is still live, then `AddFact`. Every `AddFact`: subject `subjectId`,
+    target `null`, text = the trimmed value, `hidden: false`, `cite: null`, `position: 0`. A field changed to empty
+    files nothing (fixed: the book keeps its value; list: only the remembered live fact is removed).
+  - `ScribeService.fileCardAppearance({campaignId, characterId, subjectId, before, after}): CharacterCard`: applies
+    the operations with `ScribeLogCore.rule`, replaying between rulings; saves the book; returns `after` with
+    `filedFactIds` for `face`/`features` set to the fact ids the rulings filed (removed keys dropped).
+  - `ScribeService.bookAppearance({state, subjectId}): Readonly<Record<string, string>>`: keys `age, hair, eyes,
+    build, face, features`; value = the in-force facts' texts of that category for the subject joined with `; `
+    (book order); a key with no in-force fact is left out.
+  - `GET /api/campaigns/:id/characters/:characterId` (new): `{...character, bookAppearance}` (`{}` when the
+    campaign has no book or the character no subject); POST/PATCH responses include `bookAppearance` too.
+    `api.getCharacter(campaignId, characterId)`.
 
-- [ ] **Step 1: Server.** Router POST/PATCH accept `card`, validated with `CharacterCard.fromObject` (400 with the
-  field name on failure); inside the existing transaction call `fileCardAppearance` after the character write and
-  persist the returned card. Remove the early return for a missing book in this path.
-- [ ] **Step 2: Window.** `CharacterModal` sections, in order, each a collapsible group: Basics (existing name, slug,
-  aliases, tier, player, model override, avatar), Appearance (7 fields; under each, read-only "In the book now:
-  {text}" when `bookAppearance[field]` differs from the card), Personality (`personalitySummary, traits, habits,
-  behavior, likes, dislikes`), Intimacy (4 sexuality fields), Voice (`speakingStyle, speakingQuirks`,
+- [ ] **Step 1: Book.** `AddFact` `decided` validation and storage; replay decision sequences and the
+  latest-decision rule in the decided pass.
+- [ ] **Step 2: Server.** In the POST/PATCH transaction, after the character write: when any appearance field
+  differs between the stored card (`CharacterCard.empty()` on POST) and the written card, `#syncCharacterInBook`
+  starts from an empty log when the campaign has no book (instead of returning early), then `fileCardAppearance`
+  runs and `store.setCardFiledFactIds` persists the ids. No appearance change: as today, no book is created. An
+  archived character left without a subject files nothing.
+- [ ] **Step 3: Window.** Editing a character first calls `api.getCharacter` (loading state on the trigger; an
+  error shows where the click was and the window does not open), then opens the window with that character. New
+  characters open with an empty card and no hints. `CharacterModal` sections, in order, each a collapsible group:
+  Basics (existing name, slug, aliases, tier, player, model override, avatar), Appearance (7 fields; read-only "In
+  the book now: {text}" under the field when the book differs: `age`, `hair`, `eyes`, `face`, `features` against
+  their own key, `build` once under Body against `{height}; {body}`), Personality (`personalitySummary, traits,
+  habits, behavior, likes, dislikes`), Intimacy (4 sexuality fields), Voice (`speakingStyle, speakingQuirks`,
   `speechExamples` as an add/remove list), Role and portrayal (`scenario`, `characterNote`). Labels from Tavern
   Scenario Builder's field names in plain words. Stable element IDs for every field and button. Name stays the only
-  required field. Save rightmost, Cancel left, loading state on Save.
-- [ ] **Step 3: Tests (try to break it).**
-  - `scribe.test.mjs` "card filing": a first save files 7 appearance values (build combined); a second save with
-    only `hair` changed files only hair and the old hair becomes `Reported`; a later save with nothing changed after
-    the story filed a new hair keeps the story's hair in force; `features` changed twice leaves exactly one
-    card-filed feature fact and keeps a story-added feature; empty `body` with a set `height` files `{height}`.
-  - `http.test.mjs`: create on a campaign with no book creates the book and files the facts; `card.hair: 5` -> 400
-    naming `hair`; `persona` key -> 400.
-  - `ui.test.mjs`: the window renders all fields, shows the "In the book now" hint only when different, adds and
-    removes a speech example, submits `card` with every field; focus survives a catalog update on a card field.
-- [ ] **Step 4: Run** every test file, one at a time. Expected: all pass.
+  required field. Save rightmost, Cancel left, loading state on Save. The window submits `card` with every field
+  except `filedFactIds`.
+- [ ] **Step 4: Tests (try to break it).**
+  - `scribe.test.mjs` "card filing": a first save files the 7 appearance values as 6 facts (build combined), fixed
+    ones decided; an existing undecided hair (imported operator fact) becomes `Reported` and the card's hair is in
+    force; a second save with only `hair` changed files only hair and the first card hair becomes `Reported`; a save
+    with nothing changed files nothing (log revision unchanged); an operator `EditFact` of the card hair after a card
+    save wins, then a later card save with a new hair wins over the edit; a story `Change` of the card-filed hair
+    (model-written) leaves the card hair in force and the new value `Reported`; `features` changed twice leaves
+    exactly one card-filed feature fact and keeps a story-added feature; the remembered feature fact removed in the
+    Book tab, then `features` changed: no error, the new fact is filed and remembered; `features` cleared removes
+    the remembered fact and its key; `hair` cleared files nothing and the book keeps its hair; empty `body` with a
+    set `height` files `{height}`, both empty files nothing; `AddFact` with `decided: false`, `'yes'`, on a list
+    category, or with `reported: true` is refused; replaying the same log twice gives the same statuses;
+    `bookAppearance` joins two in-force features with `; ` and leaves out `Reported` values.
+  - `http.test.mjs`: create on a campaign with no book creates the book and files the facts; a PATCH that changes
+    no appearance field on a campaign with no book creates no book; `card.hair: 5` -> 400 naming `hair`; `persona`
+    key -> 400; GET character returns `bookAppearance` (`{}` without a book), 404 for an unknown id.
+  - `ui.test.mjs`: the window renders all fields, shows the "In the book now" hint only when different (build
+    under Body), adds and removes a speech example, submits `card` with every field and no `filedFactIds`; editing
+    shows a loading state and an error without opening when GET fails; focus survives a catalog update on a card
+    field.
+- [ ] **Step 5: Run** every test file, one at a time. Expected: all pass.
 
 ### Task 3: Book rules for player-stated changes and model-written fixed values
 
@@ -173,7 +209,9 @@ before any task; this plan only fixes names, files, values and tests.
 
 - [ ] **Step 1: Player-stated is decided.** In replay, a Story fact whose every cited message position belongs to a
   message with `role === TurnRole.User`, with `evidence.attribution === 'witnessed'`, in a fixed or moving
-  category, joins `book.decided` so the existing decided pass replaces the live value (old -> `Reported`).
+  category, joins `book.decided` with the sequence of the story entry that filed it as its decision sequence, so the
+  latest-decision rule from Task 2 settles it against card values and edits (old -> `Reported`). Test: card hair
+  red, then the player's "dyed black": black in force, red `Reported`; a later card save wins again.
 - [ ] **Step 2: Model-written fixed second value is Reported.** In `file`, a Story fact in a fixed category, not
   decided, not player-stated, whose fixed slot (`ScribeReplay.keys(fact, Fixed)[0]`) already holds a live in-force
   fact, is filed `Reported` (kept, not entered).
@@ -190,6 +228,9 @@ before any task; this plan only fixes names, files, values and tests.
 - [ ] **Step 5: Run** every test file, one at a time. Expected: all pass.
 
 ### Task 4: Request assembly modules (budget, story slice, history window)
+
+`StorySlice` renders fact and card text through the shared unknown-value rule from Task 2 fix round 1 (`?` shows
+as `unknown`); Task 6 does the same for the identity, voice and portrayal blocks.
 
 **Files:**
 - Create: `src/engine/RequestBudget.mjs`, `src/engine/StorySlice.mjs`, `src/engine/HistoryWindow.mjs`

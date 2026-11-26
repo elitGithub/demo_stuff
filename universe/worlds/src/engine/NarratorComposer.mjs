@@ -1,3 +1,4 @@
+import { CharacterCard } from '../store/CharacterCard.mjs';
 import { SpeakerType } from '../store/enums/SpeakerType.mjs';
 import { SpendStage } from '../store/enums/SpendStage.mjs';
 import { BeatParser } from './BeatParser.mjs';
@@ -151,7 +152,7 @@ export const NarratorComposer = Object.freeze({
         const modeLabel = presentIdSet.has(character.id) ? 'present' : 'remote';
         const roleLabel = character.id === campaign.playerCharacterId ? 'player' : 'npc';
         const voicePart = character.card.speakingStyle.trim().length > 0
-          ? ` | voice: ${character.card.speakingStyle.trim()}`
+          ? ` | voice: ${CharacterCard.requestValue(character.card.speakingStyle).trim()}`
           : '';
         return `- ${character.name} (slug: ${character.slug}, ${roleLabel}, ${modeLabel})${voicePart}`;
       });

@@ -1,3 +1,4 @@
+import { CharacterCard } from '../store/CharacterCard.mjs';
 import { CharacterTier } from '../store/enums/CharacterTier.mjs';
 import { SpendStage } from '../store/enums/SpendStage.mjs';
 
@@ -156,7 +157,7 @@ export const CharacterMind = Object.freeze({
         ? (labelMap.get(fact.target) ?? fact.target)
         : fact.targetText;
       const categoryPart = targetLabel ? `${fact.category} (${targetLabel})` : (fact.category ?? 'fact');
-      return `- ${subjectLabel} | ${categoryPart}: ${fact.text}`;
+      return `- ${subjectLabel} | ${categoryPart}: ${CharacterCard.requestValue(fact.text)}`;
     };
 
     const knownFacts = Array.isArray(knowledgePacket.knownFacts) ? knowledgePacket.knownFacts : [];
@@ -197,8 +198,8 @@ export const CharacterMind = Object.freeze({
         'CHARACTER IDENTITY:',
         `Name: ${character.name}`,
         `Tier: ${character.tier}`,
-        `Persona: ${character.card.personalitySummary.trim().length > 0 ? character.card.personalitySummary.trim() : '(none)'}`,
-        `Voice notes: ${character.card.speakingStyle.trim().length > 0 ? character.card.speakingStyle.trim() : '(none)'}`,
+        `Persona: ${character.card.personalitySummary.trim().length > 0 ? CharacterCard.requestValue(character.card.personalitySummary).trim() : '(none)'}`,
+        `Voice notes: ${character.card.speakingStyle.trim().length > 0 ? CharacterCard.requestValue(character.card.speakingStyle).trim() : '(none)'}`,
       ].join('\n'),
       [
         'CURRENT SCENE:',

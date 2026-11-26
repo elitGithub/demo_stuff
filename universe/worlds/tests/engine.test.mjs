@@ -2572,3 +2572,135 @@ describe('TurnEngine end-to-end regressions and adversarial invariants', () => {
     assert.equal(ensembleTurn.assistantTurn.beats.length, 4);
   });
 });
+
+describe('Unknown card values reach requests as unknown', () => {
+  const directorReply = Object.freeze({
+    sceneChanged: false,
+    location: 'Oak Bedroom',
+    day: 1,
+    timeLabel: 'Evening',
+    sceneType: 'private',
+    userInputKind: 'player_in_scene',
+    presentSlugs: ['frost', 'lize'],
+    remoteSlugs: [],
+    offscreenNotes: {},
+    walkOnsEnter: [],
+    walkOnsLeave: [],
+    encounterAccepted: false,
+    encounterBrief: '',
+    pacing: 'focused_one',
+    targetChars: 800,
+    responders: [],
+    narratorDirective: '',
+  });
+
+  /**
+   * @param {object} fixture
+   * @returns {object}
+   * @throws {Error}
+   */
+  const unknownLize = ({ store, campaign, lize }) => {
+    return store.updateCharacter(campaign.id, lize.id, {
+      card: { personalitySummary: '...', speakingStyle: '-' },
+    });
+  };
+
+  /**
+   * @param {Array<{payload: {messages: Array<{content: string}>}}>} calls
+   * @returns {string}
+   */
+  const requestText = (calls) => calls.flatMap((call) => call.payload.messages.map((message) => message.content)).join('\n');
+
+  it('shows the Director roster summary as unknown', async () => {
+    const fixture = createWorldFixture();
+    const lize = unknownLize(fixture);
+    assert.equal(lize.card.personalitySummary, '?');
+    const { client, calls } = createScriptedClient([{ json: directorReply }], { store: fixture.store });
+
+    await Director.planTurn({
+      campaign: fixture.campaign,
+      characters: [fixture.frost, lize],
+      preState: fixture.campaign.sceneState,
+      recentTurns: [],
+      userText: 'Hello.',
+      mode: TurnMode.Normal,
+      encounterRoll: { triggered: false, forced: false, plausibilityRequired: false, targetKind: null, stance: null },
+      model: 'openai/gpt-4.1-mini',
+      client,
+    });
+
+    const text = requestText(calls);
+    assert.match(text, /slug: lize .*summary: unknown/);
+    assert.doesNotMatch(text, /summary: \?/);
+  });
+
+  it('shows the CharacterMind identity and known facts as unknown', async () => {
+    const fixture = createWorldFixture();
+    const lize = unknownLize(fixture);
+    const { client, calls } = createScriptedClient([
+      {
+        json: {
+          internalThought: 'Hm.',
+          physicalAction: 'Waits.',
+          spokenLines: 'Well.',
+          tone: 'dry',
+          knowledgeBoundaries: ['none'],
+        },
+      },
+    ], { store: fixture.store });
+
+    await CharacterMind.think({
+      character: lize,
+      campaign: fixture.campaign,
+      nextState: fixture.campaign.sceneState,
+      presentCharacters: [fixture.frost, lize],
+      witnessedHistory: [],
+      knowledgePacket: {
+        knownFacts: [{ subject: 'S2', category: 'age', target: null, targetText: null, text: '?' }],
+        relationships: [],
+        visibleThreads: [],
+        rulings: [{ subject: 'S2', category: 'hair', target: null, targetText: null, text: '?' }],
+      },
+      currentInput: 'Hello.',
+      model: 'openai/gpt-4.1',
+      client,
+    });
+
+    const text = requestText(calls);
+    assert.match(text, /Persona: unknown/);
+    assert.match(text, /Voice notes: unknown/);
+    assert.match(text, /\| age: unknown/);
+    assert.match(text, /\| hair: unknown/);
+    assert.doesNotMatch(text, /: \?(\n|$)/);
+  });
+
+  it('shows the NarratorComposer cast voice as unknown', async () => {
+    const fixture = createWorldFixture();
+    const lize = unknownLize(fixture);
+    const { client, calls } = createScriptedClient([
+      { type: 'stream', text: '[[BEAT:narrator]]\nA cold gust.' },
+    ], { store: fixture.store });
+
+    await NarratorComposer.compose({
+      campaign: fixture.campaign,
+      characters: [fixture.frost, lize],
+      nextState: { ...fixture.campaign.sceneState, presentIds: [fixture.frost.id, lize.id] },
+      recentSceneTurns: [],
+      userBeat: { speakerType: SpeakerType.Player, speakerName: 'Frost', text: 'Look.' },
+      directorPlan: {
+        pacing: 'narrator_only',
+        targetChars: 800,
+        narratorDirective: 'Brief.',
+        encounterAccepted: false,
+        encounterBrief: '',
+      },
+      mindPackets: [],
+      model: 'openai/gpt-4.1',
+      client,
+    });
+
+    const text = requestText(calls);
+    assert.match(text, /voice: unknown/);
+    assert.doesNotMatch(text, /voice: \?/);
+  });
+});

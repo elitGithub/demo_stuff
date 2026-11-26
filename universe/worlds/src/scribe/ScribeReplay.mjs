@@ -893,7 +893,7 @@ export const ScribeReplay = Object.freeze({
      */
     RemoveFact(book, operation) {
       book.removed.add(operation.fact);
-      if (operation.editedSource) {
+      if (operation.editedSource || operation.exact === true) {
         return;
       }
       for (const key of ScribeReplay.markKeys(book, operation.mark)) {
@@ -941,6 +941,10 @@ export const ScribeReplay = Object.freeze({
       const status = ScribeReplay.Status;
       const slot = ScribeReplay.pinSlot(book, operation);
       if (slot === null || book.pins.get(slot) !== operation) {
+        return;
+      }
+      const newestDecision = book.decidedSlots.get(slot);
+      if (newestDecision !== undefined && book.rulingSequences.get(operation) < newestDecision) {
         return;
       }
       const held = book.held.get(slot) ?? [];
@@ -1114,19 +1118,22 @@ export const ScribeReplay = Object.freeze({
     const types = ScribeAnswer.Type;
     const rulingTypes = ScribeLogCore.Ruling;
     const targets = new Map();
+    const decisionSequences = new Map();
     if (edits === null) {
       edits = new Map();
       const corrections = log.entries
         .filter((entry) => entry.kind === ScribeLogCore.Kind.Operator && !entry.withdrawn)
         .flatMap((entry) => {
-          return entry.operations.filter((operation) => {
-            return !operation.revoked && (operation.type === rulingTypes.EditFact || operation.editedSource);
-          });
+          return entry.operations
+            .filter((operation) => {
+              return !operation.revoked && (operation.type === rulingTypes.EditFact || operation.editedSource);
+            })
+            .map((operation) => ({ operation, sequence: entry.sequence }));
         });
       if (corrections.length > 0) {
         const originals = [];
         ScribeReplay.run(log, order, pending, fingerprints, edits, originals, messages);
-        for (const operation of corrections) {
+        for (const { operation, sequence } of corrections) {
           const source = operation.editedSource ?? operation.source;
           if (source.sourcePrint !== null && fingerprints !== null && fingerprints.get(source.cite) !== source.sourcePrint) {
             continue;
@@ -1135,6 +1142,7 @@ export const ScribeReplay = Object.freeze({
           if (fact && (fact.id === source.fact || (source.sourcePrint !== null && fingerprints !== null))) {
             if (operation.type === rulingTypes.EditFact) {
               edits.set(fact.id, operation);
+              decisionSequences.set(fact.id, sequence);
             } else {
               targets.set(operation, fact.id);
             }
@@ -1193,6 +1201,8 @@ export const ScribeReplay = Object.freeze({
       answers: new Map(),
       dismissals: new Map(),
       contradictions: new Map(),
+      decidedSlots: new Map(),
+      rulingSequences: new Map(),
     };
     const counted = [];
     const showings = [];
@@ -1325,13 +1335,21 @@ export const ScribeReplay = Object.freeze({
           const position = positions.get(operation.cite) ?? operation.position;
           if (position !== undefined) {
             counted.push({ operation, position, ruled, sequence: entry.sequence, index, origin: entry.origin });
+            if (operation.decided === true) {
+              decided.add(operation.fact);
+              if (!decisionSequences.has(operation.fact)) {
+                decisionSequences.set(operation.fact, entry.sequence);
+              }
+            }
           }
           continue;
         }
         if (ruling) {
           if (!operation.editedSource || targets.has(operation) || sources !== null) {
             const address = operation.type === rulingTypes.Pin ? 'winner' : 'fact';
-            rulings.push(targets.has(operation) ? { ...operation, [address]: targets.get(operation) } : operation);
+            const filed = targets.has(operation) ? { ...operation, [address]: targets.get(operation) } : operation;
+            rulings.push(filed);
+            book.rulingSequences.set(filed, entry.sequence);
           }
           continue;
         }
@@ -1402,22 +1420,39 @@ export const ScribeReplay = Object.freeze({
      * @returns {string}
      */
     const decisionField = (fact) => {
-      return JSON.stringify([ScribeReplay.keys(fact, ScribeCategory.Kind.Fixed)[0], fact.evidence?.attribute ?? fact.category]);
+      const slot = fact.category === ScribeCategory.Names.Build
+        ? JSON.stringify([fact.subject, fact.category, ScribeCategory.scope(fact).form ?? null])
+        : ScribeReplay.keys(fact, ScribeCategory.Kind.Fixed)[0];
+      return JSON.stringify([slot, fact.evidence?.attribute ?? fact.category]);
     };
-    const chosen = new Set(
-      book.facts
-        .filter((fact) => {
-          return (
-            decided.has(fact.id) &&
-            ScribeReplay.live(fact) &&
-            [ScribeCategory.Kind.Fixed, ScribeCategory.Kind.Moving].includes(ScribeReplay.kindOf(fact.category))
-          );
-        })
-        .map(decisionField),
-    );
+    const chosen = new Map();
+    for (const fact of book.facts) {
+      if (
+        decided.has(fact.id) &&
+        ScribeReplay.live(fact) &&
+        [ScribeCategory.Kind.Fixed, ScribeCategory.Kind.Moving].includes(ScribeReplay.kindOf(fact.category))
+      ) {
+        const field = decisionField(fact);
+        const held = chosen.get(field);
+        if (held === undefined || decisionSequences.get(fact.id) > decisionSequences.get(held.id)) {
+          chosen.set(field, fact);
+        }
+      }
+    }
+    for (const fact of chosen.values()) {
+      const [slot] = ScribeReplay.keys(fact, ScribeCategory.Kind.Fixed);
+      const newest = book.decidedSlots.get(slot);
+      if (newest === undefined || decisionSequences.get(fact.id) > newest) {
+        book.decidedSlots.set(slot, decisionSequences.get(fact.id));
+      }
+    }
     if (chosen.size > 0) {
       for (const fact of book.facts) {
-        if (!decided.has(fact.id) && ScribeReplay.live(fact) && chosen.has(decisionField(fact))) {
+        if (!ScribeReplay.live(fact)) {
+          continue;
+        }
+        const winner = chosen.get(decisionField(fact));
+        if (winner !== undefined && winner !== fact) {
           if (fact.status === status.InForce) {
             ScribeReplay.leave(book, fact, ScribeReplay.keys(fact, ScribeCategory.Kind.Fixed));
           }

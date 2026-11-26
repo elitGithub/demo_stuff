@@ -379,9 +379,17 @@ export class WorldsApp {
             onRefreshModels: () => this.#loadModels(true),
           });
         },
-        onEditCharacter: (character) => {
+        onEditCharacter: async (character) => {
+          const campaignId = this.#activeCampaignId;
+          if (campaignId === null) {
+            return;
+          }
+          const fullCharacter = await this.#api.getCharacter(campaignId, character.id);
+          if (this.#activeCampaignId !== campaignId) {
+            return;
+          }
           this.#characterModal.open({
-            character,
+            character: fullCharacter,
             modelCatalog: this.#modelCatalog,
             modelCatalogLoading: this.#modelCatalogLoading,
             modelCatalogError: this.#modelCatalogError,

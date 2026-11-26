@@ -13,6 +13,80 @@ export class CharacterModal {
     { value: 'coral', label: 'Coral' },
   ]);
 
+  static #BasicsSectionKey = 'basics';
+  static #BuildBookKey = 'build';
+  static #BuildSeparator = '; ';
+  static #HintPrefix = 'In the book now: ';
+  static #ExampleAddButtonId = 'char-example-add';
+  static #ExampleInputIdPrefix = 'char-example-';
+  static #ExampleRemoveIdPrefix = 'char-example-remove-';
+  static #CardFieldIdPrefix = 'char-card-';
+  static #CardHintIdPrefix = 'char-card-hint-';
+  static #SectionIdPrefix = 'char-section-';
+
+  static #CardSections = Object.freeze([
+    Object.freeze({
+      key: 'appearance',
+      title: 'Appearance',
+      hasExamples: false,
+      fields: Object.freeze([
+        Object.freeze({ name: 'age', label: 'Age', single: true, book: 'age' }),
+        Object.freeze({ name: 'hair', label: 'Hair', single: true, book: 'hair' }),
+        Object.freeze({ name: 'eyes', label: 'Eyes', single: true, book: 'eyes' }),
+        Object.freeze({ name: 'height', label: 'Height', single: true, book: null }),
+        Object.freeze({ name: 'body', label: 'Body', single: false, book: 'build' }),
+        Object.freeze({ name: 'face', label: 'Face', single: false, book: 'face' }),
+        Object.freeze({ name: 'features', label: 'Distinguishing features', single: false, book: 'features' }),
+      ]),
+    }),
+    Object.freeze({
+      key: 'personality',
+      title: 'Personality',
+      hasExamples: false,
+      fields: Object.freeze([
+        Object.freeze({ name: 'personalitySummary', label: 'Personality summary', single: false, book: null }),
+        Object.freeze({ name: 'traits', label: 'Traits', single: false, book: null }),
+        Object.freeze({ name: 'habits', label: 'Habits', single: false, book: null }),
+        Object.freeze({ name: 'behavior', label: 'Behavior', single: false, book: null }),
+        Object.freeze({ name: 'likes', label: 'Likes', single: false, book: null }),
+        Object.freeze({ name: 'dislikes', label: 'Dislikes', single: false, book: null }),
+      ]),
+    }),
+    Object.freeze({
+      key: 'intimacy',
+      title: 'Intimacy',
+      hasExamples: false,
+      fields: Object.freeze([
+        Object.freeze({ name: 'sexualityOrientation', label: 'Orientation', single: false, book: null }),
+        Object.freeze({ name: 'sexualityKinks', label: 'Kinks', single: false, book: null }),
+        Object.freeze({ name: 'sexualityLikes', label: 'Sexual likes', single: false, book: null }),
+        Object.freeze({ name: 'sexualityDislikes', label: 'Sexual dislikes', single: false, book: null }),
+      ]),
+    }),
+    Object.freeze({
+      key: 'voice',
+      title: 'Voice',
+      hasExamples: true,
+      fields: Object.freeze([
+        Object.freeze({ name: 'speakingStyle', label: 'Speaking style', single: false, book: null }),
+        Object.freeze({ name: 'speakingQuirks', label: 'Speech quirks', single: false, book: null }),
+      ]),
+    }),
+    Object.freeze({
+      key: 'role',
+      title: 'Role and portrayal',
+      hasExamples: false,
+      fields: Object.freeze([
+        Object.freeze({ name: 'scenario', label: 'Scenario', single: false, book: null }),
+        Object.freeze({ name: 'characterNote', label: 'Character note', single: false, book: null }),
+      ]),
+    }),
+  ]);
+
+  static #TextFieldNames = Object.freeze(
+    CharacterModal.#CardSections.flatMap((section) => section.fields.map((field) => field.name)),
+  );
+
   static #TierDefaultPlaceholder = 'Use tier default (no override)';
   static #RefreshButtonId = 'char-refresh-models';
   static #CloseButtonId = 'char-modal-close';
@@ -70,6 +144,7 @@ export class CharacterModal {
       refreshFocusPending: false,
       modelFilter: '',
       slugManuallyEdited: isEdit,
+      openSections: new Set([CharacterModal.#BasicsSectionKey]),
       values: CharacterModal.#buildValues(isEdit ? character : null),
       busy: false,
       errorMessage: '',
@@ -153,20 +228,12 @@ export class CharacterModal {
       refreshButtonId: CharacterModal.#RefreshButtonId,
     });
     this.#state.refreshFocusPending = refreshReturn.isPending;
-    FocusKeeper.keep({
-      documentRef: this.#documentRef,
-      containerElement: this.#modalRoot,
-      scrollSelector: CharacterModal.#ScrollSelector,
-      renderFn: () => {
-        this.#render({ focusName: false });
-      },
-      returnFocusId: refreshReturn.returnFocusId,
-    });
+    this.#keepRender(refreshReturn.returnFocusId);
   }
 
   /**
-   * @param {{name?: string, slug?: string, aliases?: Array<string>, tier?: string, isPlayer?: boolean, modelOverride?: string | null, card: {personalitySummary: string, speakingStyle: string}, avatarToken?: string, avatarInitials?: string} | null} character
-   * @returns {{name: string, slug: string, aliasesText: string, tier: string, isPlayer: boolean, modelOverride: string, personalitySummary: string, speakingStyle: string, avatarToken: string, avatarInitials: string}}
+   * @param {{name?: string, slug?: string, aliases?: Array<string>, tier?: string, isPlayer?: boolean, modelOverride?: string | null, card: Record<string, string | Array<string>>, bookAppearance: Record<string, string>, avatarToken?: string, avatarInitials?: string} | null} character
+   * @returns {{name: string, slug: string, aliasesText: string, tier: string, isPlayer: boolean, modelOverride: string, card: Record<string, string>, speechExamples: Array<string>, bookAppearance: Record<string, string>, avatarToken: string, avatarInitials: string}}
    * @throws {TypeError}
    */
   static #buildValues(character) {
@@ -178,8 +245,11 @@ export class CharacterModal {
       tier: isEdit && character.tier === 'recurring' ? 'recurring' : 'main',
       isPlayer: isEdit ? Boolean(character.isPlayer) : false,
       modelOverride: isEdit && typeof character.modelOverride === 'string' ? character.modelOverride : '',
-      personalitySummary: isEdit ? character.card.personalitySummary : '',
-      speakingStyle: isEdit ? character.card.speakingStyle : '',
+      card: Object.fromEntries(
+        CharacterModal.#TextFieldNames.map((fieldName) => [fieldName, isEdit ? character.card[fieldName] : '']),
+      ),
+      speechExamples: isEdit ? [...character.card.speechExamples] : [],
+      bookAppearance: isEdit ? character.bookAppearance : {},
       avatarToken: isEdit && typeof character.avatarToken === 'string' ? character.avatarToken : 'slate',
       avatarInitials: isEdit && typeof character.avatarInitials === 'string' ? character.avatarInitials : '',
     };
@@ -235,6 +305,8 @@ export class CharacterModal {
 
     const body = this.#documentRef.createElement('div');
     body.className = 'modal-body';
+    const basics = this.#createSection(state, CharacterModal.#BasicsSectionKey, 'Basics');
+    body.append(basics.details);
 
     const identityRow = this.#documentRef.createElement('div');
     identityRow.className = 'form-grid-two';
@@ -284,7 +356,7 @@ export class CharacterModal {
       this.#createField('Name (max 60)', nameInput, { required: true }),
       this.#createField('Slug', slugInput, { required: true }),
     );
-    body.append(identityRow);
+    basics.content.append(identityRow);
 
     const aliasesInput = this.#documentRef.createElement('input');
     aliasesInput.id = 'char-aliases-input';
@@ -296,7 +368,7 @@ export class CharacterModal {
     aliasesInput.addEventListener('input', () => {
       state.values.aliasesText = aliasesInput.value;
     });
-    body.append(this.#createField('Aliases', aliasesInput));
+    basics.content.append(this.#createField('Aliases', aliasesInput));
 
     const tierRow = this.#documentRef.createElement('div');
     tierRow.className = 'form-grid-two';
@@ -334,7 +406,7 @@ export class CharacterModal {
       this.#createField('Tier', tierSelect),
       this.#createField('Avatar initials', initialsInput),
     );
-    body.append(tierRow);
+    basics.content.append(tierRow);
 
     const playerLabel = this.#documentRef.createElement('label');
     playerLabel.className = 'checkbox-row';
@@ -349,7 +421,7 @@ export class CharacterModal {
     const playerText = this.#documentRef.createElement('span');
     playerText.textContent = 'Player character (POV protagonist)';
     playerLabel.append(playerCheckbox, playerText);
-    body.append(playerLabel);
+    basics.content.append(playerLabel);
 
     const modelGroup = this.#documentRef.createElement('div');
     modelGroup.className = 'model-slot-group';
@@ -445,7 +517,7 @@ export class CharacterModal {
       });
     }
 
-    body.append(modelGroup);
+    basics.content.append(modelGroup);
 
     const tokenGroup = this.#documentRef.createElement('div');
     tokenGroup.className = 'field-group';
@@ -484,31 +556,114 @@ export class CharacterModal {
       tokenPicker.append(optionButton);
     }
     tokenGroup.append(tokenLabel, tokenPicker);
-    body.append(tokenGroup);
+    basics.content.append(tokenGroup);
 
-    const personaInput = this.#documentRef.createElement('textarea');
-    personaInput.id = 'char-persona-input';
-    personaInput.className = 'field-control';
-    personaInput.rows = 3;
-    personaInput.value = state.values.personalitySummary;
-    personaInput.disabled = state.busy;
-    personaInput.placeholder = 'Background, personality, goals, and secrets';
-    personaInput.addEventListener('input', () => {
-      state.values.personalitySummary = personaInput.value;
-    });
-    body.append(this.#createField('Persona', personaInput));
+    const hintElements = new Map();
+    /**
+     * @returns {void}
+     */
+    const refreshHints = () => {
+      for (const [bookKey, hintElement] of hintElements) {
+        const cardText = bookKey === CharacterModal.#BuildBookKey
+          ? [state.values.card.height, state.values.card.body]
+              .map((part) => part.trim())
+              .filter((part) => part.length > 0)
+              .join(CharacterModal.#BuildSeparator)
+          : state.values.card[bookKey].trim();
+        const bookText = state.values.bookAppearance[bookKey];
+        const differs = bookText !== undefined && bookText !== cardText;
+        hintElement.textContent = differs ? `${CharacterModal.#HintPrefix}${bookText}` : '';
+        if (differs) {
+          hintElement.classList.remove('is-hidden');
+        } else {
+          hintElement.classList.add('is-hidden');
+        }
+      }
+    };
 
-    const voiceInput = this.#documentRef.createElement('textarea');
-    voiceInput.id = 'char-voice-input';
-    voiceInput.className = 'field-control';
-    voiceInput.rows = 2;
-    voiceInput.value = state.values.speakingStyle;
-    voiceInput.disabled = state.busy;
-    voiceInput.placeholder = 'Speech rhythm, habits, and diction';
-    voiceInput.addEventListener('input', () => {
-      state.values.speakingStyle = voiceInput.value;
-    });
-    body.append(this.#createField('Voice notes', voiceInput));
+    for (const section of CharacterModal.#CardSections) {
+      const cardSection = this.#createSection(state, section.key, section.title);
+      for (const field of section.fields) {
+        const control = this.#documentRef.createElement(field.single ? 'input' : 'textarea');
+        control.id = `${CharacterModal.#CardFieldIdPrefix}${field.name}`;
+        control.className = 'field-control';
+        control.value = state.values.card[field.name];
+        control.disabled = state.busy;
+        if (field.single) {
+          control.type = 'text';
+        } else {
+          control.rows = 3;
+        }
+        control.addEventListener('input', () => {
+          state.values.card[field.name] = control.value;
+          refreshHints();
+        });
+        const group = this.#createField(field.label, control);
+        if (field.book !== null) {
+          const hint = this.#documentRef.createElement('p');
+          hint.id = `${CharacterModal.#CardHintIdPrefix}${field.book}`;
+          hint.className = 'field-hint';
+          hintElements.set(field.book, hint);
+          group.append(hint);
+        }
+        cardSection.content.append(group);
+      }
+      if (section.hasExamples) {
+        const examplesGroup = this.#documentRef.createElement('div');
+        examplesGroup.className = 'field-group';
+        const examplesLabel = this.#documentRef.createElement('span');
+        examplesLabel.className = 'field-label';
+        examplesLabel.textContent = 'Speech examples';
+        examplesGroup.append(examplesLabel);
+        for (const [index, example] of state.values.speechExamples.entries()) {
+          const exampleRow = this.#documentRef.createElement('div');
+          exampleRow.className = 'example-row';
+          const exampleInput = this.#documentRef.createElement('input');
+          exampleInput.id = `${CharacterModal.#ExampleInputIdPrefix}${index}`;
+          exampleInput.type = 'text';
+          exampleInput.className = 'field-control';
+          exampleInput.value = example;
+          exampleInput.disabled = state.busy;
+          exampleInput.setAttribute('aria-label', `Speech example ${index + 1}`);
+          exampleInput.addEventListener('input', () => {
+            state.values.speechExamples[index] = exampleInput.value;
+          });
+          const removeButton = this.#documentRef.createElement('button');
+          removeButton.id = `${CharacterModal.#ExampleRemoveIdPrefix}${index}`;
+          removeButton.type = 'button';
+          removeButton.className = 'btn btn-secondary btn-compact';
+          removeButton.textContent = 'Remove';
+          removeButton.disabled = state.busy;
+          removeButton.addEventListener('click', () => {
+            state.values.speechExamples.splice(index, 1);
+            this.#keepRender();
+            const nextFocusId = index > 0
+              ? `${CharacterModal.#ExampleRemoveIdPrefix}${index - 1}`
+              : CharacterModal.#ExampleAddButtonId;
+            this.#modalRoot.querySelector(`#${nextFocusId}`).focus();
+          });
+          exampleRow.append(exampleInput, removeButton);
+          examplesGroup.append(exampleRow);
+        }
+        const addExampleButton = this.#documentRef.createElement('button');
+        addExampleButton.id = CharacterModal.#ExampleAddButtonId;
+        addExampleButton.type = 'button';
+        addExampleButton.className = 'btn btn-secondary btn-compact';
+        addExampleButton.textContent = 'Add example';
+        addExampleButton.disabled = state.busy;
+        addExampleButton.addEventListener('click', () => {
+          state.values.speechExamples.push('');
+          this.#keepRender();
+          this.#modalRoot
+            .querySelector(`#${CharacterModal.#ExampleInputIdPrefix}${state.values.speechExamples.length - 1}`)
+            .focus();
+        });
+        examplesGroup.append(addExampleButton);
+        cardSection.content.append(examplesGroup);
+      }
+      body.append(cardSection.details);
+    }
+    refreshHints();
 
     if (state.errorMessage.length > 0) {
       const errorBox = this.#documentRef.createElement('div');
@@ -605,8 +760,12 @@ export class CharacterModal {
         isPlayer: state.values.isPlayer,
         modelOverride: trimmedOverride.length > 0 ? trimmedOverride : null,
         card: {
-          personalitySummary: state.values.personalitySummary,
-          speakingStyle: state.values.speakingStyle,
+          ...Object.fromEntries(
+            CharacterModal.#TextFieldNames.map((fieldName) => [fieldName, state.values.card[fieldName].trim()]),
+          ),
+          speechExamples: state.values.speechExamples
+            .map((example) => example.trim())
+            .filter((example) => example.length > 0),
         },
         avatarToken: state.values.avatarToken,
       };
@@ -648,6 +807,49 @@ export class CharacterModal {
     if (focusName && !state.busy && typeof nameInput.focus === 'function') {
       nameInput.focus();
     }
+  }
+
+  /**
+   * @param {{openSections: Set<string>}} state
+   * @param {string} sectionKey
+   * @param {string} title
+   * @returns {{details: HTMLElement, content: HTMLElement}}
+   */
+  #createSection(state, sectionKey, title) {
+    const details = this.#documentRef.createElement('details');
+    details.id = `${CharacterModal.#SectionIdPrefix}${sectionKey}`;
+    details.className = 'card-section';
+    details.open = state.openSections.has(sectionKey);
+    details.addEventListener('toggle', () => {
+      if (details.open) {
+        state.openSections.add(sectionKey);
+      } else {
+        state.openSections.delete(sectionKey);
+      }
+    });
+    const summary = this.#documentRef.createElement('summary');
+    summary.className = 'card-section-title';
+    summary.textContent = title;
+    const content = this.#documentRef.createElement('div');
+    content.className = 'card-section-body';
+    details.append(summary, content);
+    return { details, content };
+  }
+
+  /**
+   * @param {string} [returnFocusId]
+   * @returns {void}
+   */
+  #keepRender(returnFocusId = '') {
+    FocusKeeper.keep({
+      documentRef: this.#documentRef,
+      containerElement: this.#modalRoot,
+      scrollSelector: CharacterModal.#ScrollSelector,
+      renderFn: () => {
+        this.#render({ focusName: false });
+      },
+      returnFocusId,
+    });
   }
 
   /**

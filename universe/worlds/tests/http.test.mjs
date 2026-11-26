@@ -2574,6 +2574,196 @@ describe('Model availability over HTTP', () => {
     assert.equal(listed[0].card.hair, 'red');
   });
 
+  it('character routes file appearance into the book, start the book only when an appearance field changes, and answer bookAppearance', async () => {
+    const context = await startModelServer({ catalogOptions: { answerProvider: deadAnswer } });
+    const campaign = (await send(context, 'POST', '/api/campaigns', { title: 'Card Filing' })).json;
+    const charactersPath = `/api/campaigns/${campaign.id}/characters`;
+    /**
+     * @param {string} campaignId
+     * @returns {object}
+     * @throws {SyntaxError | TypeError}
+     */
+    const replayBook = (campaignId) => {
+      const row = context.store.getScribeBook(campaignId);
+      return ScribeReplay.run(JSON.parse(row.bookJson), []);
+    };
+
+    const plain = await send(context, 'POST', charactersPath, { slug: 'plain', name: 'Plain', card: { traits: 'bold' } });
+    assert.equal(plain.status, 201);
+    assert.deepEqual(plain.json.bookAppearance, {});
+    assert.equal(context.store.getScribeBook(campaign.id), null);
+    const renamed = await send(context, 'PATCH', `${charactersPath}/${plain.json.id}`, {
+      name: 'Plain Renamed',
+      card: { traits: 'bolder', hair: '   ' },
+    });
+    assert.equal(renamed.status, 200);
+    assert.deepEqual(renamed.json.bookAppearance, {});
+    assert.equal(context.store.getScribeBook(campaign.id), null);
+    const fetchedPlain = await send(context, 'GET', `${charactersPath}/${plain.json.id}`);
+    assert.equal(fetchedPlain.status, 200);
+    assert.deepEqual(fetchedPlain.json.bookAppearance, {});
+    assert.equal(fetchedPlain.json.card.traits, 'bolder');
+    assert.equal(fetchedPlain.json.name, 'Plain Renamed');
+
+    const refusedHair = await send(context, 'POST', charactersPath, { slug: 'bad', name: 'Bad', card: { hair: 5 } });
+    assert.equal(refusedHair.status, 400);
+    assert.match(refusedHair.json.error, /hair/);
+    const refusedPersona = await send(context, 'POST', charactersPath, {
+      slug: 'old',
+      name: 'Old',
+      persona: 'x',
+      card: { hair: 'red' },
+    });
+    assert.equal(refusedPersona.status, 400);
+    assert.match(refusedPersona.json.error, /persona/);
+    assert.equal(context.store.getScribeBook(campaign.id), null);
+
+    const archived = await send(context, 'POST', charactersPath, {
+      slug: 'ghost',
+      name: 'Ghost',
+      archived: true,
+      card: { hair: 'grey' },
+    });
+    assert.equal(archived.status, 201);
+    assert.equal(archived.json.scribeSubjectId, null);
+    assert.deepEqual(archived.json.bookAppearance, {});
+    assert.equal(archived.json.card.hair, 'grey');
+    assert.equal(context.store.getScribeBook(campaign.id), null);
+
+    const created = await send(context, 'POST', charactersPath, {
+      slug: 'mara',
+      name: 'Mara',
+      card: { hair: 'red', eyes: 'green', height: "5'6", body: 'slim', features: 'a scar' },
+    });
+    assert.equal(created.status, 201);
+    assert.notEqual(context.store.getScribeBook(campaign.id), null);
+    assert.deepEqual(created.json.bookAppearance, {
+      hair: 'red',
+      eyes: 'green',
+      build: "5'6; slim",
+      features: 'a scar',
+    });
+    assert.deepEqual(Object.keys(created.json.card.filedFactIds), ['features']);
+    const subjectId = created.json.scribeSubjectId;
+    const filed = replayBook(campaign.id).facts.filter((fact) => fact.subject === subjectId);
+    assert.deepEqual(
+      filed.map((fact) => [fact.category, fact.text, fact.status]),
+      [
+        ['hair', 'red', 'InForce'],
+        ['eyes', 'green', 'InForce'],
+        ['build', "5'6; slim", 'InForce'],
+        ['feature', 'a scar', 'InForce'],
+      ],
+    );
+    assert.equal(created.json.card.filedFactIds.features, filed.find((fact) => fact.category === 'feature').id);
+
+    const unchanged = await send(context, 'PATCH', `${charactersPath}/${created.json.id}`, {
+      card: { hair: 'red', traits: 'sly' },
+    });
+    assert.equal(unchanged.status, 200);
+    assert.equal(replayBook(campaign.id).facts.filter((fact) => fact.subject === subjectId).length, 4);
+
+    const dyed = await send(context, 'PATCH', `${charactersPath}/${created.json.id}`, {
+      card: { hair: 'black', features: 'a burn' },
+    });
+    assert.equal(dyed.status, 200);
+    assert.deepEqual(dyed.json.bookAppearance, {
+      hair: 'black',
+      eyes: 'green',
+      build: "5'6; slim",
+      features: 'a burn',
+    });
+    const refiled = replayBook(campaign.id).facts.filter((fact) => fact.subject === subjectId);
+    assert.deepEqual(
+      refiled.map((fact) => [fact.category, fact.text, fact.status]),
+      [
+        ['hair', 'red', 'Reported'],
+        ['eyes', 'green', 'InForce'],
+        ['build', "5'6; slim", 'InForce'],
+        ['feature', 'a scar', 'Removed'],
+        ['hair', 'black', 'InForce'],
+        ['feature', 'a burn', 'InForce'],
+      ],
+    );
+    assert.equal(dyed.json.card.filedFactIds.features, refiled.at(-1).id);
+
+    const fetched = await send(context, 'GET', `${charactersPath}/${created.json.id}`);
+    assert.equal(fetched.status, 200);
+    assert.deepEqual(fetched.json.bookAppearance, dyed.json.bookAppearance);
+    assert.equal(fetched.json.card.hair, 'black');
+    const missing = await send(context, 'GET', `${charactersPath}/no-such-character`);
+    assert.equal(missing.status, 404);
+    const missingCampaign = await send(context, 'GET', '/api/campaigns/no-such-campaign/characters/x');
+    assert.equal(missingCampaign.status, 404);
+
+    const other = (await send(context, 'POST', '/api/campaigns', { title: 'Other' })).json;
+    const crossRead = await send(context, 'GET', `/api/campaigns/${other.id}/characters/${created.json.id}`);
+    assert.equal(crossRead.status, 404);
+  });
+
+  it('saves a card value with no letter or digit as the unknown value and files it', async () => {
+    const context = await startModelServer({ catalogOptions: { answerProvider: deadAnswer } });
+    const campaign = (await send(context, 'POST', '/api/campaigns', { title: 'Unknown Values' })).json;
+    const charactersPath = `/api/campaigns/${campaign.id}/characters`;
+
+    const created = await send(context, 'POST', charactersPath, {
+      slug: 'mara',
+      name: 'Mara',
+      card: { age: '-', speechExamples: ['...'] },
+    });
+    assert.equal(created.status, 201);
+    assert.equal(created.json.card.age, '?');
+    assert.deepEqual(created.json.card.speechExamples, ['...']);
+    assert.deepEqual(created.json.bookAppearance, { age: '?' });
+
+    const patched = await send(context, 'PATCH', `${charactersPath}/${created.json.id}`, { card: { eyes: '...' } });
+    assert.equal(patched.status, 200);
+    assert.equal(patched.json.card.eyes, '?');
+    assert.deepEqual(patched.json.bookAppearance, { age: '?', eyes: '?' });
+    const facts = ScribeReplay.run(JSON.parse(context.store.getScribeBook(campaign.id).bookJson), []).facts;
+    assert.deepEqual(facts.map((fact) => [fact.category, fact.text]), [['age', '?'], ['eyes', '?']]);
+  });
+
+  it('files the whole card when a character gets its first subject, with and without an existing book', async () => {
+    const context = await startModelServer({ catalogOptions: { answerProvider: deadAnswer } });
+    const campaign = (await send(context, 'POST', '/api/campaigns', { title: 'First Subject' })).json;
+    const charactersPath = `/api/campaigns/${campaign.id}/characters`;
+
+    const ghost = await send(context, 'POST', charactersPath, {
+      slug: 'ghost',
+      name: 'Ghost',
+      archived: true,
+      card: { hair: 'grey', eyes: 'pale' },
+    });
+    assert.equal(ghost.status, 201);
+    assert.equal(ghost.json.scribeSubjectId, null);
+    assert.equal(context.store.getScribeBook(campaign.id), null);
+
+    const restored = await send(context, 'PATCH', `${charactersPath}/${ghost.json.id}`, { archived: false });
+    assert.equal(restored.status, 200);
+    assert.notEqual(restored.json.scribeSubjectId, null);
+    assert.deepEqual(restored.json.bookAppearance, { hair: 'grey', eyes: 'pale' });
+    assert.notEqual(context.store.getScribeBook(campaign.id), null);
+
+    const sprite = await send(context, 'POST', charactersPath, {
+      slug: 'sprite',
+      name: 'Sprite',
+      archived: true,
+      card: { age: '12' },
+    });
+    assert.equal(sprite.json.scribeSubjectId, null);
+    const woken = await send(context, 'PATCH', `${charactersPath}/${sprite.json.id}`, { archived: false });
+    assert.deepEqual(woken.json.bookAppearance, { age: '12' });
+    assert.deepEqual(
+      woken.json.card.filedFactIds,
+      {},
+    );
+    const quiet = await send(context, 'PATCH', `${charactersPath}/${woken.json.id}`, { name: 'Sprite Two' });
+    assert.deepEqual(quiet.json.bookAppearance, { age: '12' });
+    const facts = ScribeReplay.run(JSON.parse(context.store.getScribeBook(campaign.id).bookJson), []).facts;
+    assert.equal(facts.filter((fact) => fact.category === 'age').length, 1);
+  });
+
   it('PUT /api/settings saves an unchecked model with a warning and an unchanged slot sends no request', async () => {
     const context = await startModelServer({ catalogOptions: { answerProvider: deadAnswer } });
     await context.fake.catalog.listModels();

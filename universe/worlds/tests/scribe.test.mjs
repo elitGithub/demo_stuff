@@ -3,6 +3,7 @@ import fs from 'node:fs';
 import path from 'node:path';
 import { describe, it } from 'node:test';
 import { OpenRouterClient } from '../src/openrouter/OpenRouterClient.mjs';
+import { CardFiling } from '../src/scribe/CardFiling.mjs';
 import { MuseService } from '../src/scribe/MuseService.mjs';
 import { PedantService } from '../src/scribe/PedantService.mjs';
 import { ScribeAnalyzer } from '../src/scribe/ScribeAnalyzer.mjs';
@@ -14,6 +15,7 @@ import { ScribeLogCore } from '../src/scribe/ScribeLogCore.mjs';
 import { ScribeReplay } from '../src/scribe/ScribeReplay.mjs';
 import { ScribeService } from '../src/scribe/ScribeService.mjs';
 import { ScribeText } from '../src/scribe/ScribeText.mjs';
+import { CharacterCard } from '../src/store/CharacterCard.mjs';
 import { AvatarToken } from '../src/store/enums/AvatarToken.mjs';
 import { CharacterTier } from '../src/store/enums/CharacterTier.mjs';
 import { FindingKind } from '../src/store/enums/FindingKind.mjs';
@@ -1239,7 +1241,7 @@ describe('MuseService thread revival and static codebase invariants', () => {
   it('contains zero background timers (setInterval/setTimeout) across src/scribe/', () => {
     const scribeDir = path.resolve('/var/www/demo_stuff/universe/worlds/src/scribe');
     const files = fs.readdirSync(scribeDir).filter((fileName) => fileName.endsWith('.mjs'));
-    assert.equal(files.length, 11);
+    assert.equal(files.length, 12);
     for (const fileName of files) {
       const content = fs.readFileSync(path.join(scribeDir, fileName), 'utf8');
       assert.equal(/\bset(?:Interval|Timeout)\b/.test(content), false, `Timer found in ${fileName}`);
@@ -2803,6 +2805,1068 @@ describe('Exact Widen, Pin audience and audience ids through merges', () => {
       assert.deepEqual(factOf(state, 'F1').audience, ['S3', 'S4']);
       assert.deepEqual(knowers(state, 'F1'), ['S1', 'S2', 'S3', 'S4']);
     });
+  });
+});
+
+describe('Decided AddFact and the latest decision in a slot', () => {
+  const decidedHair = Object.freeze({
+    type: ScribeLogCore.Ruling.AddFact,
+    subject: 'S1',
+    category: 'hair',
+    target: null,
+    text: 'red',
+    hidden: false,
+    cite: null,
+    position: 0,
+    decided: true,
+  });
+
+  /**
+   * @returns {{log: object, state: object}}
+   * @throws {Error}
+   */
+  const buildCastLog = () => {
+    const log = ScribeLogCore.create();
+    let state = ScribeReplay.run(log, []);
+    for (const name of ['Ilse Marrow', 'Garrick Fenn']) {
+      ScribeLogCore.syncCharacterSubject(log, state, {
+        subjectId: null,
+        name,
+        aliases: [],
+        kind: ScribeCategory.SubjectKinds.Character,
+      });
+      state = ScribeReplay.run(log, []);
+    }
+    return { log, state };
+  };
+
+  /**
+   * @param {object} log
+   * @param {object} ruling
+   * @returns {object}
+   * @throws {Error}
+   */
+  const rule = (log, ruling) => {
+    ScribeLogCore.rule(log, ScribeReplay.run(log, []), ruling);
+    return ScribeReplay.run(log, []);
+  };
+
+  /**
+   * @param {object} state
+   * @param {string} text
+   * @returns {object}
+   */
+  const factNamed = (state, text) => state.facts.find((fact) => fact.text === text);
+
+  it('stores decided true on a fixed or moving AddFact and nothing when it is absent', () => {
+    const { state } = buildCastLog();
+    const view = ScribeLogCore.view(state);
+    for (const category of ['hair', 'age', 'build', 'location', 'status', 'role']) {
+      const outcome = { counters: { nextFact: 1 }, stored: null };
+      assert.equal(ScribeLogCore.Rulers.AddFact({ ...decidedHair, category }, view, outcome), null, category);
+      assert.equal(outcome.stored.decided, true, category);
+    }
+    const plain = { counters: { nextFact: 1 }, stored: null };
+    const { decided, ...undecided } = decidedHair;
+    assert.equal(decided, true);
+    assert.equal(ScribeLogCore.Rulers.AddFact(undecided, view, plain), null);
+    assert.equal(Object.hasOwn(plain.stored, 'decided'), false);
+  });
+
+  it('refuses decided unless it is true on a fixed or moving category without reported', () => {
+    const { log, state } = buildCastLog();
+    const view = ScribeLogCore.view(state);
+    const refused = [
+      { decided: false },
+      { decided: 'yes' },
+      { decided: 1 },
+      { decided: null },
+      { decided: true, category: 'feature' },
+      { decided: true, category: 'appearance' },
+      { decided: true, category: 'aka' },
+      { decided: true, category: 'condition' },
+      { decided: true, category: 'scar' },
+      { decided: true, category: 'relation', target: 'S2' },
+      { decided: true, reported: true },
+    ];
+    for (const override of refused) {
+      const outcome = { counters: { nextFact: 1 }, stored: null };
+      assert.equal(
+        ScribeLogCore.Rulers.AddFact({ ...decidedHair, ...override }, view, outcome),
+        ScribeLogCore.Settings.InvalidOperation,
+        JSON.stringify(override),
+      );
+      assert.equal(outcome.stored, null);
+    }
+    const entriesBefore = log.entries.length;
+    assert.throws(() => ScribeLogCore.rule(log, state, { ...decidedHair, decided: 'yes' }), /InvalidOperation/);
+    assert.equal(log.entries.length, entriesBefore);
+  });
+
+  it('keeps only the latest decided fixed value in force and reports the older one', () => {
+    const { log } = buildCastLog();
+    rule(log, { ...decidedHair, text: 'red' });
+    const state = rule(log, { ...decidedHair, text: 'black' });
+
+    assert.equal(factNamed(state, 'black').status, ScribeReplay.Status.InForce);
+    assert.equal(factNamed(state, 'red').status, ScribeReplay.Status.Reported);
+    assert.equal(ScribeReplay.live(factNamed(state, 'red')), false);
+  });
+
+  it('keeps only the latest decided moving value in force and reports the older one', () => {
+    const { log } = buildCastLog();
+    const landing = { ...decidedHair, category: 'location' };
+    rule(log, { ...landing, text: 'the harbor' });
+    const state = rule(log, { ...landing, text: 'the tower' });
+
+    assert.equal(factNamed(state, 'the tower').status, ScribeReplay.Status.InForce);
+    assert.equal(factNamed(state, 'the harbor').status, ScribeReplay.Status.Reported);
+  });
+
+  it('reports an undecided operator value in the slot and leaves other slots and subjects alone', () => {
+    const { log } = buildCastLog();
+    const { decided, ...undecided } = decidedHair;
+    assert.equal(decided, true);
+    rule(log, { ...undecided, text: 'brown' });
+    rule(log, { ...undecided, text: 'green', category: 'eyes' });
+    rule(log, { ...undecided, text: 'grey', subject: 'S2' });
+    const state = rule(log, { ...decidedHair, text: 'red' });
+
+    assert.equal(factNamed(state, 'brown').status, ScribeReplay.Status.Reported);
+    assert.equal(factNamed(state, 'red').status, ScribeReplay.Status.InForce);
+    assert.equal(factNamed(state, 'green').status, ScribeReplay.Status.InForce);
+    assert.equal(factNamed(state, 'grey').status, ScribeReplay.Status.InForce);
+  });
+
+  it('orders an operator edit by the log entry of the edit, against the card entry that came later', () => {
+    const { log } = buildCastLog();
+    const { decided, ...undecided } = decidedHair;
+    assert.equal(decided, true);
+    rule(log, { ...undecided, text: 'brown' });
+    let state = ScribeReplay.run(log, []);
+    ScribeLogCore.rule(log, state, {
+      type: ScribeLogCore.Ruling.EditFact,
+      fact: factNamed(state, 'brown').id,
+      text: 'chestnut',
+      expected: ScribeLogCore.editExpected(factNamed(state, 'brown')),
+    });
+    state = ScribeReplay.run(log, []);
+    assert.equal(factNamed(state, 'chestnut').status, ScribeReplay.Status.InForce);
+
+    state = rule(log, { ...decidedHair, text: 'red' });
+    assert.equal(factNamed(state, 'red').status, ScribeReplay.Status.InForce);
+    assert.equal(factNamed(state, 'chestnut').status, ScribeReplay.Status.Reported);
+
+    ScribeLogCore.rule(log, state, {
+      type: ScribeLogCore.Ruling.EditFact,
+      fact: factNamed(state, 'red').id,
+      text: 'auburn',
+      expected: ScribeLogCore.editExpected(factNamed(state, 'red')),
+    });
+    state = ScribeReplay.run(log, []);
+    assert.equal(factNamed(state, 'auburn').status, ScribeReplay.Status.InForce);
+    assert.equal(factNamed(state, 'chestnut').status, ScribeReplay.Status.Reported);
+
+    state = rule(log, { ...decidedHair, text: 'black' });
+    assert.equal(factNamed(state, 'black').status, ScribeReplay.Status.InForce);
+    assert.equal(factNamed(state, 'auburn').status, ScribeReplay.Status.Reported);
+  });
+
+  it('gives the same statuses when the same log is replayed twice or copied', () => {
+    const { log } = buildCastLog();
+    rule(log, { ...decidedHair, text: 'red' });
+    rule(log, { ...decidedHair, text: 'black' });
+    rule(log, { ...decidedHair, text: 'the harbor', category: 'location' });
+    rule(log, { ...decidedHair, text: 'the tower', category: 'location' });
+    /**
+     * @param {object} replayLog
+     * @returns {Array<[string, string]>}
+     * @throws {TypeError}
+     */
+    const statuses = (replayLog) => ScribeReplay.run(replayLog, []).facts.map((fact) => [fact.id, fact.status]);
+
+    const first = statuses(log);
+    assert.deepEqual(statuses(log), first);
+    assert.deepEqual(statuses(structuredClone(log)), first);
+    assert.deepEqual(
+      first.map(([, status]) => status),
+      [
+        ScribeReplay.Status.Reported,
+        ScribeReplay.Status.InForce,
+        ScribeReplay.Status.Reported,
+        ScribeReplay.Status.InForce,
+      ],
+    );
+  });
+
+  it('keeps a model-written Change of a decided fact as a Reported second value and the decided one in force', () => {
+    const { log } = buildCastLog();
+    const state = rule(log, { ...decidedHair, text: 'red' });
+    const decided = factNamed(state, 'red');
+    const becomes = ScribeLogCore.nextFactId(log);
+    log.entries.push({
+      sequence: log.nextSequence,
+      kind: ScribeLogCore.Kind.Update,
+      origin: ScribeLogCore.Origin.Story,
+      messageIds: ['msg-1'],
+      operations: [
+        {
+          type: ScribeAnswer.Type.Change,
+          fact: decided.id,
+          becomes,
+          subject: 'S1',
+          label: 'Ilse Marrow',
+          category: 'hair',
+          target: null,
+          targetText: null,
+          other: null,
+          text: 'blonde',
+          cite: 'msg-1',
+          position: 1,
+          hidden: false,
+        },
+      ],
+      withdrawn: false,
+    });
+    log.read['msg-1'] = log.nextSequence;
+    log.nextSequence += 1;
+    log.revision += 1;
+
+    const replayed = ScribeReplay.run(log, [{ id: 'msg-1', position: 1 }]);
+    assert.equal(factNamed(replayed, 'red').status, ScribeReplay.Status.InForce);
+    assert.equal(factNamed(replayed, 'blonde').status, ScribeReplay.Status.Reported);
+  });
+
+  const hairPin = Object.freeze({
+    type: ScribeLogCore.Ruling.Pin,
+    subject: 'S1',
+    category: 'hair',
+    target: null,
+    hidden: false,
+  });
+
+  /**
+   * @param {object} state
+   * @returns {Array<[string, string]>}
+   */
+  const hairIn = (state) => {
+    return state.facts.filter((fact) => fact.category === 'hair').map((fact) => [fact.text, fact.status]);
+  };
+
+  it('lets a later decided value win over an older Pin of the same slot', () => {
+    const { log } = buildCastLog();
+    rule(log, { ...decidedHair, text: 'black' });
+    rule(log, { ...hairPin, text: 'black' });
+    const state = rule(log, { ...decidedHair, text: 'white' });
+
+    assert.deepEqual(hairIn(state), [
+      ['black', ScribeReplay.Status.Reported],
+      ['white', ScribeReplay.Status.InForce],
+    ]);
+  });
+
+  it('lets a Pin newer than every decided value win over the card value', () => {
+    const { log } = buildCastLog();
+    rule(log, { ...decidedHair, text: 'black' });
+    const state = rule(log, { ...hairPin, text: 'red' });
+
+    assert.equal(factNamed(state, 'red').status, ScribeReplay.Status.InForce);
+    assert.equal(factNamed(state, 'black').status, ScribeReplay.Status.Disputed);
+  });
+
+  it('lets a decided value win over an older Pin of another value', () => {
+    const { log } = buildCastLog();
+    rule(log, { ...hairPin, text: 'red' });
+    const state = rule(log, { ...decidedHair, text: 'black' });
+
+    assert.deepEqual(hairIn(state), [['black', ScribeReplay.Status.InForce]]);
+  });
+
+  it('keeps the Pin behaviour when the slot holds no decided value', () => {
+    const { log } = buildCastLog();
+    const { decided, ...undecided } = decidedHair;
+    assert.equal(decided, true);
+    rule(log, { ...undecided, text: 'brown' });
+    rule(log, { ...undecided, text: 'grey' });
+    const state = rule(log, { ...hairPin, text: 'grey' });
+
+    assert.equal(factNamed(state, 'grey').status, ScribeReplay.Status.InForce);
+    assert.equal(factNamed(state, 'grey').pinned, true);
+    assert.equal(factNamed(state, 'brown').status, ScribeReplay.Status.Disputed);
+  });
+
+  it('settles the order of an edit against a later subject merge with the edit entry, not the first entry', () => {
+    const { log } = buildCastLog();
+    rule(log, { ...decidedHair, text: 'red' });
+    rule(log, { ...decidedHair, text: 'black', subject: 'S2' });
+    let state = ScribeReplay.run(log, []);
+    ScribeLogCore.rule(log, state, {
+      type: ScribeLogCore.Ruling.EditFact,
+      fact: factNamed(state, 'red').id,
+      text: 'auburn',
+      expected: ScribeLogCore.editExpected(factNamed(state, 'red')),
+    });
+    state = rule(log, { type: ScribeLogCore.Ruling.Merge, from: 'S2', into: 'S1' });
+
+    assert.deepEqual(hairIn(state), [
+      ['auburn', ScribeReplay.Status.InForce],
+      ['black', ScribeReplay.Status.Reported],
+    ]);
+  });
+
+  it('keeps the build slot of one form apart from the card build and drops the word-derived dimension', () => {
+    const { log } = buildCastLog();
+    const build = { ...decidedHair, category: 'build' };
+    const { decided, ...undecided } = build;
+    assert.equal(decided, true);
+    rule(log, { ...undecided, text: 'dragon form: 60 feet long' });
+    rule(log, { ...undecided, text: 'slim and athletic' });
+    rule(log, { ...undecided, text: 'tall with curvy figure' });
+    const state = rule(log, { ...build, text: 'average height; stocky' });
+    const statuses = Object.fromEntries(state.facts.map((fact) => [fact.text, fact.status]));
+
+    assert.deepEqual(statuses, {
+      'dragon form: 60 feet long': ScribeReplay.Status.InForce,
+      'slim and athletic': ScribeReplay.Status.Reported,
+      'tall with curvy figure': ScribeReplay.Status.Reported,
+      'average height; stocky': ScribeReplay.Status.InForce,
+    });
+  });
+
+  it('reports a model-written build with the word tall beside the card build', () => {
+    const { log } = buildCastLog();
+    const state = rule(log, { ...decidedHair, category: 'build', text: 'slim' });
+    const becomes = ScribeLogCore.nextFactId(log);
+    log.entries.push({
+      sequence: log.nextSequence,
+      kind: ScribeLogCore.Kind.Update,
+      origin: ScribeLogCore.Origin.Story,
+      messageIds: ['msg-1'],
+      operations: [
+        {
+          type: ScribeAnswer.Type.Fact,
+          fact: becomes,
+          subject: 'S1',
+          label: 'Ilse Marrow',
+          category: 'build',
+          target: null,
+          targetText: null,
+          other: null,
+          text: 'She is very tall',
+          cite: 'msg-1',
+          position: 1,
+          hidden: false,
+        },
+      ],
+      withdrawn: false,
+    });
+    log.read['msg-1'] = log.nextSequence;
+    log.nextSequence += 1;
+    log.revision += 1;
+
+    const replayed = ScribeReplay.run(log, [{ id: 'msg-1', position: 1 }]);
+    assert.equal(factNamed(state, 'slim').status, ScribeReplay.Status.InForce);
+    assert.equal(factNamed(replayed, 'slim').status, ScribeReplay.Status.InForce);
+    assert.equal(factNamed(replayed, 'She is very tall').status, ScribeReplay.Status.Reported);
+  });
+
+  it('accepts exactly the unknown value besides worded text in an AddFact', () => {
+    const { state } = buildCastLog();
+    const view = ScribeLogCore.view(state);
+    for (const [text, expected] of [
+      ['?', null],
+      ['red', null],
+      ['??', ScribeLogCore.Settings.InvalidOperation],
+      ['-', ScribeLogCore.Settings.InvalidOperation],
+      ['...', ScribeLogCore.Settings.InvalidOperation],
+      ['', ScribeLogCore.Settings.InvalidOperation],
+    ]) {
+      const outcome = { counters: { nextFact: 1 }, stored: null };
+      assert.equal(ScribeLogCore.Rulers.AddFact({ ...decidedHair, text }, view, outcome), expected, text);
+    }
+  });
+
+  it('removes a fact exactly without striking the wording of other facts', () => {
+    const { log } = buildCastLog();
+    const { decided, ...undecided } = decidedHair;
+    assert.equal(decided, true);
+    const feature = { ...undecided, category: 'feature' };
+    let state = rule(log, { ...feature, text: 'freckles' });
+    ScribeLogCore.rule(log, state, {
+      type: ScribeLogCore.Ruling.RemoveFact,
+      fact: factNamed(state, 'freckles').id,
+      exact: true,
+    });
+    assert.equal(log.entries.at(-1).operations[0].exact, true);
+    state = rule(log, { ...feature, text: 'Freckles' });
+    assert.equal(factNamed(state, 'Freckles').status, ScribeReplay.Status.InForce);
+    assert.equal(factNamed(state, 'freckles').status, ScribeReplay.Status.Removed);
+    for (const exact of [false, 'yes', 1, null]) {
+      assert.throws(
+        () => ScribeLogCore.rule(log, state, { type: ScribeLogCore.Ruling.RemoveFact, fact: factNamed(state, 'Freckles').id, exact }),
+        /InvalidOperation/,
+        String(exact),
+      );
+    }
+  });
+});
+
+describe('Card filing into the book', () => {
+  /**
+   * @returns {{store: SqliteStore, campaign: object, rowan: object, mara: object, campaignId: string, service: ScribeService, card: CharacterCard}}
+   * @throws {Error}
+   */
+  const createCardWorld = () => {
+    const { store, campaign, rowan, mara } = createSeededCampaign();
+    const service = new ScribeService({ store });
+    const loaded = service.loadState(campaign.id);
+    ScribeLogCore.syncCharacterSubject(loaded.log, loaded.state, { subjectId: 'S2', name: 'Mara' });
+    store.saveScribeBook(campaign.id, { bookJson: JSON.stringify(loaded.log), lastTurnSeq: 0 });
+    return { store, campaign, rowan, mara, campaignId: campaign.id, service, card: CharacterCard.empty() };
+  };
+
+  /**
+   * @param {{store: SqliteStore, campaign: object, rowan: object, mara: object, campaignId: string, service: ScribeService}} world
+   * @param {ReadonlyArray<object>} operations
+   * @returns {void}
+   * @throws {Error}
+   */
+  const addStory = (world, operations) => {
+    const sceneNumber = loadBook(world).turns.length + 1;
+    const pair = world.store.commitTurnPair({
+      campaignId: world.campaignId,
+      userTurn: { mode: TurnMode.Normal, rawText: 'Go on.', sceneNumber, witnessIds: [world.rowan.id, world.mara.id] },
+      userBeat: { speakerType: SpeakerType.Player, characterId: world.rowan.id, speakerName: world.rowan.name, text: 'Go on.' },
+      assistantTurn: { mode: TurnMode.Normal, rawText: 'Mara waits.', sceneNumber, witnessIds: [world.rowan.id, world.mara.id] },
+      assistantBeats: [
+        { speakerType: SpeakerType.Character, characterId: world.mara.id, speakerName: world.mara.name, text: 'Mara waits.' },
+      ],
+      nextSceneState: { ...world.campaign.sceneState, sceneNumber },
+    });
+    changeBook(world, ({ log }) => {
+      log.entries.push({
+        sequence: log.nextSequence,
+        kind: ScribeLogCore.Kind.Update,
+        origin: ScribeLogCore.Origin.Story,
+        messageIds: [pair.assistantTurn.id],
+        operations: operations.map((operation) => ({
+          subject: 'S2',
+          label: 'Mara',
+          target: null,
+          targetText: null,
+          other: null,
+          hidden: false,
+          cite: pair.assistantTurn.id,
+          position: pair.assistantTurn.seq,
+          ...(operation.type === ScribeAnswer.Type.Refine
+            ? { becomes: ScribeLogCore.nextFactId(log) }
+            : { fact: ScribeLogCore.nextFactId(log) }),
+          ...operation,
+        })),
+        withdrawn: false,
+      });
+      log.read[pair.assistantTurn.id] = log.nextSequence;
+      log.nextSequence += 1;
+      log.revision += 1;
+    });
+  };
+
+  /**
+   * @param {{service: ScribeService, campaignId: string, card: CharacterCard}} world
+   * @param {Record<string, unknown>} fields
+   * @returns {CharacterCard}
+   * @throws {Error}
+   */
+  const saveCard = (world, fields) => {
+    const after = CharacterCard.fromObject({ ...world.card.toObject(), ...fields });
+    world.card = world.service.fileCardAppearance({
+      campaignId: world.campaignId,
+      subjectId: 'S2',
+      before: world.card,
+      after,
+    });
+    return world.card;
+  };
+
+  /**
+   * @param {{service: ScribeService, campaignId: string}} world
+   * @returns {object}
+   * @throws {Error}
+   */
+  const loadBook = (world) => world.service.loadState(world.campaignId);
+
+  /**
+   * @param {{service: ScribeService, store: SqliteStore, campaignId: string}} world
+   * @param {(loaded: object) => void} change
+   * @returns {void}
+   * @throws {Error}
+   */
+  const changeBook = (world, change) => {
+    const loaded = loadBook(world);
+    change(loaded);
+    world.store.saveScribeBook(world.campaignId, { bookJson: JSON.stringify(loaded.log), lastTurnSeq: 0 });
+  };
+
+  /**
+   * @param {{service: ScribeService, store: SqliteStore, campaignId: string}} world
+   * @param {Record<string, unknown>} fields
+   * @returns {void}
+   * @throws {Error}
+   */
+  const addOperatorFact = (world, fields) => {
+    changeBook(world, ({ log, state }) => {
+      ScribeLogCore.rule(log, state, {
+        type: ScribeLogCore.Ruling.AddFact,
+        subject: 'S2',
+        target: null,
+        hidden: false,
+        cite: null,
+        position: 0,
+        ...fields,
+      });
+    });
+  };
+
+  /**
+   * @param {object} state
+   * @param {string} category
+   * @returns {Array<[string, string]>}
+   */
+  const factsIn = (state, category) => {
+    return state.facts
+      .filter((fact) => fact.subject === 'S2' && fact.category === category)
+      .map((fact) => [fact.text, fact.status]);
+  };
+
+  /**
+   * @param {object} log
+   * @param {string} type
+   * @returns {Array<object>}
+   */
+  const operationsOf = (log, type) => log.entries.flatMap((entry) => entry.operations).filter((op) => op.type === type);
+
+  const { InForce, Reported, Removed } = ScribeReplay.Status;
+  const fullCard = Object.freeze({
+    age: '29',
+    hair: 'red',
+    eyes: 'green',
+    height: "5'6",
+    body: 'slim',
+    face: 'freckled',
+    features: 'a scar',
+  });
+
+  it('files the seven appearance values as six facts, combines build, and decides only the fixed ones', () => {
+    const world = createCardWorld();
+    const card = saveCard(world, fullCard);
+    const { state, log } = loadBook(world);
+
+    assert.deepEqual(
+      state.facts.filter((fact) => fact.subject === 'S2').map((fact) => [fact.category, fact.text, fact.status]),
+      [
+        ['age', '29', InForce],
+        ['hair', 'red', InForce],
+        ['eyes', 'green', InForce],
+        ['build', "5'6; slim", InForce],
+        ['appearance', 'freckled', InForce],
+        ['feature', 'a scar', InForce],
+      ],
+    );
+    const added = operationsOf(log, ScribeLogCore.Ruling.AddFact);
+    assert.deepEqual(
+      added.map((op) => [op.category, op.decided === true, op.position, op.cite, op.hidden, op.target]),
+      [
+        ['age', true, 0, null, false, null],
+        ['hair', true, 0, null, false, null],
+        ['eyes', true, 0, null, false, null],
+        ['build', true, 0, null, false, null],
+        ['appearance', false, 0, null, false, null],
+        ['feature', false, 0, null, false, null],
+      ],
+    );
+    assert.deepEqual(card.filedFactIds, {
+      face: added.find((op) => op.category === 'appearance').fact,
+      features: added.find((op) => op.category === 'feature').fact,
+    });
+    assert.deepEqual(world.service.bookAppearance({ state, subjectId: 'S2' }), {
+      age: '29',
+      hair: 'red',
+      eyes: 'green',
+      build: "5'6; slim",
+      face: 'freckled',
+      features: 'a scar',
+    });
+  });
+
+  it('puts the card hair in force over an undecided operator hair and reports the old value', () => {
+    const world = createCardWorld();
+    addOperatorFact(world, { category: 'hair', text: 'brown' });
+    assert.deepEqual(factsIn(loadBook(world).state, 'hair'), [['brown', InForce]]);
+
+    saveCard(world, { hair: 'red' });
+    assert.deepEqual(factsIn(loadBook(world).state, 'hair'), [['brown', Reported], ['red', InForce]]);
+  });
+
+  it('files only the changed field on a second save and reports the first card value', () => {
+    const world = createCardWorld();
+    saveCard(world, fullCard);
+    const before = loadBook(world);
+    const idsBefore = before.state.facts.map((fact) => fact.id);
+
+    saveCard(world, { hair: 'black' });
+    const after = loadBook(world);
+    const added = operationsOf(after.log, ScribeLogCore.Ruling.AddFact);
+    assert.equal(added.length, 7);
+    assert.equal(added.at(-1).category, 'hair');
+    assert.equal(after.log.revision, before.log.revision + 1);
+    assert.deepEqual(factsIn(after.state, 'hair'), [['red', Reported], ['black', InForce]]);
+    assert.deepEqual(after.state.facts.slice(0, idsBefore.length).map((fact) => fact.id), idsBefore);
+    for (const category of ['age', 'eyes', 'build', 'appearance', 'feature']) {
+      assert.equal(factsIn(after.state, category).length, 1, category);
+    }
+  });
+
+  it('files nothing when no appearance field changed, whitespace differences and other card fields included', () => {
+    const world = createCardWorld();
+    saveCard(world, { hair: 'red' });
+    const revision = loadBook(world).log.revision;
+
+    saveCard(world, { hair: 'red' });
+    saveCard(world, { hair: '  red ' });
+    saveCard(world, { traits: 'bold', personalitySummary: 'Quick.' });
+    assert.equal(loadBook(world).log.revision, revision);
+    assert.equal(operationsOf(loadBook(world).log, ScribeLogCore.Ruling.AddFact).length, 1);
+  });
+
+  it('lets a later card save win over an operator edit of the card value, and an earlier edit lose to the card', () => {
+    const world = createCardWorld();
+    addOperatorFact(world, { category: 'hair', text: 'brown' });
+    changeBook(world, ({ log, state }) => {
+      const fact = state.facts.find((item) => item.text === 'brown');
+      ScribeLogCore.rule(log, state, {
+        type: ScribeLogCore.Ruling.EditFact,
+        fact: fact.id,
+        text: 'chestnut',
+        expected: ScribeLogCore.editExpected(fact),
+      });
+    });
+    assert.deepEqual(factsIn(loadBook(world).state, 'hair'), [['chestnut', InForce]]);
+
+    saveCard(world, { hair: 'red' });
+    assert.deepEqual(factsIn(loadBook(world).state, 'hair'), [['chestnut', Reported], ['red', InForce]]);
+
+    changeBook(world, ({ log, state }) => {
+      const fact = state.facts.find((item) => item.text === 'red');
+      ScribeLogCore.rule(log, state, {
+        type: ScribeLogCore.Ruling.EditFact,
+        fact: fact.id,
+        text: 'auburn',
+        expected: ScribeLogCore.editExpected(fact),
+      });
+    });
+    assert.deepEqual(factsIn(loadBook(world).state, 'hair'), [['chestnut', Reported], ['auburn', InForce]]);
+
+    saveCard(world, { hair: 'black' });
+    assert.deepEqual(
+      factsIn(loadBook(world).state, 'hair'),
+      [['chestnut', Reported], ['auburn', Reported], ['black', InForce]],
+    );
+  });
+
+  it('keeps the card value in force when a model-written Change of the hair comes from the story', () => {
+    const world = createCardWorld();
+    saveCard(world, { hair: 'red' });
+    const { log, state } = loadBook(world);
+    const card = state.facts.find((fact) => fact.text === 'red');
+    log.entries.push({
+      sequence: log.nextSequence,
+      kind: ScribeLogCore.Kind.Update,
+      origin: ScribeLogCore.Origin.Story,
+      messageIds: ['msg-1'],
+      operations: [
+        {
+          type: ScribeAnswer.Type.Change,
+          fact: card.id,
+          becomes: ScribeLogCore.nextFactId(log),
+          subject: 'S2',
+          label: 'Mara',
+          category: 'hair',
+          target: null,
+          targetText: null,
+          other: null,
+          text: 'blonde',
+          cite: 'msg-1',
+          position: 1,
+          hidden: false,
+        },
+      ],
+      withdrawn: false,
+    });
+    log.read['msg-1'] = log.nextSequence;
+    log.nextSequence += 1;
+    log.revision += 1;
+
+    const replayed = ScribeReplay.run(log, [{ id: 'msg-1', position: 1 }]);
+    assert.deepEqual(factsIn(replayed, 'hair'), [['red', InForce], ['blonde', Reported]]);
+    assert.deepEqual(world.service.bookAppearance({ state: replayed, subjectId: 'S2' }), { hair: 'red' });
+  });
+
+  it('keeps exactly one card-filed feature when features change twice, and leaves other features alone', () => {
+    const world = createCardWorld();
+    saveCard(world, { features: 'a scar' });
+    addOperatorFact(world, { category: 'feature', text: 'a tattoo' });
+    saveCard(world, { features: 'a scar; a burn' });
+    const second = world.card.filedFactIds.features;
+    saveCard(world, { features: 'a burn' });
+
+    const { state } = loadBook(world);
+    assert.deepEqual(factsIn(state, 'feature'), [
+      ['a scar', Removed],
+      ['a tattoo', InForce],
+      ['a scar; a burn', Removed],
+      ['a burn', InForce],
+    ]);
+    assert.notEqual(world.card.filedFactIds.features, second);
+    assert.equal(state.facts.find((fact) => fact.id === world.card.filedFactIds.features).text, 'a burn');
+    assert.deepEqual(world.service.bookAppearance({ state, subjectId: 'S2' }), {
+      features: 'a tattoo; a burn',
+    });
+  });
+
+  it('files the new feature without an error when the remembered fact was removed in the Book tab', () => {
+    const world = createCardWorld();
+    saveCard(world, { features: 'a scar' });
+    const removed = world.card.filedFactIds.features;
+    changeBook(world, ({ log, state }) => {
+      ScribeLogCore.rule(log, state, { type: ScribeLogCore.Ruling.RemoveFact, fact: removed });
+    });
+    const removals = operationsOf(loadBook(world).log, ScribeLogCore.Ruling.RemoveFact).length;
+
+    saveCard(world, { features: 'a burn' });
+    const { state, log } = loadBook(world);
+    assert.deepEqual(factsIn(state, 'feature'), [['a scar', Removed], ['a burn', InForce]]);
+    assert.equal(operationsOf(log, ScribeLogCore.Ruling.RemoveFact).length, removals);
+    assert.notEqual(world.card.filedFactIds.features, removed);
+    assert.equal(state.facts.find((fact) => fact.id === world.card.filedFactIds.features).text, 'a burn');
+  });
+
+  it('removes the remembered feature and its key when features is cleared, and drops a stale key too', () => {
+    const world = createCardWorld();
+    saveCard(world, { features: 'a scar', face: 'freckled' });
+    assert.deepEqual(Object.keys(world.card.filedFactIds).sort(), ['face', 'features']);
+
+    saveCard(world, { features: '' });
+    const { state } = loadBook(world);
+    assert.deepEqual(factsIn(state, 'feature'), [['a scar', Removed]]);
+    assert.deepEqual(Object.keys(world.card.filedFactIds), ['face']);
+    assert.equal(Object.hasOwn(world.service.bookAppearance({ state, subjectId: 'S2' }), 'features'), false);
+
+    saveCard(world, { face: 'pale' });
+    changeBook(world, ({ log, state: current }) => {
+      ScribeLogCore.rule(log, current, { type: ScribeLogCore.Ruling.RemoveFact, fact: world.card.filedFactIds.face });
+    });
+    const revision = loadBook(world).log.revision;
+    saveCard(world, { face: '' });
+    assert.equal(loadBook(world).log.revision, revision);
+    assert.deepEqual(world.card.filedFactIds, {});
+  });
+
+  it('files nothing and keeps the book hair when hair is cleared', () => {
+    const world = createCardWorld();
+    saveCard(world, { hair: 'red', age: '29' });
+    const revision = loadBook(world).log.revision;
+
+    saveCard(world, { hair: '' });
+    const { state, log } = loadBook(world);
+    assert.equal(log.revision, revision);
+    assert.deepEqual(factsIn(state, 'hair'), [['red', InForce]]);
+    assert.equal(world.card.hair, '');
+  });
+
+  it('files the height alone when body is empty, the body alone when height is empty, and nothing when both are empty', () => {
+    const world = createCardWorld();
+    saveCard(world, { height: "5'6" });
+    assert.deepEqual(factsIn(loadBook(world).state, 'build'), [["5'6", InForce]]);
+
+    saveCard(world, { height: '' });
+    const revision = loadBook(world).log.revision;
+    assert.deepEqual(factsIn(loadBook(world).state, 'build'), [["5'6", InForce]]);
+    assert.equal(operationsOf(loadBook(world).log, ScribeLogCore.Ruling.AddFact).length, 1);
+
+    saveCard(world, { body: 'slim' });
+    assert.deepEqual(factsIn(loadBook(world).state, 'build'), [["5'6", Reported], ['slim', InForce]]);
+
+    saveCard(world, { height: "5'7" });
+    assert.deepEqual(
+      factsIn(loadBook(world).state, 'build'),
+      [["5'6", Reported], ['slim', Reported], ["5'7; slim", InForce]],
+    );
+    assert.equal(loadBook(world).log.revision, revision + 2);
+
+    const empty = createCardWorld();
+    saveCard(empty, { height: '  ', body: '' });
+    assert.equal(operationsOf(loadBook(empty).log, ScribeLogCore.Ruling.AddFact).length, 0);
+  });
+
+  it('builds the filing steps as card-position, public, uncited operator facts with decided only on fixed slots', () => {
+    const { state } = loadBook(createCardWorld());
+    const steps = CardFiling.operations({
+      state,
+      subjectId: 'S2',
+      before: CharacterCard.empty(),
+      after: CharacterCard.fromObject({ hair: ' red ', face: 'pale', height: '6 ft' }),
+    });
+    const type = ScribeLogCore.Ruling.AddFact;
+    assert.deepEqual(steps.map((step) => step.field), ['hair', 'build', 'face']);
+    assert.deepEqual(steps.map((step) => step.operation), [
+      { type, subject: 'S2', category: 'hair', target: null, text: 'red', hidden: false, cite: null, position: 0, decided: true },
+      { type, subject: 'S2', category: 'build', target: null, text: '6 ft', hidden: false, cite: null, position: 0, decided: true },
+      { type, subject: 'S2', category: 'appearance', target: null, text: 'pale', hidden: false, cite: null, position: 0 },
+    ]);
+    assert.deepEqual(CardFiling.changedFields(CharacterCard.empty(), CharacterCard.fromObject({ hair: ' ', eyes: 'x' })), ['eyes']);
+  });
+
+  it('refuses a save whose subject is unknown and leaves the stored book as it was', () => {
+    const world = createCardWorld();
+    const revision = loadBook(world).log.revision;
+    assert.throws(
+      () => world.service.fileCardAppearance({
+        campaignId: world.campaignId,
+        subjectId: 'S99',
+        before: CharacterCard.empty(),
+        after: CharacterCard.fromObject({ hair: 'red', eyes: 'green' }),
+      }),
+      /Reference/,
+    );
+    assert.equal(loadBook(world).log.revision, revision);
+  });
+
+  it('joins two in-force features with a semicolon and leaves out Reported values in bookAppearance', () => {
+    const world = createCardWorld();
+    addOperatorFact(world, { category: 'feature', text: 'a scar' });
+    addOperatorFact(world, { category: 'feature', text: 'a tattoo' });
+    addOperatorFact(world, { category: 'hair', text: 'red', decided: true });
+    addOperatorFact(world, { category: 'hair', text: 'black', decided: true });
+    const { state } = loadBook(world);
+
+    assert.deepEqual(world.service.bookAppearance({ state, subjectId: 'S2' }), {
+      hair: 'black',
+      features: 'a scar; a tattoo',
+    });
+    assert.deepEqual(world.service.bookAppearance({ state, subjectId: 'S4' }), {});
+  });
+
+  it('puts the card build in force over imported builds even when a word like tall scopes them', () => {
+    const world = createCardWorld();
+    addOperatorFact(world, { category: 'build', text: 'slim and athletic' });
+    addOperatorFact(world, { category: 'build', text: 'tall with curvy figure' });
+    saveCard(world, { height: 'average height', body: 'stocky' });
+
+    assert.deepEqual(factsIn(loadBook(world).state, 'build'), [
+      ['slim and athletic', Reported],
+      ['tall with curvy figure', Reported],
+      ['average height; stocky', InForce],
+    ]);
+  });
+
+  it('keeps only the newer card build in force when the second one contains tall or long', () => {
+    const world = createCardWorld();
+    saveCard(world, { height: "5'6\"", body: 'slim' });
+    saveCard(world, { height: 'tall' });
+    let { state } = loadBook(world);
+    assert.deepEqual(factsIn(state, 'build'), [["5'6\"; slim", Reported], ['tall; slim', InForce]]);
+    assert.equal(world.service.bookAppearance({ state, subjectId: 'S2' }).build, 'tall; slim');
+
+    saveCard(world, { body: 'long-legged and lean' });
+    ({ state } = loadBook(world));
+    assert.deepEqual(factsIn(state, 'build').map(([, status]) => status), [Reported, Reported, InForce]);
+    assert.equal(world.service.bookAppearance({ state, subjectId: 'S2' }).build, 'tall; long-legged and lean');
+  });
+
+  it('files an unknown card value as the unknown value and keeps it in force', () => {
+    const world = createCardWorld();
+    saveCard(world, { age: '-', hair: '...', features: '~' });
+
+    const { state } = loadBook(world);
+    assert.deepEqual(factsIn(state, 'age'), [['?', InForce]]);
+    assert.deepEqual(factsIn(state, 'hair'), [['?', InForce]]);
+    assert.deepEqual(factsIn(state, 'feature'), [['?', InForce]]);
+    assert.deepEqual(world.service.bookAppearance({ state, subjectId: 'S2' }), { age: '?', hair: '?', features: '?' });
+    assert.equal(world.card.age, '?');
+  });
+
+  it('keeps a story fact with the same wording when the card replaces its own value, now and later', () => {
+    const world = createCardWorld();
+    saveCard(world, { features: 'freckles' });
+    addStory(world, [{ type: ScribeAnswer.Type.Fact, category: 'feature', text: 'Freckles' }]);
+    saveCard(world, { features: 'a tattoo' });
+    addStory(world, [{ type: ScribeAnswer.Type.Fact, category: 'feature', text: 'freckles' }]);
+
+    assert.deepEqual(factsIn(loadBook(world).state, 'feature'), [
+      ['freckles', Removed],
+      ['a tattoo', InForce],
+      ['Freckles', InForce],
+      ['freckles', InForce],
+    ]);
+  });
+
+  it('replaces a card feature the story refined, following the refinement to its current fact', () => {
+    const world = createCardWorld();
+    saveCard(world, { features: 'a scar on her cheek' });
+    addStory(world, [
+      {
+        type: ScribeAnswer.Type.Refine,
+        fact: world.card.filedFactIds.features,
+        category: 'feature',
+        text: 'a long sword scar on her left cheek',
+      },
+    ]);
+    assert.deepEqual(factsIn(loadBook(world).state, 'feature'), [
+      ['a scar on her cheek', ScribeReplay.Status.Replaced],
+      ['a long sword scar on her left cheek', InForce],
+    ]);
+
+    saveCard(world, { features: 'no scars' });
+    assert.deepEqual(factsIn(loadBook(world).state, 'feature'), [
+      ['a scar on her cheek', Removed],
+      ['no scars', InForce],
+      ['a long sword scar on her left cheek', Removed],
+    ]);
+    assert.equal(
+      loadBook(world).state.facts.find((fact) => fact.id === world.card.filedFactIds.features).text,
+      'no scars',
+    );
+  });
+
+  it('does not file a card list value that a live fact of the subject already holds, and does not adopt it', () => {
+    const world = createCardWorld();
+    addOperatorFact(world, { category: 'feature', text: 'a scar' });
+    saveCard(world, { features: 'a scar' });
+
+    assert.deepEqual(factsIn(loadBook(world).state, 'feature'), [['a scar', InForce]]);
+    assert.deepEqual(world.card.filedFactIds, {});
+    assert.equal(operationsOf(loadBook(world).log, ScribeLogCore.Ruling.AddFact).length, 1);
+  });
+
+  it('replaces its own fact with a differently written value of the same wording', () => {
+    const world = createCardWorld();
+    saveCard(world, { features: 'a scar' });
+    saveCard(world, { features: 'A SCAR' });
+
+    assert.deepEqual(factsIn(loadBook(world).state, 'feature'), [['a scar', Removed], ['A SCAR', InForce]]);
+    assert.equal(
+      loadBook(world).state.facts.find((fact) => fact.id === world.card.filedFactIds.features).text,
+      'A SCAR',
+    );
+  });
+
+  it('replaces its own fact after the card subject was merged into another subject', () => {
+    const world = createCardWorld();
+    saveCard(world, { features: 'a scar' });
+    changeBook(world, ({ log, state }) => {
+      ScribeLogCore.syncCharacterSubject(log, state, { subjectId: 'S3', name: 'Vesper' });
+    });
+    changeBook(world, ({ log, state }) => {
+      ScribeLogCore.rule(log, state, { type: ScribeLogCore.Ruling.Merge, from: 'S2', into: 'S3' });
+    });
+
+    saveCard(world, { features: 'a burn' });
+    const { state } = loadBook(world);
+    assert.deepEqual(
+      state.facts.filter((fact) => fact.category === 'feature').map((fact) => [fact.text, fact.subject, fact.status]),
+      [['a scar', 'S3', Removed], ['a burn', 'S3', InForce]],
+    );
+  });
+
+  it('leaves a remembered fact the story ended as it is and files the new value beside it', () => {
+    const world = createCardWorld();
+    saveCard(world, { features: 'a scar' });
+    addStory(world, [{ type: ScribeAnswer.Type.End, fact: world.card.filedFactIds.features, reason: 'healed' }]);
+    assert.deepEqual(factsIn(loadBook(world).state, 'feature'), [['a scar', ScribeReplay.Status.Ended]]);
+
+    saveCard(world, { features: 'a burn' });
+    assert.deepEqual(factsIn(loadBook(world).state, 'feature'), [
+      ['a scar', ScribeReplay.Status.Ended],
+      ['a burn', InForce],
+    ]);
+  });
+
+  it('removes a remembered fact only while it still belongs to this subject', () => {
+    const world = createCardWorld();
+    saveCard(world, { features: 'a scar' });
+    const remembered = world.card.filedFactIds.features;
+    changeBook(world, ({ log, state }) => {
+      ScribeLogCore.rule(log, state, {
+        type: ScribeLogCore.Ruling.Split,
+        subject: 'S2',
+        label: 'Mara Shade',
+        kind: ScribeCategory.SubjectKinds.Character,
+        facts: [remembered],
+      });
+    });
+    assert.notEqual(loadBook(world).state.facts.find((fact) => fact.id === remembered).subject, 'S2');
+
+    saveCard(world, { features: 'a burn' });
+    const { state } = loadBook(world);
+    const split = state.facts.find((fact) => fact.id === remembered);
+    assert.equal(split.status, InForce);
+    assert.notEqual(split.subject, 'S2');
+    assert.deepEqual(factsIn(state, 'feature'), [['a burn', InForce]]);
+  });
+
+  it('shows an unknown fact value as unknown in a Scribe statement and in the Pedant ledger', async () => {
+    const world = createCardWorld();
+    saveCard(world, { age: '?', hair: 'red' });
+    const { state } = loadBook(world);
+    const unknownFact = state.facts.find((fact) => fact.category === 'age');
+    const statement = ScribeAnalyzer.statement(unknownFact, ScribeAnalyzer.labels(state));
+    assert.match(statement, /^age: unknown/);
+
+    const pair = world.store.commitTurnPair({
+      campaignId: world.campaignId,
+      userTurn: { mode: TurnMode.Normal, rawText: 'Well?', sceneNumber: 1, witnessIds: [world.rowan.id, world.mara.id] },
+      userBeat: { speakerType: SpeakerType.Player, characterId: world.rowan.id, speakerName: world.rowan.name, text: 'Well?' },
+      assistantTurn: { mode: TurnMode.Normal, rawText: 'Mara nods.', sceneNumber: 1, witnessIds: [world.rowan.id, world.mara.id] },
+      assistantBeats: [
+        { speakerType: SpeakerType.Character, characterId: world.mara.id, speakerName: world.mara.name, text: 'I am here.' },
+      ],
+      nextSceneState: world.campaign.sceneState,
+    });
+    let ledgerPrompt = '';
+    const { client } = createFakeClient([
+      (payload) => {
+        ledgerPrompt = payload.messages[1].content;
+        return '=== CONTRADICTIONS\n(none)';
+      },
+    ], { store: world.store });
+    const pedantService = new PedantService({ store: world.store, client, scribeService: world.service });
+    await pedantService.checkTurn({ campaignId: world.campaignId, turn: pair.assistantTurn });
+
+    assert.match(ledgerPrompt, /F\d+ \| Mara \| age \| unknown/);
+    assert.doesNotMatch(ledgerPrompt, /\| age \| \?/);
+  });
+
+  it('turns every text field of a card that has no letter or digit into the unknown value, except speech examples', () => {
+    const card = CharacterCard.fromObject({
+      age: '-',
+      hair: '  ...  ',
+      eyes: '',
+      body: '   ',
+      traits: 'bold',
+      scenario: '?',
+      speechExamples: ['...', '-'],
+    });
+
+    assert.equal(card.age, CharacterCard.Unknown);
+    assert.equal(card.hair, CharacterCard.Unknown);
+    assert.equal(card.scenario, CharacterCard.Unknown);
+    assert.equal(card.eyes, '');
+    assert.equal(card.body, '   ');
+    assert.equal(card.traits, 'bold');
+    assert.deepEqual(card.speechExamples, ['...', '-']);
+    assert.equal(CharacterCard.fromObject(card.toObject()).age, '?');
+    assert.equal(CharacterCard.requestValue(' ? '), CharacterCard.UnknownLabel);
+    assert.equal(CharacterCard.requestValue('?!'), '?!');
   });
 });
 

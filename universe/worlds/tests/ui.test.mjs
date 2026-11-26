@@ -700,6 +700,60 @@ function buildBrowserSettings() {
 }
 
 /**
+ * @param {Record<string, string | Array<string>>} [overrides]
+ * @returns {Record<string, string | Array<string> | Record<string, string>>}
+ */
+function buildCard(overrides = {}) {
+  return {
+    age: '',
+    hair: '',
+    eyes: '',
+    height: '',
+    body: '',
+    face: '',
+    features: '',
+    traits: '',
+    habits: '',
+    behavior: '',
+    likes: '',
+    dislikes: '',
+    sexualityOrientation: '',
+    sexualityKinks: '',
+    sexualityLikes: '',
+    sexualityDislikes: '',
+    speakingStyle: '',
+    speakingQuirks: '',
+    personalitySummary: '',
+    scenario: '',
+    characterNote: '',
+    speechExamples: [],
+    filedFactIds: {},
+    ...overrides,
+  };
+}
+
+/**
+ * @param {{card?: Record<string, string | Array<string>>, bookAppearance?: Record<string, string>, id?: string, name?: string, slug?: string}} [options]
+ * @returns {object}
+ */
+function buildCharacter({ card = {}, bookAppearance = {}, id = 'char-1', name = 'Maya', slug = 'maya' } = {}) {
+  return {
+    id,
+    slug,
+    name,
+    aliases: [],
+    tier: 'main',
+    isPlayer: false,
+    archived: false,
+    modelOverride: null,
+    avatarToken: 'slate',
+    avatarInitials: 'MA',
+    card: buildCard(card),
+    bookAppearance,
+  };
+}
+
+/**
  * @param {Array<object>} items
  * @returns {{items: Array<object>, total: number, nextCursor: null}}
  */
@@ -761,7 +815,7 @@ function listAlertTexts(root, levelClass) {
 }
 
 /**
- * @param {{catalogHandler?: (request: object) => Promise<{status: number, body: object}> | {status: number, body: object}, refreshHandler?: (request: object) => Promise<{status: number, body: object}> | {status: number, body: object}, settingsPutHandler?: (request: object) => {status: number, body: object}, characterHandler?: (request: object) => {status: number, body: object}, ignoreAbortForModels?: boolean}} [options]
+ * @param {{catalogHandler?: (request: object) => Promise<{status: number, body: object}> | {status: number, body: object}, refreshHandler?: (request: object) => Promise<{status: number, body: object}> | {status: number, body: object}, settingsPutHandler?: (request: object) => {status: number, body: object}, characterHandler?: (request: object) => {status: number, body: object}, characterGetHandler?: (request: object) => Promise<{status: number, body: object}> | {status: number, body: object}, castItems?: Array<object>, ignoreAbortForModels?: boolean}} [options]
  * @returns {{app: WorldsApp, shell: object, documentRef: object, requests: Array<object>, unexpected: Array<string>}}
  * @throws {TypeError}
  */
@@ -770,6 +824,8 @@ function createBrowserHarness({
   refreshHandler = () => ({ status: 200, body: buildCatalog(2) }),
   settingsPutHandler = (request) => ({ status: 200, body: { ...request.body, warnings: [] } }),
   characterHandler = (request) => ({ status: 200, body: { id: 'char-1', slug: 'maya', name: 'Maya', isPlayer: false, warnings: [], ...request.body } }),
+  characterGetHandler = () => ({ status: 200, body: buildCharacter() }),
+  castItems = [],
   ignoreAbortForModels = false,
 } = {}) {
   const { documentRef, createRootShell } = createFakeDomEnvironment();
@@ -818,7 +874,14 @@ function createBrowserHarness({
       if (routeKey === 'GET /api/campaigns') {
         return jsonResponse(200, buildPage([BrowserCampaign]));
       }
-      if (/^GET \/api\/campaigns\/camp-1\/(turns|findings|characters)$/.test(routeKey)) {
+      if (routeKey === 'GET /api/campaigns/camp-1/characters') {
+        return jsonResponse(200, buildPage(castItems));
+      }
+      if (/^GET \/api\/campaigns\/camp-1\/characters\/char-\d+$/.test(routeKey)) {
+        const answer = await characterGetHandler(record);
+        return jsonResponse(answer.status, answer.body);
+      }
+      if (/^GET \/api\/campaigns\/camp-1\/(turns|findings)$/.test(routeKey)) {
         return jsonResponse(200, buildPage([]));
       }
       if (routeKey === 'GET /api/campaigns/camp-1/memory') {
@@ -2181,47 +2244,402 @@ describe('Browser model catalog: boot, races, dropdowns, status lines, alerts an
     assert.equal(directorPicker.value, '');
   });
 
-  it('sends only the two textarea card fields on edit, never filedFactIds, persona or voiceNotes', async () => {
-    const storedCard = {
+  it('renders the six groups in order with Basics open and every card field as the right control with its label', () => {
+    const { modalRoot } = createModalHarness();
+
+    const groups = modalRoot.querySelectorAll('details');
+    assert.deepEqual(
+      groups.map((group) => group.id),
+      ['char-section-basics', 'char-section-appearance', 'char-section-personality', 'char-section-intimacy', 'char-section-voice', 'char-section-role'],
+    );
+    assert.deepEqual(
+      groups.map((group) => group.querySelector('summary').textContent),
+      ['Basics', 'Appearance', 'Personality', 'Intimacy', 'Voice', 'Role and portrayal'],
+    );
+    assert.deepEqual(groups.map((group) => group.open), [true, false, false, false, false, false]);
+
+    const expectedFields = [
+      ['age', 'Age', 'INPUT'],
+      ['hair', 'Hair', 'INPUT'],
+      ['eyes', 'Eyes', 'INPUT'],
+      ['height', 'Height', 'INPUT'],
+      ['body', 'Body', 'TEXTAREA'],
+      ['face', 'Face', 'TEXTAREA'],
+      ['features', 'Distinguishing features', 'TEXTAREA'],
+      ['personalitySummary', 'Personality summary', 'TEXTAREA'],
+      ['traits', 'Traits', 'TEXTAREA'],
+      ['habits', 'Habits', 'TEXTAREA'],
+      ['behavior', 'Behavior', 'TEXTAREA'],
+      ['likes', 'Likes', 'TEXTAREA'],
+      ['dislikes', 'Dislikes', 'TEXTAREA'],
+      ['sexualityOrientation', 'Orientation', 'TEXTAREA'],
+      ['sexualityKinks', 'Kinks', 'TEXTAREA'],
+      ['sexualityLikes', 'Sexual likes', 'TEXTAREA'],
+      ['sexualityDislikes', 'Sexual dislikes', 'TEXTAREA'],
+      ['speakingStyle', 'Speaking style', 'TEXTAREA'],
+      ['speakingQuirks', 'Speech quirks', 'TEXTAREA'],
+      ['scenario', 'Scenario', 'TEXTAREA'],
+      ['characterNote', 'Character note', 'TEXTAREA'],
+    ];
+    const labelsByTarget = new Map(
+      modalRoot.querySelectorAll('label').map((label) => [label.getAttribute('for'), label.textContent]),
+    );
+    for (const [fieldName, labelText, tagName] of expectedFields) {
+      const control = modalRoot.querySelector(`#char-card-${fieldName}`);
+      assert.notEqual(control, null, fieldName);
+      assert.equal(control.tagName, tagName, fieldName);
+      assert.equal(labelsByTarget.get(`char-card-${fieldName}`), labelText, fieldName);
+    }
+    assert.equal(modalRoot.querySelector('#char-section-appearance').querySelector('#char-card-hair') !== null, true);
+    assert.equal(modalRoot.querySelector('#char-section-voice').querySelector('#char-card-speakingQuirks') !== null, true);
+    assert.equal(modalRoot.querySelector('#char-section-role').querySelector('#char-card-scenario') !== null, true);
+    assert.equal(modalRoot.querySelector('#char-section-basics').querySelector('#char-name-input') !== null, true);
+    assert.equal(modalRoot.querySelectorAll('.required-marker').length, 2);
+    assert.equal(modalRoot.querySelectorAll('.field-hint').filter((hint) => hint.textContent.length > 0).length, 0);
+  });
+
+  it('keeps an opened group open across a catalog update and a speech example change', async () => {
+    const { modal, modalRoot } = createModalHarness();
+    const voiceGroup = modalRoot.querySelector('#char-section-voice');
+    voiceGroup.open = true;
+    await voiceGroup.dispatchEvent('toggle');
+
+    modal.setModelCatalog(buildCatalog(3));
+    assert.equal(modalRoot.querySelector('#char-section-voice').open, true);
+    assert.equal(modalRoot.querySelector('#char-section-appearance').open, false);
+
+    await modalRoot.querySelector('#char-example-add').dispatchEvent('click');
+    assert.equal(modalRoot.querySelector('#char-section-voice').open, true);
+
+    modalRoot.querySelector('#char-section-voice').open = false;
+    await modalRoot.querySelector('#char-section-voice').dispatchEvent('toggle');
+    modal.setModelCatalog(buildCatalog(3));
+    assert.equal(modalRoot.querySelector('#char-section-voice').open, false);
+  });
+
+  it('keeps focus and caret on a speech example and on the add button across a catalog update', async () => {
+    const { modal, modalRoot, documentRef } = createModalHarness({
+      character: buildCharacter({ card: { speechExamples: ['Well, then.'] } }),
+    });
+    const exampleInput = modalRoot.querySelector('#char-example-0');
+    exampleInput.value = 'Half-typed';
+    await exampleInput.dispatchEvent('input');
+    exampleInput.focus();
+    exampleInput.selectionStart = 2;
+    exampleInput.selectionEnd = 5;
+
+    modal.setModelCatalog(buildCatalog(3));
+    const restored = modalRoot.querySelector('#char-example-0');
+    assert.notEqual(restored, exampleInput);
+    assert.equal(documentRef.activeElement, restored);
+    assert.equal(restored.value, 'Half-typed');
+    assert.equal(restored.selectionStart, 2);
+    assert.equal(restored.selectionEnd, 5);
+
+    const addButton = modalRoot.querySelector('#char-example-add');
+    addButton.focus();
+    modal.setModelCatalogLoading(true);
+    assert.equal(documentRef.activeElement, modalRoot.querySelector('#char-example-add'));
+  });
+
+  it('shows In the book now only where the book differs, with the build line once under Body', async () => {
+    const { modalRoot } = createModalHarness({
+      character: buildCharacter({
+        card: { hair: 'red', eyes: 'green', height: "5'6", body: 'slim', age: '30' },
+        bookAppearance: { hair: 'black', eyes: 'green', build: "5'6; slim", features: 'a scar' },
+      }),
+    });
+    /**
+     * @param {string} bookKey
+     * @returns {{text: string, hidden: boolean}}
+     */
+    const hintOf = (bookKey) => {
+      const hint = modalRoot.querySelector(`#char-card-hint-${bookKey}`);
+      return { text: hint.textContent, hidden: hint.classList.contains('is-hidden') };
+    };
+
+    assert.equal(modalRoot.querySelectorAll('.field-hint').length, 6);
+    assert.equal(modalRoot.querySelector('#char-card-hint-height'), null);
+    assert.deepEqual(hintOf('hair'), { text: 'In the book now: black', hidden: false });
+    assert.deepEqual(hintOf('features'), { text: 'In the book now: a scar', hidden: false });
+    assert.deepEqual(hintOf('eyes'), { text: '', hidden: true });
+    assert.deepEqual(hintOf('build'), { text: '', hidden: true });
+    assert.deepEqual(hintOf('age'), { text: '', hidden: true });
+    assert.deepEqual(hintOf('face'), { text: '', hidden: true });
+    assert.equal(
+      modalRoot.querySelector('#char-card-body').parentNode.querySelector('#char-card-hint-build') !== null,
+      true,
+    );
+
+    const hairInput = modalRoot.querySelector('#char-card-hair');
+    hairInput.value = 'black';
+    await hairInput.dispatchEvent('input');
+    assert.deepEqual(hintOf('hair'), { text: '', hidden: true });
+
+    const bodyInput = modalRoot.querySelector('#char-card-body');
+    bodyInput.value = 'athletic';
+    await bodyInput.dispatchEvent('input');
+    assert.deepEqual(hintOf('build'), { text: "In the book now: 5'6; slim", hidden: false });
+    const heightInput = modalRoot.querySelector('#char-card-height');
+    heightInput.value = '';
+    await heightInput.dispatchEvent('input');
+    bodyInput.value = "5'6; slim";
+    await bodyInput.dispatchEvent('input');
+    assert.deepEqual(hintOf('build'), { text: '', hidden: true });
+    heightInput.value = "5'6";
+    await heightInput.dispatchEvent('input');
+    bodyInput.value = 'slim';
+    await bodyInput.dispatchEvent('input');
+    assert.deepEqual(hintOf('build'), { text: '', hidden: true });
+  });
+
+  it('shows no hints for a new character', () => {
+    const { modalRoot } = createModalHarness();
+    assert.equal(modalRoot.querySelectorAll('.field-hint').filter((hint) => hint.textContent.length > 0).length, 0);
+  });
+
+  it('adds and removes speech examples, keeps focus on the new row, and drops blank examples on save', async () => {
+    const { modalRoot, documentRef, savedPayloads } = createModalHarness({
+      character: buildCharacter({ card: { speechExamples: ['Well, then.', 'Hm.'] } }),
+    });
+    assert.equal(modalRoot.querySelector('#char-example-0').value, 'Well, then.');
+    assert.equal(modalRoot.querySelector('#char-example-1').value, 'Hm.');
+    assert.equal(modalRoot.querySelector('#char-example-2'), null);
+
+    await modalRoot.querySelector('#char-example-add').dispatchEvent('click');
+    const added = modalRoot.querySelector('#char-example-2');
+    assert.notEqual(added, null);
+    assert.equal(added.value, '');
+    assert.equal(documentRef.activeElement, added);
+    added.value = '  Fine.  ';
+    await added.dispatchEvent('input');
+
+    await modalRoot.querySelector('#char-example-remove-0').dispatchEvent('click');
+    assert.equal(modalRoot.querySelector('#char-example-0').value, 'Hm.');
+    assert.equal(modalRoot.querySelector('#char-example-1').value, '  Fine.  ');
+    assert.equal(modalRoot.querySelector('#char-example-2'), null);
+
+    await modalRoot.querySelector('#char-example-add').dispatchEvent('click');
+    await modalRoot.querySelector('form').dispatchEvent('submit');
+    assert.deepEqual(savedPayloads[0].card.speechExamples, ['Hm.', 'Fine.']);
+  });
+
+  it('submits every card field, trimmed, and never filedFactIds, persona or voiceNotes, on edit', async () => {
+    const storedCard = buildCard({
       hair: 'red',
       speechExamples: ['Well, then.'],
       filedFactIds: { hair: 'F1' },
       personalitySummary: 'Old summary.',
       speakingStyle: 'Old style.',
-    };
-    const { modalRoot, savedPayloads } = createModalHarness({
-      character: { id: 'char-1', name: 'Maya', slug: 'maya', tier: 'main', card: storedCard },
+      scenario: 'Harbor pilot.',
     });
-    assert.equal(modalRoot.querySelector('#char-persona-input').value, 'Old summary.');
-    assert.equal(modalRoot.querySelector('#char-voice-input').value, 'Old style.');
+    const { modalRoot, savedPayloads } = createModalHarness({
+      character: { ...buildCharacter(), card: storedCard },
+    });
+    assert.equal(modalRoot.querySelector('#char-card-personalitySummary').value, 'Old summary.');
+    assert.equal(modalRoot.querySelector('#char-card-speakingStyle').value, 'Old style.');
+    assert.equal(modalRoot.querySelector('#char-card-hair').value, 'red');
 
-    const personaInput = modalRoot.querySelector('#char-persona-input');
-    personaInput.value = 'New summary.';
-    await personaInput.dispatchEvent('input');
+    const summaryInput = modalRoot.querySelector('#char-card-personalitySummary');
+    summaryInput.value = '  New summary.  ';
+    await summaryInput.dispatchEvent('input');
     await modalRoot.querySelector('form').dispatchEvent('submit');
 
     assert.equal(savedPayloads.length, 1);
-    assert.deepEqual(savedPayloads[0].card, {
+    const { filedFactIds, ...sentCardFields } = buildCard({
+      hair: 'red',
+      speechExamples: ['Well, then.'],
       personalitySummary: 'New summary.',
       speakingStyle: 'Old style.',
+      scenario: 'Harbor pilot.',
     });
+    assert.deepEqual(filedFactIds, {});
+    assert.deepEqual(savedPayloads[0].card, sentCardFields);
+    assert.equal(Object.hasOwn(savedPayloads[0].card, 'filedFactIds'), false);
     assert.equal(Object.hasOwn(savedPayloads[0], 'persona'), false);
     assert.equal(Object.hasOwn(savedPayloads[0], 'voiceNotes'), false);
     assert.equal(storedCard.personalitySummary, 'Old summary.');
   });
 
-  it('sends a card with only the two textarea fields when a new character is created', async () => {
+  it('submits an empty card with every field when a new character is created', async () => {
     const { modalRoot, savedPayloads } = createModalHarness();
     const nameInput = modalRoot.querySelector('#char-name-input');
     nameInput.value = 'Newcomer';
     await nameInput.dispatchEvent('input');
-    const voiceInput = modalRoot.querySelector('#char-voice-input');
+    const voiceInput = modalRoot.querySelector('#char-card-speakingStyle');
     voiceInput.value = 'Slow and low.';
     await voiceInput.dispatchEvent('input');
     await modalRoot.querySelector('form').dispatchEvent('submit');
 
+    const { filedFactIds, ...expectedCard } = buildCard({ speakingStyle: 'Slow and low.' });
+    assert.deepEqual(filedFactIds, {});
     assert.equal(savedPayloads.length, 1);
-    assert.deepEqual(savedPayloads[0].card, { personalitySummary: '', speakingStyle: 'Slow and low.' });
+    assert.deepEqual(savedPayloads[0].card, expectedCard);
+  });
+
+  it('shows the Opening state on Edit, then opens the window with the fetched character and its book hints', async () => {
+    const answer = createDeferred();
+    const harness = createBrowserHarness({
+      castItems: [buildCharacter({ card: { hair: 'stale list value' } })],
+      characterGetHandler: () => answer.promise,
+    });
+    await harness.app.init();
+    const drawerEl = harness.shell.querySelector('#inspector-drawer');
+    const modalRoot = harness.shell.querySelector('#modal-root');
+    await harness.shell.querySelector('#inspector-toggle-btn').dispatchEvent('click');
+    await findButton(drawerEl, 'Cast').dispatchEvent('click');
+
+    const pendingClick = findButton(drawerEl, 'Edit').dispatchEvent('click');
+    await waitUntil(() => findAllButtonLabels(drawerEl).includes('Opening...'));
+    assert.equal(findButton(drawerEl, 'Opening...').disabled, true);
+    assert.equal(findButton(drawerEl, 'Opening...').classList.contains('is-loading'), true);
+    assert.equal(modalRoot.querySelector('#character-modal-title'), null);
+
+    answer.resolve({
+      status: 200,
+      body: buildCharacter({ card: { hair: 'red' }, bookAppearance: { hair: 'black' } }),
+    });
+    await pendingClick;
+    assert.equal(modalRoot.querySelector('#character-modal-title').textContent, 'Edit Character');
+    assert.equal(modalRoot.querySelector('#char-card-hair').value, 'red');
+    assert.equal(modalRoot.querySelector('#char-card-hint-hair').textContent, 'In the book now: black');
+    assert.equal(findAllButtonLabels(drawerEl).includes('Opening...'), false);
+    assert.equal(findButton(drawerEl, 'Edit').disabled, false);
+    assert.deepEqual(
+      harness.requests.filter((request) => request.path === '/api/campaigns/camp-1/characters/char-1').map((request) => request.method),
+      ['GET'],
+    );
+    assert.deepEqual(harness.unexpected, []);
+  });
+
+  it('shows an Edit failure next to its own row, returns focus to that Edit button, and gives each Edit button its own ID', async () => {
+    const harness = createBrowserHarness({
+      castItems: [
+        buildCharacter({ id: 'char-1', name: 'Maya', slug: 'maya' }),
+        buildCharacter({ id: 'char-2', name: 'Nia', slug: 'nia' }),
+      ],
+      characterGetHandler: (request) => (
+        request.path.endsWith('/char-2')
+          ? { status: 404, body: { error: 'Character not found: char-2' } }
+          : { status: 200, body: buildCharacter() }
+      ),
+    });
+    await harness.app.init();
+    const drawerEl = harness.shell.querySelector('#inspector-drawer');
+    const modalRoot = harness.shell.querySelector('#modal-root');
+    await harness.shell.querySelector('#inspector-toggle-btn').dispatchEvent('click');
+    await findButton(drawerEl, 'Cast').dispatchEvent('click');
+
+    const firstEdit = drawerEl.querySelector('#cast-edit-char-1');
+    const secondEdit = drawerEl.querySelector('#cast-edit-char-2');
+    assert.notEqual(firstEdit, null);
+    assert.notEqual(secondEdit, null);
+    assert.equal(drawerEl.querySelectorAll('.item-card').length, 2);
+
+    await secondEdit.dispatchEvent('click');
+    const rows = drawerEl.querySelectorAll('.item-card');
+    assert.deepEqual(rows[0].querySelectorAll('.inline-alert').map((alert) => alert.textContent), []);
+    assert.deepEqual(
+      rows[1].querySelectorAll('.inline-alert').map((alert) => alert.textContent),
+      ['Character not found: char-2'],
+    );
+    assert.equal(rows[1].contains(drawerEl.querySelector('#cast-edit-char-2')), true);
+    assert.equal(harness.documentRef.activeElement, drawerEl.querySelector('#cast-edit-char-2'));
+    assert.equal(modalRoot.querySelector('#character-modal-title'), null);
+
+    await drawerEl.querySelector('#cast-edit-char-1').dispatchEvent('click');
+    assert.equal(modalRoot.querySelector('#character-modal-title').textContent, 'Edit Character');
+    assert.deepEqual(drawerEl.querySelectorAll('.inline-alert'), []);
+  });
+
+  it('drops a character fetch that lands after the active campaign changed', async () => {
+    const answer = createDeferred();
+    const harness = createBrowserHarness({
+      castItems: [buildCharacter()],
+      characterGetHandler: () => answer.promise,
+    });
+    await harness.app.init();
+    const drawerEl = harness.shell.querySelector('#inspector-drawer');
+    const modalRoot = harness.shell.querySelector('#modal-root');
+    await harness.shell.querySelector('#inspector-toggle-btn').dispatchEvent('click');
+    await findButton(drawerEl, 'Cast').dispatchEvent('click');
+
+    const pendingClick = drawerEl.querySelector('#cast-edit-char-1').dispatchEvent('click');
+    await waitUntil(() => harness.requests.some((request) => request.path.endsWith('/characters/char-1')));
+    await harness.app.selectCampaign('camp-gone');
+    answer.resolve({ status: 200, body: buildCharacter() });
+    await pendingClick;
+
+    assert.equal(modalRoot.querySelector('#character-modal-title'), null);
+  });
+
+  it('moves focus to the previous example Remove button, or to Add when the first example goes', async () => {
+    const { modalRoot, documentRef } = createModalHarness({
+      character: buildCharacter({ card: { speechExamples: ['one', 'two', 'three'] } }),
+    });
+    modalRoot.querySelector('#char-example-remove-1').focus();
+    await modalRoot.querySelector('#char-example-remove-1').dispatchEvent('click');
+    assert.equal(documentRef.activeElement, modalRoot.querySelector('#char-example-remove-0'));
+    assert.equal(modalRoot.querySelector('#char-example-1').value, 'three');
+
+    await modalRoot.querySelector('#char-example-remove-0').dispatchEvent('click');
+    assert.equal(documentRef.activeElement, modalRoot.querySelector('#char-example-add'));
+    assert.equal(modalRoot.querySelector('#char-example-0').value, 'three');
+    assert.equal(modalRoot.querySelector('#char-example-1'), null);
+  });
+
+  it('keeps a visible disclosure marker on the group titles and a focus ring on them', () => {
+    const rules = parseCssRules(fs.readFileSync(path.join(PublicDirPath, 'styles.css'), 'utf8'));
+    const title = rules.find((rule) => rule.selector === '.card-section-title');
+    assert.notEqual(title, undefined);
+    assert.match(title.body, /display:\s*list-item;/);
+    assert.doesNotMatch(title.body, /display:\s*(flex|grid|block|inline-flex);/);
+    assert.doesNotMatch(title.body, /list-style(-type)?:\s*none/);
+    assert.doesNotMatch(title.body, /(?:#[0-9a-fA-F]{3,8}\b|rgba?\()/);
+    assert.equal(rules.some((rule) => rule.selector.split(',').map((part) => part.trim()).includes('summary:focus-visible')), true);
+  });
+
+  it('shows no hint when the card and the book both hold the unknown value, and trims the single-line comparison', async () => {
+    const { modalRoot } = createModalHarness({
+      character: buildCharacter({
+        card: { age: '?', hair: 'red' },
+        bookAppearance: { age: '?', hair: 'red' },
+      }),
+    });
+    /**
+     * @param {string} bookKey
+     * @returns {object}
+     */
+    const hint = (bookKey) => modalRoot.querySelector(`#char-card-hint-${bookKey}`);
+    assert.equal(hint('age').textContent, '');
+    assert.equal(hint('age').classList.contains('is-hidden'), true);
+
+    const hairInput = modalRoot.querySelector('#char-card-hair');
+    hairInput.value = '  red  ';
+    await hairInput.dispatchEvent('input');
+    assert.equal(hint('hair').textContent, '');
+    assert.equal(hint('hair').classList.contains('is-hidden'), true);
+    hairInput.value = 'reddish';
+    await hairInput.dispatchEvent('input');
+    assert.equal(hint('hair').textContent, 'In the book now: red');
+  });
+
+  it('shows the error where the Edit click was and does not open the window when the fetch fails', async () => {
+    const harness = createBrowserHarness({
+      castItems: [buildCharacter()],
+      characterGetHandler: () => ({ status: 404, body: { error: 'Character not found: char-1' } }),
+    });
+    await harness.app.init();
+    const drawerEl = harness.shell.querySelector('#inspector-drawer');
+    const modalRoot = harness.shell.querySelector('#modal-root');
+    await harness.shell.querySelector('#inspector-toggle-btn').dispatchEvent('click');
+    await findButton(drawerEl, 'Cast').dispatchEvent('click');
+
+    await findButton(drawerEl, 'Edit').dispatchEvent('click');
+    assert.equal(modalRoot.querySelector('#character-modal-title'), null);
+    assert.deepEqual(listAlertTexts(drawerEl, 'is-danger'), ['Character not found: char-1']);
+    assert.equal(findButton(drawerEl, 'Edit').disabled, false);
+    assert.equal(findAllButtonLabels(drawerEl).includes('Opening...'), false);
   });
 
   it('shows the four status line texts, the loading state, and the warning and danger alerts in Settings and in the Character modal', async () => {
@@ -2390,6 +2808,7 @@ describe('Browser model catalog: boot, races, dropdowns, status lines, alerts an
           slug: 'maya',
           name: 'Maya',
           isPlayer: false,
+          bookAppearance: {},
           ...request.body,
           warnings: request.method === 'POST' ? characterWarnings : [],
         },
@@ -2441,6 +2860,7 @@ describe('Browser model catalog: boot, races, dropdowns, status lines, alerts an
           slug: 'maya',
           name: 'Maya',
           isPlayer: false,
+          bookAppearance: { hair: 'black' },
           ...request.body,
           warnings: request.method === 'POST' ? [warningText] : [],
         },
@@ -2466,6 +2886,7 @@ describe('Browser model catalog: boot, races, dropdowns, status lines, alerts an
     assert.deepEqual(listAlertTexts(modalRoot, 'is-warning'), [warningText]);
     assert.equal(modalRoot.querySelector('#char-name-input').value, 'Maya');
     assert.equal(modalRoot.querySelector('#char-model-input').value, 'vendor/model-009');
+    assert.equal(modalRoot.querySelector('#char-card-hint-hair').textContent, 'In the book now: black');
     assert.equal(harness.requests.filter((request) => request.method === 'POST' && request.path.endsWith('/characters')).length, 1);
 
     await modalRoot.querySelector('form').dispatchEvent('submit');
@@ -2534,8 +2955,10 @@ describe('Browser model catalog: boot, races, dropdowns, status lines, alerts an
     const textFieldIds = [
       'char-name-input',
       'char-aliases-input',
-      'char-persona-input',
-      'char-voice-input',
+      'char-card-hair',
+      'char-card-personalitySummary',
+      'char-card-speakingStyle',
+      'char-card-scenario',
       'char-model-input',
       'char-model-filter',
     ];
@@ -2642,7 +3065,7 @@ describe('Browser model catalog: boot, races, dropdowns, status lines, alerts an
 
   it('shows only the filtered matches in the Character modal, selects the empty option and keeps the saved ID when the filter hides it, with the option text of ruling 21', async () => {
     const { modalRoot, savedPayloads } = createModalHarness({
-      character: { id: 'char-1', name: 'Maya', slug: 'maya', tier: 'main', modelOverride: 'vendor/model-001', card: { personalitySummary: '', speakingStyle: '' } },
+      character: { ...buildCharacter(), modelOverride: 'vendor/model-001' },
       catalog: buildCatalog(75),
     });
     const picker = modalRoot.querySelector('#char-model-picker');
@@ -3187,7 +3610,7 @@ describe('Browser model catalog: boot, races, dropdowns, status lines, alerts an
       refreshAnswers,
       containerElement: modalRoot,
       refreshSelector: '#char-refresh-models',
-      otherFieldSelector: '#char-persona-input',
+      otherFieldSelector: '#char-card-personalitySummary',
     });
     assert.deepEqual(harness.unexpected, []);
   });

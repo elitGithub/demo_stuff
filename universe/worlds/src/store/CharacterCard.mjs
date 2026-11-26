@@ -1,5 +1,20 @@
+import { ScribeAnswer } from '../scribe/ScribeAnswer.mjs';
+
 export class CharacterCard {
-  static AppearanceFields = Object.freeze(['age', 'hair', 'eyes', 'height', 'body', 'face', 'features']);
+  static Field = Object.freeze({
+    Age: 'age',
+    Hair: 'hair',
+    Eyes: 'eyes',
+    Height: 'height',
+    Body: 'body',
+    Face: 'face',
+    Features: 'features',
+  });
+
+  static AppearanceFields = Object.freeze(Object.values(CharacterCard.Field));
+
+  static Unknown = '?';
+  static UnknownLabel = 'unknown';
 
   static TextFields = Object.freeze([
     'age',
@@ -46,7 +61,7 @@ export class CharacterCard {
       if (typeof fieldValue !== 'string') {
         throw new TypeError(`${field} must be a string.`);
       }
-      this[field] = fieldValue;
+      this[field] = CharacterCard.normalise(fieldValue);
     }
 
     const rawExamples = values.speechExamples;
@@ -82,6 +97,22 @@ export class CharacterCard {
     this.speechExamples = Object.freeze(exampleCopy);
     this.filedFactIds = Object.freeze(filedCopy);
     Object.freeze(this);
+  }
+
+  /**
+   * @param {string} text
+   * @returns {string}
+   */
+  static normalise(text) {
+    return text.trim().length > 0 && !ScribeAnswer.Settings.HasContent.test(text) ? CharacterCard.Unknown : text;
+  }
+
+  /**
+   * @param {string} text
+   * @returns {string}
+   */
+  static requestValue(text) {
+    return text.trim() === CharacterCard.Unknown ? CharacterCard.UnknownLabel : text;
   }
 
   /**

@@ -1,6 +1,8 @@
+import { CharacterCard } from '../store/CharacterCard.mjs';
 import { SceneType } from '../store/enums/SceneType.mjs';
 import { SpendStage } from '../store/enums/SpendStage.mjs';
 import { TurnRole } from '../store/enums/TurnRole.mjs';
+import { CardFiling } from './CardFiling.mjs';
 import { ScribeAnalyzer } from './ScribeAnalyzer.mjs';
 import { ScribeAnswer } from './ScribeAnswer.mjs';
 import { ScribeCategory } from './ScribeCategory.mjs';
@@ -123,6 +125,65 @@ export class ScribeService {
       lastTurnSeq,
       dirty,
     };
+  }
+
+  /**
+   * @param {{campaignId: string, subjectId: string, before: CharacterCard, after: CharacterCard}} options
+   * @returns {CharacterCard}
+   * @throws {Error}
+   */
+  fileCardAppearance({ campaignId, subjectId, before, after }) {
+    const loaded = this.loadState(campaignId);
+    const { log, turns, messages } = loaded;
+    const order = turns.map((turn) => ({ id: turn.id, position: turn.seq }));
+    const fingerprints = new Map(messages.map((message) => [message.id, message.fingerprint]));
+    const steps = CardFiling.operations({ state: loaded.state, subjectId, before, after });
+    const filedFactIds = { ...before.filedFactIds };
+    for (const field of CardFiling.changedFields(before, after)) {
+      delete filedFactIds[field];
+    }
+    let state = loaded.state;
+    for (const [index, step] of steps.entries()) {
+      if (index > 0) {
+        state = ScribeReplay.run(log, order, null, fingerprints, null, null, messages);
+      }
+      const entry = ScribeLogCore.rule(log, state, step.operation);
+      if (step.operation.type === ScribeLogCore.Ruling.AddFact && CardFiling.ListFields.includes(step.field)) {
+        filedFactIds[step.field] = entry.operations[0].fact;
+      }
+    }
+    if (steps.length > 0) {
+      this.#store.saveScribeBook(campaignId, {
+        bookJson: JSON.stringify(log),
+        lastTurnSeq: loaded.lastTurnSeq,
+        dirty: loaded.dirty,
+      });
+    }
+    return CharacterCard.fromObject({ ...after.toObject(), filedFactIds });
+  }
+
+  /**
+   * @param {{state: object, subjectId: string}} options
+   * @returns {Readonly<Record<string, string>>}
+   */
+  bookAppearance({ state, subjectId }) {
+    const owner = ScribeKnowledge.survivor(state, subjectId);
+    const appearance = {};
+    for (const slot of CardFiling.Slots) {
+      const texts = state.facts
+        .filter((fact) => {
+          return (
+            fact.subject === owner &&
+            fact.category === slot.category &&
+            fact.status === ScribeReplay.Status.InForce
+          );
+        })
+        .map((fact) => fact.text);
+      if (texts.length > 0) {
+        appearance[slot.key] = texts.join(CardFiling.Separator);
+      }
+    }
+    return Object.freeze(appearance);
   }
 
   /**

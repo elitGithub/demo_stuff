@@ -16,6 +16,15 @@ export const ScribeCategory = Object.freeze({
     World: 'world',
   }),
 
+  Names: Object.freeze({
+    Age: 'age',
+    Hair: 'hair',
+    Eyes: 'eyes',
+    Build: 'build',
+    Appearance: 'appearance',
+    Feature: 'feature',
+  }),
+
   Settings: Object.freeze({
     Words: Object.freeze({
       Fixed: Object.freeze(['kind', 'age', 'eyes', 'hair', 'build', 'skin']),

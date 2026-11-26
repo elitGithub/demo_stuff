@@ -1,3 +1,4 @@
+import { CharacterCard } from '../store/CharacterCard.mjs';
 import { ScribeCategory } from './ScribeCategory.mjs';
 import { ScribeIntakeAdapter } from './ScribeIntakeAdapter.mjs';
 import { ScribeLogCore } from './ScribeLogCore.mjs';
@@ -412,7 +413,7 @@ export const ScribeAnalyzer = Object.freeze({
       evidence && evidence.attribution !== 'witnessed'
         ? ' [' + evidence.attribution + ' by ' + evidence.speaker + ']'
         : '';
-    return category + settings.Colon + ScribeCategory.displayValue(fact) + source + (scope ? ' [scope: ' + scope + ']' : '') + account;
+    return category + settings.Colon + ScribeCategory.displayValue({ ...fact, text: CharacterCard.requestValue(fact.text) }) + source + (scope ? ' [scope: ' + scope + ']' : '') + account;
   },
 
   /**

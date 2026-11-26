@@ -1,0 +1,272 @@
+# Handoff 2026-11-26: Worlds reply tuning, project 1 (Task 2 under review)
+
+For the next agent session on another PC. That session will not have this PC's agent memory
+(`~/.claude/projects/-var-www-demo-stuff/memory/`) or the loop files (`~/.claude/projects/-var-www-demo-stuff/
+sdd-snapshots/reply-tuning/`), so everything needed is in this file. Read it in full, then
+`/var/www/demo_stuff/CLAUDE.md` (workspace laws, in the repo), before doing anything. It replaces
+`docs/HANDOFF-2026-11-25-live-model-catalog.md`, whose work is all committed.
+
+## 1. Where things stand
+
+- HEAD `90cfe3c` ("universe: add character cards and reply tuning") = reply tuning Task 1 plus the catalog fix
+  rounds 3-6. The operator commits; agents never do.
+- **Task 2 (character card end to end, appearance filed into the book): NOT commit-ready: scoped re-review of fix
+  round 1 running.** Built by a Sonnet implementer (section 5). Opus review: 2 High, 4 Medium, 9 Low, 1 Nit,
+  checked against the code (section 6). Fix round 1 (section 6a, operator's rulings included) is done: all 10 test
+  files pass (ui 56, http 36, catalog 54, config 14, engine 24, scribe 84, store 30, openrouter 49, seed 37, sync
+  8). Implementer's calls for the re-review to check: a Pin older than the newest decided value is skipped
+  outright (no longer sets `pinned`); a build saying "dragon form" with no height/length wording stays in the
+  unscoped slot (`ScribeCategory.scope` only returns a form together with a dimension); `?` -> `unknown` matches an
+  exact `?` only; `decided`/`exact` are accepted through `tellCommit`. If the tree moved before the re-review
+  reported, rerun it (section 7, limited to the fix round and these calls), then the own checks.
+- **Pending question to the operator (2026-11-26), after "Again with "broken code against tests" loop?":** for
+  Tasks 3-8, (a) the plan maps every existing feature that touches the task's data (for the book: decided values,
+  pins, build scope, strike marks, refinements, merges, splits) with a test case each; (b) the implementer gets the
+  review's attack list up front; (c) implementers stop running mutant checks, the reviewer keeps them. Cause given
+  to the operator: the Task 2 plan did not map the book's existing features, so the implementer's passing tests
+  covered only the listed cases.
+- Tasks 3-8: not started. One task at a time, each only after the operator commits the one before.
+
+## 2. Documents
+
+- Design (approved 2026-11-25, addenda since): `universe/worlds/docs/superpowers/specs/2026-11-25-reply-tuning-design.md`.
+  Read "Addendum: scene styles" and "Addendum: decisions (operator, 2026-11-26)".
+- Plan (approved 2026-11-25; Task 2 rewritten and Task 3 Step 1 updated 2026-11-26 after the ruling in section 4):
+  `universe/worlds/docs/superpowers/plans/2026-11-25-reply-tuning.md`. 8 tasks:
+  1. storage, schema upgrades, card, settings (committed);
+  2. card end to end with book filing (built, under review);
+  3. book rules for player-stated changes and model-written fixed values;
+  4. RequestBudget, StorySlice, HistoryWindow, `modelCatalog.contextLength`;
+  5. TagReader, Director tags, `SceneStyle` enum and the `sceneStyles` setting;
+  6. CharacterBrain, Narrator, ReplyStreamSplitter (`styleText` as `<style>` above `<direction>`);
+  7. TurnEngine sequence, scene style state and pin; deletes `src/engine/CharacterMind.mjs`,
+     `src/engine/NarratorComposer.mjs`, `src/engine/BeatParser.mjs` (operator gave the go for these three paths:
+     "confirmed", 2026-11-25);
+  8. browser (thoughts toggle, phase labels, Settings fields incl. replies 1-5 and the style texts, Scene-tab
+     style pin, README).
+
+## 3. Open items, in order
+
+1. **Task 2 fix round 1:** rulings given (6a items 3 and 6). Finish the fix round (section 1), scoped Opus
+   re-review, own checks (all 10 test files one at a time, seeder dry-run, docblock sweep, PhpStorm on changed
+   lines), hand-off opening "Commit-ready." or "NOT commit-ready: ...".
+2. **Tasks 3-8**, one at a time, same loop. Task 3 must reuse Task 2's latest-decision rule (plan Task 3 Step 1).
+3. **Later (operator-listed, not this project):** project 2 character brain (reflection/dream, budgeted feelings
+   summary, timed runs every few hours for characters not in the scene); project 3 book pass at intervals,
+   scene-scoped, plus format fixes and Pedant quote verification; the player speaking as any character (as in
+   Zeta); operator-defined scene style names; the dead-saved-models design
+   (`docs/superpowers/specs/2026-11-25-dead-saved-models-design.md`, draft, not approved); a play round.
+4. **Prompts to check:** `universe/worlds/docs/PROMPTS-TO-CHECK.md`, the operator's list of LLM pipelines to make
+   sure are functional (Pedant misspelling and placeholder-quote findings first). Proposed code checks there are
+   not ruled yet.
+5. **Pre-existing, told to the operator, not in scope:** if GET settings fails at boot and again on tab open while
+   PUT works, Save blanks the model slots. The concurrent first-open WAL race (seeder and server on the same fresh
+   file, about 1 in 80) stays as is: operator ruling "Rule A, leave it".
+
+## 4. Rulings of 2026-11-26 (Task 2)
+
+- The plan's first idea (file a card value with AddFact, then EditFact it so it is decided) does nothing: an
+  EditFact with unchanged text stores no entry (`src/scribe/ScribeLogCore.mjs:977`), and the decided pass only
+  demotes undecided values (`src/scribe/ScribeReplay.mjs:1418-1426` at HEAD), so two decided values stayed in force.
+- Operator: the operator's word decides a fixed value: what is on the card, and what the player states happened.
+  "The AI can't change things without basis. It has to be confirmed by the user somehow." Ruled option A ("Let's do
+  it like that, fiine"):
+  - a card save files a changed fixed value (age, hair, eyes, build) as a decided operator fact (`AddFact` with
+    `decided: true`);
+  - when two decided values share a slot, the later decision wins and the older becomes `Reported`, readable as the
+    earlier value ("hair dyed black (originally red)");
+  - model-written second values stay `Reported` (Task 3);
+  - the card window keeps the card's own value and shows "In the book now: ..." under the field when the book
+    differs.
+- Calls made by the orchestrator (stated to the operator): "later" is log order (entry `sequence`), not turn
+  position; card facts are filed at `position: 0` (the card is the starting description); editing a character
+  first fetches it (new `GET` route) so the window can show the book hints, with a loading state on the trigger and
+  an error without opening on failure; `filedFactIds` kept for `face` and `features` only; field labels as in the
+  plan.
+- The operator's model of appearance, for Task 4 (request assembly): appearance in requests is built from the
+  facts about the character, with history, e.g. "scar on shoulder, hair dyed black (originally red)".
+
+## 5. What Task 2 built (implementer's report, not yet verified by review)
+
+Working tree, uncommitted: `src/scribe/CardFiling.mjs` (new), `src/scribe/ScribeLogCore.mjs`,
+`src/scribe/ScribeReplay.mjs`, `src/scribe/ScribeService.mjs`, `src/scribe/ScribeCategory.mjs`,
+`src/store/CharacterCard.mjs`, `src/http/Router.mjs`, `public/components/CharacterModal.mjs`,
+`public/components/InspectorDrawer.mjs`, `public/app.mjs`, `public/api.mjs`, `public/styles.css`,
+`tests/scribe.test.mjs`, `tests/http.test.mjs`, `tests/ui.test.mjs`, plus the plan and spec edits and this file.
+
+- `AddFact` accepts `decided` (only `true` or absent; only fixed or moving categories; not with `reported: true`).
+- Replay: a decided `AddFact` joins `book.decided`; `decisionSequences` maps each decided fact to the sequence of its
+  AddFact entry or its latest EditFact entry; the decided pass keeps the highest-sequence live decided fact per
+  decision field and turns every other live fact there `Reported`. Behaviour change: two decided facts in one slot
+  used to both stay in force.
+- `CardFiling.operations` and `ScribeService.fileCardAppearance` / `bookAppearance` as in the plan;
+  `fileCardAppearance` dropped the unused `characterId` parameter. `CharacterCard.Field` constants and
+  `ScribeCategory.Names` added so CardFiling has no magic strings.
+- Router: `#syncCharacterInBook(campaignId, character, before)` creates the book only when an appearance field
+  changed; new `GET /api/campaigns/:id/characters/:characterId`; POST/PATCH responses carry `bookAppearance`.
+- Browser: six collapsible `<details>` sections (Basics open), IDs `char-card-{field}`, `char-section-{key}`,
+  `char-card-hint-{book key}`, `char-example-{n}`, `char-example-remove-{n}`, `char-example-add`; live hints (build
+  under Body); speech example list; submit sends every card field except `filedFactIds`, trimmed, blank examples
+  dropped; the Edit button in the Cast tab shows "Opening..." and a failure shows in the Cast tab's danger alert.
+- Tests: 22 new scribe tests, 1 new http test (all plan cases plus archived), new ui tests. Runs: ui 51, http 34,
+  catalog 54, config 14, engine 21, scribe 63, store 30, openrouter 49, seed 37, sync 8; 0 fail.
+- Implementer's own notes (the review was told to test them): a build text containing "tall" or "height" gets a
+  dimension-scoped build key and may not demote an unscoped imported build (two builds in force); `decided: true`
+  is also accepted through `tellCommit` (client-supplied rulings); a book row created by a card save makes the Book
+  tab and the Scribe's first read show the subject and card facts instead of the empty state, and subject numbering
+  may follow save order; mutants were restored by editing lines back and checked by grep, not by diff.
+
+## 6. Task 2 review result (2026-11-26)
+
+Opus review finished: 2 High, 4 Medium, 9 Low, 1 Nit. The orchestrator checked each claim against the code:
+H1, H2, M1-M4 and L9 confirmed by reading the cited lines; L1-L8 taken as the reviewer reproduced or reasoned
+them (L3-L6 reasoned from code, no browser). All 10 test files pass (ui 51, http 34, catalog 54, config 14, engine
+21, scribe 63, store 30, openrouter 49, seed 37, sync 8). Seeder dry-run counts unchanged (48/61/195/36/3/23,
+Frost, 680/1384). No mutant leftovers.
+
+Findings:
+- **H1 A Pin beats every later card decision.** The Pinning pass (`ScribeReplay.mjs` ~1460-1471) runs after the
+  decided pass (~1414-1444) and forces its winner. Pins arise in normal use: resolving a Pedant finding as Ruled
+  with a replacement in a fixed category files an EditFact plus a Pin (`PedantService.mjs:625`). Card hair black,
+  Pin black, card save white: black in force, white Disputed, every later card save in that slot does nothing.
+- **H2 Build scope splits the slot, so two builds stay in force.** `ScribeCategory.scope` (`ScribeCategory.mjs`
+  114-145, build only) gives build text with "tall"/"height" a height dimension and "long"/"length" a length
+  dimension (it exists for Hero Gone's human vs dragon forms); the decision field uses that scoped key. Card
+  "5'6\"; slim" then height "tall": both in force (`5'6"; slim; tall; slim`); imported "slim and athletic" plus card
+  "tall; slim", "average height; stocky" or body "long-legged and lean": both in force; a model's "She is very
+  tall" beside the card's build: both in force.
+- **M1 A card value with no letter or digit ("?", "-", "...", "~") fails the whole save with 500
+  "InvalidOperation"** (`ScribeLogCore.worded`, reached from `ScribeService.fileCardAppearance`). Rollback is
+  correct.
+- **M2 A character created archived never gets its card appearance filed**: no subject at creation, and the later
+  unarchive PATCH has no appearance change (`Router.mjs` ~1531, ~1570).
+- **M3 Replacing a card list value erases story facts with the same wording, now and later**: `RemoveFact` stores a
+  strike mark (`ScribeReplay.erase` ~159-175 removes non-operator facts matching it). Card features "freckles",
+  story "Freckles", card changed to "a tattoo": the story's Freckles and every later story "freckles" are Removed.
+- **M4 A story-refined card feature is not replaced when the card changes** (`CardFiling.mjs:81` checks only that
+  the remembered id is live; it does not follow the refinement to its successor). Follows the plan's wording, not
+  the spec's ("the new fact replaces that one fact").
+- **L1** A list value equal to an existing book fact is filed again (two "a scar", hint shown under a matching
+  field). **L2** A remembered id split off to another subject is removed there (no subject or category check).
+  **L3** Removing the last speech example drops keyboard focus to the page (`CharacterModal.mjs` ~637). **L4**
+  `.card-section-title { display: flex }` hides the `<summary>` disclosure marker (`styles.css` ~1099). **L5** The
+  Edit failure shows at the top of the cast list, not where the click was; the Edit button has no ID
+  (`InspectorDrawer.mjs` ~864). **L6** A slow character GET that lands after a campaign switch opens the old
+  campaign's character; Save then 404s (`app.mjs` ~387). **L7** Untested guard `!decisionSequences.has(...)`
+  (`ScribeReplay.mjs:1334`; reachable via edit then subject merge). **L8** Untested `.trim()` in the single-field
+  hint comparison (`CharacterModal.mjs` ~572). **L9 (law)** Test helpers without `@throws`:
+  `tests/http.test.mjs:2585` `replayBook`, `tests/scribe.test.mjs:2985` `statuses`.
+- **Nit** `fileCardAppearance` has no `characterId` parameter: unused, keep it out; the plan's interface line is
+  to be corrected.
+
+## 6a. Proposed fix round 1 (waiting for the operator's ruling on items marked RULING)
+
+1. **H1:** Pins take part in the latest-decision order by their entry sequence: a Pin older than the newest decided
+   value in its slot does not override it; a newer Pin still wins. Test both orders.
+2. **H2:** for decisions, a build's slot ignores the word-derived dimension (height/length) and keeps only the
+   form (human/dragon form). Checked on the real export: its 5 build facts have no form wording, and one ordinary
+   description ("tall with H-cup breasts, wide hips, and curvy figure") is height-scoped only because of "tall". So
+   a decided card build replaces every build of that subject with the same form (none), and a model's "very tall"
+   becomes `Reported`. Task 3's model-written rule must group builds the same way.
+3. **M1 (ruled 2026-11-26):** a card text value with no letter or digit is saved as `?` and filed into the book as
+   `?`; every model request shows `?` as `unknown` (operator: "I think a LLL would react incorrect to it, so in the
+   requests any "?" becomes "unknown""). Speech examples kept as written (orchestrator's call).
+4. **M2:** when a character gets its first subject (created now), file the whole stored card (before = empty).
+5. **M3:** list replacement removes only the card's own fact, without a strike mark (an exact removal that adds
+   the id to the removed set only), so story facts with the same wording stay.
+6. **M4 (ruled 2026-11-26):** when the story refined the card's feature and the card's features then change, the
+   card's change replaces the refined fact, following the refinement chain to the current fact. Operator: "card
+   changes to explain, but the data should remain short (e.g. appearace: "black hair, scar on left cheek, green
+   eyes", and below in character features: "has an old scar, silvery, from a long sword from a long forgotten
+   battle")". The "keep it short" part (appearance stays a short summary, detail goes into features) is about how
+   the Scribe writes refinements: recorded under Later (project 3, book pass and format fixes), not this round.
+7. **L1:** an identical live list value in the book is not filed again and not adopted. **L2:** remove a
+   remembered fact only when it is still this subject's (survivor) and this category. **L3:** after removing a
+   speech example, focus moves to the previous example's Remove button, else Add. **L4:** keep a visible disclosure
+   marker (tokens only). **L5:** stable ID on each Edit button; the failure shows next to the clicked row and focus
+   returns to it. **L6:** drop a character GET response when the campaign changed meanwhile. **L7, L8:** tests that
+   fail without the guard and the trim. **L9:** `@throws` on both helpers.
+8. Plan correction (orchestrator, docs only): `fileCardAppearance` interface without `characterId`; Task 2 list
+   replacement wording per items 5-6.
+
+After the ruling: fix-round brief (Sonnet, rules as section 8), scoped Opus re-review of the round, own checks,
+hand-off.
+
+## 7. Task 2 review brief (for a rerun)
+
+Adversarial Opus reviewer, read-only on the repository, probes only via the Write tool under the session
+scratchpad, Node only under limits. Directive: "Assume this code has defects and try to prove it. A finding counts
+only with an input that reproduces it; if you cannot break something, say so." Read the plan header, Global
+Constraints, Review Focus 5, Task 2; the spec sections "Character card", "Book rules for player-stated changes",
+"Addendum: decisions", "Browser"; this file's sections 4-5. Attack list:
+
+- Decided pass: two decided values in one slot (card vs card, card vs EditFact, edit of an older fact after a newer
+  card save); decided facts later removed, withdrawn, merged into another subject, or replaced; an EditFact whose
+  source no longer matches (`sourcePrint`); moving categories; scoped fixed facts (`form`, `dimension`); pins in the
+  same slot; replay determinism and the two-pass `run`. Did any existing book's statuses change where no decided
+  AddFact exists? Run the real-export check in `tests/seed.test.mjs`.
+- The implementer's four notes in section 5.
+- `AddFact` validation: every `decided` value, category kinds, `reported` combinations, `relation`.
+- `CardFiling`: every field alone and together; height/body combinations; whitespace-only values; list
+  replacement when the remembered fact is removed, replaced, refined, merged or another subject's; ids that never
+  existed; values identical to an existing fact.
+- Router: POST/PATCH with and without `card`, only non-appearance changes, archived characters, player switching in
+  the same request, no book, concurrent saves, the GET route (other campaign, archived, unknown); rollback when
+  filing throws (character write and book row).
+- `bookAppearance`: joined text, hidden, scoped, `Disputed`, merged subjects.
+- Browser: empty and full cards, long values, example add/remove (focus, IDs after removal), blank examples, hint
+  comparison, Edit loading, double click, failure path, stale response after a drawer re-render, phone width,
+  focus across a catalog refresh, Save loading, reduced motion, keyboard on `<summary>`.
+- Whether each new test fails without its code (mutants in memory or as scratch copies, never by editing repository
+  files).
+- Code laws on every added or changed line (section 8); law hits are findings, never Nits.
+
+Report: findings ranked Critical, High, Medium, Low, Nit, each with file:line, the reproducing input, observed
+versus expected; then what could not be broken; then test summary lines.
+
+## 8. Standing rules (agent memory on the old PC; it does not travel)
+
+- **The operator decides everything.** No product or behaviour decision on an agent's own; surface it with argued
+  options and a recommendation. Never re-ask a settled ruling. Questions and fork answers are not go signals.
+- **Verify Worlds code before describing its behaviour** (on 2026-11-25 an agent told the operator Worlds raises a
+  conflict on a second fixed value; it does not). Facts about the Zeta export come from the exported JSON in hand.
+- **UI is display only:** the backend owns every decision about saved data; the browser renders and sends input.
+- **Never assume an LLM output format;** formats are the operator's (tags as in the spec for this project).
+- **No invented limits** (caps, budgets, timeouts, retries) unless the operator gave them or they were measured.
+- **Rewrites keep every safety behaviour of removed code**; a lost one is restored as it was.
+- **Code laws are never Nits:** tag-only JSDoc (`@param`, `@returns`, `@throws` on every uncaught path, assertions
+  and rejected awaits included) on every function, method, IIFE, named helper, test helper and test-fake method; no
+  prose comments; braces; no single-letter or throwaway names; no magic strings; one declaration per file; enums with
+  `label()`; no private method with one caller; no single-use wrappers; no swallowed errors; no defensive `?.`/`??`
+  on guaranteed values; no inline styles or raw colours; phone-first; loading state on every round-trip. Exception
+  (operator): small anonymous callbacks written inline as option properties need no docblock.
+- **Process:** implementer subagent (lowest tier that keeps quality: Haiku mechanical, Sonnet with a precise brief
+  for reasoning, Opus only when needed) -> adversarial Opus reviewer -> orchestrator checks each claim and never
+  writes implementation code -> fix rounds proposed to the operator -> scoped re-review -> hand-off opening
+  "Commit-ready." or "NOT commit-ready: ...". In hand-offs, surface only what needs a ruling; fold obvious fixes in.
+  Stop after every task; the operator commits.
+- **Locks:** no database access (present SQL, the operator runs it); never read `.env`, `config.inc.php`,
+  credentials, or anything in `local/` (reply log headers only); git read-only (`status`, `diff`, `log`, `show`,
+  `blame`); Edit/Write tools only for file changes (no sed, awk, heredocs, python, shell redirects, scratchpad
+  included); no deletes without a per-path go; no dependency changes; never start the real server; never run the
+  seeder except `--dry-run`, and only the operator runs it for real. A subagent's denied action is never run for it
+  by the orchestrator without the operator's word.
+- **Node only under limits, one test file at a time** (an unbounded run crashed WSL three times), from
+  `universe/worlds`:
+  `NODE_OPTIONS=--max-old-space-size=600 prlimit --as=3000000000 timeout -s KILL 120 node --test tests/<file>.test.mjs`
+  The 10 files: ui, http, catalog, config, engine, scribe, store, openrouter, seed, sync.
+- **Seeder dry-run** (counts must stay unchanged):
+  `NODE_OPTIONS=--max-old-space-size=600 prlimit --as=3000000000 timeout -s KILL 60 node scripts/seed-from-export.mjs /var/www/demo_stuff/zeta-dm-memory/scribe/private/hero_gone_latest.json --dry-run --player frost`
+  Expected: characters 48, subjects 61, facts 195, relations 36, claims 3, threads 23, player Frost, readThrough
+  680, chatMessages 1384.
+- **Replies:** terse, plain words, no emojis, no insight blocks, no recaps, no commit reminders; report what was run
+  and what was not.
+
+## 9. Tools
+
+- PhpStorm MCP (`phpstorm`, SSE `http://127.0.0.1:64442/sse`, registered user-wide with
+  `claude mcp add --scope user --transport sse phpstorm http://127.0.0.1:64442/sse`). `get_file_problems` with the
+  project path PhpStorm uses on that PC (this PC: `//wsl.localhost/Ubuntu/var/www/demo_stuff`; the older PC:
+  `/var/www/demo_stuff`), long timeout for big files. Filter results with jq: drop `LANGUAGE_ADDITIONS` and
+  unresolved-SQL noise; keep only lines added in `git diff -U0 HEAD`.
+- Probes and scratch files from this PC's scratchpad do not travel.

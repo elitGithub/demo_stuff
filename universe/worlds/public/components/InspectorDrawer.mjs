@@ -31,6 +31,7 @@ export class InspectorDrawer {
   static #FilterPlaceholder = 'Filter OpenRouter models...';
   static #RefreshButtonId = 'settings-refresh-models';
   static #CloseButtonId = 'drawer-close';
+  static #EditButtonIdPrefix = 'cast-edit-';
   static #TabButtonIdPrefix = 'drawer-tab-';
   static #ApplyDefaultsButtonId = 'settings-apply-defaults';
   static #ClearKeyButtonId = 'settings-clear-key';
@@ -68,6 +69,8 @@ export class InspectorDrawer {
     includeArchived: false,
     loadingMore: false,
     busyCharId: null,
+    openingCharId: null,
+    editFailure: null,
     error: '',
   };
 
@@ -259,6 +262,7 @@ export class InspectorDrawer {
     this.#castData.nextCursor = page.nextCursor ?? null;
     this.#castData.loadingMore = false;
     this.#castData.error = '';
+    this.#castData.editFailure = null;
     this.render();
   }
 
@@ -918,11 +922,36 @@ export class InspectorDrawer {
             actions.className = 'action-row-end';
 
             const editBtn = this.#buildButton('Edit', {
+              id: `${InspectorDrawer.#EditButtonIdPrefix}${character.id}`,
               variant: 'secondary',
               compact: true,
-              disabled: isCharBusy,
-              onClick: () => {
-                this.#callbacks.onEditCharacter(character);
+              busy: this.#castData.openingCharId === character.id,
+              busyLabel: 'Opening...',
+              disabled: isCharBusy || this.#castData.openingCharId !== null,
+              onClick: async () => {
+                if (this.#castData.busyCharId !== null || this.#castData.openingCharId !== null) {
+                  return;
+                }
+                this.#castData.openingCharId = character.id;
+                this.#castData.error = '';
+                this.#castData.editFailure = null;
+                this.render();
+                let failed = false;
+                try {
+                  await this.#callbacks.onEditCharacter(character);
+                } catch (openError) {
+                  failed = true;
+                  this.#castData.editFailure = {
+                    characterId: character.id,
+                    message: openError instanceof Error ? openError.message : String(openError),
+                  };
+                } finally {
+                  this.#castData.openingCharId = null;
+                  this.render();
+                }
+                if (failed) {
+                  this.#drawerElement.querySelector(`#${InspectorDrawer.#EditButtonIdPrefix}${character.id}`).focus();
+                }
               },
             });
 
@@ -932,7 +961,7 @@ export class InspectorDrawer {
               busy: isCharBusy,
               busyLabel: 'Updating...',
               onClick: async () => {
-                if (this.#castData.busyCharId !== null) {
+                if (this.#castData.busyCharId !== null || this.#castData.openingCharId !== null) {
                   return;
                 }
                 this.#castData.busyCharId = character.id;
@@ -960,6 +989,9 @@ export class InspectorDrawer {
 
             actions.append(editBtn, archiveBtn, deleteBtn);
             card.append(actions);
+            if (this.#castData.editFailure !== null && this.#castData.editFailure.characterId === character.id) {
+              card.append(this.#buildAlert(this.#castData.editFailure.message, 'danger'));
+            }
             list.append(card);
           }
           castSection.append(list);

@@ -1,5 +1,6 @@
 import fs from 'node:fs';
 import { WorldsConfig } from '../config.mjs';
+import { CardFiling } from '../scribe/CardFiling.mjs';
 import { ScribeAnalyzer } from '../scribe/ScribeAnalyzer.mjs';
 import { ScribeAnswer } from '../scribe/ScribeAnswer.mjs';
 import { ScribeCategory } from '../scribe/ScribeCategory.mjs';
@@ -698,8 +699,8 @@ export class Router {
                 }
                 this.#store.updateCampaign(campaignId, { playerCharacterId: character.id });
               }
-              character = this.#syncCharacterInBook(campaignId, character);
-              return character;
+              character = this.#syncCharacterInBook(campaignId, character, CharacterCard.empty());
+              return { ...character, bookAppearance: this.#bookAppearance(campaignId, character) };
             });
 
             this.#sendJson(response, 201, { ...created, warnings: createWarnings });
@@ -711,6 +712,15 @@ export class Router {
 
         if (segments.length === 5 && segments[3] === 'characters' && segments[4].length > 0) {
           const characterId = segments[4];
+          if (method === 'GET') {
+            this.#requireCampaign(campaignId);
+            const character = this.#store.getCharacter(campaignId, characterId);
+            if (character === null) {
+              throw this.#createHttpError(404, `Character not found: ${characterId}`);
+            }
+            this.#sendJson(response, 200, { ...character, bookAppearance: this.#bookAppearance(campaignId, character) });
+            return;
+          }
           if (method === 'PATCH') {
             this.#requireCampaign(campaignId);
             const existingCharacter = this.#store.getCharacter(campaignId, characterId);
@@ -794,8 +804,8 @@ export class Router {
               } else if (!character.isPlayer && latestCampaign !== null && latestCampaign.playerCharacterId === character.id) {
                 this.#store.updateCampaign(campaignId, { playerCharacterId: null });
               }
-              character = this.#syncCharacterInBook(campaignId, character);
-              return character;
+              character = this.#syncCharacterInBook(campaignId, character, freshExisting.card);
+              return { ...character, bookAppearance: this.#bookAppearance(campaignId, character) };
             });
 
             this.#sendJson(response, 200, { ...updated, warnings: updateWarnings });
@@ -1508,11 +1518,15 @@ export class Router {
   /**
    * @param {string} campaignId
    * @param {object} character
+   * @param {CharacterCard} before
    * @returns {object}
+   * @throws {Error}
    */
-  #syncCharacterInBook(campaignId, character) {
+  #syncCharacterInBook(campaignId, character, before) {
     const bookRow = this.#store.getScribeBook(campaignId);
-    if (bookRow === null) {
+    const baseline = character.scribeSubjectId === null ? CharacterCard.empty() : before;
+    const appearanceChanged = CardFiling.changedFields(baseline, character.card).length > 0;
+    if (bookRow === null && !appearanceChanged) {
       return character;
     }
     if (character.archived && character.scribeSubjectId === null) {
@@ -1545,15 +1559,39 @@ export class Router {
         dirty: loaded.dirty,
       });
     }
+    let synchronized = character;
     if (character.scribeSubjectId !== synced.subjectId) {
       const updated = this.#store.updateCharacter(campaignId, character.id, {
         scribeSubjectId: synced.subjectId,
       });
       if (updated !== null) {
-        return updated;
+        synchronized = updated;
       }
     }
-    return character;
+    if (!appearanceChanged) {
+      return synchronized;
+    }
+    const filedCard = this.#scribeService.fileCardAppearance({
+      campaignId,
+      subjectId: synced.subjectId,
+      before: baseline,
+      after: synchronized.card,
+    });
+    return this.#store.setCardFiledFactIds(campaignId, synchronized.id, filedCard.filedFactIds);
+  }
+
+  /**
+   * @param {string} campaignId
+   * @param {object} character
+   * @returns {Readonly<Record<string, string>>}
+   * @throws {Error}
+   */
+  #bookAppearance(campaignId, character) {
+    if (character.scribeSubjectId === null || this.#store.getScribeBook(campaignId) === null) {
+      return Object.freeze({});
+    }
+    const { state } = this.#scribeService.loadState(campaignId);
+    return this.#scribeService.bookAppearance({ state, subjectId: character.scribeSubjectId });
   }
 
   /**

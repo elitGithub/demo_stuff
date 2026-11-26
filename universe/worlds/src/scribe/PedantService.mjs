@@ -1,3 +1,4 @@
+import { CharacterCard } from '../store/CharacterCard.mjs';
 import { FindingKind } from '../store/enums/FindingKind.mjs';
 import { FindingStatus } from '../store/enums/FindingStatus.mjs';
 import { SpendStage } from '../store/enums/SpendStage.mjs';
@@ -228,7 +229,7 @@ export class PedantService {
       const category = fact.category === ScribeCategory.Settings.RelationCategory
         ? `relation to ${fact.target === null ? fact.targetText : labels.get(fact.target)}`
         : fact.category;
-      const base = [fact.id, labels.get(fact.subject), category, fact.text].join(' | ');
+      const base = [fact.id, labels.get(fact.subject), category, CharacterCard.requestValue(fact.text)].join(' | ');
       return this.isRestricted(state, fact) ? `${base} (hidden)` : base;
     });
     const unknownLines = unknownPairs.map((pair) => `${pair.speaker.label} does not know ${pair.fact.id}`);

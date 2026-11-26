@@ -375,6 +375,21 @@ export class WorldsApi {
 
   /**
    * @param {string} campaignId
+   * @param {string} characterId
+   * @param {{signal?: AbortSignal | null}} [options]
+   * @returns {Promise<object>}
+   * @throws {Error}
+   */
+  async getCharacter(campaignId, characterId, { signal = null } = {}) {
+    return await this.#requestJson(
+      'GET',
+      `/api/campaigns/${encodeURIComponent(campaignId)}/characters/${encodeURIComponent(characterId)}`,
+      { signal },
+    );
+  }
+
+  /**
+   * @param {string} campaignId
    * @param {Record<string, unknown>} payload
    * @param {{signal?: AbortSignal | null}} [options]
    * @returns {Promise<object>}

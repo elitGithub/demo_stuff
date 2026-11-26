@@ -647,6 +647,13 @@ textarea.field-control {
   overflow-wrap: anywhere;
 }
 
+.beat-narration {
+  display: block;
+  margin-top: var(--space-1);
+  font-style: italic;
+  color: var(--text-secondary);
+}
+
 .turn-actions {
   display: flex;
   flex-wrap: wrap;

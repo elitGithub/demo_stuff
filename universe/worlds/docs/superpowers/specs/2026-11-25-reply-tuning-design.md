@@ -405,6 +405,39 @@ not change it without that basis; its second value stays `Reported` (rule 11).
 - A card change to a list field replaces the card's own fact even after the story refined it (operator: "card
   changes to explain").
 
+## Addendum: player narration (operator, 2026-11-26)
+
+Found while building Task 3: the Worlds Scribe never records whether a fact was narration or dialogue (no
+attribution), so the "witnessed" rule above could not fire in real play. The operator ruled:
+
+- "A player message supersedes the AI": every fact the Scribe takes only from player turns is the player's
+  decision. For fixed values it is decided and settles against card values, edits and Pins by the newest decision.
+  Dialogue and actions in the player's turn count the same (whole player turn).
+- Moving values the player states (location, status, role) replace the current value once, as today; later story
+  moves still enter. They are not locked.
+- The composer gets a button "Add narration facts". What the player types there becomes a narration block appended
+  to the message ("translated into that block", the player does not type tags). It supersedes the previous facts
+  like the rest of the player's turn. A `<narration>...</narration>` part the player types in the message reads the
+  same way. The existing Narrator mode and "Narrator:" prefix keep working.
+- The server turns the narration into a narration part of the player's turn (shown and read as narration, not as
+  the player character speaking); the browser only sends what the player typed and shows what the server returns.
+  The request side (Director, Narrator, character brains reading narration) follows in Tasks 4-6.
+- The imported Hero Gone book is story entries, not operator facts: the model-written second-value rule changes two
+  of Frost's ages ("almost thirty", "twenty-nine" become `Reported`, "twenty" stays). Accepted: "leave up to
+  operator decision" (the card decides the age). Dry-run facts 312, claims 23.
+- Correction from the Task 3 review: "almost thirty" is Frost's own line ("I'm almost 30...", player message #217),
+  not model-written; the import replayed without message roles. Ruled: the import applies the player rule. The
+  operator noted "twenty-nine" agrees with "almost thirty"; the book compares values as written, so it stays
+  `Reported` beside it. Measured on the export: "almost thirty" stays in force; "twenty" and "twenty-nine" become
+  `Reported`; Frost's build line (player message #639) is in force again and the model's "F-cup breasts" refine is
+  `Reported`. Dry-run facts 312, claims 24 (this replaces the 312 and 23 above).
+- A Normal turn with no player text and only narration is saved as a Narrator turn with the narration as its one
+  line (same as typing "Narrator: ..."). Accepted; the same applies to Narrator mode and a bare "Narrator:".
+- Regenerate regenerates the AI reply only and never touches the player's message: "it should stay the same.
+  Separate Player/Character speaking. Narrator is technically a character." and "MY MESSAGES are to be left
+  untouched". The player turn is not deleted or re-created; every line keeps its own speaker and text, including
+  imported turns with several lines.
+
 ## Later (not this project)
 
 - Styles the operator defines (names beyond the fixed list).

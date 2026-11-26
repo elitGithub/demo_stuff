@@ -4,12 +4,15 @@ import { BeatParser } from '../src/engine/BeatParser.mjs';
 import { CharacterMind } from '../src/engine/CharacterMind.mjs';
 import { Director } from '../src/engine/Director.mjs';
 import { EncounterRoller } from '../src/engine/EncounterRoller.mjs';
+import { NarrationParts } from '../src/engine/NarrationParts.mjs';
 import { NarratorComposer } from '../src/engine/NarratorComposer.mjs';
 import { TurnEngine } from '../src/engine/TurnEngine.mjs';
 import { WitnessFilter } from '../src/engine/WitnessFilter.mjs';
 import { OpenRouterClient } from '../src/openrouter/OpenRouterClient.mjs';
 import { PedantService } from '../src/scribe/PedantService.mjs';
 import { ScribeKnowledge } from '../src/scribe/ScribeKnowledge.mjs';
+import { ScribeLogCore } from '../src/scribe/ScribeLogCore.mjs';
+import { ScribeReplay } from '../src/scribe/ScribeReplay.mjs';
 import { ScribeService } from '../src/scribe/ScribeService.mjs';
 import { AvatarToken } from '../src/store/enums/AvatarToken.mjs';
 import { CharacterTier } from '../src/store/enums/CharacterTier.mjs';
@@ -2000,15 +2003,15 @@ describe('TurnEngine end-to-end regressions and adversarial invariants', () => {
     ]);
     const bookBeforeFail = store.getScribeBook(campaign.id);
 
-    const originalCommitTurnPair = store.commitTurnPair.bind(store);
-    store.commitTurnPair = () => {
-      throw new Error('Simulated commitTurnPair crash');
+    const originalCommitAssistantTurn = store.commitAssistantTurn.bind(store);
+    store.commitAssistantTurn = () => {
+      throw new Error('Simulated commitAssistantTurn crash');
     };
     await assert.rejects(
       () => engine.regenerateLastTurn({ campaignId: campaign.id }),
-      /Simulated commitTurnPair crash/,
+      /Simulated commitAssistantTurn crash/,
     );
-    store.commitTurnPair = originalCommitTurnPair;
+    store.commitAssistantTurn = originalCommitAssistantTurn;
 
     const latestAfterRegenFail = store.getLatestTurnPair(campaign.id);
     assert.equal(latestAfterRegenFail.assistantTurn.id, initial.assistantTurn.id);
@@ -2702,5 +2705,305 @@ describe('Unknown card values reach requests as unknown', () => {
     const text = requestText(calls);
     assert.match(text, /voice: unknown/);
     assert.doesNotMatch(text, /voice: \?/);
+  });
+});
+
+describe('Player narration beat in the player turn', () => {
+  const directorPlan = Object.freeze({
+    sceneChanged: false,
+    location: 'Oak Bedroom',
+    day: 1,
+    timeLabel: 'Evening',
+    sceneType: 'private',
+    userInputKind: 'player_in_scene',
+    presentSlugs: ['frost', 'lize'],
+    remoteSlugs: [],
+    offscreenNotes: {},
+    walkOnsEnter: [],
+    walkOnsLeave: [],
+    encounterAccepted: false,
+    encounterBrief: '',
+    pacing: 'focused_one',
+    targetChars: 900,
+    responders: [{ slug: 'lize', beatGoal: 'React', length: 'short' }],
+    narratorDirective: 'Keep it close.',
+  });
+  const mindReply = Object.freeze({
+    internalThought: 'Thinking.',
+    physicalAction: 'Lize looks up.',
+    spokenLines: 'Hm.',
+    tone: 'dry',
+    knowledgeBoundaries: [],
+  });
+
+  /**
+   * @param {{text: string, narration?: string | null, mode?: string, scribeText?: string | null, prepare?: ((fixture: object) => void) | null}} options
+   * @returns {Promise<{fixture: object, result: object, calls: Array<object>, events: Array<{event: string, data: unknown}>}>}
+   * @throws {Error}
+   */
+  const runTurn = async ({ text, narration = null, mode = TurnMode.Normal, scribeText = null, prepare = null }) => {
+    const fixture = createWorldFixture({ scribeInterval: scribeText === null ? 10 : 1, pedantEnabled: false });
+    if (prepare !== null) {
+      prepare(fixture);
+    }
+    /** @type {Array<{json?: object, type?: string, text?: string}>} */
+    const script = [
+      { json: directorPlan },
+      { json: mindReply },
+      { type: 'stream', text: '[[BEAT:lize]]\n*Lize looks up.*\nHm.' },
+    ];
+    if (scribeText !== null) {
+      script.push({ text: scribeText });
+    }
+    const { client, calls } = createScriptedClient(script, { store: fixture.store });
+    const engine = new TurnEngine({
+      store: fixture.store,
+      client,
+      scribeService: new ScribeService({ store: fixture.store, client }),
+    });
+    const events = [];
+    const result = await engine.runTurn({
+      campaignId: fixture.campaign.id,
+      text,
+      mode,
+      narration,
+      emit: ({ event, data }) => {
+        events.push({ event, data });
+      },
+    });
+    return { fixture, result, calls, events };
+  };
+
+  /**
+   * @param {object} result
+   * @returns {Array<{speakerType: string, speakerName: string, text: string, seq: number}>}
+   */
+  const userBeats = (result) => {
+    return result.userTurn.beats.map((beat) => ({
+      speakerType: beat.speakerType,
+      speakerName: beat.speakerName,
+      text: beat.text,
+      seq: beat.seq,
+    }));
+  };
+
+  it('stores the narration field as a narrator beat after the player beat with the same witnesses', async () => {
+    const { result } = await runTurn({ text: 'I look at her.', narration: 'Her hair is dyed black.' });
+
+    assert.deepEqual(userBeats(result), [
+      { speakerType: SpeakerType.Player, speakerName: 'Frost', text: 'I look at her.', seq: 1 },
+      { speakerType: SpeakerType.Narrator, speakerName: 'Narrator', text: 'Her hair is dyed black.', seq: 2 },
+    ]);
+    assert.equal(result.userTurn.rawText, 'I look at her.');
+    assert.deepEqual(result.userTurn.beats[1].witnessIds, result.userTurn.beats[0].witnessIds);
+    assert.equal(result.userTurn.beats[1].mindPacket, null);
+  });
+
+  it('reads a typed narration tag as the narration part and keeps it out of the player beat', async () => {
+    const { result } = await runTurn({ text: 'I look at her. <narration>Her hair is dyed black.</narration>' });
+
+    assert.deepEqual(userBeats(result).map((beat) => [beat.speakerType, beat.text]), [
+      [SpeakerType.Player, 'I look at her.'],
+      [SpeakerType.Narrator, 'Her hair is dyed black.'],
+    ]);
+  });
+
+  it('joins a typed tag and the narration field into one narration beat', async () => {
+    const { result } = await runTurn({
+      text: 'I look at her. <narration>Her hair is dyed black.</narration>',
+      narration: 'Her eyes are green.',
+    });
+
+    assert.deepEqual(userBeats(result).map((beat) => [beat.speakerType, beat.text]), [
+      [SpeakerType.Player, 'I look at her.'],
+      [SpeakerType.Narrator, `Her hair is dyed black.${NarrationParts.Settings.Joiner}Her eyes are green.`],
+    ]);
+  });
+
+  it('ignores an empty narration field and an empty tag', async () => {
+    const { result } = await runTurn({ text: 'I look at her. <narration>  </narration>', narration: '   ' });
+
+    assert.deepEqual(userBeats(result).map((beat) => beat.text), ['I look at her.']);
+  });
+
+  it('keeps Narrator mode and the Narrator prefix as one narrator beat', async () => {
+    const prefixed = await runTurn({ text: '*Narrator: Rain falls.*', mode: TurnMode.Normal });
+    assert.equal(prefixed.result.userTurn.mode, TurnMode.Narrator);
+    assert.deepEqual(userBeats(prefixed.result).map((beat) => [beat.speakerType, beat.text]), [
+      [SpeakerType.Narrator, 'Rain falls.*'],
+    ]);
+
+    const moded = await runTurn({ text: 'Rain falls.', mode: TurnMode.Narrator });
+    assert.deepEqual(userBeats(moded.result).map((beat) => [beat.speakerType, beat.text]), [
+      [SpeakerType.Narrator, 'Rain falls.'],
+    ]);
+  });
+
+  it('turns narration typed with no player text into a Narrator turn', async () => {
+    const { result } = await runTurn({ text: '', narration: 'Her hair is dyed black.' });
+
+    assert.equal(result.userTurn.mode, TurnMode.Narrator);
+    assert.deepEqual(userBeats(result).map((beat) => [beat.speakerType, beat.text]), [
+      [SpeakerType.Narrator, 'Her hair is dyed black.'],
+    ]);
+  });
+
+  /**
+   * @param {object} fixture
+   * @returns {{engine: TurnEngine, calls: Array<{payload: {messages: Array<{content: string}>}}>}}
+   * @throws {Error}
+   */
+  const regenerationEngine = (fixture) => {
+    const { client, calls } = createScriptedClient([
+      { json: directorPlan },
+      { json: mindReply },
+      { type: 'stream', text: '[[BEAT:lize]]\n*Lize nods.*\nYes.' },
+    ], { store: fixture.store });
+    const engine = new TurnEngine({ store: fixture.store, client, scribeService: new ScribeService({ store: fixture.store }) });
+    return { engine, calls };
+  };
+
+  /**
+   * @param {Array<{payload: {messages: Array<{content: string}>}}>} calls
+   * @param {string} wholeMessage
+   * @returns {void}
+   * @throws {Error}
+   */
+  const assertEveryModelGotThe = (calls, wholeMessage) => {
+    assert.equal(calls.length, 3);
+    for (const call of calls) {
+      assert.equal(call.payload.messages.map((message) => message.content).join('\n').includes(wholeMessage), true);
+    }
+  };
+
+  it('keeps the player turn as edited, with the narration once, through every regenerate', async () => {
+    const { fixture, result } = await runTurn({ text: 'I look at her.', narration: 'Her hair is dyed black.' });
+    regenerationEngine(fixture).engine.editTurn({
+      campaignId: fixture.campaign.id,
+      turnId: result.userTurn.id,
+      beatId: result.userTurn.beats[0].id,
+      text: 'I look at her again.',
+    });
+    const expected = [
+      [SpeakerType.Player, 'Frost', 'I look at her again.'],
+      [SpeakerType.Narrator, 'Narrator', 'Her hair is dyed black.'],
+    ];
+
+    const savedPlayerTurn = fixture.store.getTurn(fixture.campaign.id, result.userTurn.id);
+    assert.deepEqual(savedPlayerTurn.beats.map((beat) => [beat.speakerType, beat.speakerName, beat.text]), expected);
+    let previousAssistantId = result.assistantTurn.id;
+    for (let round = 0; round < 2; round += 1) {
+      const { engine, calls } = regenerationEngine(fixture);
+      const regenerated = await engine.regenerateLastTurn({ campaignId: fixture.campaign.id });
+
+      assertEveryModelGotThe(calls, 'I look at her again.\n\nHer hair is dyed black.');
+      assert.deepEqual(fixture.store.getTurn(fixture.campaign.id, result.userTurn.id), savedPlayerTurn);
+      assert.deepEqual(regenerated.userTurn, savedPlayerTurn);
+      assert.notEqual(regenerated.assistantTurn.id, previousAssistantId);
+      previousAssistantId = regenerated.assistantTurn.id;
+      assert.equal(fixture.store.getTurn(fixture.campaign.id, result.assistantTurn.id), null);
+      assert.equal(regenerated.assistantTurn.seq, result.userTurn.seq + 1);
+      assert.equal(regenerated.assistantTurn.beats.some((beat) => beat.text.includes('Yes.')), true);
+      assert.equal(fixture.store.listTurns(fixture.campaign.id, { limit: 50 }).total, 2);
+    }
+  });
+
+  it('regenerates a Zeta-shaped player turn with several beats and speakers unchanged', async () => {
+    const fixture = createWorldFixture({ scribeInterval: 10, pedantEnabled: false });
+    const { store, campaign, frost, lize } = fixture;
+    const witnessIds = [frost.id, lize.id];
+    const sceneState = { ...campaign.sceneState, presentIds: witnessIds };
+    const imported = store.importTurns(campaign.id, [
+      {
+        role: TurnRole.User,
+        mode: TurnMode.Normal,
+        rawText: 'She looks up.\n\nRain falls.\n\nShe waits.',
+        sceneNumber: 1,
+        witnessIds,
+        sceneStateBefore: sceneState,
+        sceneStateAfter: sceneState,
+        beats: [
+          { speakerType: SpeakerType.Player, characterId: frost.id, speakerName: 'Frost', text: 'She looks up.' },
+          { speakerType: SpeakerType.Narrator, characterId: null, speakerName: 'Narrator', text: 'Rain falls.' },
+          { speakerType: SpeakerType.Player, characterId: frost.id, speakerName: 'Frost', text: 'She waits.' },
+        ],
+      },
+      {
+        role: TurnRole.Assistant,
+        mode: TurnMode.Normal,
+        rawText: 'Hm.',
+        sceneNumber: 1,
+        witnessIds,
+        sceneStateBefore: sceneState,
+        sceneStateAfter: sceneState,
+        beats: [{ speakerType: SpeakerType.Character, characterId: lize.id, speakerName: 'Lize', text: 'Hm.' }],
+      },
+    ]);
+    const saved = /** @type {{beats: Array<object>}} */ (store.getTurn(campaign.id, imported[0].id));
+    const { engine, calls } = regenerationEngine(fixture);
+    const regenerated = await engine.regenerateLastTurn({ campaignId: campaign.id });
+
+    assertEveryModelGotThe(calls, 'She looks up.\n\nRain falls.\n\nShe waits.');
+    assert.deepEqual(store.getTurn(campaign.id, imported[0].id), saved);
+    assert.equal(saved.beats.length, 3);
+    assert.equal(store.getTurn(campaign.id, imported[1].id), null);
+    assert.equal(regenerated.assistantTurn.beats.some((beat) => beat.text.includes('Yes.')), true);
+  });
+
+  it('turns narration alone into one Narrator beat in Normal mode, Narrator mode and with a bare prefix', async () => {
+    for (const [text, mode] of [
+      ['', TurnMode.Normal],
+      ['', TurnMode.Narrator],
+      ['Narrator:', TurnMode.Normal],
+      ['  Narrator:  ', TurnMode.Narrator],
+    ]) {
+      const { result } = await runTurn({ text, mode, narration: 'Her hair is dyed black.' });
+
+      assert.equal(result.userTurn.mode, TurnMode.Narrator, `${mode} ${text}`);
+      assert.deepEqual(userBeats(result).map((beat) => [beat.speakerType, beat.text]), [
+        [SpeakerType.Narrator, 'Her hair is dyed black.'],
+      ]);
+    }
+  });
+
+  it('decides a fact the Scribe takes from the narration beat: black in force, card red Reported', async () => {
+    const { fixture, events } = await runTurn({
+      text: 'I look at her.',
+      narration: "Lize's hair is dyed black.",
+      scribeText: ['=== FACTS', 'Lize | hair | black, freshly dyed | #1'].join('\n'),
+      prepare: ({ store, campaign, frost, lize, viola, collette, mirra, kira, maya }) => {
+        const log = ScribeLogCore.create();
+        let state = ScribeReplay.run(log, []);
+        for (const character of [frost, lize, viola, collette, mirra, kira, maya]) {
+          ScribeLogCore.syncCharacterSubject(log, state, {
+            subjectId: character.scribeSubjectId,
+            name: character.name,
+            aliases: character.aliases,
+          });
+          state = ScribeReplay.run(log, []);
+        }
+        ScribeLogCore.rule(log, state, {
+          type: ScribeLogCore.Ruling.AddFact,
+          subject: lize.scribeSubjectId,
+          category: 'hair',
+          target: null,
+          text: 'red',
+          hidden: false,
+          cite: null,
+          position: 0,
+          decided: true,
+        });
+        store.saveScribeBook(campaign.id, { bookJson: JSON.stringify(log), lastTurnSeq: 0, dirty: false });
+      },
+    });
+    assert.deepEqual(events.filter((entry) => entry.event === 'warning'), []);
+    const loaded = new ScribeService({ store: fixture.store }).loadState(fixture.campaign.id);
+    const hair = Object.fromEntries(
+      loaded.state.facts.filter((fact) => fact.category === 'hair').map((fact) => [fact.text, fact.status]),
+    );
+
+    assert.deepEqual(hair, { red: 'Reported', 'black, freshly dyed': 'InForce' });
+    const narrationMessage = loaded.messages.find((message) => message.position === 1);
+    assert.deepEqual(narrationMessage.blocks.map((block) => block.role), ['Player', 'Narrator']);
   });
 });

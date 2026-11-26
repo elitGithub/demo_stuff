@@ -1895,7 +1895,7 @@ export const ScribeLogCore = Object.freeze({
 
   /**
    * @param {object} log
-   * @param {ReadonlySet<string>} ids
+   * @param {ReadonlySet<string> | Set<string>} ids
    * @returns {Set<string>}
    */
   withdrawSources(log, ids) {

@@ -1,4 +1,4 @@
-# Handoff 2026-11-26: Worlds reply tuning, project 1 (Task 2 commit-ready, Tasks 3-8 next)
+# Handoff 2026-11-26: Worlds reply tuning, project 1 (Task 2 committed, Task 3 built, Tasks 4-8 next)
 
 For the next agent session on another PC. That session will not have this PC's agent memory
 (`~/.claude/projects/-var-www-demo-stuff/memory/`) or the loop files (`~/.claude/projects/-var-www-demo-stuff/
@@ -11,8 +11,32 @@ sdd-snapshots/reply-tuning/`), so everything needed is in this file. Read it in 
 - Commits: `90cfe3c` reply tuning Task 1 plus the catalog fix rounds 3-6; `0691ddc` ("universe: expand character
   cards and clarify unknown values") Task 2 plus its fix round 1, this handoff and `PROMPTS-TO-CHECK.md`. The
   operator commits; agents never do. Later edits to this file (sections 1-3 and 6b) are uncommitted until the
-  operator commits them.
-- **Task 2 (character card end to end, appearance filed into the book): commit-ready (2026-11-26), awaiting the operator's commit; known limits below.**
+  operator commits them. `ced0327` ("worlds: improve character card book hints") Task 2 fix rounds 2-6.
+- **Task 3 (book rules for player-stated changes, player narration): commit-ready (2026-11-26), awaiting the
+  operator's commit.** Built with fix rounds 1-6, each re-reviewed; the last re-check found nothing. The operator's
+  rulings are in the spec's "Addendum: player narration (operator, 2026-11-26)".
+  - Every fixed fact the Scribe takes from a player turn is decided (whole player turn) and settles by the newest
+    decision; a model-written second fixed value is `Reported`; player-stated moving values replace once.
+  - Composer button "Add narration facts" and typed `<narration>...</narration>` parts become a Narrator line of the
+    player's turn; narration alone is a Narrator turn (Normal mode, Narrator mode, bare "Narrator:").
+  - Regenerate replaces only the AI reply. The player's message is never deleted or rewritten; the AI gets the whole
+    saved message, every line in order.
+  - The Zeta import replays with the export's sender roles, so the player rule applies to imported books.
+  - The streaming preview renders narration as styled text (frontend rendering only) and shows the speaker and lines
+    the server then saves, Encounter and the "Narrator:" prefix included.
+  - Tests, each file alone: ui 60, http 40, catalog 54, config 14, engine 34, scribe 180, store 34, openrouter 49,
+    seed 39, sync 8. Hero Gone dry-run: characters 76, subjects 93, facts 312, relations 41, claims 24, threads 44,
+    readThrough 1384, chatMessages 1384, player Frost.
+  - Known limits: on Send the AI does not read the narration yet; on Regenerate it reads the whole message under the
+    player's name (request side is Tasks 4-6). The book compares values as written ("twenty-nine" stays `Reported`
+    beside "almost thirty"). On Regenerate the player turn keeps its first plan's scene number and witnesses. A typed
+    `<narration>` part in the middle of a message renders in place in the preview (operator: rendering "Same as
+    rendering italic"); the saved message puts it on its own Narrator line after the player's text. The
+    router's "throw caught locally" warning is its house error pattern, left as is. PhpStorm's SQL "Unable to resolve
+    table/column" errors cover all of `SqliteStore.mjs` (no data source), not this task.
+  - Scratch databases `app-HEAD.sqlite` and `app-work.sqlite` under the session scratchpad `reply-tuning/task3/` came
+    from a seeder run that broke the dry-run-only rule; deleting them awaits the operator's per-path go.
+- **Task 2 (character card end to end, appearance filed into the book): committed in `ced0327`; known limits below.**
   - Built by a Sonnet implementer (section 5); Opus review: 2 High, 4 Medium, 9 Low, 1 Nit, checked against the
     code (section 6).
   - Fix round 1 (section 6a, the operator's rulings included) built: all 10 test files pass (ui 56, http 36,
@@ -116,8 +140,10 @@ sdd-snapshots/reply-tuning/`), so everything needed is in this file. Read it in 
       Orchestrator checks: all 10 test files pass (ui 58, http 37, catalog 54, config 14, engine 24, scribe 166,
       store 30, openrouter 49, seed 37, sync 8); dry-run 76/93/314/41/21/44/1384/1384, Frost; PhpStorm clean on
       changed lines of every changed file.
-    - Rule from now on: a review finding counts only when it reproduces through the app's own entry points (routes
-      or the services they call, scripted model text); hand-built logs do not count.
+    - **Operator law from now on (2026-11-26):** no fix is ever approved unless the issue is proven reproducible
+      against real flows: the operator's real data (exports, saved books from play) or the operator in the app.
+      Hand-built logs, fuzz, mocks, scripted model text and guessed inputs prove nothing; an unproven finding does not
+      exist and never becomes a fix round. Code-law hits are read on the line and handled as laws.
 - **Way of working, ruled 2026-11-26 ("All three"), for fix round 2 and Tasks 3-8:**
   - (a) the plan maps every existing feature that touches the task's data, with a test case each (for the book:
     decided values, pins, build scope, strike marks, refinements, merges, splits);
@@ -130,13 +156,15 @@ sdd-snapshots/reply-tuning/`), so everything needed is in this file. Read it in 
 
 ## 2. Documents
 
+- The game's root idea and the operator's research notes on a character brain (2026-11-26):
+  `universe/worlds/docs/CHARACTER-BRAIN-IDEA.md`. Read it before any character-brain design (Tasks 5-6, project 2).
 - Design (approved 2026-11-25, addenda since): `universe/worlds/docs/superpowers/specs/2026-11-25-reply-tuning-design.md`.
   Read "Addendum: scene styles" and "Addendum: decisions (operator, 2026-11-26)".
 - Plan (approved 2026-11-25; Task 2 rewritten and Task 3 Step 1 updated 2026-11-26 after the ruling in section 4):
   `universe/worlds/docs/superpowers/plans/2026-11-25-reply-tuning.md`. 8 tasks:
   1. storage, schema upgrades, card, settings (committed, `90cfe3c`);
-  2. card end to end with book filing (committed with fix round 1, `0691ddc`; fix round 2 open);
-  3. book rules for player-stated changes and model-written fixed values;
+  2. card end to end with book filing (committed, `0691ddc` and `ced0327`);
+  3. book rules for player-stated changes and model-written fixed values, plus player narration (commit-ready);
   4. RequestBudget, StorySlice, HistoryWindow, `modelCatalog.contextLength`;
   5. TagReader, Director tags, `SceneStyle` enum and the `sceneStyles` setting;
   6. CharacterBrain, Narrator, ReplyStreamSplitter (`styleText` as `<style>` above `<direction>`);
@@ -148,12 +176,12 @@ sdd-snapshots/reply-tuning/`), so everything needed is in this file. Read it in 
 
 ## 3. Open items, in order
 
-1. **Task 2 fix round 2:** ask the operator for the go on section 6b and the answer to the open question in
-   section 1. Then write the brief from 6b (rules as section 8; the fix round 1 brief did not travel, 6a holds its
-   content), dispatch (Sonnet), scoped Opus re-review of round 2 (section 7, limited to 6b), own checks (all 10
-   test files one at a time, seeder dry-run, docblock sweep, PhpStorm on changed lines), hand-off opening
-   "Commit-ready." or "NOT commit-ready: ...".
-2. **Tasks 3-8**, one at a time, same loop. Task 3 must reuse Task 2's latest-decision rule (plan Task 3 Step 1).
+1. **Task 3:** the operator's commit after the hand-off (section 1).
+2. **Tasks 4-8**, one at a time, same loop, each brief carrying the proof law (section 8) and the dry-run-only seeder
+   rule. Tasks 4-6 include the request side of player narration (Director, Narrator, character brains reading
+   narration as narration on Send and Regenerate). Task 7's deletes of `src/engine/CharacterMind.mjs`,
+   `src/engine/NarratorComposer.mjs` and `src/engine/BeatParser.mjs` have the operator's go ("confirmed",
+   2026-11-25, section 2).
 3. **Later (operator-listed, not this project):** project 2 character brain (reflection/dream, budgeted feelings
    summary, timed runs every few hours for characters not in the scene); project 3 book pass at intervals,
    scene-scoped, plus format fixes and Pedant quote verification; the player speaking as any character (as in

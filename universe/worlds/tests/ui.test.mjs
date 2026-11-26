@@ -1267,6 +1267,90 @@ describe('WorldsApi SSE stream parser and CSRF enforcement', () => {
 });
 
 describe('DOM XSS escaping, Screen-Law button order, and interactive workflows', () => {
+  it('renders narration in the pending card as narration-styled text without tags and without HTML injection', () => {
+    const { documentRef, createRootShell } = createFakeDomEnvironment();
+    const shell = createRootShell();
+    const chatContainer = shell.querySelector('#chat-view');
+    const chatView = new ChatView({
+      container: chatContainer,
+      documentRef: /** @type {Document} */ (documentRef),
+      onLoadEarlier: async () => {},
+      onRegenerate: async () => {},
+      onSaveEdit: async () => {},
+      onRequestDelete: () => {},
+    });
+    chatView.setCampaignActive(true);
+
+    /**
+     * @param {Record<string, unknown>} options
+     * @returns {{lines: string[], narration: string[], whole: string, speaker: string}}
+     * @throws {Error}
+     */
+    const preview = (options) => {
+      chatView.startStreaming({ userSpeakerType: 'player', userSpeakerName: 'Frost', ...options });
+      const card = chatContainer.querySelector('.turn-streaming');
+      const textElement = card.querySelector('.beat-text');
+      const result = {
+        speaker: card.querySelector('.beat-speaker').textContent,
+        lines: textElement.querySelectorAll('span').map((span) => span.textContent),
+        narration: textElement.querySelectorAll('.beat-narration').map((span) => span.textContent),
+        whole: card.textContent,
+      };
+      chatView.clearStreaming();
+      return result;
+    };
+
+    const boxed = preview({ userText: 'I look at her.', narrationText: 'Her hair is dyed black.' });
+    assert.deepEqual(boxed.lines, ['I look at her.', 'Her hair is dyed black.']);
+    assert.deepEqual(boxed.narration, ['Her hair is dyed black.']);
+
+    const typed = preview({ userText: 'I look at her. <narration>Her hair is dyed black.</narration> Then she waits.' });
+    assert.deepEqual(typed.lines, ['I look at her.', 'Her hair is dyed black.', 'Then she waits.']);
+    assert.deepEqual(typed.narration, ['Her hair is dyed black.']);
+    assert.equal(typed.whole.includes('<narration>'), false);
+    assert.equal(typed.whole.includes('</narration>'), false);
+
+    const both = preview({ userText: 'Hi <narration>One.</narration>', narrationText: 'Two.' });
+    assert.deepEqual(both.narration, ['One.', 'Two.']);
+    assert.equal(both.speaker, 'Frost');
+
+    const encounterBox = preview({ mode: 'encounter', userText: '', narrationText: 'Her hair is dyed black.' });
+    assert.equal(encounterBox.speaker, 'Frost');
+    assert.deepEqual(encounterBox.lines, ['*(Encounter)*', 'Her hair is dyed black.']);
+    assert.deepEqual(encounterBox.narration, ['Her hair is dyed black.']);
+
+    const encounterTag = preview({ mode: 'encounter', userText: '<narration>Her hair is dyed black.</narration>' });
+    assert.equal(encounterTag.speaker, 'Frost');
+    assert.deepEqual(encounterTag.lines, ['*(Encounter)*', 'Her hair is dyed black.']);
+    assert.equal(encounterTag.whole.includes('<narration>'), false);
+
+    const encounterPlain = preview({ mode: 'encounter', userText: 'Someone knocks.', narrationText: 'Rain.' });
+    assert.deepEqual(encounterPlain.lines, ['Someone knocks.', 'Rain.']);
+    assert.deepEqual(preview({ mode: 'encounter', userText: '' }).lines, ['*(Encounter)*']);
+
+    const tagOnly = preview({ userText: '<narration>Her hair is dyed black.</narration>' });
+    assert.equal(tagOnly.speaker, 'Narrator');
+    assert.deepEqual(tagOnly.narration, ['Her hair is dyed black.']);
+    assert.equal(tagOnly.whole.includes('<narration>'), false);
+    assert.equal(preview({ userText: '<narration>One.</narration>', narrationText: 'Two.' }).speaker, 'Narrator');
+
+    const plain = preview({ userText: 'Just talking.' });
+    assert.deepEqual(plain.narration, []);
+    assert.deepEqual(plain.lines, ['Just talking.']);
+
+    chatView.startStreaming({
+      userText: '<u data-probe="1">underlined</u> <narration><script>alert(1)</script></narration>',
+      narrationText: '<b>bold</b>',
+    });
+    assert.equal(chatContainer.querySelectorAll('u').length, 0);
+    assert.equal(chatContainer.querySelectorAll('script').length, 0);
+    assert.equal(chatContainer.querySelectorAll('b').length, 0);
+    assert.ok(chatContainer.textContent.includes('<u data-probe="1">underlined</u>'));
+    assert.ok(chatContainer.textContent.includes('<script>alert(1)</script>'));
+    assert.ok(chatContainer.textContent.includes('<b>bold</b>'));
+    chatView.clearStreaming();
+  });
+
   it('renders malicious HTML/script payloads strictly via textContent in ChatView and InspectorDrawer', async () => {
     const { documentRef, createRootShell } = createFakeDomEnvironment();
     const shell = createRootShell();
@@ -1487,6 +1571,63 @@ describe('DOM XSS escaping, Screen-Law button order, and interactive workflows',
     assert.equal(documentRef.getDocumentListenerCount('keydown'), 0);
   });
 
+  it('sends the typed narration facts with the message and sends nothing the player did not type', async () => {
+    const { documentRef, createRootShell } = createFakeDomEnvironment();
+    const shell = createRootShell();
+    const container = shell.querySelector('#composer-bar');
+    const calls = [];
+    const composer = new ComposerBar({
+      container,
+      documentRef: /** @type {Document} */ (documentRef),
+      onSend: (payload) => {
+        calls.push(payload);
+      },
+      onStop: () => {},
+    });
+    composer.setCampaignActive(true);
+    const toggle = container.querySelector('#composer-narration-toggle');
+    const narrationInput = container.querySelector('#composer-narration-input');
+    const textInput = container.querySelector('#composer-text-input');
+    const sendBtn = container.querySelectorAll('button').find((button) => button.textContent === 'Send');
+
+    assert.equal(toggle.textContent, 'Add narration facts');
+    assert.equal(toggle.getAttribute('aria-expanded'), 'false');
+    assert.equal(narrationInput.parentNode.classList.contains('is-hidden'), true);
+    await toggle.dispatchEvent('click');
+    assert.equal(toggle.getAttribute('aria-expanded'), 'true');
+    assert.equal(narrationInput.parentNode.classList.contains('is-hidden'), false);
+
+    composer.setDraftText('I look at her.');
+    await sendBtn.dispatchEvent('click');
+    assert.equal(calls[0].narration, null);
+
+    narrationInput.value = '  Her hair is dyed black.  ';
+    await sendBtn.dispatchEvent('click');
+    assert.equal(calls[1].text, 'I look at her.');
+    assert.equal(calls[1].narration, 'Her hair is dyed black.');
+
+    textInput.value = '';
+    await sendBtn.dispatchEvent('click');
+    assert.equal(calls.length, 3);
+    assert.equal(calls[2].text, '');
+    assert.equal(calls[2].narration, 'Her hair is dyed black.');
+
+    composer.clearDraft();
+    assert.equal(narrationInput.value, '');
+    await sendBtn.dispatchEvent('click');
+    assert.equal(calls.length, 3);
+
+    textInput.value = 'Hi <narration>Rain.</narration>';
+    await sendBtn.dispatchEvent('click');
+    assert.equal(calls[3].text, 'Hi <narration>Rain.</narration>');
+    assert.equal(calls[3].narration, null);
+
+    composer.setStreaming(true);
+    assert.equal(narrationInput.disabled, true);
+    composer.setStreaming(false);
+    assert.equal(narrationInput.disabled, false);
+  });
+
   it('enforces ComposerBar modes, CharacterModal slug rules without scribeSubjectId, and ConfirmModal error recovery', async () => {
     const { documentRef, createRootShell } = createFakeDomEnvironment();
     const shell = createRootShell();
@@ -1669,6 +1810,15 @@ describe('Live WorldsServer static serving and WorldsApp boot integration', () =
           }, { once: true });
         });
       },
+      ...[0, 1, 2, 3].map(() => (init) => {
+        return new Promise((resolve, reject) => {
+          init.signal.addEventListener('abort', () => {
+            const abortError = new Error('Aborted');
+            abortError.name = 'AbortError';
+            reject(abortError);
+          }, { once: true });
+        });
+      }),
     ];
     const client = new OpenRouterClient({
       apiKeyProvider: () => 'sk-ui-smoke-key',
@@ -1819,11 +1969,15 @@ describe('Live WorldsServer static serving and WorldsApp boot integration', () =
     assert.notEqual(shell.querySelector('#spend-badge').textContent, '$0.00');
     assert.equal(shell.querySelector('#spend-warning-banner').classList.contains('is-hidden'), false);
 
-    composerInput.value = 'Abort this turn please.';
+    composerInput.value = '';
     await composerInput.dispatchEvent('input');
+    composerBar.querySelector('#composer-narration-input').value = 'Abort this narration please.';
     await sendButton.dispatchEvent('click');
     await abortDirectorStartedPromise;
     assert.equal(sendButton.textContent, 'Stop');
+    const pendingCard = shell.querySelector('#chat-view').querySelector('.turn-streaming');
+    assert.equal(pendingCard.querySelector('.beat-speaker').textContent, 'Narrator');
+    assert.equal(pendingCard.querySelector('.beat-text').textContent, 'Abort this narration please.');
     await sendButton.dispatchEvent('click');
 
     const abortDeadlineMs = Date.now() + 3000;
@@ -1833,6 +1987,65 @@ describe('Live WorldsServer static serving and WorldsApp boot integration', () =
     assert.equal(sendButton.textContent, 'Send');
     assert.equal(shell.querySelector('#chat-view').querySelectorAll('.turn-card').length, 2);
     assert.ok(composerBar.textContent.includes('Turn stopped. No changes were committed.'));
+
+    composerInput.value = 'I look at her. <narration>Her eyes are green.</narration>';
+    await composerInput.dispatchEvent('input');
+    composerBar.querySelector('#composer-narration-input').value = 'Her hair is dyed black.';
+    await sendButton.dispatchEvent('click');
+    assert.equal(sendButton.textContent, 'Stop');
+    const pendingText = shell.querySelector('#chat-view').querySelector('.turn-streaming').querySelector('.beat-text');
+    assert.deepEqual(
+      pendingText.querySelectorAll('.beat-narration').map((span) => span.textContent),
+      ['Her eyes are green.', 'Her hair is dyed black.'],
+    );
+    assert.equal(pendingText.textContent.includes('<narration>'), false);
+    await sendButton.dispatchEvent('click');
+    const secondDeadlineMs = Date.now() + 3000;
+    while (Date.now() < secondDeadlineMs && sendButton.textContent !== 'Send') {
+      await new Promise((resolve) => setTimeout(resolve, 10));
+    }
+    assert.equal(sendButton.textContent, 'Send');
+
+    const encounterButton = composerBar.querySelectorAll('button').find((button) => button.textContent === 'Encounter');
+    for (const typed of ['', '<narration>Her hair is dyed black.</narration>']) {
+      composerInput.value = typed;
+      await composerInput.dispatchEvent('input');
+      composerBar.querySelector('#composer-narration-input').value = typed === '' ? 'Her hair is dyed black.' : '';
+      await encounterButton.dispatchEvent('click');
+      assert.equal(sendButton.textContent, 'Stop');
+      const pendingCard = shell.querySelector('#chat-view').querySelector('.turn-streaming');
+      assert.equal(pendingCard.querySelector('.beat-speaker').textContent, 'Frost');
+      assert.deepEqual(
+        pendingCard.querySelector('.beat-text').querySelectorAll('span').map((span) => span.textContent),
+        ['*(Encounter)*', 'Her hair is dyed black.'],
+      );
+      assert.equal(pendingCard.textContent.includes('<narration>'), false);
+      await sendButton.dispatchEvent('click');
+      const encounterDeadlineMs = Date.now() + 3000;
+      while (Date.now() < encounterDeadlineMs && sendButton.textContent !== 'Send') {
+        await new Promise((resolve) => setTimeout(resolve, 10));
+      }
+      assert.equal(sendButton.textContent, 'Send');
+    }
+
+    composerInput.value = 'Narrator:';
+    await composerInput.dispatchEvent('input');
+    composerBar.querySelector('#composer-narration-input').value = 'It is raining.';
+    await encounterButton.dispatchEvent('click');
+    assert.equal(sendButton.textContent, 'Stop');
+    const prefixedCard = shell.querySelector('#chat-view').querySelector('.turn-streaming');
+    assert.equal(prefixedCard.querySelector('.beat-speaker').textContent, 'Narrator');
+    assert.deepEqual(
+      prefixedCard.querySelector('.beat-text').querySelectorAll('span').map((span) => span.textContent),
+      ['It is raining.'],
+    );
+    assert.equal(prefixedCard.textContent.includes('Encounter'), false);
+    await sendButton.dispatchEvent('click');
+    const prefixedDeadlineMs = Date.now() + 3000;
+    while (Date.now() < prefixedDeadlineMs && sendButton.textContent !== 'Send') {
+      await new Promise((resolve) => setTimeout(resolve, 10));
+    }
+    assert.equal(sendButton.textContent, 'Send');
   });
 });
 

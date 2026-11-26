@@ -3364,6 +3364,179 @@ describe('Model availability over HTTP', () => {
   });
 });
 
+describe('Player narration over HTTP', () => {
+  const cleanups = [];
+
+  after(async () => {
+    for (const cleanupFn of cleanups) {
+      await cleanupFn();
+    }
+  });
+
+  const directorPlan = {
+    sceneChanged: false,
+    location: 'Harbor Inn',
+    day: 1,
+    timeLabel: 'Evening',
+    sceneType: 'private',
+    userInputKind: 'player_in_scene',
+    presentSlugs: ['frost', 'lize'],
+    remoteSlugs: [],
+    offscreenNotes: {},
+    walkOnsEnter: [],
+    walkOnsLeave: [],
+    encounterAccepted: false,
+    encounterBrief: '',
+    pacing: 'focused_one',
+    targetChars: 800,
+    responders: [{ slug: 'lize', beatGoal: 'Answer.', length: 'short' }],
+    narratorDirective: 'Keep it quiet.',
+  };
+
+  /**
+   * @param {number} turnCount
+   * @returns {Promise<{started: object, headers: object, campaign: object}>}
+   * @throws {Error}
+   */
+  const boot = async (turnCount) => {
+    const env = createTempEnvironment({ envApiKey: 'sk-narration-key' });
+    const store = new SqliteStore(env.config.dbPath);
+    store.updateSettings({
+      models: {
+        director: 'openrouter/dir',
+        composer: 'openrouter/comp',
+        main: 'openrouter/main',
+        recurring: 'openrouter/rec',
+        scribe: 'openrouter/scribe',
+      },
+      scribeInterval: 0,
+      pedantEnabled: false,
+    });
+    const campaign = store.createCampaign({
+      title: 'Narration',
+      sceneState: {
+        sceneNumber: 1,
+        day: 1,
+        timeLabel: 'Evening',
+        location: 'Harbor Inn',
+        sceneType: 'private',
+        presentIds: [],
+        remoteIds: [],
+        offscreenNotes: {},
+        activeWalkOns: [],
+      },
+    });
+    const frost = store.createCharacter(campaign.id, {
+      slug: 'frost',
+      name: 'Frost',
+      isPlayer: true,
+      tier: CharacterTier.Main,
+      avatarToken: AvatarToken.Slate,
+    });
+    const lize = store.createCharacter(campaign.id, {
+      slug: 'lize',
+      name: 'Lize',
+      tier: CharacterTier.Main,
+      avatarToken: AvatarToken.Rose,
+    });
+    store.updateCampaign(campaign.id, {
+      playerCharacterId: frost.id,
+      sceneState: { ...campaign.sceneState, presentIds: [frost.id, lize.id] },
+    });
+    const script = [];
+    for (let turn = 0; turn < turnCount; turn += 1) {
+      script.push(
+        { json: directorPlan },
+        { json: { internalThought: 'x', physicalAction: 'Lize nods.', spokenLines: 'Yes.', tone: 'dry', knowledgeBoundaries: [] } },
+        { type: 'stream', text: '[[BEAT:lize]]\n*Lize nods.*\nYes.' },
+      );
+    }
+    const { client } = createScriptedOpenRouterClient(script, { store });
+    const server = await WorldsServer.create({
+      config: env.config,
+      store,
+      client,
+      modelCatalog: createFakeModelCatalog().catalog,
+    });
+    const started = await server.start();
+    cleanups.push(async () => {
+      await server.stop();
+      store.close();
+      fs.rmSync(env.tempRoot, { recursive: true, force: true });
+    });
+    const headers = {
+      origin: started.url,
+      'x-worlds-csrf': started.csrfToken,
+      'content-type': 'application/json',
+    };
+    return { started, headers, campaign };
+  };
+
+  /**
+   * @param {{started: object, headers: object, campaign: object}} context
+   * @param {object} body
+   * @returns {Promise<Response>}
+   * @throws {Error}
+   */
+  const post = (context, body) => {
+    return fetch(`${context.started.url}/api/campaigns/${context.campaign.id}/turns`, {
+      method: 'POST',
+      headers: context.headers,
+      body: JSON.stringify(body),
+    });
+  };
+
+  it('accepts the narration key and returns the narration beat in the committed player turn', async () => {
+    const context = await boot(2);
+
+    const fieldRes = await post(context, { text: 'I look at her.', mode: TurnMode.Normal, narration: 'Her hair is dyed black.' });
+    assert.equal(fieldRes.status, 200);
+    const fieldEvents = await readAllSseEvents(fieldRes);
+    const committed = fieldEvents.find((item) => item.event === 'committed');
+    assert.deepEqual(committed.data.userTurn.beats.map((beat) => [beat.seq, beat.speakerType, beat.text]), [
+      [1, 'player', 'I look at her.'],
+      [2, 'narrator', 'Her hair is dyed black.'],
+    ]);
+
+    const tagRes = await post(context, { text: 'Again. <narration>Her eyes are green.</narration>' });
+    assert.equal(tagRes.status, 200);
+    const tagCommitted = (await readAllSseEvents(tagRes)).find((item) => item.event === 'committed');
+    assert.deepEqual(tagCommitted.data.userTurn.beats.map((beat) => [beat.speakerType, beat.text]), [
+      ['player', 'Again.'],
+      ['narrator', 'Her eyes are green.'],
+    ]);
+  });
+
+  it('commits narration alone as one Narrator beat in Normal mode, Narrator mode and with a bare prefix', async () => {
+    const context = await boot(3);
+
+    for (const body of [
+      { text: '', narration: 'Her hair is dyed black.' },
+      { text: '', mode: TurnMode.Narrator, narration: 'Her hair is dyed black.' },
+      { text: 'Narrator:', narration: 'Her hair is dyed black.' },
+    ]) {
+      const response = await post(context, body);
+      assert.equal(response.status, 200);
+      const events = await readAllSseEvents(response);
+      assert.equal(events.some((item) => item.event === 'error'), false, JSON.stringify(body));
+      const committed = events.find((item) => item.event === 'committed');
+      assert.equal(committed.data.userTurn.mode, TurnMode.Narrator);
+      assert.deepEqual(committed.data.userTurn.beats.map((beat) => [beat.speakerType, beat.text]), [
+        ['narrator', 'Her hair is dyed black.'],
+      ]);
+    }
+  });
+
+  it('refuses a non-string narration, an unknown key, and a turn with no text and no narration', async () => {
+    const context = await boot(0);
+
+    assert.equal((await post(context, { text: 'Hi', narration: 5 })).status, 400);
+    assert.equal((await post(context, { text: 'Hi', narrations: 'x' })).status, 400);
+    assert.equal((await post(context, { text: '   ', narration: '   ' })).status, 400);
+    assert.equal((await post(context, { text: '<narration> </narration>' })).status, 400);
+  });
+});
+
 /**
  * @returns {{promise: Promise<void>, open: () => void}}
  */

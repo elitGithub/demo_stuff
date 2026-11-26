@@ -453,14 +453,14 @@ export class WorldsApi {
 
   /**
    * @param {string} campaignId
-   * @param {{text: string, mode?: 'normal' | 'narrator' | 'encounter', oocNudge?: string | null}} payload
+   * @param {{text: string, mode?: 'normal' | 'narrator' | 'encounter', oocNudge?: string | null, narration?: string | null}} payload
    * @param {{onEvent: (payload: {event: string, data: unknown}) => void | Promise<void>, signal?: AbortSignal | null}} options
    * @returns {Promise<void>}
    * @throws {Error}
    */
-  async runTurn(campaignId, { text, mode = 'normal', oocNudge = null }, { onEvent, signal = null } = {}) {
+  async runTurn(campaignId, { text, mode = 'normal', oocNudge = null, narration = null }, { onEvent, signal = null } = {}) {
     await this.#openSse('POST', `/api/campaigns/${encodeURIComponent(campaignId)}/turns`, {
-      body: { text, mode, oocNudge },
+      body: { text, mode, oocNudge, narration },
       onEvent,
       signal,
     });

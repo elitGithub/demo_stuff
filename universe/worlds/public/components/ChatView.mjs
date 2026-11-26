@@ -1,4 +1,9 @@
 export class ChatView {
+  static #NarrationTagPattern = /<narration>([\s\S]*?)<\/narration>/gi;
+  static #NarrationClass = 'beat-narration';
+  static #NarratorType = 'narrator';
+  static #NarratorName = 'Narrator';
+  static #EncounterText = '*(Encounter)*';
   static #ValidTokens = new Set(['sage', 'rose', 'amber', 'slate', 'plum', 'teal', 'indigo', 'coral']);
 
   #container;
@@ -162,7 +167,7 @@ export class ChatView {
   }
 
   /**
-   * @param {{userText?: string, userSpeakerName?: string, userCharacterId?: string | null, userSpeakerType?: string, oocNudge?: string | null, mode?: string, regenerating?: boolean}} options
+   * @param {{userText?: string, userSpeakerName?: string, userCharacterId?: string | null, userSpeakerType?: string, oocNudge?: string | null, mode?: string, narrationText?: string, regenerating?: boolean}} options
    * @returns {void}
    */
   startStreaming({
@@ -172,6 +177,7 @@ export class ChatView {
     userSpeakerType = 'narrator',
     oocNudge = null,
     mode = 'normal',
+    narrationText = '',
     regenerating = false,
   } = {}) {
     this.#editingTurnId = null;
@@ -184,6 +190,7 @@ export class ChatView {
       userSpeakerType,
       oocNudge,
       mode,
+      narrationText,
       beats: [],
     };
     this.render();
@@ -618,13 +625,43 @@ export class ChatView {
 
         const userBeatList = this.#documentRef.createElement('div');
         userBeatList.className = 'beat-list';
+        const segments = [];
+        let cursor = 0;
+        for (const match of streamState.userText.matchAll(ChatView.#NarrationTagPattern)) {
+          segments.push(
+            { text: streamState.userText.slice(cursor, match.index).trim(), narration: false },
+            { text: match[1].trim(), narration: true },
+          );
+          cursor = match.index + match[0].length;
+        }
+        segments.push(
+          { text: streamState.userText.slice(cursor).trim(), narration: false },
+          { text: streamState.narrationText.trim(), narration: true },
+        );
+        const shownSegments = segments.filter((segment) => segment.text.length > 0);
+        const isEncounter = streamState.mode === 'encounter';
+        if (isEncounter && !shownSegments.some((segment) => !segment.narration)) {
+          shownSegments.unshift({ text: ChatView.#EncounterText, narration: false });
+        }
+        const narrationOnly = !isEncounter && shownSegments.length > 0 &&
+          shownSegments.every((segment) => segment.narration);
         const userRendered = this.#createBeatRow({
-          speakerType: streamState.userSpeakerType,
-          characterId: streamState.userCharacterId,
+          speakerType: narrationOnly ? ChatView.#NarratorType : streamState.userSpeakerType,
+          characterId: narrationOnly ? null : streamState.userCharacterId,
           slug: null,
-          speakerName: streamState.userSpeakerName,
-          text: streamState.userText,
+          speakerName: narrationOnly ? ChatView.#NarratorName : streamState.userSpeakerName,
+          text: '',
         });
+        userRendered.textElement.replaceChildren(
+          ...shownSegments.map((segment) => {
+            const spanElement = this.#documentRef.createElement('span');
+            if (segment.narration) {
+              spanElement.className = ChatView.#NarrationClass;
+            }
+            spanElement.textContent = segment.text;
+            return spanElement;
+          }),
+        );
         userBeatList.append(userRendered.rowElement);
         previewUserCard.append(userBeatList);
         nodes.push(previewUserCard);

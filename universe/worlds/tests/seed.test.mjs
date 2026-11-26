@@ -11,10 +11,12 @@ import { ScribeCategory } from '../src/scribe/ScribeCategory.mjs';
 import { ScribeKnowledge } from '../src/scribe/ScribeKnowledge.mjs';
 import { ScribeLogCore } from '../src/scribe/ScribeLogCore.mjs';
 import { ScribeReplay } from '../src/scribe/ScribeReplay.mjs';
+import { ScribeService } from '../src/scribe/ScribeService.mjs';
 import { ScribeText } from '../src/scribe/ScribeText.mjs';
 import { CharacterCard } from '../src/store/CharacterCard.mjs';
 import { CharacterTier } from '../src/store/enums/CharacterTier.mjs';
 import { SceneType } from '../src/store/enums/SceneType.mjs';
+import { TurnRole } from '../src/store/enums/TurnRole.mjs';
 import { SqliteStore } from '../src/store/SqliteStore.mjs';
 import { ZetaSeeder } from '../scripts/seed-from-export.mjs';
 
@@ -1629,10 +1631,11 @@ test('ZetaSeeder refuses a look-alike pair it cannot copy and accepts the pair o
   assert.doesNotThrow(() => ZetaSeeder.parseExport(bundleText(bundle)));
 });
 
-test('ZetaSeeder imports chat messages as speaker-tagged turns with scene witnesses and marks read turns', (testContext) => {
-  const workDir = makeTempDir(testContext);
-  const bundle = buildScribeBundleFixture();
-  bundle.campaign.messages = [
+/**
+ * @returns {object[]}
+ */
+function buildChatMessages() {
+  return [
     {
       id: 'msg-obs-1',
       sender: { id: 'USER-1', type: 'USER' },
@@ -1662,6 +1665,12 @@ test('ZetaSeeder imports chat messages as speaker-tagged turns with scene witnes
       ],
     },
   ];
+}
+
+test('ZetaSeeder imports chat messages as speaker-tagged turns with scene witnesses and marks read turns', (testContext) => {
+  const workDir = makeTempDir(testContext);
+  const bundle = buildScribeBundleFixture();
+  bundle.campaign.messages = buildChatMessages();
   const exportPath = writeBundle(workDir, 'with-chat.json', bundle);
   const dbPath = path.join(workDir, 'seeded-chat.sqlite');
 
@@ -1712,6 +1721,94 @@ test('ZetaSeeder imports chat messages as speaker-tagged turns with scene witnes
     assert.equal(savedLog.read[firstTurn.id], 1);
     assert.equal(savedLog.read[secondTurn.id], 1);
     assert.equal(savedLog.read[thirdTurn.id], 1);
+  } finally {
+    store.close();
+  }
+});
+
+test('ZetaSeeder applies the player rule on import with the sender role of each export message', () => {
+  /**
+   * @param {string} senderType
+   * @returns {Record<string, boolean>}
+   */
+  const reportedByText = (senderType) => {
+    const bundle = buildScribeBundleFixture();
+    bundle.campaign.messages = buildChatMessages();
+    bundle.campaign.messages[2].sender = { id: 'X-1', type: senderType };
+    bundle.book.log.nextFact = 8;
+    storyOperations(bundle).push(
+      {
+        type: ScribeAnswer.Type.Fact,
+        fact: 'F6',
+        subject: 'S2',
+        label: 'Tamsin Locke',
+        category: 'hair',
+        target: null,
+        targetText: null,
+        other: null,
+        text: 'red',
+        cite: 'msg-obs-2',
+        position: 2,
+        hidden: false,
+      },
+      {
+        type: ScribeAnswer.Type.Fact,
+        fact: 'F7',
+        subject: 'S2',
+        label: 'Tamsin Locke',
+        category: 'hair',
+        target: null,
+        targetText: null,
+        other: null,
+        text: 'black',
+        cite: 'msg-obs-3',
+        position: 3,
+        hidden: false,
+      },
+    );
+    const parsed = ZetaSeeder.parseExport(bundleText(bundle), { playerRef: 'corin-vale' });
+    return Object.fromEntries(
+      parsed.facts.filter((fact) => fact.category === 'hair').map((fact) => [fact.text, fact.reported]),
+    );
+  };
+
+  assert.deepEqual(reportedByText('USER'), { red: true, black: false });
+  assert.deepEqual(reportedByText('BOT'), { red: false, black: true });
+});
+
+test('ZetaSeeder seeds a book whose operator facts keep their status when the replay knows the chat roles', (testContext) => {
+  const workDir = makeTempDir(testContext);
+  const bundle = buildScribeBundleFixture();
+  bundle.campaign.messages = buildChatMessages();
+  const exportPath = writeBundle(workDir, 'with-roles.json', bundle);
+  const dbPath = path.join(workDir, 'seeded-roles.sqlite');
+  const summary = ZetaSeeder.run({
+    exportPath,
+    dbPath,
+    title: 'Observatory Roles',
+    playerRef: 'corin-vale',
+    allowedRoots: [workDir],
+  });
+
+  const store = new SqliteStore(dbPath);
+  try {
+    const loaded = new ScribeService({ store }).loadState(summary.campaignId);
+    assert.equal(loaded.messages.some((message) => message.role === TurnRole.User), true);
+    assert.equal(loaded.log.entries.every((entry) => entry.origin === ScribeLogCore.Origin.Operator), true);
+
+    const bare = ScribeReplay.run(loaded.log, []);
+    /**
+     * @param {object} state
+     * @returns {Map<string, string>}
+     */
+    const statusById = (state) => new Map(state.facts.map((fact) => [fact.id, fact.status]));
+    assert.deepEqual(statusById(loaded.state), statusById(bare));
+
+    const amber = loaded.state.facts.find((fact) => fact.text === 'amber');
+    assert.equal(amber.evidence.attribution, 'witnessed');
+    assert.equal(amber.status, ScribeReplay.Status.InForce);
+    const claim = loaded.state.facts.find((fact) => fact.text === 'hiding in the bell tower');
+    assert.equal(claim.status, ScribeReplay.Status.Reported);
   } finally {
     store.close();
   }

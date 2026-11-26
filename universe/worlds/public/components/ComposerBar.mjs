@@ -8,7 +8,11 @@ export class ComposerBar {
   #campaignActive = false;
   #streaming = false;
   #oocExpanded = false;
+  #narrationExpanded = false;
 
+  #narrationToggleButton;
+  #narrationWrapper;
+  #narrationInput;
   #phaseBanner;
   #alertBox;
   #narratorBadge;
@@ -20,7 +24,7 @@ export class ComposerBar {
   #sendButton;
 
   /**
-   * @param {{container: HTMLElement, documentRef?: Document | null, onSend: (payload: {text: string, mode: 'normal' | 'narrator' | 'encounter', oocNudge: string | null}) => Promise<void> | void, onStop: () => void}} options
+   * @param {{container: HTMLElement, documentRef?: Document | null, onSend: (payload: {text: string, mode: 'normal' | 'narrator' | 'encounter', oocNudge: string | null, narration: string | null}) => Promise<void> | void, onStop: () => void}} options
    * @throws {TypeError}
    */
   constructor(options = {}) {
@@ -78,7 +82,39 @@ export class ComposerBar {
       }
     });
 
-    metaRow.append(this.#narratorBadge, this.#oocToggleButton);
+    this.#narrationToggleButton = this.#documentRef.createElement('button');
+    this.#narrationToggleButton.id = 'composer-narration-toggle';
+    this.#narrationToggleButton.type = 'button';
+    this.#narrationToggleButton.className = 'btn btn-ghost btn-compact';
+    this.#narrationToggleButton.setAttribute('aria-expanded', 'false');
+    this.#narrationToggleButton.setAttribute('aria-controls', 'composer-narration-input');
+    this.#narrationToggleButton.textContent = 'Add narration facts';
+    this.#narrationToggleButton.addEventListener('click', () => {
+      this.#narrationExpanded = !this.#narrationExpanded;
+      this.#narrationWrapper.className = this.#narrationExpanded ? 'field-group' : 'field-group is-hidden';
+      this.#narrationToggleButton.setAttribute('aria-expanded', this.#narrationExpanded ? 'true' : 'false');
+      if (this.#narrationExpanded) {
+        this.#narrationInput.focus();
+      }
+    });
+
+    metaRow.append(this.#narratorBadge, this.#oocToggleButton, this.#narrationToggleButton);
+
+    this.#narrationWrapper = this.#documentRef.createElement('div');
+    this.#narrationWrapper.className = 'field-group is-hidden';
+
+    const narrationLabel = this.#documentRef.createElement('label');
+    narrationLabel.className = 'field-label';
+    narrationLabel.setAttribute('for', 'composer-narration-input');
+    narrationLabel.textContent = 'Narration facts (what is true now; added to your message as narration)';
+
+    this.#narrationInput = this.#documentRef.createElement('textarea');
+    this.#narrationInput.id = 'composer-narration-input';
+    this.#narrationInput.rows = 2;
+    this.#narrationInput.className = 'field-control composer-textarea';
+    this.#narrationInput.placeholder = 'For example: Her hair is dyed black.';
+
+    this.#narrationWrapper.append(narrationLabel, this.#narrationInput);
 
     this.#oocWrapper = this.#documentRef.createElement('div');
     this.#oocWrapper.className = 'field-group is-hidden';
@@ -156,6 +192,7 @@ export class ComposerBar {
       this.#alertBox,
       metaRow,
       this.#oocWrapper,
+      this.#narrationWrapper,
       controlsRow,
     );
 
@@ -236,6 +273,7 @@ export class ComposerBar {
   clearDraft() {
     this.#textarea.value = '';
     this.#oocInput.value = '';
+    this.#narrationInput.value = '';
     this.#updateNarratorBadge();
   }
 
@@ -255,6 +293,8 @@ export class ComposerBar {
     this.#textarea.disabled = inputDisabled;
     this.#oocInput.disabled = inputDisabled;
     this.#oocToggleButton.disabled = !this.#campaignActive;
+    this.#narrationInput.disabled = inputDisabled;
+    this.#narrationToggleButton.disabled = !this.#campaignActive;
     this.#encounterButton.disabled = inputDisabled;
 
     if (this.#streaming) {
@@ -282,7 +322,9 @@ export class ComposerBar {
         ? 'narrator'
         : 'normal';
 
-    if (effectiveMode !== 'encounter' && (isNarrator ? strippedNarrator.length === 0 : rawText.trim().length === 0)) {
+    const trimmedNarration = this.#narrationInput.value.trim();
+    const textMissing = isNarrator ? strippedNarrator.length === 0 : rawText.trim().length === 0;
+    if (effectiveMode !== 'encounter' && textMissing && trimmedNarration.length === 0) {
       this.setAlert('Write a message before sending, or click Encounter.', { level: 'warning' });
       return;
     }
@@ -293,6 +335,7 @@ export class ComposerBar {
       text: rawText,
       mode: effectiveMode,
       oocNudge: trimmedOoc.length > 0 ? trimmedOoc : null,
+      narration: trimmedNarration.length > 0 ? trimmedNarration : null,
     });
   }
 }

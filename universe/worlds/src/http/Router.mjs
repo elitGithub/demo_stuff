@@ -1,5 +1,6 @@
 import fs from 'node:fs';
 import { WorldsConfig } from '../config.mjs';
+import { NarrationParts } from '../engine/NarrationParts.mjs';
 import { CardFiling } from '../scribe/CardFiling.mjs';
 import { ScribeAnalyzer } from '../scribe/ScribeAnalyzer.mjs';
 import { ScribeAnswer } from '../scribe/ScribeAnswer.mjs';
@@ -850,7 +851,7 @@ export class Router {
           if (method === 'POST') {
             this.#requireCampaign(campaignId);
             const body = await Security.readJsonBody(request);
-            this.#assertAllowedKeys(body, ['text', 'mode', 'oocNudge'], 'turn');
+            this.#assertAllowedKeys(body, ['text', 'mode', 'oocNudge', 'narration'], 'turn');
 
             const mode = body.mode === undefined ? TurnMode.Normal : body.mode;
             TurnMode.label(mode);
@@ -862,13 +863,22 @@ export class Router {
             if (oocNudge !== null && typeof oocNudge !== 'string') {
               throw this.#createHttpError(400, 'oocNudge must be null or a string.');
             }
+            const narration = body.narration === undefined ? null : body.narration;
+            if (narration !== null && typeof narration !== 'string') {
+              throw this.#createHttpError(400, 'narration must be null or a string.');
+            }
+            const parts = NarrationParts.split(rawText, narration);
             const narratorPrefixPattern = /^[\s*_]*narrator:\s*/i;
-            const hasNarratorPrefix = narratorPrefixPattern.test(rawText);
+            const hasNarratorPrefix = narratorPrefixPattern.test(parts.text);
             const effectiveMode = hasNarratorPrefix ? TurnMode.Narrator : mode;
             const strippedText = hasNarratorPrefix
-              ? rawText.replace(narratorPrefixPattern, '').trim()
-              : rawText.trim();
-            if ((effectiveMode === TurnMode.Normal || effectiveMode === TurnMode.Narrator) && strippedText.length === 0) {
+              ? parts.text.replace(narratorPrefixPattern, '').trim()
+              : parts.text;
+            if (
+              (effectiveMode === TurnMode.Normal || effectiveMode === TurnMode.Narrator) &&
+              strippedText.length === 0 &&
+              parts.narration.length === 0
+            ) {
               throw this.#createHttpError(400, 'Turn text must not be empty.');
             }
 
@@ -880,6 +890,7 @@ export class Router {
                 return await this.#turnEngine.runTurn({
                   campaignId,
                   text: rawText,
+                  narration,
                   mode,
                   oocNudge,
                   signal,
@@ -1410,7 +1421,7 @@ export class Router {
 
   /**
    * @param {Record<string, unknown>} body
-   * @param {ReadonlyArray<string>} allowedKeys
+   * @param {readonly string[]} allowedKeys
    * @param {string} contextLabel
    * @returns {void}
    * @throws {Error}

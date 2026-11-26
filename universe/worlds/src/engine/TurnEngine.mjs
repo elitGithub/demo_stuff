@@ -10,6 +10,7 @@ import { TurnMode } from '../store/enums/TurnMode.mjs';
 import { CharacterMind } from './CharacterMind.mjs';
 import { Director } from './Director.mjs';
 import { EncounterRoller } from './EncounterRoller.mjs';
+import { NarrationParts } from './NarrationParts.mjs';
 import { NarratorComposer } from './NarratorComposer.mjs';
 import { WitnessFilter } from './WitnessFilter.mjs';
 
@@ -86,7 +87,7 @@ export class TurnEngine {
   }
 
   /**
-   * @param {{campaignId: string, text: string, mode?: string, oocNudge?: string | null, signal?: AbortSignal | null, emit?: ((payload: {event: string, data: unknown}) => void | Promise<void>) | null}} options
+   * @param {{campaignId: string, text: string, mode?: string, narration?: string | null, oocNudge?: string | null, signal?: AbortSignal | null, emit?: ((payload: {event: string, data: unknown}) => void | Promise<void>) | null}} options
    * @returns {Promise<Readonly<{userTurn: object, assistantTurn: object, sceneState: object, plan: object, truncated: boolean, playerBeatRemapped: boolean}>>}
    * @throws {Error}
    */
@@ -99,6 +100,7 @@ export class TurnEngine {
       campaignId,
       text,
       mode = TurnMode.Normal,
+      narration = null,
       oocNudge = null,
       signal = null,
       emit = null,
@@ -108,6 +110,9 @@ export class TurnEngine {
     try {
       if (typeof text !== 'string') {
         throw new TypeError('text must be a string.');
+      }
+      if (narration !== null && typeof narration !== 'string') {
+        throw new TypeError('narration must be null or a string.');
       }
       TurnMode.label(mode);
       if (oocNudge !== null && typeof oocNudge !== 'string') {
@@ -133,6 +138,7 @@ export class TurnEngine {
         preState: snapshot.campaign.sceneState,
         scribeState: scribeLoaded.state,
         rawText: text,
+        narration,
         mode,
         oocNudge,
         signal,
@@ -182,15 +188,15 @@ export class TurnEngine {
       }
 
       const snapshot = this.#loadCampaignSnapshot(campaignId);
-      const discardedIdSet = new Set([userTurn.id, assistantTurn.id]);
-      const priorTurns = snapshot.allTurns.filter((turn) => !discardedIdSet.has(turn.id));
+      const remainingTurns = snapshot.allTurns.filter((turn) => turn.id !== assistantTurn.id);
+      const priorTurns = remainingTurns.filter((turn) => turn.id !== userTurn.id);
 
       const scribeLoaded = this.#scribeService.loadState(campaignId);
       const previewLog = structuredClone(scribeLoaded.log);
-      ScribeLogCore.withdrawSources(previewLog, discardedIdSet);
+      ScribeLogCore.withdrawSources(previewLog, new Set([assistantTurn.id]));
       const previewState = this.#recoverMissingScenes(
         previewLog,
-        priorTurns,
+        remainingTurns,
         snapshot.allCharacters,
         snapshot.campaign,
       );
@@ -202,20 +208,20 @@ export class TurnEngine {
         priorTurns,
         preState,
         scribeState: previewState,
-        rawText: userTurn.rawText,
+        existingUserTurn: userTurn,
         mode: userTurn.mode,
         oocNudge: userTurn.oocNudge,
         signal,
         emit,
         beforeCommit: () => {
-          const deleted = this.#store.deleteLastTurnPair(campaignId);
+          const deleted = this.#store.deleteLastAssistantTurn(campaignId);
           if (deleted === null) {
-            throw new Error('Failed to delete latest turn pair.');
+            throw new Error('Failed to delete latest assistant turn.');
           }
           this.#withdrawFromSavedBook(
             campaignId,
-            [deleted.deletedUserTurnId, deleted.deletedAssistantTurnId],
-            priorTurns,
+            [deleted.deletedTurnId],
+            remainingTurns,
             snapshot.allCharacters,
             snapshot.campaign,
           );
@@ -436,8 +442,8 @@ export class TurnEngine {
 
   /**
    * @param {object} log
-   * @param {ReadonlyArray<object>} remainingTurns
-   * @param {ReadonlyArray<object>} allCharacters
+   * @param {readonly object[]} remainingTurns
+   * @param {readonly object[]} allCharacters
    * @param {object} campaign
    * @returns {object}
    * @throws {Error}
@@ -484,12 +490,13 @@ export class TurnEngine {
 
   /**
    * @param {string} campaignId
-   * @param {ReadonlyArray<string>} turnIds
-   * @param {ReadonlyArray<object>} remainingTurns
-   * @param {ReadonlyArray<object>} allCharacters
+   * @param {readonly string[]} turnIds
+   * @param {readonly object[]} remainingTurns
+   * @param {readonly object[]} allCharacters
    * @param {object} campaign
    * @param {{markDirty?: boolean}} [options]
    * @returns {boolean}
+   * @throws {Error}
    */
   #withdrawFromSavedBook(campaignId, turnIds, remainingTurns, allCharacters, campaign, { markDirty = false } = {}) {
     const bookRow = this.#store.getScribeBook(campaignId);
@@ -518,7 +525,7 @@ export class TurnEngine {
   }
 
   /**
-   * @param {{campaign: object, settings: object, allCharacters: Array<object>, priorTurns: Array<object>, preState: object, scribeState: object, rawText: string, mode: string, oocNudge: string | null, signal: AbortSignal | null, emit: ((payload: {event: string, data: unknown}) => void | Promise<void>) | null, beforeCommit?: (() => void) | null}} pipelineInput
+   * @param {{campaign: object, settings: object, allCharacters: Array<object>, priorTurns: Array<object>, preState: object, scribeState: object, rawText?: string, narration?: string | null, existingUserTurn?: object | null, mode: string, oocNudge: string | null, signal: AbortSignal | null, emit: ((payload: {event: string, data: unknown}) => void | Promise<void>) | null, beforeCommit?: (() => void) | null}} pipelineInput
    * @returns {Promise<Readonly<{userTurn: object, assistantTurn: object, sceneState: object, plan: object, truncated: boolean, playerBeatRemapped: boolean}>>}
    * @throws {Error}
    */
@@ -530,6 +537,8 @@ export class TurnEngine {
     preState,
     scribeState,
     rawText,
+    narration = null,
+    existingUserTurn = null,
     mode,
     oocNudge,
     signal,
@@ -537,9 +546,27 @@ export class TurnEngine {
     beforeCommit = null,
   }) {
     const narratorPrefixPattern = /^[\s*_]*narrator:\s*/i;
-    const hasNarratorPrefix = narratorPrefixPattern.test(rawText);
-    const effectiveMode = hasNarratorPrefix ? TurnMode.Narrator : mode;
-    let promptText = hasNarratorPrefix ? rawText.replace(narratorPrefixPattern, '').trim() : rawText.trim();
+    let narrationText = '';
+    let effectiveMode = mode;
+    let promptText;
+    if (existingUserTurn !== null) {
+      promptText = existingUserTurn.beats.map((beat) => beat.text).join(NarrationParts.Settings.Joiner);
+    } else {
+      const parts = NarrationParts.split(rawText, narration);
+      narrationText = parts.narration;
+      const hasNarratorPrefix = narratorPrefixPattern.test(parts.text);
+      effectiveMode = hasNarratorPrefix ? TurnMode.Narrator : mode;
+      promptText = hasNarratorPrefix ? parts.text.replace(narratorPrefixPattern, '').trim() : parts.text;
+      if (
+        (effectiveMode === TurnMode.Normal || effectiveMode === TurnMode.Narrator) &&
+        promptText.length === 0 &&
+        narrationText.length > 0
+      ) {
+        effectiveMode = TurnMode.Narrator;
+        promptText = narrationText;
+        narrationText = '';
+      }
+    }
 
     if (effectiveMode === TurnMode.Encounter && promptText.length === 0) {
       promptText = '*(Encounter)*';
@@ -748,12 +775,19 @@ export class TurnEngine {
       playerChar === null ||
       (plan.userInputKind === 'narrator_direction' && !nextParticipantSet.has(playerChar.id));
 
-    const userBeat = {
-      speakerType: isNarratorUserBeat ? SpeakerType.Narrator : SpeakerType.Player,
-      characterId: isNarratorUserBeat ? null : playerChar.id,
-      speakerName: isNarratorUserBeat ? 'Narrator' : playerChar.name,
-      text: promptText,
-    };
+    const userBeat = existingUserTurn === null
+      ? {
+          speakerType: isNarratorUserBeat ? SpeakerType.Narrator : SpeakerType.Player,
+          characterId: isNarratorUserBeat ? null : playerChar.id,
+          speakerName: isNarratorUserBeat ? SpeakerType.label(SpeakerType.Narrator) : playerChar.name,
+          text: promptText,
+        }
+      : {
+          speakerType: existingUserTurn.beats[0].speakerType,
+          characterId: existingUserTurn.beats[0].characterId,
+          speakerName: existingUserTurn.beats[0].speakerName,
+          text: promptText,
+        };
 
     let userWitnessIds;
     if (plan.sceneChanged) {
@@ -874,31 +908,13 @@ export class TurnEngine {
       };
     });
 
-    const commitPayload = {
-      campaignId: campaign.id,
-      userTurn: {
-        mode: effectiveMode,
-        rawText: promptText,
-        oocNudge: normalizedOocNudge,
-        sceneNumber: nextState.sceneNumber,
-        witnessIds: userWitnessIds,
-      },
-      userBeat: {
-        ...userBeat,
-        witnessIds: userWitnessIds,
-        mindPacket: null,
-      },
-      assistantTurn: {
-        mode: effectiveMode,
-        rawText: composerResult.rawText,
-        sceneNumber: nextState.sceneNumber,
-        witnessIds: [...assistantTurnWitnessSet],
-        directorPlan: plan,
-        truncated: composerResult.truncated,
-      },
-      assistantBeats,
-      nextSceneState: nextState,
-      spendIds: [...collectedSpendIds],
+    const assistantPayload = {
+      mode: effectiveMode,
+      rawText: composerResult.rawText,
+      sceneNumber: nextState.sceneNumber,
+      witnessIds: [...assistantTurnWitnessSet],
+      directorPlan: plan,
+      truncated: composerResult.truncated,
     };
 
     this.#throwIfAborted(signal);
@@ -907,7 +923,45 @@ export class TurnEngine {
       if (beforeCommit !== null) {
         beforeCommit();
       }
-      return this.#store.commitTurnPair(commitPayload);
+      if (existingUserTurn !== null) {
+        const assistantTurn = this.#store.commitAssistantTurn({
+          campaignId: campaign.id,
+          userTurnId: existingUserTurn.id,
+          assistantTurn: assistantPayload,
+          assistantBeats,
+          nextSceneState: nextState,
+          spendIds: [...collectedSpendIds],
+        });
+        return { userTurn: this.#store.getTurn(campaign.id, existingUserTurn.id), assistantTurn };
+      }
+      return this.#store.commitTurnPair({
+        campaignId: campaign.id,
+        userTurn: {
+          mode: effectiveMode,
+          rawText: promptText,
+          oocNudge: normalizedOocNudge,
+          sceneNumber: nextState.sceneNumber,
+          witnessIds: userWitnessIds,
+        },
+        userBeat: {
+          ...userBeat,
+          witnessIds: userWitnessIds,
+          mindPacket: null,
+        },
+        userExtraBeats: narrationText.length === 0
+          ? []
+          : [{
+              speakerType: SpeakerType.Narrator,
+              characterId: null,
+              speakerName: SpeakerType.label(SpeakerType.Narrator),
+              text: narrationText,
+              witnessIds: userWitnessIds,
+            }],
+        assistantTurn: assistantPayload,
+        assistantBeats,
+        nextSceneState: nextState,
+        spendIds: [...collectedSpendIds],
+      });
     });
 
     await this.#emitEvent(emit, 'committed', {

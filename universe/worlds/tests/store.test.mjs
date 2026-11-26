@@ -1750,3 +1750,144 @@ describe('SqliteStore measured characters per token', () => {
     assert.equal(SpendStage.Composer, 'composer');
   });
 });
+
+describe('SqliteStore.commitTurnPair extra player beats', () => {
+  /**
+   * @param {SqliteStore} store
+   * @param {Array<Record<string, unknown>> | undefined} userExtraBeats
+   * @returns {{pair: {userTurn: {id: string, seq: number, beats: Array<object>}, assistantTurn: {id: string}}, campaign: {id: string}}}
+   * @throws {Error}
+   */
+  const commit = (store, userExtraBeats) => {
+    const campaign = store.createCampaign({ title: 'Extra Beats', sceneState: buildSceneState('Courtyard', 1, []) });
+    const lyra = store.createCharacter(campaign.id, {
+      slug: 'lyra',
+      name: 'Lyra',
+      tier: CharacterTier.Main,
+      avatarToken: AvatarToken.Indigo,
+    });
+    const pair = store.commitTurnPair({
+      campaignId: campaign.id,
+      userTurn: { mode: TurnMode.Normal, rawText: 'I wave.', witnessIds: [lyra.id] },
+      userBeat: { speakerType: SpeakerType.Player, characterId: lyra.id, speakerName: 'Lyra', text: 'I wave.' },
+      ...(userExtraBeats === undefined ? {} : { userExtraBeats }),
+      assistantTurn: { mode: TurnMode.Normal, rawText: 'Hello.', witnessIds: [lyra.id] },
+      assistantBeats: [{ speakerType: SpeakerType.Character, characterId: lyra.id, speakerName: 'Lyra', text: 'Hello.' }],
+      nextSceneState: buildSceneState('Courtyard', 1, [lyra.id]),
+    });
+    return { pair, campaign };
+  };
+
+  it('stores extra beats after the player beat from seq 2 with the turn witnesses by default', () => {
+    const store = new SqliteStore(':memory:');
+    try {
+      const { pair } = commit(store, [
+        { speakerType: SpeakerType.Narrator, speakerName: ' Narrator ', text: 'Her hair is dyed black.' },
+        { speakerType: SpeakerType.Narrator, characterId: null, speakerName: 'Narrator', text: 'Rain.', witnessIds: [] },
+      ]);
+      const beats = pair.userTurn.beats;
+
+      assert.deepEqual(beats.map((beat) => [beat.seq, beat.speakerType, beat.speakerName, beat.text]), [
+        [1, SpeakerType.Player, 'Lyra', 'I wave.'],
+        [2, SpeakerType.Narrator, 'Narrator', 'Her hair is dyed black.'],
+        [3, SpeakerType.Narrator, 'Narrator', 'Rain.'],
+      ]);
+      assert.deepEqual(beats[1].witnessIds, pair.userTurn.witnessIds);
+      assert.deepEqual(beats[2].witnessIds, []);
+      assert.equal(beats[1].mindPacket, null);
+      assert.equal(pair.userTurn.rawText, 'I wave.');
+    } finally {
+      store.close();
+    }
+  });
+
+  it('replaces only the assistant turn with commitAssistantTurn and leaves the player turn identical', () => {
+    const store = new SqliteStore(':memory:');
+    try {
+      const { pair, campaign } = commit(store, [{ speakerType: SpeakerType.Narrator, speakerName: 'Narrator', text: 'Rain.' }]);
+      const savedPlayerTurn = store.getTurn(campaign.id, pair.userTurn.id);
+      const deleted = store.deleteLastAssistantTurn(campaign.id);
+      assert.equal(deleted.deletedTurnId, pair.assistantTurn.id);
+
+      const replacement = store.commitAssistantTurn({
+        campaignId: campaign.id,
+        userTurnId: pair.userTurn.id,
+        assistantTurn: { mode: TurnMode.Normal, rawText: 'Again.', witnessIds: [] },
+        assistantBeats: [{ speakerType: SpeakerType.Narrator, speakerName: 'Narrator', text: 'Again.' }],
+        nextSceneState: buildSceneState('Courtyard', 1, []),
+        spendIds: [],
+      });
+
+      assert.deepEqual(store.getTurn(campaign.id, pair.userTurn.id), savedPlayerTurn);
+      assert.equal(replacement.seq, pair.userTurn.seq + 1);
+      assert.equal(replacement.role, TurnRole.Assistant);
+      assert.equal(store.listTurns(campaign.id, { limit: 50 }).total, 2);
+      assert.throws(
+        () => store.commitAssistantTurn({
+          campaignId: campaign.id,
+          userTurnId: pair.userTurn.id,
+          assistantTurn: { mode: TurnMode.Normal, rawText: 'Twice.' },
+          assistantBeats: [{ speakerType: SpeakerType.Narrator, speakerName: 'Narrator', text: 'Twice.' }],
+          nextSceneState: buildSceneState('Courtyard', 1, []),
+          spendIds: [],
+        }),
+        /not the given user turn/,
+      );
+      assert.equal(store.listTurns(campaign.id, { limit: 50 }).total, 2);
+    } finally {
+      store.close();
+    }
+  });
+
+  it('stores one beat without the option or with an empty list', () => {
+    const store = new SqliteStore(':memory:');
+    try {
+      assert.equal(commit(store, undefined).pair.userTurn.beats.length, 1);
+      assert.equal(commit(store, []).pair.userTurn.beats.length, 1);
+    } finally {
+      store.close();
+    }
+  });
+
+  it('refuses a bad extra beat and rolls the whole commit back', () => {
+    const store = new SqliteStore(':memory:');
+    try {
+      const campaign = store.createCampaign({ title: 'Rollback', sceneState: buildSceneState('Courtyard', 1, []) });
+      const lyra = store.createCharacter(campaign.id, {
+        slug: 'lyra',
+        name: 'Lyra',
+        tier: CharacterTier.Main,
+        avatarToken: AvatarToken.Indigo,
+      });
+      const narrator = { speakerType: SpeakerType.Narrator, speakerName: 'Narrator', text: 'y' };
+      const badLists = [
+        'text',
+        [null],
+        [{ ...narrator, speakerType: 'robot' }],
+        [{ ...narrator, speakerName: '' }],
+        [{ ...narrator, text: 5 }],
+        [narrator, { ...narrator, characterId: 'phantom' }],
+      ];
+      const changesBefore = store.getLocalChangeSeq();
+      for (const bad of badLists) {
+        assert.throws(
+          () => store.commitTurnPair({
+            campaignId: campaign.id,
+            userTurn: { mode: TurnMode.Normal, rawText: 'I wave.', witnessIds: [lyra.id] },
+            userBeat: { speakerType: SpeakerType.Player, characterId: lyra.id, speakerName: 'Lyra', text: 'I wave.' },
+            userExtraBeats: bad,
+            assistantTurn: { mode: TurnMode.Normal, rawText: 'Hello.', witnessIds: [lyra.id] },
+            assistantBeats: [{ speakerType: SpeakerType.Character, characterId: lyra.id, speakerName: 'Lyra', text: 'Hello.' }],
+            nextSceneState: buildSceneState('Courtyard', 1, [lyra.id]),
+          }),
+          undefined,
+          JSON.stringify(bad),
+        );
+      }
+      assert.equal(store.listTurns(campaign.id, { limit: 50 }).total, 0);
+      assert.equal(store.getLocalChangeSeq(), changesBefore);
+    } finally {
+      store.close();
+    }
+  });
+});

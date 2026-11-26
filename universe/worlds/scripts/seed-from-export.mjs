@@ -208,6 +208,17 @@ export class ZetaSeeder {
   }
 
   /**
+   * @param {object} message
+   * @returns {string}
+   */
+  static roleOf(message) {
+    const senderType = ZetaSeeder.isRecord(message.sender) && typeof message.sender.type === 'string'
+      ? message.sender.type.trim().toUpperCase()
+      : '';
+    return senderType === USER_SENDER_TYPE ? TurnRole.User : TurnRole.Assistant;
+  }
+
+  /**
    * @param {object[]} characters
    * @param {string} ref
    * @param {string} role
@@ -352,7 +363,8 @@ export class ZetaSeeder {
     }
     let state;
     try {
-      state = ScribeReplay.run(log, messages);
+      const roles = messages.map((message) => ({ id: message.id, role: ZetaSeeder.roleOf(message) }));
+      state = ScribeReplay.run(log, messages, null, null, null, null, roles);
     } catch (error) {
       throw new Error(`Scribe log could not be replayed: ${error.message}`, { cause: error });
     }
@@ -656,10 +668,7 @@ export class ZetaSeeder {
         presentSubjectIds.push(...initialScene.presentSubjectIds);
       }
 
-      const senderType = ZetaSeeder.isRecord(message.sender) && typeof message.sender.type === 'string'
-        ? message.sender.type.trim().toUpperCase()
-        : '';
-      const role = senderType === USER_SENDER_TYPE ? TurnRole.User : TurnRole.Assistant;
+      const role = ZetaSeeder.roleOf(message);
       const createdAt = typeof message.messageTime === 'string' && !Number.isNaN(Date.parse(message.messageTime))
         ? new Date(message.messageTime).toISOString()
         : null;

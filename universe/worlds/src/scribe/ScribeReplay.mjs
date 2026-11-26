@@ -1,3 +1,4 @@
+import { TurnRole } from '../store/enums/TurnRole.mjs';
 import { ScribeAnswer } from './ScribeAnswer.mjs';
 import { ScribeCategory } from './ScribeCategory.mjs';
 import { ScribeLogCore } from './ScribeLogCore.mjs';
@@ -630,7 +631,18 @@ export const ScribeReplay = Object.freeze({
         item.origin === ScribeLogCore.Origin.Story &&
         !book.decided.has(id) &&
         ['claimed', 'inferred', 'promised'].includes(fact.evidence?.attribution)) ||
-      (operation.type === ScribeLogCore.Ruling.AddFact && operation.reported === true)
+      (operation.type === ScribeLogCore.Ruling.AddFact && operation.reported === true) ||
+      (kind === ScribeCategory.Kind.Fixed &&
+        item.origin === ScribeLogCore.Origin.Story &&
+        !book.decided.has(id) &&
+        keys.some((key) => {
+          return [...(book.inForce.get(key) ?? [])].some((holder) => {
+            return (
+              !book.decided.has(holder.id) &&
+              ScribeReplay.decisionField(book, holder) === ScribeReplay.decisionField(book, fact)
+            );
+          });
+        }))
     ) {
       fact.status = ScribeReplay.Status.Reported;
       ScribeReplay.keep(book, fact);
@@ -1225,7 +1237,7 @@ export const ScribeReplay = Object.freeze({
    * @param {ReadonlyMap<string, string> | null} [fingerprints]
    * @param {ReadonlyMap<string, object> | null} [edits]
    * @param {Array<object> | null} [sources]
-   * @param {ReadonlyMap<string, object> | readonly object[] | null} [messages]
+   * @param {readonly object[] | null} [messages]
    * @returns {Readonly<{revision: number, subjects: readonly object[], facts: readonly object[], scenes: readonly object[], nights: readonly object[], threads: readonly object[], conflicts: readonly object[], lookAlikes: readonly object[], stale: readonly object[], refinements: readonly object[], aliases: readonly object[], questions: readonly object[], unaliased: readonly object[], distinct: readonly object[], contradictions: readonly object[], inheritedForms?: Readonly<Record<string, string>>}>}
    * @throws {TypeError}
    */
@@ -1290,6 +1302,9 @@ export const ScribeReplay = Object.freeze({
       }
     }
     const decided = new Set(edits.keys());
+    const playerMessageIds = new Set(
+      (messages ?? []).filter((message) => message.role === TurnRole.User).map((message) => message.id),
+    );
     const book = {
       decided,
       edits,
@@ -1509,6 +1524,18 @@ export const ScribeReplay = Object.freeze({
         }
         if (position !== undefined) {
           counted.push({ operation, position, ruled, sequence: entry.sequence, index, origin: entry.origin });
+          if (
+            entry.origin === ScribeLogCore.Origin.Story &&
+            [types.Fact, types.Change, types.Refine].includes(operation.type) &&
+            playerMessageIds.has(operation.cite) &&
+            ScribeLogCore.categoryKind(operation.category) === ScribeCategory.Kind.Fixed
+          ) {
+            const stated = operation.becomes ?? operation.fact;
+            decided.add(stated);
+            if (!decisionSequences.has(stated)) {
+              decisionSequences.set(stated, entry.sequence);
+            }
+          }
         }
       }
     }

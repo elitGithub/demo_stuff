@@ -4681,8 +4681,8 @@ describe('Decided AddFact and the latest decision in a slot', () => {
     assert.equal(kept.winner !== null, true);
 
     const disputed = buildCastLog().log;
-    addStoryFact(disputed, { category: 'build', text: dragonScales });
-    addStoryFact(disputed, { category: 'build', text: 'In dragon form she is covered in red scales' });
+    rule(disputed, { ...decidedBuild, decided: undefined, text: dragonScales });
+    rule(disputed, { ...decidedBuild, decided: undefined, text: 'In dragon form she is covered in red scales' });
     rule(disputed, { ...buildPin, text: 'In dragon form she is covered in red scales' });
     rule(disputed, { ...decidedBuild, text: 'slim' });
     assert.equal(factNamed(ScribeReplay.run(disputed, storyOrder), dragonScales).status, ScribeReplay.Status.Disputed);
@@ -5577,6 +5577,539 @@ describe('Card filing into the book', () => {
     assert.equal(CharacterCard.fromObject(card.toObject()).age, '?');
     assert.equal(CharacterCard.requestValue(' ? '), CharacterCard.UnknownLabel);
     assert.equal(CharacterCard.requestValue('?!'), '?!');
+  });
+});
+
+describe('Player-stated changes and model-written fixed values', () => {
+  const Witnessed = 'witnessed';
+  const Claimed = 'claimed';
+  const { InForce, Reported, Replaced, Ended } = ScribeReplay.Status;
+  const turns = Object.freeze([
+    { id: 'u1', seq: 1, role: TurnRole.User, mode: TurnMode.Normal, rawText: 'Her hair is dyed black.', sceneNumber: 1, beats: [] },
+    { id: 'a1', seq: 2, role: TurnRole.Assistant, mode: TurnMode.Normal, rawText: 'Ilse smiles.', sceneNumber: 1, beats: [] },
+    { id: 'n1', seq: 3, role: TurnRole.User, mode: TurnMode.Narrator, rawText: 'Her hair turns white.', sceneNumber: 1, beats: [] },
+  ]);
+  const intake = ScribeIntakeAdapter.fromTurns(turns, { playerName: 'Rowan' });
+  const order = turns.map((turn) => ({ id: turn.id, position: turn.seq }));
+  const fingerprints = new Map(intake.messages.map((message) => [message.id, message.fingerprint]));
+  const cardHair = Object.freeze({
+    type: ScribeLogCore.Ruling.AddFact,
+    subject: 'S1',
+    category: 'hair',
+    target: null,
+    text: 'red',
+    hidden: false,
+    cite: null,
+    position: 0,
+    decided: true,
+  });
+
+  /**
+   * @param {object} log
+   * @returns {object}
+   * @throws {TypeError}
+   */
+  const replay = (log) => ScribeReplay.run(log, order, null, fingerprints, null, null, intake.messages);
+
+  /**
+   * @returns {object}
+   * @throws {Error}
+   */
+  const buildCastLog = () => {
+    const log = ScribeLogCore.create();
+    let state = ScribeReplay.run(log, []);
+    for (const name of ['Ilse Marrow', 'Garrick Fenn']) {
+      ScribeLogCore.syncCharacterSubject(log, state, {
+        subjectId: null,
+        name,
+        aliases: [],
+        kind: ScribeCategory.SubjectKinds.Character,
+      });
+      state = ScribeReplay.run(log, []);
+    }
+    return log;
+  };
+
+  /**
+   * @param {object} log
+   * @param {object} ruling
+   * @returns {object}
+   * @throws {Error}
+   */
+  const rule = (log, ruling) => {
+    ScribeLogCore.rule(log, replay(log), ruling);
+    return replay(log);
+  };
+
+  /**
+   * @param {object} log
+   * @param {string} cite
+   * @param {string | null} attribution
+   * @param {Record<string, unknown>} fields
+   * @returns {void}
+   */
+  const addStory = (log, cite, attribution, fields) => {
+    const position = turns.find((turn) => turn.id === cite).seq;
+    log.entries.push({
+      sequence: log.nextSequence,
+      kind: ScribeLogCore.Kind.Update,
+      origin: ScribeLogCore.Origin.Story,
+      messageIds: [cite],
+      operations: [
+        {
+          type: ScribeAnswer.Type.Fact,
+          fact: ScribeLogCore.nextFactId(log),
+          subject: 'S1',
+          label: 'Ilse Marrow',
+          target: null,
+          targetText: null,
+          other: null,
+          cite,
+          position,
+          hidden: false,
+          ...(attribution === null
+            ? {}
+            : {
+                evidence: {
+                  messageId: cite,
+                  messageNumber: position,
+                  fingerprint: fingerprints.get(cite),
+                  attribution,
+                  speaker: 'Rowan',
+                },
+              }),
+          ...fields,
+        },
+      ],
+      withdrawn: false,
+    });
+    log.read[cite] = log.nextSequence;
+    log.nextSequence += 1;
+    log.revision += 1;
+  };
+
+  /**
+   * @param {object} state
+   * @param {string} category
+   * @param {string} [subject]
+   * @returns {Record<string, string>}
+   */
+  const statuses = (state, category, subject = 'S1') => {
+    return Object.fromEntries(
+      state.facts.filter((fact) => fact.subject === subject && fact.category === category).map((fact) => [fact.text, fact.status]),
+    );
+  };
+
+  /**
+   * @param {object} state
+   * @param {string} text
+   * @returns {string}
+   */
+  const idOf = (state, text) => state.facts.filter((fact) => fact.text === text).at(-1).id;
+
+  /**
+   * @param {object} log
+   * @param {string} text
+   * @returns {void}
+   * @throws {Error}
+   */
+  const editFact = (log, text) => {
+    const state = replay(log);
+    const fact = state.facts.find((item) => item.text === text);
+    ScribeLogCore.rule(log, state, {
+      type: ScribeLogCore.Ruling.EditFact,
+      fact: fact.id,
+      text: 'jet black',
+      expected: ScribeLogCore.editExpected(fact),
+    });
+  };
+
+  it('files a player-stated witnessed fixed value as the newest decision and reports the card value', () => {
+    const log = buildCastLog();
+    rule(log, cardHair);
+    addStory(log, 'u1', Witnessed, { category: 'hair', text: 'black' });
+
+    assert.deepEqual(statuses(replay(log), 'hair'), { red: Reported, black: InForce });
+
+    const narrated = buildCastLog();
+    rule(narrated, cardHair);
+    addStory(narrated, 'n1', Witnessed, { category: 'hair', text: 'white' });
+    assert.deepEqual(statuses(replay(narrated), 'hair'), { red: Reported, white: InForce });
+
+    const undecided = buildCastLog();
+    addStory(undecided, 'a1', Witnessed, { category: 'hair', text: 'red' });
+    addStory(undecided, 'u1', Witnessed, { category: 'hair', text: 'black' });
+    assert.deepEqual(statuses(replay(undecided), 'hair'), { red: Reported, black: InForce });
+  });
+
+  it('files a player-stated Change of the card value as the newest decision', () => {
+    const log = buildCastLog();
+    const state = rule(log, cardHair);
+    addStory(log, 'u1', Witnessed, {
+      type: ScribeAnswer.Type.Change,
+      fact: idOf(state, 'red'),
+      becomes: ScribeLogCore.nextFactId(log),
+      category: 'hair',
+      text: 'black',
+    });
+
+    assert.deepEqual(statuses(replay(log), 'hair'), { red: Reported, black: InForce });
+  });
+
+  it('settles a player-stated value against a later card save, an edit and a Pin by the log entry of each', () => {
+    const later = buildCastLog();
+    rule(later, cardHair);
+    addStory(later, 'u1', Witnessed, { category: 'hair', text: 'black' });
+    rule(later, { ...cardHair, text: 'auburn' });
+    assert.deepEqual(statuses(replay(later), 'hair'), { red: Reported, black: Reported, auburn: InForce });
+
+    const edited = buildCastLog();
+    rule(edited, cardHair);
+    addStory(edited, 'u1', Witnessed, { category: 'hair', text: 'black' });
+    editFact(edited, 'black');
+    assert.deepEqual(statuses(replay(edited), 'hair'), { red: Reported, 'jet black': InForce });
+
+    const pinned = buildCastLog();
+    rule(pinned, cardHair);
+    addStory(pinned, 'u1', Witnessed, { category: 'hair', text: 'black' });
+    const pin = { type: ScribeLogCore.Ruling.Pin, subject: 'S1', category: 'hair', target: null, hidden: false };
+    assert.deepEqual(statuses(rule(pinned, { ...pin, text: 'red' }), 'hair'), { red: InForce, black: Reported });
+    assert.deepEqual(statuses(rule(pinned, { ...pin, text: 'black' }), 'hair'), { red: Reported, black: InForce });
+  });
+
+  it('decides a fixed value from a player turn whatever its attribution, and keeps a character reply Reported', () => {
+    const eyes = buildCastLog();
+    rule(eyes, { ...cardHair, category: 'eyes', text: 'green' });
+    addStory(eyes, 'u1', Claimed, { category: 'eyes', text: 'blue' });
+    assert.deepEqual(statuses(replay(eyes), 'eyes'), { green: Reported, blue: InForce });
+
+    const bare = buildCastLog();
+    rule(bare, cardHair);
+    addStory(bare, 'u1', null, { category: 'hair', text: 'black' });
+    assert.deepEqual(statuses(replay(bare), 'hair'), { red: Reported, black: InForce });
+
+    const reply = buildCastLog();
+    rule(reply, cardHair);
+    addStory(reply, 'a1', Witnessed, { category: 'hair', text: 'blonde' });
+    assert.deepEqual(statuses(replay(reply), 'hair'), { red: InForce, blonde: Reported });
+  });
+
+  it('reports the second model-written value of a fixed attribute and enters the first', () => {
+    const log = buildCastLog();
+    addStory(log, 'a1', Witnessed, { category: 'hair', text: 'red' });
+    addStory(log, 'a1', Witnessed, { category: 'hair', text: 'blonde' });
+    addStory(log, 'a1', null, { category: 'hair', text: 'black' });
+    addStory(log, 'a1', Witnessed, { category: 'eyes', text: 'green' });
+    addStory(log, 'a1', Witnessed, { subject: 'S2', label: 'Garrick Fenn', category: 'hair', text: 'grey' });
+    const state = replay(log);
+
+    assert.deepEqual(statuses(state, 'hair'), { red: InForce, blonde: Reported, black: Reported });
+    assert.deepEqual(statuses(state, 'eyes'), { green: InForce });
+    assert.deepEqual(statuses(state, 'hair', 'S2'), { grey: InForce });
+  });
+
+  it('lets a fixed value enter again after the first one ended or was refined by the story', () => {
+    const log = buildCastLog();
+    addStory(log, 'a1', Witnessed, { category: 'eyes', text: 'green' });
+    const state = replay(log);
+    addStory(log, 'a1', Witnessed, { type: ScribeAnswer.Type.End, fact: idOf(state, 'green'), reason: 'changed' });
+    addStory(log, 'a1', Witnessed, { category: 'eyes', text: 'grey' });
+    assert.deepEqual(statuses(replay(log), 'eyes'), { green: Ended, grey: InForce });
+
+    const refined = buildCastLog();
+    addStory(refined, 'a1', Witnessed, { category: 'hair', text: 'red' });
+    addStory(refined, 'a1', Witnessed, {
+      type: ScribeAnswer.Type.Refine,
+      fact: idOf(replay(refined), 'red'),
+      becomes: ScribeLogCore.nextFactId(refined),
+      category: 'hair',
+      text: 'deep red',
+    });
+    addStory(refined, 'a1', Witnessed, {
+      type: ScribeAnswer.Type.Change,
+      fact: idOf(replay(refined), 'deep red'),
+      becomes: ScribeLogCore.nextFactId(refined),
+      category: 'hair',
+      text: 'blonde',
+    });
+    assert.deepEqual(statuses(replay(refined), 'hair'), { red: Replaced, 'deep red': Replaced, blonde: InForce });
+  });
+
+  it('reports a model Change or Refine of a player-stated value and keeps the player value in force', () => {
+    const log = buildCastLog();
+    rule(log, cardHair);
+    addStory(log, 'u1', Witnessed, { category: 'hair', text: 'black' });
+    const black = idOf(replay(log), 'black');
+    addStory(log, 'a1', Witnessed, {
+      type: ScribeAnswer.Type.Change,
+      fact: black,
+      becomes: ScribeLogCore.nextFactId(log),
+      category: 'hair',
+      text: 'blonde',
+    });
+    addStory(log, 'a1', Witnessed, {
+      type: ScribeAnswer.Type.Refine,
+      fact: black,
+      becomes: ScribeLogCore.nextFactId(log),
+      category: 'hair',
+      text: 'jet black',
+    });
+
+    assert.deepEqual(statuses(replay(log), 'hair'), { red: Reported, black: InForce, blonde: Reported, 'jet black': Reported });
+  });
+
+  it('keeps forms apart when a player states or a model writes a build', () => {
+    const plain = buildCastLog();
+    rule(plain, { ...cardHair, category: 'build', text: 'slim' });
+    addStory(plain, 'u1', Witnessed, { category: 'build', text: 'tall and stocky' });
+    assert.deepEqual(statuses(replay(plain), 'build'), { slim: Reported, 'tall and stocky': InForce });
+
+    const dragon = buildCastLog();
+    rule(dragon, { ...cardHair, category: 'build', text: 'slim' });
+    addStory(dragon, 'u1', Witnessed, { category: 'build', text: 'In dragon form she is covered in black scales' });
+    assert.deepEqual(statuses(replay(dragon), 'build'), {
+      slim: InForce,
+      'In dragon form she is covered in black scales': InForce,
+    });
+
+    const sameForm = buildCastLog();
+    rule(sameForm, { ...cardHair, category: 'build', text: 'In dragon form she is huge' });
+    addStory(sameForm, 'u1', Witnessed, { category: 'build', text: 'In dragon form she is tiny' });
+    addStory(sameForm, 'n1', Witnessed, { category: 'build', text: 'In human form she is slim' });
+    assert.deepEqual(statuses(replay(sameForm), 'build'), {
+      'In dragon form she is huge': Reported,
+      'In dragon form she is tiny': InForce,
+      'In human form she is slim': InForce,
+    });
+
+    const model = buildCastLog();
+    addStory(model, 'a1', Witnessed, { category: 'build', text: 'In dragon form she is huge' });
+    addStory(model, 'a1', Witnessed, { category: 'build', text: 'In human form she is slim' });
+    addStory(model, 'a1', Witnessed, { category: 'build', text: 'In dragon form she is tiny' });
+    assert.deepEqual(statuses(replay(model), 'build'), {
+      'In dragon form she is huge': InForce,
+      'In human form she is slim': InForce,
+      'In dragon form she is tiny': Reported,
+    });
+  });
+
+  it('lets model-written and player-stated moving values enter in force without locking the slot', () => {
+    const moves = buildCastLog();
+    addStory(moves, 'a1', Witnessed, { category: 'location', text: 'the harbor' });
+    addStory(moves, 'a1', Witnessed, { category: 'location', text: 'the tower' });
+    assert.deepEqual(statuses(replay(moves), 'location'), { 'the harbor': InForce, 'the tower': InForce });
+    addStory(moves, 'a1', Witnessed, {
+      type: ScribeAnswer.Type.Change,
+      fact: idOf(replay(moves), 'the harbor'),
+      becomes: ScribeLogCore.nextFactId(moves),
+      category: 'location',
+      text: 'the market',
+    });
+    assert.deepEqual(statuses(replay(moves), 'location'), {
+      'the harbor': Replaced,
+      'the tower': InForce,
+      'the market': InForce,
+    });
+
+    const stated = buildCastLog();
+    addStory(stated, 'a1', Witnessed, { category: 'role', text: 'cook' });
+    addStory(stated, 'u1', Witnessed, { category: 'role', text: 'guard' });
+    assert.deepEqual(statuses(replay(stated), 'role'), { cook: InForce, guard: InForce });
+    addStory(stated, 'a1', Witnessed, { category: 'role', text: 'captain' });
+    assert.deepEqual(statuses(replay(stated), 'role'), { cook: InForce, guard: InForce, captain: InForce });
+
+    const player = buildCastLog();
+    addStory(player, 'u1', null, { category: 'location', text: 'the harbor' });
+    addStory(player, 'a1', null, { category: 'location', text: 'the tower' });
+    assert.deepEqual(statuses(replay(player), 'location'), { 'the harbor': InForce, 'the tower': InForce });
+  });
+
+  it('files "you are now called Bubba" as an alias only and keeps the subject label', () => {
+    const log = buildCastLog();
+    rule(log, cardHair);
+    log.entries.push({
+      sequence: log.nextSequence,
+      kind: ScribeLogCore.Kind.Update,
+      origin: ScribeLogCore.Origin.Story,
+      messageIds: ['u1'],
+      operations: [
+        {
+          type: ScribeAnswer.Type.Alias,
+          subject: 'S1',
+          name: 'Bubba',
+          cite: 'u1',
+          position: 1,
+          other: null,
+          evidence: {
+            messageId: 'u1',
+            messageNumber: 1,
+            fingerprint: fingerprints.get('u1'),
+            attribution: Witnessed,
+            speaker: 'Rowan',
+          },
+        },
+      ],
+      withdrawn: false,
+    });
+    log.read.u1 = log.nextSequence;
+    log.nextSequence += 1;
+    log.revision += 1;
+    const state = replay(log);
+    const subject = state.subjects.find((item) => item.id === 'S1');
+
+    assert.equal(subject.label, 'Ilse Marrow');
+    assert.deepEqual(subject.aka, ['Bubba']);
+    assert.equal(state.facts.some((fact) => fact.text === 'Bubba'), false);
+    assert.deepEqual(statuses(state, 'hair'), { red: InForce });
+  });
+
+  it('restores the card value when the player turn is withdrawn and replays the same every time', () => {
+    const log = buildCastLog();
+    rule(log, cardHair);
+    addStory(log, 'u1', Witnessed, { category: 'hair', text: 'black' });
+    assert.deepEqual(statuses(replay(log), 'hair'), { red: Reported, black: InForce });
+    assert.deepEqual(statuses(replay(JSON.parse(JSON.stringify(log))), 'hair'), { red: Reported, black: InForce });
+
+    ScribeLogCore.withdraw(log, 'u1');
+    assert.deepEqual(statuses(replay(log), 'hair'), { red: InForce });
+    assert.deepEqual(replay(log).facts, replay(JSON.parse(JSON.stringify(log))).facts);
+  });
+
+  it('decides no player statement when the replay is given no messages', () => {
+    const log = buildCastLog();
+    rule(log, cardHair);
+    addStory(log, 'u1', Witnessed, { category: 'hair', text: 'black' });
+
+    assert.deepEqual(statuses(ScribeReplay.run(log, order, null, fingerprints), 'hair'), { red: InForce, black: Reported });
+    assert.deepEqual(statuses(ScribeReplay.run(log, order, null, fingerprints, null, null, []), 'hair'), {
+      red: InForce,
+      black: Reported,
+    });
+  });
+
+  it('decides a player-stated value on the subject that holds it through a merge and a split', () => {
+    const merged = buildCastLog();
+    rule(merged, cardHair);
+    addStory(merged, 'u1', Witnessed, { subject: 'S2', label: 'Garrick Fenn', category: 'hair', text: 'black' });
+    assert.deepEqual(statuses(replay(merged), 'hair'), { red: InForce });
+    assert.deepEqual(statuses(replay(merged), 'hair', 'S2'), { black: InForce });
+    rule(merged, { type: ScribeLogCore.Ruling.Merge, from: 'S2', into: 'S1' });
+    assert.deepEqual(statuses(replay(merged), 'hair'), { red: Reported, black: InForce });
+
+    const cardLast = buildCastLog();
+    addStory(cardLast, 'u1', Witnessed, { subject: 'S2', label: 'Garrick Fenn', category: 'hair', text: 'black' });
+    rule(cardLast, cardHair);
+    rule(cardLast, { type: ScribeLogCore.Ruling.Merge, from: 'S2', into: 'S1' });
+    assert.deepEqual(statuses(replay(cardLast), 'hair'), { red: InForce, black: Reported });
+
+    const split = buildCastLog();
+    rule(split, cardHair);
+    addStory(split, 'u1', Witnessed, { category: 'hair', text: 'black' });
+    rule(split, {
+      type: ScribeLogCore.Ruling.Split,
+      subject: 'S1',
+      label: 'Ilse Shade',
+      kind: ScribeCategory.SubjectKinds.Character,
+      facts: [idOf(replay(split), 'black')],
+    });
+    const shade = replay(split).subjects.find((subject) => subject.label === 'Ilse Shade');
+    assert.deepEqual(statuses(replay(split), 'hair'), { red: InForce });
+    assert.deepEqual(statuses(replay(split), 'hair', shade.id), { black: InForce });
+  });
+
+  it('shows only the player-stated value in the knowledge packet of the character it concerns', () => {
+    const { store, campaign, rowan, mara } = createSeededCampaign();
+    try {
+      const log = ScribeLogCore.create();
+      let state = ScribeReplay.run(log, []);
+      for (const character of [rowan, mara]) {
+        ScribeLogCore.syncCharacterSubject(log, state, {
+          subjectId: character.scribeSubjectId,
+          name: character.name,
+          aliases: character.aliases,
+        });
+        state = ScribeReplay.run(log, []);
+      }
+      ScribeLogCore.rule(log, state, { ...cardHair, subject: mara.scribeSubjectId });
+      store.saveScribeBook(campaign.id, { bookJson: JSON.stringify(log), lastTurnSeq: 0, dirty: false });
+      const witnessIds = [rowan.id, mara.id];
+      const pair = store.commitTurnPair({
+        campaignId: campaign.id,
+        userTurn: { mode: TurnMode.Normal, rawText: 'Mara has dyed her hair black.', sceneNumber: 1, witnessIds },
+        userBeat: {
+          speakerType: SpeakerType.Player,
+          characterId: rowan.id,
+          speakerName: rowan.name,
+          text: 'Mara has dyed her hair black.',
+          witnessIds,
+        },
+        assistantTurn: { mode: TurnMode.Normal, rawText: 'Mara smiles.', sceneNumber: 1, witnessIds },
+        assistantBeats: [
+          {
+            speakerType: SpeakerType.Character,
+            characterId: mara.id,
+            speakerName: mara.name,
+            text: 'Do you like it?',
+            witnessIds,
+          },
+        ],
+        nextSceneState: campaign.sceneState,
+      });
+      const scribeService = new ScribeService({ store });
+      const loaded = scribeService.loadState(campaign.id);
+      const userTurn = pair.userTurn;
+      const message = loaded.messages.find((item) => item.id === userTurn.id);
+      assert.equal(message.role, TurnRole.User);
+      log.entries.push({
+        sequence: log.nextSequence,
+        kind: ScribeLogCore.Kind.Update,
+        origin: ScribeLogCore.Origin.Story,
+        messageIds: [userTurn.id],
+        operations: [
+          {
+            type: ScribeAnswer.Type.Fact,
+            fact: ScribeLogCore.nextFactId(log),
+            subject: mara.scribeSubjectId,
+            label: mara.name,
+            category: 'hair',
+            target: null,
+            targetText: null,
+            other: null,
+            text: 'black',
+            cite: userTurn.id,
+            position: userTurn.seq,
+            hidden: false,
+            evidence: {
+              messageId: userTurn.id,
+              messageNumber: userTurn.seq,
+              fingerprint: message.fingerprint,
+              attribution: Witnessed,
+              speaker: rowan.name,
+            },
+          },
+        ],
+        withdrawn: false,
+      });
+      log.read[userTurn.id] = log.nextSequence;
+      log.nextSequence += 1;
+      log.revision += 1;
+      store.saveScribeBook(campaign.id, { bookJson: JSON.stringify(log), lastTurnSeq: 1, dirty: false });
+
+      const reloaded = scribeService.loadState(campaign.id);
+      const packet = scribeService.characterKnowledgePacket({
+        state: reloaded.state,
+        character: mara,
+        presentCharacters: [rowan, mara],
+        turnsById: new Map(reloaded.turns.map((turn) => [turn.id, turn])),
+      });
+      assert.deepEqual(
+        packet.knownFacts.filter((fact) => fact.category === 'hair').map((fact) => fact.text),
+        ['black'],
+      );
+      assert.deepEqual(statuses(reloaded.state, 'hair', mara.scribeSubjectId), { red: Reported, black: InForce });
+    } finally {
+      store.close();
+    }
   });
 });
 

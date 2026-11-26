@@ -257,8 +257,8 @@ export class WorldsApp {
     this.#composerBar = new ComposerBar({
       container: composerContainer,
       documentRef: this.#documentRef,
-      onSend: async ({ text, mode, oocNudge }) => {
-        await this.#executeSseTurn({ text, mode, oocNudge, regenerating: false });
+      onSend: async ({ text, mode, oocNudge, narration }) => {
+        await this.#executeSseTurn({ text, mode, oocNudge, narration, regenerating: false });
       },
       onStop: () => {
         if (this.#activeTurnController !== null && !this.#activeTurnController.signal.aborted) {
@@ -1014,10 +1014,10 @@ export class WorldsApp {
   }
 
   /**
-   * @param {{text?: string, mode?: 'normal' | 'narrator' | 'encounter', oocNudge?: string | null, regenerating?: boolean}} options
+   * @param {{text?: string, mode?: 'normal' | 'narrator' | 'encounter', oocNudge?: string | null, narration?: string | null, regenerating?: boolean}} options
    * @returns {Promise<void>}
    */
-  async #executeSseTurn({ text = '', mode = 'normal', oocNudge = null, regenerating = false }) {
+  async #executeSseTurn({ text = '', mode = 'normal', oocNudge = null, narration = null, regenerating = false }) {
     const campaign = this.#getActiveCampaign();
     if (campaign === null || this.#activeTurnController !== null) {
       return;
@@ -1034,10 +1034,11 @@ export class WorldsApp {
     const playerCharacter = campaign.playerCharacterId
       ? this.#activeCharacters.find((character) => character.id === campaign.playerCharacterId && !character.archived) ?? null
       : null;
-    const isNarratorMode = mode === 'narrator' || /^[\s*_]*narrator:\s*/i.test(text);
-    const previewUserText = mode === 'encounter' && text.trim().length === 0
-      ? '*(Encounter)*'
-      : text.replace(/^[\s*_]*narrator:\s*/i, '').trim();
+    const typedPreviewText = text.replace(/^[\s*_]*narrator:\s*/i, '').trim();
+    const previewMode = /^[\s*_]*narrator:\s*/i.test(text) ? 'narrator' : mode;
+    const boxIsWholeMessage = previewMode !== 'encounter' && typedPreviewText.length === 0 && narration !== null;
+    const isNarratorMode = previewMode === 'narrator' || boxIsWholeMessage;
+    const previewUserText = boxIsWholeMessage ? narration : typedPreviewText;
 
     this.#chatView.startStreaming({
       regenerating,
@@ -1046,7 +1047,8 @@ export class WorldsApp {
       userCharacterId: isNarratorMode || playerCharacter === null ? null : playerCharacter.id,
       userSpeakerName: isNarratorMode || playerCharacter === null ? 'Narrator' : playerCharacter.name,
       oocNudge,
-      mode,
+      mode: previewMode,
+      narrationText: boxIsWholeMessage ? '' : (narration ?? ''),
     });
 
     let turnCommitted = false;
@@ -1142,7 +1144,7 @@ export class WorldsApp {
           signal: controller.signal,
         });
       } else {
-        await this.#api.runTurn(campaignId, { text, mode, oocNudge }, {
+        await this.#api.runTurn(campaignId, { text, mode, oocNudge, narration }, {
           onEvent,
           signal: controller.signal,
         });

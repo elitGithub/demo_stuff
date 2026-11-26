@@ -1019,7 +1019,7 @@ export class SqliteStore {
   }
 
   /**
-   * @param {{campaignId: string, userTurn: Record<string, unknown>, userBeat: Record<string, unknown>, assistantTurn: Record<string, unknown>, assistantBeats: Array<Record<string, unknown>>, nextSceneState: Record<string, unknown>, spendIds?: Array<string>}} payload
+   * @param {{campaignId: string, userTurn: Record<string, unknown>, userBeat: Record<string, unknown>, userExtraBeats?: Array<Record<string, unknown>>, assistantTurn: Record<string, unknown>, assistantBeats: Array<Record<string, unknown>>, nextSceneState: Record<string, unknown>, spendIds?: Array<string>}} payload
    * @returns {{userTurn: object, assistantTurn: object}}
    * @throws {Error}
    */
@@ -1027,6 +1027,7 @@ export class SqliteStore {
     campaignId,
     userTurn,
     userBeat,
+    userExtraBeats = [],
     assistantTurn,
     assistantBeats,
     nextSceneState,
@@ -1044,6 +1045,9 @@ export class SqliteStore {
     }
     if (!Array.isArray(assistantBeats) || assistantBeats.length === 0) {
       throw new RangeError('assistantBeats must be a non-empty array.');
+    }
+    if (!Array.isArray(userExtraBeats)) {
+      throw new TypeError('userExtraBeats must be an array.');
     }
 
     const normalizedNextSceneState = this.#normalizeSceneState(nextSceneState, null);
@@ -1080,50 +1084,15 @@ export class SqliteStore {
       : this.#validateStringArray(userBeat.witnessIds, 'userBeat.witnessIds');
     const userBeatMindPacket = userBeat.mindPacket === undefined ? null : userBeat.mindPacket;
 
-    const assistantMode = assistantTurn.mode === undefined ? userTurn.mode : assistantTurn.mode;
-    TurnMode.label(assistantMode);
-    if (typeof assistantTurn.rawText !== 'string') {
-      throw new TypeError('assistantTurn.rawText must be a string.');
-    }
-    const assistantSceneNumber = assistantTurn.sceneNumber === undefined
-      ? normalizedNextSceneState.sceneNumber
-      : assistantTurn.sceneNumber;
-    if (!Number.isInteger(assistantSceneNumber) || assistantSceneNumber < 1) {
-      throw new RangeError('assistantTurn.sceneNumber must be a positive integer.');
-    }
-    const assistantWitnessIds = assistantTurn.witnessIds === undefined
-      ? []
-      : this.#validateStringArray(assistantTurn.witnessIds, 'assistantTurn.witnessIds');
-    const directorPlan = assistantTurn.directorPlan === undefined ? null : assistantTurn.directorPlan;
-    const truncated = assistantTurn.truncated === undefined ? false : assistantTurn.truncated;
-    if (typeof truncated !== 'boolean') {
-      throw new TypeError('assistantTurn.truncated must be a boolean.');
-    }
+    const validatedAssistant = this.#validateAssistantTurn(
+      assistantTurn,
+      assistantBeats,
+      userTurn.mode,
+      normalizedNextSceneState.sceneNumber,
+    );
 
-    const validatedAssistantBeats = assistantBeats.map((beat) => {
-      if (beat === null || typeof beat !== 'object') {
-        throw new TypeError('Each assistant beat must be an object.');
-      }
-      SpeakerType.label(beat.speakerType);
-      if (beat.characterId !== undefined && beat.characterId !== null) {
-        this.#validateNonEmptyString(beat.characterId, 'beat.characterId');
-      }
-      this.#validateNonEmptyString(beat.speakerName, 'beat.speakerName');
-      if (typeof beat.text !== 'string') {
-        throw new TypeError('beat.text must be a string.');
-      }
-      const beatWitnessIds = beat.witnessIds === undefined
-        ? assistantWitnessIds
-        : this.#validateStringArray(beat.witnessIds, 'beat.witnessIds');
-      const beatMindPacket = beat.mindPacket === undefined ? null : beat.mindPacket;
-      return {
-        speakerType: beat.speakerType,
-        characterId: beat.characterId === undefined ? null : beat.characterId,
-        speakerName: beat.speakerName.trim(),
-        text: beat.text,
-        witnessIds: beatWitnessIds,
-        mindPacket: beatMindPacket,
-      };
+    const validatedUserExtraBeats = userExtraBeats.map((beat) => {
+      return this.#validateTurnBeat(beat, 'user extra', userWitnessIds);
     });
 
     return this.#runTransaction(() => {
@@ -1199,61 +1168,37 @@ export class SqliteStore {
         userBeatMindPacket === null ? null : JSON.stringify(userBeatMindPacket),
       );
 
-      insertTurnStmt.run(
-        assistantTurnId,
-        campaignId,
-        assistantSeq,
-        TurnRole.Assistant,
-        assistantMode,
-        assistantTurn.rawText,
-        null,
-        assistantSceneNumber,
-        JSON.stringify(assistantWitnessIds),
-        beforeJson,
-        afterJson,
-        directorPlan === null ? null : JSON.stringify(directorPlan),
-        truncated ? 1 : 0,
-        now,
-      );
-
-      for (let beatIndex = 0; beatIndex < validatedAssistantBeats.length; beatIndex += 1) {
-        const beat = validatedAssistantBeats[beatIndex];
-        if (beat.characterId !== null) {
-          const beatCharRow = checkCharCampaignStmt.get(beat.characterId);
-          if (beatCharRow !== undefined && beatCharRow.campaign_id !== campaignId) {
-            throw new RangeError(`Character does not belong to campaign: ${beat.characterId}`);
+      for (let extraIndex = 0; extraIndex < validatedUserExtraBeats.length; extraIndex += 1) {
+        const extraBeat = validatedUserExtraBeats[extraIndex];
+        if (extraBeat.characterId !== null) {
+          const extraCharRow = checkCharCampaignStmt.get(extraBeat.characterId);
+          if (extraCharRow !== undefined && extraCharRow.campaign_id !== campaignId) {
+            throw new RangeError(`Character does not belong to campaign: ${extraBeat.characterId}`);
           }
         }
         insertBeatStmt.run(
           randomUUID(),
-          assistantTurnId,
-          beatIndex + 1,
-          beat.speakerType,
-          beat.characterId,
-          beat.speakerName,
-          beat.text,
-          JSON.stringify(beat.witnessIds),
-          beat.mindPacket === null ? null : JSON.stringify(beat.mindPacket),
+          userTurnId,
+          extraIndex + 2,
+          extraBeat.speakerType,
+          extraBeat.characterId,
+          extraBeat.speakerName,
+          extraBeat.text,
+          JSON.stringify(extraBeat.witnessIds),
+          null,
         );
       }
 
-      this.#db.prepare(
-        'UPDATE campaigns SET scene_state_json = ?, updated_at = ? WHERE id = ?',
-      ).run(afterJson, now, campaignId);
-
-      if (validSpendIds.length > 0) {
-        const linkSpendStmt = this.#db.prepare(
-          `UPDATE spend_log
-           SET turn_id = ?, campaign_id = COALESCE(campaign_id, ?)
-           WHERE id = ? AND turn_id IS NULL AND (campaign_id = ? OR campaign_id IS NULL)`,
-        );
-        for (const spendId of validSpendIds) {
-          const linkResult = linkSpendStmt.run(assistantTurnId, campaignId, spendId, campaignId);
-          if (Number(linkResult.changes) !== 1) {
-            throw new RangeError(`Unable to link spend entry: ${spendId}`);
-          }
-        }
-      }
+      this.#storeAssistantTurn({
+        campaignId,
+        turnId: assistantTurnId,
+        seq: assistantSeq,
+        validated: validatedAssistant,
+        sceneBeforeJson: beforeJson,
+        sceneAfterJson: afterJson,
+        spendIds: validSpendIds,
+        now,
+      });
 
       this.#bumpChangeSeq();
 
@@ -1266,6 +1211,178 @@ export class SqliteStore {
         assistantTurn: this.#mapTurn(insertedTurns[1], beatsByTurnId.get(assistantTurnId)),
       };
     });
+  }
+
+  /**
+   * @param {{campaignId: string, userTurnId: string, assistantTurn: Record<string, unknown>, assistantBeats: Array<Record<string, unknown>>, nextSceneState: Record<string, unknown>, spendIds: Array<string>}} payload
+   * @returns {{id: string, campaignId: string, seq: number, role: string, mode: string, rawText: string, oocNudge: string | null, sceneNumber: number, witnessIds: Array<string>, sceneStateBefore: object | null, sceneStateAfter: object | null, directorPlan: object | null, truncated: boolean, createdAt: string, beats: Array<object>}}
+   * @throws {Error}
+   */
+  commitAssistantTurn({ campaignId, userTurnId, assistantTurn, assistantBeats, nextSceneState, spendIds }) {
+    this.#validateNonEmptyString(campaignId, 'campaignId');
+    this.#validateNonEmptyString(userTurnId, 'userTurnId');
+    if (assistantTurn === null || typeof assistantTurn !== 'object') {
+      throw new TypeError('assistantTurn must be an object.');
+    }
+    if (!Array.isArray(assistantBeats) || assistantBeats.length === 0) {
+      throw new RangeError('assistantBeats must be a non-empty array.');
+    }
+    const normalizedNextSceneState = this.#normalizeSceneState(nextSceneState, null);
+    const validSpendIds = this.#validateStringArray(spendIds, 'spendIds');
+    const validatedAssistant = this.#validateAssistantTurn(
+      assistantTurn,
+      assistantBeats,
+      null,
+      normalizedNextSceneState.sceneNumber,
+    );
+
+    return this.#runTransaction(() => {
+      const campaignRow = this.#db.prepare(
+        'SELECT scene_state_json FROM campaigns WHERE id = ?',
+      ).get(campaignId);
+      if (campaignRow === undefined) {
+        throw new Error(`Campaign not found: ${campaignId}`);
+      }
+      const latestRow = this.#db.prepare(
+        'SELECT * FROM turns WHERE campaign_id = ? ORDER BY seq DESC LIMIT 1',
+      ).get(campaignId);
+      if (latestRow === undefined || latestRow.id !== userTurnId || latestRow.role !== TurnRole.User) {
+        throw new Error('The latest turn is not the given user turn.');
+      }
+
+      const assistantTurnId = randomUUID();
+      this.#storeAssistantTurn({
+        campaignId,
+        turnId: assistantTurnId,
+        seq: Number(latestRow.seq) + 1,
+        validated: validatedAssistant,
+        sceneBeforeJson: campaignRow.scene_state_json,
+        sceneAfterJson: JSON.stringify(normalizedNextSceneState),
+        spendIds: validSpendIds,
+        now: new Date().toISOString(),
+      });
+
+      this.#bumpChangeSeq();
+      const insertedRow = this.#db.prepare('SELECT * FROM turns WHERE id = ?').get(assistantTurnId);
+      return this.#mapTurn(insertedRow, this.#loadBeatsForTurnIds([assistantTurnId]).get(assistantTurnId));
+    });
+  }
+
+  /**
+   * @param {Record<string, unknown>} assistantTurn
+   * @param {Array<Record<string, unknown>>} assistantBeats
+   * @param {string | null} defaultMode
+   * @param {number} defaultSceneNumber
+   * @returns {{mode: string, rawText: string, sceneNumber: number, witnessIds: Array<string>, directorPlan: unknown, truncated: boolean, beats: Array<object>}}
+   * @throws {TypeError | RangeError}
+   */
+  #validateAssistantTurn(assistantTurn, assistantBeats, defaultMode, defaultSceneNumber) {
+    const mode = assistantTurn.mode === undefined ? defaultMode : assistantTurn.mode;
+    TurnMode.label(mode);
+    if (typeof assistantTurn.rawText !== 'string') {
+      throw new TypeError('assistantTurn.rawText must be a string.');
+    }
+    const sceneNumber = assistantTurn.sceneNumber === undefined ? defaultSceneNumber : assistantTurn.sceneNumber;
+    if (!Number.isInteger(sceneNumber) || sceneNumber < 1) {
+      throw new RangeError('assistantTurn.sceneNumber must be a positive integer.');
+    }
+    const witnessIds = assistantTurn.witnessIds === undefined
+      ? []
+      : this.#validateStringArray(assistantTurn.witnessIds, 'assistantTurn.witnessIds');
+    const truncated = assistantTurn.truncated === undefined ? false : assistantTurn.truncated;
+    if (typeof truncated !== 'boolean') {
+      throw new TypeError('assistantTurn.truncated must be a boolean.');
+    }
+    return {
+      mode,
+      rawText: assistantTurn.rawText,
+      sceneNumber,
+      witnessIds,
+      directorPlan: assistantTurn.directorPlan === undefined ? null : assistantTurn.directorPlan,
+      truncated,
+      beats: assistantBeats.map((beat) => {
+        return {
+          ...this.#validateTurnBeat(beat, 'assistant', witnessIds),
+          mindPacket: beat.mindPacket === undefined ? null : beat.mindPacket,
+        };
+      }),
+    };
+  }
+
+  /**
+   * @param {{campaignId: string, turnId: string, seq: number, validated: object, sceneBeforeJson: string, sceneAfterJson: string, spendIds: Array<string>, now: string}} input
+   * @returns {void}
+   * @throws {Error}
+   */
+  #storeAssistantTurn({ campaignId, turnId, seq, validated, sceneBeforeJson, sceneAfterJson, spendIds, now }) {
+    this.#db.prepare(
+      `INSERT INTO turns (
+        id, campaign_id, seq, role, mode, raw_text, ooc_nudge, scene_number,
+        witness_ids_json, scene_state_before_json, scene_state_after_json,
+        director_plan_json, truncated, created_at
+      ) VALUES (?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?)`,
+    ).run(
+      turnId,
+      campaignId,
+      seq,
+      TurnRole.Assistant,
+      validated.mode,
+      validated.rawText,
+      null,
+      validated.sceneNumber,
+      JSON.stringify(validated.witnessIds),
+      sceneBeforeJson,
+      sceneAfterJson,
+      validated.directorPlan === null ? null : JSON.stringify(validated.directorPlan),
+      validated.truncated ? 1 : 0,
+      now,
+    );
+
+    const checkCharCampaignStmt = this.#db.prepare('SELECT campaign_id FROM characters WHERE id = ?');
+    const insertBeatStmt = this.#db.prepare(
+      `INSERT INTO beats (
+        id, turn_id, seq, speaker_type, character_id, speaker_name,
+        text, witness_ids_json, mind_packet_json
+      ) VALUES (?, ?, ?, ?, ?, ?, ?, ?, ?)`,
+    );
+    for (let beatIndex = 0; beatIndex < validated.beats.length; beatIndex += 1) {
+      const beat = validated.beats[beatIndex];
+      if (beat.characterId !== null) {
+        const beatCharRow = checkCharCampaignStmt.get(beat.characterId);
+        if (beatCharRow !== undefined && beatCharRow.campaign_id !== campaignId) {
+          throw new RangeError(`Character does not belong to campaign: ${beat.characterId}`);
+        }
+      }
+      insertBeatStmt.run(
+        randomUUID(),
+        turnId,
+        beatIndex + 1,
+        beat.speakerType,
+        beat.characterId,
+        beat.speakerName,
+        beat.text,
+        JSON.stringify(beat.witnessIds),
+        beat.mindPacket === null ? null : JSON.stringify(beat.mindPacket),
+      );
+    }
+
+    this.#db.prepare(
+      'UPDATE campaigns SET scene_state_json = ?, updated_at = ? WHERE id = ?',
+    ).run(sceneAfterJson, now, campaignId);
+
+    if (spendIds.length > 0) {
+      const linkSpendStmt = this.#db.prepare(
+        `UPDATE spend_log
+         SET turn_id = ?, campaign_id = COALESCE(campaign_id, ?)
+         WHERE id = ? AND turn_id IS NULL AND (campaign_id = ? OR campaign_id IS NULL)`,
+      );
+      for (const spendId of spendIds) {
+        const linkResult = linkSpendStmt.run(turnId, campaignId, spendId, campaignId);
+        if (Number(linkResult.changes) !== 1) {
+          throw new RangeError(`Unable to link spend entry: ${spendId}`);
+        }
+      }
+    }
   }
 
   /**
@@ -2113,6 +2230,36 @@ export class SqliteStore {
     if (typeof slug !== 'string' || !/^[a-z0-9][a-z0-9_-]{0,47}$/.test(slug)) {
       throw new RangeError(`Invalid character slug: ${String(slug)}`);
     }
+  }
+
+  /**
+   * @param {unknown} beat
+   * @param {string} owner
+   * @param {Array<string>} defaultWitnessIds
+   * @returns {{speakerType: string, characterId: string | null, speakerName: string, text: string, witnessIds: Array<string>}}
+   * @throws {TypeError | RangeError}
+   */
+  #validateTurnBeat(beat, owner, defaultWitnessIds) {
+    if (beat === null || typeof beat !== 'object') {
+      throw new TypeError(`Each ${owner} beat must be an object.`);
+    }
+    SpeakerType.label(beat.speakerType);
+    if (beat.characterId !== undefined && beat.characterId !== null) {
+      this.#validateNonEmptyString(beat.characterId, 'beat.characterId');
+    }
+    this.#validateNonEmptyString(beat.speakerName, 'beat.speakerName');
+    if (typeof beat.text !== 'string') {
+      throw new TypeError('beat.text must be a string.');
+    }
+    return {
+      speakerType: beat.speakerType,
+      characterId: beat.characterId === undefined ? null : beat.characterId,
+      speakerName: beat.speakerName.trim(),
+      text: beat.text,
+      witnessIds: beat.witnessIds === undefined
+        ? defaultWitnessIds
+        : this.#validateStringArray(beat.witnessIds, 'beat.witnessIds'),
+    };
   }
 
   /**

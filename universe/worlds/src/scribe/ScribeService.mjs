@@ -187,6 +187,21 @@ export class ScribeService {
   }
 
   /**
+   * @param {{state: object, subjectId: string, card: CharacterCard}} options
+   * @returns {Readonly<Record<string, string>>}
+   */
+  bookHints({ state, subjectId, card }) {
+    const appearance = this.bookAppearance({ state, subjectId });
+    const hints = {};
+    for (const slot of CardFiling.Slots) {
+      if (Object.hasOwn(appearance, slot.key) && appearance[slot.key] !== CardFiling.text(slot, card)) {
+        hints[slot.key] = appearance[slot.key];
+      }
+    }
+    return Object.freeze(hints);
+  }
+
+  /**
    * @param {{state: object, character: object, presentCharacters?: ReadonlyArray<object>, turnsById?: ReadonlyMap<string, object> | Record<string, object>}} options
    * @returns {Readonly<{knownFacts: readonly object[], relationships: readonly object[], visibleThreads: readonly object[], rulings: readonly object[]}>}
    * @throws {TypeError}
@@ -939,6 +954,7 @@ export class ScribeService {
       'resolutions',
       'editOrigins',
       'editedSince',
+      'inheritedForms',
     ];
     const subjectCoveredKeys = ['id', 'kind', 'label', 'aka'];
     const factCoveredKeys = ['id', 'status', 'hidden', 'told', 'widened'];
@@ -1033,13 +1049,27 @@ export class ScribeService {
     for (const thread of beforeState.threads) {
       threads.set(thread.id, thread);
     }
+    /**
+     * @param {{subject: string, category: string}} conflict
+     * @returns {string}
+     */
     const conflictKey = (conflict) => JSON.stringify([conflict.subject, conflict.category]);
     for (const conflict of beforeState.conflicts) {
       conflicts.set(conflictKey(conflict), conflict);
     }
 
+    /**
+     * @param {{hidden: boolean}} fact
+     * @returns {string}
+     */
     const mark = (fact) => (fact.hidden ? 'Hidden' : 'Not hidden');
     const named = new Set();
+    /**
+     * @param {string} subjectId
+     * @param {string} aliasName
+     * @returns {string}
+     * @throws {TypeError}
+     */
     const nameKey = (subjectId, aliasName) => `${subjectId}|${ScribeText.normaliseName(aliasName)}`;
 
     for (const subject of afterState.subjects) {

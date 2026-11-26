@@ -1,4 +1,4 @@
-# Handoff 2026-11-26: Worlds reply tuning, project 1 (Task 2 committed, fix round 2 open)
+# Handoff 2026-11-26: Worlds reply tuning, project 1 (Task 2 commit-ready, Tasks 3-8 next)
 
 For the next agent session on another PC. That session will not have this PC's agent memory
 (`~/.claude/projects/-var-www-demo-stuff/memory/`) or the loop files (`~/.claude/projects/-var-www-demo-stuff/
@@ -12,7 +12,7 @@ sdd-snapshots/reply-tuning/`), so everything needed is in this file. Read it in 
   cards and clarify unknown values") Task 2 plus its fix round 1, this handoff and `PROMPTS-TO-CHECK.md`. The
   operator commits; agents never do. Later edits to this file (sections 1-3 and 6b) are uncommitted until the
   operator commits them.
-- **Task 2 (character card end to end, appearance filed into the book): NOT commit-ready: fix round 2 open.**
+- **Task 2 (character card end to end, appearance filed into the book): commit-ready (2026-11-26), awaiting the operator's commit; known limits below.**
   - Built by a Sonnet implementer (section 5); Opus review: 2 High, 4 Medium, 9 Low, 1 Nit, checked against the
     code (section 6).
   - Fix round 1 (section 6a, the operator's rulings included) built: all 10 test files pass (ui 56, http 36,
@@ -20,11 +20,105 @@ sdd-snapshots/reply-tuning/`), so everything needed is in this file. Read it in 
     while its scoped re-review was still running.
   - Scoped re-review of fix round 1: 3 Medium, 4 Low, 1 law hit left (section 6b). Seeder dry-run counts unchanged
     on `0691ddc`.
-  - **Fix round 2 proposed (section 6b), not dispatched.** On 2026-11-26 the operator said "no, file everything in
-    the handoff" instead of a go: the next session asks the operator for the go before dispatching.
-- **Open question to the operator** (asked 2026-11-26, after "Again with "broken code against tests" loop?" and
-  "Did it fix, or is it doing loops against code it breaks intentionally?"; not answered). Proposed way of working
-  for fix round 2 and Tasks 3-8:
+  - **Fix round 2 (section 6b): operator's go on all six items, 2026-11-26 (second PC).** Dispatched to a Sonnet
+    implementer; brief at `~/.claude/projects/-var-www-demo-stuff/sdd-snapshots/reply-tuning/task2-fix2-brief.md` on
+    that PC (content: section 6b plus the way of working below).
+  - Fix round 2 built (plus two corrections: a winning Pin in a field with a decided value reports its slot-mates
+    instead of disputing them, and reuses a non-Removed fact of its value instead of copying it). Scoped Opus
+    re-review: 1 High, 2 Medium, 5 Low, 1 Nit, checked against the code. All 10 test files pass (ui 58, http 36,
+    catalog 54, config 14, engine 24, scribe 108, store 30, openrouter 49, seed 37, sync 8). Real-export check on
+    `hero_gone_latest_updated.json` (the handoff's `hero_gone_latest.json` is not on the second PC): 0 status
+    differences across 90cfe3c, HEAD and the working tree; the export has no Pins or EditFacts. Dry-run counts on that
+    file equal across the three: characters 76, subjects 93, facts 314, relations 41, claims 21, threads 44,
+    readThrough 1384, chatMessages 1384.
+  - **Fix round 3 (operator's go, 2026-11-26), dispatched:**
+    - H-A: since fix 3 one build slot holds several decision fields (forms), but a Pin still acts on the whole slot,
+      so an older Pin of one form can overrule newer card saves of another. Fix: when the slot holds a decided value,
+      a Pin acts only within its own decision field; slots without one keep today's Pin behaviour.
+    - M-B: a model Change or Refine of a decided build with a form, written without the form words, stays in force
+      beside it. Fix: the refused second value takes the decided fact's form, so it is `Reported`.
+    - M-A (ruled "Server decides"): the server sends per-field book hints computed from the saved card with the
+      filing's text rule; the card window only displays them (no live comparison while typing).
+    - L-A (ruled "Fact keeps its own"): a Pin that reuses a fact keeps that fact's own visibility (today's code; tests
+      added).
+    - Technical: tests for two surviving mutants and for the `app.mjs` half of fix 4; `'build'` magic string;
+      single-use `ScribeCategory.decisionForm` removed; one `?? null`; two dead test assignments; `decisionField`
+      docblock types; a focus assertion.
+    - Built, with technical corrections: a Pin acts per field also when its own field holds a decided value
+      elsewhere; in such slots Pins are kept per field; a build rewrite takes the old build's form when its own text
+      names none. Scoped Opus re-review of rounds 2 and 3: 1 High, 5 Low; all earlier findings fixed on their cases;
+      all 10 test files pass (scribe 127); export check and dry-run counts equal across 90cfe3c, HEAD and work.
+  - **Fix round 4 (operator's go, 2026-11-26), dispatched:**
+    - H-1: a Pin ignores the form its winner inherited, so a Pedant confirmation of a model-rewritten build makes a
+      duplicate and can report the card value or show a false Disputed (also without a card value: regression
+      against HEAD). Fix: a Pin with a winner belongs to its winner's decision field.
+    - L-2: an older Pin beaten by a newer one in the same field stays readable as `Reported` (it vanished).
+    - L-3: narrowing decided per slot, the Pins' own fields included (an older Pin of another form vanished when the
+      card build said "tall").
+    - L-1 (ruled "Every rewrite"): a build rewrite takes the old build's form whatever the old fact's status; tests.
+    - L-4, L-5: tests for four surviving mutants; docblock types.
+    - Ruled "Check it in round 4" (report only, no fix): a Pedant ruled replacement on a `Reported` fact throws
+      StaleState (same at HEAD; card saves make `Reported` facts more common).
+    - Built; all 10 test files pass (ui 58, http 37, catalog 54, config 14, engine 24, scribe 136, store 30,
+      openrouter 49, seed 37, sync 8); dry-run counts as above. StaleState trace (checked against the code): the
+      EditFact ruler refuses non-live facts (`ScribeLogCore.mjs:963`, thrown at `:1820`); `PedantService.mjs:597`
+      lets `Reported` facts into the replacement path and the catch at `:608` handles only merges; same at 90cfe3c.
+      The Pedant flags only InForce facts, so it happens when the card field changes between a finding and its
+      resolution.
+    - Scoped Opus re-review of rounds 2-4: 5 Medium, 6 Low, 1 Nit (Medium ones reproduced on work and HEAD by the
+      orchestrator); PhpStorm adds 2 hits (`ScribeReplay.mjs:1541` argument type, `tests/scribe.test.mjs:4011`
+      unused assignment). Export check and dry-run counts equal across 90cfe3c, HEAD and work.
+  - **Fix round 5 (operator's go, 2026-11-26), dispatched:**
+    - M1: a Pin whose winner was split to another subject decided on that subject (a card save on one character
+      demoted the other's value). Fix: the Pin's field takes the winner's form and the Pin's own subject.
+    - M2: a Pin whose winner was later refined into another form or attribute made a duplicate and left two values
+      in force. Fix: held facts are matched by the field of the fact they follow to.
+    - M3, M4 (ruled "Both keep form"): a Pedant confirmation of a `Reported` form-inheriting build, and a ruled
+      replacement that drops the form words, keep the build's form. Every edit of a build whose new text names no
+      form keeps the form it had (the replay cannot tell a Pedant edit from a fact-editor edit).
+    - M5 (ruled "Newest Pin wins"): Pins ignore the model's evidence attribute name (card values and edits keep the
+      per-attribute rule).
+    - StaleState (ruled "Newest decision"): a ruled replacement of a `Reported` fact skips the edit and files a Pin,
+      the newest decision; no error.
+    - Technical: a winning Pin in a decided field reuses only a live or `Reported` fact (Ended or Replaced: a copy);
+      docblock types, the PhpStorm hits, one no-op spread; tests for four surviving mutants.
+    - Built, plus orchestrator corrections: the kept form follows every edit of a chain; the replay state carries
+      `inheritedForms` only when one exists, so the Pedant keeps an inherited form too; `describeChanges` covers that
+      key (it showed "Something else in the book would change"); PhpStorm types; a test for a Pin whose value sits in
+      two forms (falls back to its own text, the round 4 rule). All 10 test files pass (scribe 153).
+    - Scoped Opus re-review of rounds 2-5: 4 Medium, 4 Low, all reproduced by the orchestrator. Books with no decided
+      value equal HEAD; export check and dry-run counts equal across 90cfe3c, HEAD and work; PhpStorm clean.
+  - **Fix round 6 (operator's go, 2026-11-26, all technical), dispatched:** held facts matched in their standing
+    fact's own subject (a model Refine to another character); a replacement text that names a form takes it; the
+    Pedant's form-keeping Pin competes with other Pins of its form (its explicit `form` gave it its own slot); made
+    copies, their edits and Pins on them placed in their Pin's form (duplicate copies in force); an edit naming a form
+    wins over a carried old scope; the edit chain follows replayed edits; tests for four surviving mutants; three
+    defensive null checks removed. Operator told: each Pin round has exposed the next edge cases (rounds 3, 4, 5: 1
+    High, 5 Medium, 4 Medium); a restructure (Pins as ordinary decisions in every slot) was offered and not chosen.
+    - Built (scribe 166). Scoped Opus re-review of rounds 2-6: 4 Medium, 2 Low, no code-law hits; fuzz violations 39
+      of 1000 (239 at HEAD), classified: 14 defects, 5 a rule gap (does a Pin act on facts of its form in another
+      slot), 20 oracle errors.
+    - **Operator stopped the Pin fix rounds (2026-11-26).** Cause: every finding since round 4 came from probes that
+      write log entries straight into the book, not from paths the app can take. Real producers: Pins and edits come
+      only from resolving a Pedant finding (`PedantService.mjs:603`, `:636`, `:667`); Worlds has no fact editor; Tell
+      files story operations only. The one finding called a real regression (round 6 M-B: a model Refine of a Pin's
+      copy) was run through the real services (in-memory SQLite, real ScribeService, PedantService, card save,
+      scripted model text; probe `orch5/realFlow.mjs` in the session scratchpad): the Scribe refuses the Refine
+      ("Reference") and the book ends with one dragon build in force. The Pedant also never checks facts of a
+      private scene (not known to everyone).
+    - Known limits, seen only on hand-built logs and not reproduced through the app (round 6 re-review): an edit of a
+      Pin's copy does not count as a decided value (M-A); a model rewrite of a copy takes no form (M-B, refused by
+      the real Scribe); a `Reported`-path replacement Pin carries the old explicit or dimension scope (M-C); a copy's
+      form comes from its Pin's text, not the Pin's field (M-D); an accepted Change or Refine keeps the old explicit
+      or dimension form when its text names another (L-A, same at HEAD); two surviving mutants (L-B). Open rule gap:
+      does a Pin act on facts of its own form that sit in another slot.
+    - Last fix: the replay state's `@returns` type lists `inheritedForms` (PhpStorm hit at `PedantService.mjs:627`).
+      Orchestrator checks: all 10 test files pass (ui 58, http 37, catalog 54, config 14, engine 24, scribe 166,
+      store 30, openrouter 49, seed 37, sync 8); dry-run 76/93/314/41/21/44/1384/1384, Frost; PhpStorm clean on
+      changed lines of every changed file.
+    - Rule from now on: a review finding counts only when it reproduces through the app's own entry points (routes
+      or the services they call, scripted model text); hand-built logs do not count.
+- **Way of working, ruled 2026-11-26 ("All three"), for fix round 2 and Tasks 3-8:**
   - (a) the plan maps every existing feature that touches the task's data, with a test case each (for the book:
     decided values, pins, build scope, strike marks, refinements, merges, splits);
   - (b) the implementer gets the review's attack list up front;

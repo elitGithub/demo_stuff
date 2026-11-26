@@ -2809,6 +2809,7 @@ describe('Exact Widen, Pin audience and audience ids through merges', () => {
 });
 
 describe('Decided AddFact and the latest decision in a slot', () => {
+  const storyOrder = Object.freeze([{ id: 'msg-1', position: 1 }]);
   const decidedHair = Object.freeze({
     type: ScribeLogCore.Ruling.AddFact,
     subject: 'S1',
@@ -2847,8 +2848,8 @@ describe('Decided AddFact and the latest decision in a slot', () => {
    * @throws {Error}
    */
   const rule = (log, ruling) => {
-    ScribeLogCore.rule(log, ScribeReplay.run(log, []), ruling);
-    return ScribeReplay.run(log, []);
+    ScribeLogCore.rule(log, ScribeReplay.run(log, storyOrder), ruling);
+    return ScribeReplay.run(log, storyOrder);
   };
 
   /**
@@ -2857,6 +2858,67 @@ describe('Decided AddFact and the latest decision in a slot', () => {
    * @returns {object}
    */
   const factNamed = (state, text) => state.facts.find((fact) => fact.text === text);
+
+  const { InForce, Reported, Removed } = ScribeReplay.Status;
+  const decidedBuild = Object.freeze({ ...decidedHair, category: 'build' });
+  const buildPin = Object.freeze({
+    type: ScribeLogCore.Ruling.Pin,
+    subject: 'S1',
+    category: 'build',
+    target: null,
+    hidden: false,
+  });
+
+  /**
+   * @param {object} state
+   * @param {string} category
+   * @returns {Record<string, string>}
+   */
+  const statusesIn = (state, category) => {
+    return Object.fromEntries(
+      state.facts.filter((fact) => fact.subject === 'S1' && fact.category === category).map((fact) => [fact.text, fact.status]),
+    );
+  };
+
+  /**
+   * @param {object} log
+   * @param {string} text
+   * @returns {object}
+   */
+  const entryOf = (log, text) => log.entries.find((entry) => entry.operations.some((operation) => operation.text === text));
+
+  /**
+   * @param {object} log
+   * @param {Record<string, unknown>} fields
+   * @returns {void}
+   */
+  const addStoryFact = (log, fields) => {
+    log.entries.push({
+      sequence: log.nextSequence,
+      kind: ScribeLogCore.Kind.Update,
+      origin: ScribeLogCore.Origin.Story,
+      messageIds: ['msg-1'],
+      operations: [
+        {
+          type: ScribeAnswer.Type.Fact,
+          fact: ScribeLogCore.nextFactId(log),
+          subject: 'S1',
+          label: 'Ilse Marrow',
+          target: null,
+          targetText: null,
+          other: null,
+          cite: 'msg-1',
+          position: 1,
+          hidden: false,
+          ...fields,
+        },
+      ],
+      withdrawn: false,
+    });
+    log.read['msg-1'] = log.nextSequence;
+    log.nextSequence += 1;
+    log.revision += 1;
+  };
 
   it('stores decided true on a fixed or moving AddFact and nothing when it is absent', () => {
     const { state } = buildCastLog();
@@ -3071,7 +3133,7 @@ describe('Decided AddFact and the latest decision in a slot', () => {
     const state = rule(log, { ...hairPin, text: 'red' });
 
     assert.equal(factNamed(state, 'red').status, ScribeReplay.Status.InForce);
-    assert.equal(factNamed(state, 'black').status, ScribeReplay.Status.Disputed);
+    assert.equal(factNamed(state, 'black').status, ScribeReplay.Status.Reported);
   });
 
   it('lets a decided value win over an older Pin of another value', () => {
@@ -3079,7 +3141,10 @@ describe('Decided AddFact and the latest decision in a slot', () => {
     rule(log, { ...hairPin, text: 'red' });
     const state = rule(log, { ...decidedHair, text: 'black' });
 
-    assert.deepEqual(hairIn(state), [['black', ScribeReplay.Status.InForce]]);
+    assert.deepEqual(hairIn(state), [
+      ['black', ScribeReplay.Status.InForce],
+      ['red', ScribeReplay.Status.Reported],
+    ]);
   });
 
   it('keeps the Pin behaviour when the slot holds no decided value', () => {
@@ -3198,7 +3263,8 @@ describe('Decided AddFact and the latest decision in a slot', () => {
       exact: true,
     });
     assert.equal(log.entries.at(-1).operations[0].exact, true);
-    state = rule(log, { ...feature, text: 'Freckles' });
+    addStoryFact(log, { category: 'feature', text: 'Freckles' });
+    state = ScribeReplay.run(log, storyOrder);
     assert.equal(factNamed(state, 'Freckles').status, ScribeReplay.Status.InForce);
     assert.equal(factNamed(state, 'freckles').status, ScribeReplay.Status.Removed);
     for (const exact of [false, 'yes', 1, null]) {
@@ -3208,6 +3274,1437 @@ describe('Decided AddFact and the latest decision in a slot', () => {
         String(exact),
       );
     }
+  });
+
+  it('keeps an older Pin build readable as Reported beside a later card build', () => {
+    const { log } = buildCastLog();
+    rule(log, { ...buildPin, text: 'slim' });
+    const state = rule(log, { ...decidedBuild, text: 'tall; slim' });
+
+    assert.deepEqual(statusesIn(state, 'build'), { 'tall; slim': InForce, slim: Reported });
+    assert.equal(factNamed(state, 'slim').made, true);
+    assert.equal(factNamed(state, 'slim').pinned, false);
+  });
+
+  it('keeps the card build in force beside an older Pin on a word-scoped build and keeps the Pin value readable', () => {
+    const { log } = buildCastLog();
+    rule(log, { ...buildPin, text: 'very tall' });
+    const state = rule(log, { ...decidedBuild, text: 'slim' });
+
+    assert.deepEqual(statusesIn(state, 'build'), { slim: InForce, 'very tall': Reported });
+  });
+
+  it('lets a newer Pin take an imported fact of its value as its winner instead of copying it', () => {
+    const { log } = buildCastLog();
+    addStoryFact(log, { category: 'build', text: 'athletic' });
+    let state = rule(log, { ...decidedBuild, text: 'tall; slim' });
+    assert.deepEqual(statusesIn(state, 'build'), { athletic: Reported, 'tall; slim': InForce });
+
+    state = rule(log, { ...buildPin, text: 'athletic' });
+    assert.equal(state.facts.filter((fact) => fact.text === 'athletic').length, 1);
+    assert.deepEqual(statusesIn(state, 'build'), { athletic: InForce, 'tall; slim': Reported });
+    assert.equal(factNamed(state, 'athletic').pinned, true);
+    assert.equal(factNamed(state, 'athletic').made, false);
+  });
+
+  it('lets a Pin newer than the card build win and reports the card build', () => {
+    const { log } = buildCastLog();
+    rule(log, { ...decidedBuild, text: 'tall; slim' });
+    const state = rule(log, { ...buildPin, text: 'athletic' });
+
+    assert.deepEqual(statusesIn(state, 'build'), { 'tall; slim': Reported, athletic: InForce });
+    assert.equal(factNamed(state, 'athletic').pinned, true);
+  });
+
+  it('files no second fact for an older Pin whose value an imported fact already holds', () => {
+    const { log } = buildCastLog();
+    const { decided, ...undecided } = decidedBuild;
+    assert.equal(decided, true);
+    rule(log, { ...undecided, text: 'athletic' });
+    rule(log, { ...buildPin, text: 'athletic' });
+    const state = rule(log, { ...decidedBuild, text: 'tall; slim' });
+
+    assert.equal(state.facts.filter((fact) => fact.text === 'athletic').length, 1);
+    assert.deepEqual(statusesIn(state, 'build'), { athletic: Reported, 'tall; slim': InForce });
+  });
+
+  it('orders Pins and card builds of different scoped slots of one build field by their log entries', () => {
+    const { log } = buildCastLog();
+    rule(log, { ...decidedBuild, text: 'slim' });
+    let state = rule(log, { ...buildPin, text: 'very tall' });
+    assert.deepEqual(statusesIn(state, 'build'), { slim: Reported, 'very tall': InForce });
+
+    state = rule(log, { ...decidedBuild, text: 'stocky' });
+    assert.deepEqual(statusesIn(state, 'build'), { slim: Reported, 'very tall': Reported, stocky: InForce });
+
+    state = rule(log, { ...buildPin, text: 'athletic' });
+    assert.deepEqual(statusesIn(state, 'build'), {
+      slim: Reported,
+      'very tall': Reported,
+      stocky: Reported,
+      athletic: InForce,
+    });
+  });
+
+  it('keeps the copy of an older Pin as a Reported value when its winner is removed beside a later card value', () => {
+    const { log } = buildCastLog();
+    addStoryFact(log, { category: 'hair', text: 'grey' });
+    let state = rule(log, { ...hairPin, text: 'grey' });
+    assert.deepEqual(hairIn(state), [['grey', InForce]]);
+
+    state = rule(log, { ...decidedHair, text: 'red' });
+    assert.deepEqual(hairIn(state), [['red', InForce], ['grey', Reported]]);
+
+    state = rule(log, { type: ScribeLogCore.Ruling.RemoveFact, fact: factNamed(state, 'grey').id });
+    assert.deepEqual(hairIn(state), [['red', InForce], ['grey', Removed], ['grey', Reported]]);
+  });
+
+  it('gives the same statuses for Pins and decided builds when the log is replayed twice or copied', () => {
+    const { log } = buildCastLog();
+    rule(log, { ...buildPin, text: 'slim' });
+    rule(log, { ...decidedBuild, text: 'tall; slim' });
+    rule(log, { ...buildPin, text: 'very tall' });
+    rule(log, { ...decidedBuild, text: 'stocky' });
+    /**
+     * @param {object} replayLog
+     * @returns {Array<[string, string]>}
+     * @throws {TypeError}
+     */
+    const statuses = (replayLog) => ScribeReplay.run(replayLog, storyOrder).facts.map((fact) => [fact.id, fact.status]);
+
+    const first = statuses(log);
+    assert.deepEqual(statuses(log), first);
+    assert.deepEqual(statuses(structuredClone(log)), first);
+    assert.deepEqual(
+      first.map(([, status]) => status).sort(),
+      [InForce, Reported, Reported, Reported],
+    );
+  });
+
+  it('refuses a Pin on a moving category and leaves the decided moving value alone', () => {
+    const { log } = buildCastLog();
+    const state = rule(log, { ...decidedHair, category: 'location', text: 'the harbor' });
+
+    assert.throws(
+      () => ScribeLogCore.rule(log, state, { ...hairPin, category: 'location', text: 'the tower' }),
+      /InvalidOperation/,
+    );
+    assert.equal(factNamed(ScribeReplay.run(log, storyOrder), 'the harbor').status, InForce);
+  });
+
+  it('reads the form of a build from its text for decisions and leaves the scope of slot keys as it was', () => {
+    const dragon = { category: 'build', text: 'In dragon form she is covered in black scales' };
+    assert.deepEqual(ScribeCategory.scope(dragon), {});
+    assert.equal(ScribeCategory.derive(dragon).form, 'dragon');
+    assert.deepEqual(ScribeCategory.scope({ ...dragon, text: 'In full-dragon form she is huge' }), {});
+    assert.equal(ScribeCategory.derive({ ...dragon, text: 'In full-dragon form she is huge' }).form, 'full dragon');
+    assert.equal(ScribeCategory.derive({ ...dragon, text: 'In human form or dragon form she is slim' }).form, null);
+    assert.equal(ScribeCategory.derive({ category: 'build', text: 'slim' }).form, null);
+    assert.deepEqual(ScribeCategory.scope({ category: 'build', text: 'In dragon form she is 60 feet long' }), {
+      form: 'dragon',
+      dimension: 'length',
+    });
+    assert.equal(ScribeCategory.derive({ category: 'build', text: 'x', form: ' Human  Form ', dimension: null }).form, 'human form');
+  });
+
+  it('reads no form for a decision outside the build category', () => {
+    const { log } = buildCastLog();
+    addStoryFact(log, { category: 'hair', text: 'In dragon form she is blonde' });
+    const state = rule(log, { ...decidedHair, text: 'red' });
+
+    assert.deepEqual(statusesIn(state, 'hair'), { 'In dragon form she is blonde': Reported, red: InForce });
+  });
+
+  it('keeps a form-wise story build in force beside a card build that names no form', () => {
+    const { log } = buildCastLog();
+    addStoryFact(log, { category: 'build', text: 'In dragon form she is covered in black scales' });
+    const state = rule(log, { ...decidedBuild, text: 'slim' });
+
+    assert.deepEqual(statusesIn(state, 'build'), {
+      'In dragon form she is covered in black scales': InForce,
+      slim: InForce,
+    });
+  });
+
+  it('keeps an imported human-form height in force beside a card build without a form', () => {
+    const { log } = buildCastLog();
+    const { decided, ...undecided } = decidedBuild;
+    assert.equal(decided, true);
+    rule(log, { ...undecided, text: 'In human form she is 5 ft 6' });
+    const state = rule(log, { ...decidedBuild, text: '5\'6"; slim' });
+
+    assert.deepEqual(statusesIn(state, 'build'), { 'In human form she is 5 ft 6': InForce, '5\'6"; slim': InForce });
+  });
+
+  it('decides builds of an explicit form and dimension by form, beside a card build and Pins of that form', () => {
+    const { log } = buildCastLog();
+    addStoryFact(log, { category: 'build', text: 'covered in black scales', form: 'dragon', dimension: 'length' });
+    addStoryFact(log, { category: 'build', text: 'covered in white scales', form: 'dragon' });
+    let state = rule(log, { ...decidedBuild, text: 'slim' });
+    assert.deepEqual(statusesIn(state, 'build'), {
+      'covered in black scales': InForce,
+      'covered in white scales': InForce,
+      slim: InForce,
+    });
+
+    state = rule(log, { ...decidedBuild, text: 'In dragon form she is winged' });
+    assert.deepEqual(statusesIn(state, 'build'), {
+      'covered in black scales': Reported,
+      'covered in white scales': Reported,
+      slim: InForce,
+      'In dragon form she is winged': InForce,
+    });
+
+    state = rule(log, { ...buildPin, text: 'scaled and horned', form: 'dragon' });
+    assert.deepEqual(statusesIn(state, 'build'), {
+      'covered in black scales': Reported,
+      'covered in white scales': Reported,
+      slim: InForce,
+      'In dragon form she is winged': Reported,
+      'scaled and horned': InForce,
+    });
+  });
+
+  it('removes a story fact next to a decided value with a strike mark and keeps the decided value in force', () => {
+    const { log } = buildCastLog();
+    addStoryFact(log, { category: 'hair', text: 'blonde' });
+    let state = rule(log, { ...decidedHair, text: 'red' });
+    assert.deepEqual(statusesIn(state, 'hair'), { blonde: Reported, red: InForce });
+
+    rule(log, { type: ScribeLogCore.Ruling.RemoveFact, fact: factNamed(state, 'blonde').id });
+    addStoryFact(log, { category: 'hair', text: 'Blonde' });
+    state = ScribeReplay.run(log, storyOrder);
+    assert.deepEqual(statusesIn(state, 'hair'), { blonde: Removed, Blonde: Removed, red: InForce });
+  });
+
+  it('removes a story fact exactly next to a decided value and reports a later one with the same wording', () => {
+    const { log } = buildCastLog();
+    addStoryFact(log, { category: 'hair', text: 'blonde' });
+    let state = rule(log, { ...decidedHair, text: 'red' });
+    rule(log, { type: ScribeLogCore.Ruling.RemoveFact, fact: factNamed(state, 'blonde').id, exact: true });
+    addStoryFact(log, { category: 'hair', text: 'Blonde' });
+    state = ScribeReplay.run(log, storyOrder);
+
+    assert.deepEqual(statusesIn(state, 'hair'), { blonde: Removed, Blonde: Reported, red: InForce });
+  });
+
+  it('brings the older decided value back when the newest one is removed', () => {
+    const { log } = buildCastLog();
+    rule(log, { ...decidedHair, text: 'red' });
+    let state = rule(log, { ...decidedHair, text: 'black' });
+    state = rule(log, { type: ScribeLogCore.Ruling.RemoveFact, fact: factNamed(state, 'black').id, exact: true });
+
+    assert.deepEqual(statusesIn(state, 'hair'), { red: InForce, black: Removed });
+  });
+
+  it('reports the refined value of an older story fact beside a card value and keeps an older Pin from copying it', () => {
+    const { log } = buildCastLog();
+    addStoryFact(log, { category: 'hair', text: 'brown' });
+    addStoryFact(log, {
+      type: ScribeAnswer.Type.Refine,
+      fact: factNamed(ScribeReplay.run(log, storyOrder), 'brown').id,
+      becomes: ScribeLogCore.nextFactId(log),
+      category: 'hair',
+      text: 'chestnut brown',
+    });
+    rule(log, { ...hairPin, text: 'chestnut brown' });
+    const state = rule(log, { ...decidedHair, text: 'red' });
+
+    assert.deepEqual(statusesIn(state, 'hair'), {
+      brown: ScribeReplay.Status.Replaced,
+      'chestnut brown': Reported,
+      red: InForce,
+    });
+    assert.equal(state.facts.filter((fact) => fact.text === 'chestnut brown').length, 1);
+  });
+
+  it('files a story Refine of a decided value as a separate Reported value', () => {
+    const { log } = buildCastLog();
+    const state = rule(log, { ...decidedHair, text: 'red' });
+    addStoryFact(log, {
+      type: ScribeAnswer.Type.Refine,
+      fact: factNamed(state, 'red').id,
+      becomes: ScribeLogCore.nextFactId(log),
+      category: 'hair',
+      text: 'dark red',
+    });
+
+    assert.deepEqual(statusesIn(ScribeReplay.run(log, storyOrder), 'hair'), { red: InForce, 'dark red': Reported });
+  });
+
+  it('orders a Pin of a merged subject against the survivor decisions by log entry', () => {
+    const merge = { type: ScribeLogCore.Ruling.Merge, from: 'S2', into: 'S1' };
+    const older = buildCastLog().log;
+    rule(older, { ...hairPin, subject: 'S2', text: 'black' });
+    rule(older, { ...decidedHair, text: 'red' });
+    assert.deepEqual(hairIn(rule(older, merge)), [['red', InForce], ['black', Reported]]);
+
+    const newer = buildCastLog().log;
+    rule(newer, { ...decidedHair, text: 'red' });
+    rule(newer, { ...hairPin, subject: 'S2', text: 'black' });
+    assert.deepEqual(hairIn(rule(newer, merge)), [['red', Reported], ['black', InForce]]);
+  });
+
+  it('keeps the decisions of the subject that stays when a decided fact is split away', () => {
+    const { log } = buildCastLog();
+    rule(log, { ...decidedHair, text: 'red' });
+    let state = rule(log, { ...decidedHair, text: 'black' });
+    state = rule(log, {
+      type: ScribeLogCore.Ruling.Split,
+      subject: 'S1',
+      label: 'Ilse Shade',
+      kind: ScribeCategory.SubjectKinds.Character,
+      facts: [factNamed(state, 'black').id],
+    });
+    assert.equal(factNamed(state, 'red').subject, 'S1');
+    assert.notEqual(factNamed(state, 'black').subject, 'S1');
+    assert.equal(factNamed(state, 'red').status, InForce);
+    assert.equal(factNamed(state, 'black').status, InForce);
+
+    state = rule(log, { ...hairPin, text: 'grey' });
+    assert.equal(factNamed(state, 'grey').status, InForce);
+    assert.equal(factNamed(state, 'red').status, Reported);
+    assert.equal(factNamed(state, 'black').status, InForce);
+  });
+
+  it('ignores a withdrawn entry and a revoked operation when ordering Pins and decided values', () => {
+    const { log } = buildCastLog();
+    rule(log, { ...decidedHair, text: 'red' });
+    rule(log, { ...decidedHair, text: 'black' });
+    let state = rule(log, { ...hairPin, text: 'grey' });
+    assert.deepEqual(hairIn(state), [['red', Reported], ['black', Reported], ['grey', InForce]]);
+
+    entryOf(log, 'grey').withdrawn = true;
+    state = ScribeReplay.run(log, storyOrder);
+    assert.deepEqual(hairIn(state), [['red', Reported], ['black', InForce]]);
+
+    entryOf(log, 'black').operations[0].revoked = true;
+    state = ScribeReplay.run(log, storyOrder);
+    assert.deepEqual(hairIn(state), [['red', InForce]]);
+  });
+
+  it('keeps the card value in force when an edit of a story fact no longer matches its source', () => {
+    const { log } = buildCastLog();
+    addStoryFact(log, { category: 'hair', text: 'blonde' });
+    const story = factNamed(ScribeReplay.run(log, storyOrder), 'blonde');
+    rule(log, { ...decidedHair, text: 'red' });
+    log.entries.push({
+      sequence: log.nextSequence,
+      kind: ScribeLogCore.Kind.Operator,
+      origin: ScribeLogCore.Origin.Operator,
+      messageIds: [],
+      operations: [
+        {
+          type: ScribeLogCore.Ruling.EditFact,
+          fact: story.id,
+          before: 'blonde',
+          text: 'honey',
+          source: {
+            fact: story.id,
+            cite: 'msg-1',
+            subject: 'S1',
+            category: 'hair',
+            target: null,
+            targetText: null,
+            book: 'blonde',
+            sourcePrint: 'print-old',
+          },
+        },
+      ],
+      withdrawn: false,
+    });
+    log.nextSequence += 1;
+    log.revision += 1;
+    /**
+     * @param {string} print
+     * @returns {Array<[string, string]>}
+     * @throws {TypeError}
+     */
+    const hairWith = (print) => hairIn(ScribeReplay.run(log, storyOrder, null, new Map([['msg-1', print]])));
+
+    assert.deepEqual(hairWith('print-old'), [['red', Reported], ['honey', InForce]]);
+    assert.deepEqual(hairWith('print-new'), [['red', InForce], ['blonde', Reported]]);
+  });
+
+  const dragonScales = 'In dragon form she is covered in black scales';
+  const obsidianScales = 'In dragon form she is covered in obsidian scales';
+
+  it('keeps later card builds of another form in force beside a ruled replacement edit and its Pin', () => {
+    const { log } = buildCastLog();
+    addStoryFact(log, { category: 'build', text: dragonScales });
+    let state = ScribeReplay.run(log, storyOrder);
+    const story = factNamed(state, dragonScales);
+    ScribeLogCore.rule(log, state, {
+      type: ScribeLogCore.Ruling.EditFact,
+      fact: story.id,
+      text: obsidianScales,
+      expected: ScribeLogCore.editExpected(story),
+    });
+    state = ScribeReplay.run(log, storyOrder);
+    const refreshed = factNamed(state, obsidianScales);
+    rule(log, { ...buildPin, ...ScribeCategory.scope(refreshed), text: obsidianScales });
+    state = rule(log, { ...decidedBuild, text: 'slim' });
+    assert.deepEqual(statusesIn(state, 'build'), { [obsidianScales]: InForce, slim: InForce });
+
+    state = rule(log, { ...decidedBuild, text: 'stocky' });
+    assert.deepEqual(statusesIn(state, 'build'), { [obsidianScales]: InForce, slim: Reported, stocky: InForce });
+  });
+
+  it('keeps a Pin build of one form and a later card build of another form both in force', () => {
+    const { log } = buildCastLog();
+    rule(log, { ...buildPin, text: dragonScales });
+    let state = rule(log, { ...decidedBuild, text: 'slim' });
+    assert.deepEqual(statusesIn(state, 'build'), { [dragonScales]: InForce, slim: InForce });
+
+    const other = buildCastLog().log;
+    rule(other, { ...buildPin, text: 'athletic' });
+    state = rule(other, { ...decidedBuild, text: 'In human form she is slim' });
+    assert.deepEqual(statusesIn(state, 'build'), { athletic: InForce, 'In human form she is slim': InForce });
+  });
+
+  it('lets a newer Pin of one form report only the card build of that form and leave other forms alone', () => {
+    const { log } = buildCastLog();
+    addStoryFact(log, { category: 'build', text: dragonScales });
+    addStoryFact(log, { category: 'build', text: 'In human form she is slim' });
+    addStoryFact(log, { category: 'build', text: 'In full-dragon form she is huge' });
+    let state = rule(log, { ...decidedBuild, text: 'slim' });
+    assert.deepEqual(statusesIn(state, 'build'), {
+      [dragonScales]: InForce,
+      'In human form she is slim': InForce,
+      'In full-dragon form she is huge': InForce,
+      slim: InForce,
+    });
+
+    state = rule(log, { ...buildPin, text: 'athletic' });
+    assert.deepEqual(statusesIn(state, 'build'), {
+      [dragonScales]: InForce,
+      'In human form she is slim': InForce,
+      'In full-dragon form she is huge': InForce,
+      slim: Reported,
+      athletic: InForce,
+    });
+  });
+
+  it('disputes every build of a slot beside a Pin when no decided value is in the slot', () => {
+    const { log } = buildCastLog();
+    addStoryFact(log, { category: 'build', text: dragonScales });
+    addStoryFact(log, { category: 'build', text: 'slim' });
+    const state = rule(log, { ...buildPin, text: 'athletic' });
+
+    assert.deepEqual(statusesIn(state, 'build'), {
+      [dragonScales]: ScribeReplay.Status.Disputed,
+      slim: ScribeReplay.Status.Disputed,
+      athletic: InForce,
+    });
+  });
+
+  it('keeps the decided card hair in force beside a Pin of a story hair filed under another attribute', () => {
+    const { log } = buildCastLog();
+    addStoryFact(log, { category: 'hair', text: 'black', evidence: { messageId: 'msg-1', attribute: 'hair color' } });
+    rule(log, { ...hairPin, text: 'black' });
+    rule(log, { ...decidedHair, text: 'red' });
+    rule(log, { ...decidedHair, text: 'white' });
+    const state = rule(log, { ...decidedHair, text: 'green' });
+
+    assert.deepEqual(statusesIn(state, 'hair'), { black: InForce, red: Reported, white: Reported, green: InForce });
+  });
+
+  it('keeps a Pin of a hair filed under the same attribute behind the later card hair', () => {
+    const { log } = buildCastLog();
+    addStoryFact(log, { category: 'hair', text: 'black' });
+    rule(log, { ...hairPin, text: 'black' });
+    rule(log, { ...decidedHair, text: 'red' });
+    const state = rule(log, { ...decidedHair, text: 'green' });
+
+    assert.deepEqual(statusesIn(state, 'hair'), { black: Reported, red: Reported, green: InForce });
+  });
+
+  it('lets only the newest Pin win beside a card build when an older Pin sits in another scoped slot', () => {
+    const { log } = buildCastLog();
+    rule(log, { ...decidedBuild, text: 'slim' });
+    rule(log, { ...buildPin, text: 'very tall' });
+    const state = rule(log, { ...buildPin, text: 'athletic' });
+
+    assert.deepEqual(statusesIn(state, 'build'), { slim: Reported, 'very tall': Reported, athletic: InForce });
+  });
+
+  it('keeps only the newest of three Pins in force and the older ones readable when two share a scoped slot', () => {
+    const { log } = buildCastLog();
+    rule(log, { ...decidedBuild, text: 'slim' });
+    rule(log, { ...buildPin, text: 'very tall' });
+    rule(log, { ...buildPin, text: 'athletic' });
+    const state = rule(log, { ...buildPin, text: 'very tall, and lean' });
+
+    assert.deepEqual(statusesIn(state, 'build'), {
+      slim: Reported,
+      'very tall': Reported,
+      athletic: Reported,
+      'very tall, and lean': InForce,
+    });
+  });
+
+  it('keeps an older Pin of a field beaten by a newer Pin of that field readable as Reported', () => {
+    const { log } = buildCastLog();
+    rule(log, { ...decidedHair, text: 'grey' });
+    rule(log, { ...hairPin, text: 'red' });
+    const state = rule(log, { ...hairPin, text: 'black' });
+
+    assert.deepEqual(statusesIn(state, 'hair'), { grey: Reported, red: Reported, black: InForce });
+  });
+
+  it('acts on only the newest Pin of a slot when no decided value is near it', () => {
+    const { log } = buildCastLog();
+    rule(log, { ...hairPin, text: 'red' });
+    const state = rule(log, { ...hairPin, text: 'black' });
+
+    assert.deepEqual(statusesIn(state, 'hair'), { black: InForce });
+  });
+
+  it('keeps an Ended story fact Ended and files a copy for a Pin of its value when no decided value is held', () => {
+    const { log } = buildCastLog();
+    addStoryFact(log, { category: 'hair', text: 'blonde' });
+    addStoryFact(log, {
+      type: ScribeAnswer.Type.End,
+      fact: factNamed(ScribeReplay.run(log, storyOrder), 'blonde').id,
+      reason: 'dyed',
+    });
+    const state = rule(log, { ...hairPin, text: 'blonde' });
+
+    assert.deepEqual(hairIn(state), [['blonde', ScribeReplay.Status.Ended], ['blonde', InForce]]);
+    assert.equal(state.facts.find((fact) => fact.status === InForce).made, true);
+  });
+
+  it('keeps the hidden flag of a story fact a public Pin reuses, and the public flag of one a hidden Pin reuses', () => {
+    const hiddenLog = buildCastLog().log;
+    addStoryFact(hiddenLog, { category: 'hair', text: 'blonde', hidden: true });
+    rule(hiddenLog, { ...decidedHair, text: 'red' });
+    let state = rule(hiddenLog, { ...hairPin, text: 'blonde', hidden: false });
+    assert.deepEqual(statusesIn(state, 'hair'), { blonde: InForce, red: Reported });
+    assert.equal(factNamed(state, 'blonde').hidden, true);
+    assert.equal(factNamed(state, 'blonde').made, false);
+
+    const publicLog = buildCastLog().log;
+    addStoryFact(publicLog, { category: 'hair', text: 'blonde' });
+    rule(publicLog, { ...decidedHair, text: 'red' });
+    state = rule(publicLog, { ...hairPin, text: 'blonde', hidden: true });
+    assert.deepEqual(statusesIn(state, 'hair'), { blonde: InForce, red: Reported });
+    assert.equal(factNamed(state, 'blonde').hidden, false);
+    assert.equal(factNamed(state, 'blonde').made, false);
+  });
+
+  /**
+   * @param {object} log
+   * @param {string} type
+   * @param {object} named
+   * @param {string} text
+   * @returns {object}
+   * @throws {Error}
+   */
+  const storyRewrite = (log, type, named, text) => {
+    addStoryFact(log, { type, fact: named.id, becomes: ScribeLogCore.nextFactId(log), category: 'build', text });
+    return ScribeReplay.run(log, storyOrder);
+  };
+
+  it('reports a model Change or Refine of a decided form-wise build beside it, with and without form words', () => {
+    for (const type of [ScribeAnswer.Type.Change, ScribeAnswer.Type.Refine]) {
+      for (const text of ['covered in white scales', 'In dragon form she is covered in white scales']) {
+        const { log } = buildCastLog();
+        const state = rule(log, { ...decidedBuild, text: dragonScales });
+        const replayed = storyRewrite(log, type, factNamed(state, dragonScales), text);
+
+        assert.deepEqual(statusesIn(replayed, 'build'), { [dragonScales]: InForce, [text]: Reported }, `${type}: ${text}`);
+      }
+    }
+  });
+
+  it('keeps the form of an undecided form-wise story build for a form-less model Change or Refine of it', () => {
+    for (const type of [ScribeAnswer.Type.Change, ScribeAnswer.Type.Refine]) {
+      const { log } = buildCastLog();
+      addStoryFact(log, { category: 'build', text: dragonScales });
+      rule(log, { ...decidedBuild, text: 'slim' });
+      const replayed = storyRewrite(
+        log,
+        type,
+        factNamed(ScribeReplay.run(log, storyOrder), dragonScales),
+        'covered in white scales',
+      );
+
+      assert.deepEqual(
+        statusesIn(replayed, 'build'),
+        { [dragonScales]: ScribeReplay.Status.Replaced, 'covered in white scales': InForce, slim: InForce },
+        type,
+      );
+    }
+  });
+
+  it('lets a model Change of a decided dragon-form build that names the human form stand in the human form', () => {
+    const { log } = buildCastLog();
+    const state = rule(log, { ...decidedBuild, text: dragonScales });
+    const replayed = storyRewrite(log, ScribeAnswer.Type.Change, factNamed(state, dragonScales), 'In human form she is slim');
+
+    assert.deepEqual(statusesIn(replayed, 'build'), { [dragonScales]: InForce, 'In human form she is slim': InForce });
+  });
+
+  it('lets a form-less Pin act on the no-form field when the card build sits in another slot', () => {
+    const { log } = buildCastLog();
+    addStoryFact(log, { category: 'build', text: dragonScales });
+    rule(log, { ...decidedBuild, text: 'tall; slim' });
+    const state = rule(log, { ...buildPin, text: 'athletic' });
+
+    assert.deepEqual(statusesIn(state, 'build'), { [dragonScales]: InForce, 'tall; slim': Reported, athletic: InForce });
+  });
+
+  it('keeps the newest Pin of each decision field of one slot beside a card build', () => {
+    const { log } = buildCastLog();
+    rule(log, { ...decidedBuild, text: 'slim' });
+    rule(log, { ...buildPin, text: dragonScales });
+    const state = rule(log, { ...buildPin, text: 'athletic' });
+
+    assert.deepEqual(statusesIn(state, 'build'), { slim: Reported, [dragonScales]: InForce, athletic: InForce });
+  });
+
+  it('keeps the newest Pin of each decision field of one slot beside a card build in another slot', () => {
+    const { log } = buildCastLog();
+    rule(log, { ...decidedBuild, text: 'tall; slim' });
+    rule(log, { ...buildPin, text: dragonScales });
+    const state = rule(log, { ...buildPin, text: 'athletic' });
+
+    assert.deepEqual(statusesIn(state, 'build'), { 'tall; slim': Reported, [dragonScales]: InForce, athletic: InForce });
+  });
+
+  const whiteScales = 'covered in white scales';
+  const silverScales = 'covered in silver scales';
+
+  /**
+   * @returns {{log: object, white: object}}
+   * @throws {Error}
+   */
+  const dragonChangedToWhite = () => {
+    const { log } = buildCastLog();
+    addStoryFact(log, { category: 'build', text: dragonScales });
+    const state = storyRewrite(log, ScribeAnswer.Type.Change, factNamed(ScribeReplay.run(log, storyOrder), dragonScales), whiteScales);
+    return { log, white: factNamed(state, whiteScales) };
+  };
+
+  it('lets a Pin with a winner that inherited its form reuse the winner and keep the card build in force', () => {
+    const { log } = dragonChangedToWhite();
+    rule(log, { ...decidedBuild, text: 'slim' });
+    const state = rule(log, { ...buildPin, text: whiteScales });
+
+    assert.deepEqual(statusesIn(state, 'build'), {
+      [dragonScales]: ScribeReplay.Status.Replaced,
+      [whiteScales]: InForce,
+      slim: InForce,
+    });
+    assert.equal(state.facts.filter((fact) => fact.text === whiteScales).length, 1);
+    assert.equal(factNamed(state, whiteScales).pinned, true);
+    assert.equal(factNamed(state, whiteScales).made, false);
+  });
+
+  it('lets a ruled replacement of a form-inheriting build stand in its form beside later card builds', () => {
+    const { log, white } = dragonChangedToWhite();
+    rule(log, { ...decidedBuild, text: 'slim' });
+    ScribeLogCore.rule(log, ScribeReplay.run(log, storyOrder), {
+      type: ScribeLogCore.Ruling.EditFact,
+      fact: white.id,
+      text: silverScales,
+      expected: ScribeLogCore.editExpected(white),
+    });
+    let state = ScribeReplay.run(log, storyOrder);
+    state = rule(log, { ...buildPin, ...ScribeCategory.scope(factNamed(state, silverScales)), text: silverScales });
+    assert.deepEqual(statusesIn(state, 'build'), {
+      [dragonScales]: ScribeReplay.Status.Replaced,
+      [silverScales]: InForce,
+      slim: InForce,
+    });
+    assert.equal(state.facts.filter((fact) => fact.text === silverScales).length, 1);
+    assert.equal(factNamed(state, silverScales).pinned, true);
+
+    state = rule(log, { ...decidedBuild, text: 'stocky' });
+    assert.deepEqual(statusesIn(state, 'build'), {
+      [dragonScales]: ScribeReplay.Status.Replaced,
+      [silverScales]: InForce,
+      slim: Reported,
+      stocky: InForce,
+    });
+  });
+
+  it('leaves a story build of another form alone when a ruled replacement stands without a card value', () => {
+    const { log, white } = dragonChangedToWhite();
+    addStoryFact(log, { category: 'build', text: 'she is slim' });
+    ScribeLogCore.rule(log, ScribeReplay.run(log, storyOrder), {
+      type: ScribeLogCore.Ruling.EditFact,
+      fact: white.id,
+      text: silverScales,
+      expected: ScribeLogCore.editExpected(white),
+    });
+    let state = ScribeReplay.run(log, storyOrder);
+    state = rule(log, { ...buildPin, ...ScribeCategory.scope(factNamed(state, silverScales)), text: silverScales });
+
+    assert.deepEqual(statusesIn(state, 'build'), {
+      [dragonScales]: ScribeReplay.Status.Replaced,
+      [silverScales]: InForce,
+      'she is slim': InForce,
+    });
+    assert.equal(state.facts.filter((fact) => fact.text === silverScales).length, 1);
+    assert.equal(factNamed(state, silverScales).pinned, true);
+  });
+
+  it('keeps a build rewritten from an Ended, a Replaced or a split-away build in the form of the old build', () => {
+    const ended = buildCastLog().log;
+    addStoryFact(ended, { category: 'build', text: dragonScales });
+    const dragon = factNamed(ScribeReplay.run(ended, storyOrder), dragonScales);
+    addStoryFact(ended, { type: ScribeAnswer.Type.End, fact: dragon.id, reason: 'shed' });
+    rule(ended, { ...decidedBuild, text: 'slim' });
+    assert.deepEqual(statusesIn(storyRewrite(ended, ScribeAnswer.Type.Change, dragon, whiteScales), 'build'), {
+      [dragonScales]: ScribeReplay.Status.Ended,
+      [whiteScales]: InForce,
+      slim: InForce,
+    });
+
+    const { log } = dragonChangedToWhite();
+    rule(log, { ...decidedBuild, text: 'slim' });
+    const replaced = factNamed(ScribeReplay.run(log, storyOrder), dragonScales);
+    assert.deepEqual(statusesIn(storyRewrite(log, ScribeAnswer.Type.Refine, replaced, 'covered in glossy scales'), 'build'), {
+      [dragonScales]: ScribeReplay.Status.Replaced,
+      [whiteScales]: InForce,
+      'covered in glossy scales': InForce,
+      slim: InForce,
+    });
+
+    const moved = buildCastLog().log;
+    addStoryFact(moved, { category: 'build', text: dragonScales });
+    const original = factNamed(ScribeReplay.run(moved, storyOrder), dragonScales);
+    rule(moved, {
+      type: ScribeLogCore.Ruling.Split,
+      subject: 'S1',
+      label: 'Ilse Shade',
+      kind: ScribeCategory.SubjectKinds.Character,
+      facts: [original.id],
+    });
+    rule(moved, { ...decidedBuild, subject: 'S3', text: 'slim' });
+    const movedState = storyRewrite(moved, ScribeAnswer.Type.Change, original, whiteScales);
+    assert.deepEqual(
+      Object.fromEntries(movedState.facts.filter((fact) => fact.subject === 'S3').map((fact) => [fact.text, fact.status])),
+      { [dragonScales]: ScribeReplay.Status.Replaced, [whiteScales]: InForce, slim: InForce },
+    );
+  });
+
+  it('follows inherited forms through a chain of model Changes', () => {
+    const { log, white } = dragonChangedToWhite();
+    rule(log, { ...decidedBuild, text: 'slim' });
+    const state = storyRewrite(log, ScribeAnswer.Type.Change, white, 'covered in grey scales');
+
+    assert.deepEqual(statusesIn(state, 'build'), {
+      [dragonScales]: ScribeReplay.Status.Replaced,
+      [whiteScales]: ScribeReplay.Status.Replaced,
+      'covered in grey scales': InForce,
+      slim: InForce,
+    });
+  });
+
+  it('does not let a removed build of the card form narrow a slot for a Pin of another form', () => {
+    const { log } = buildCastLog();
+    addStoryFact(log, { category: 'build', text: 'slim' });
+    addStoryFact(log, { category: 'build', text: 'In human form she is pale' });
+    let state = rule(log, { ...decidedBuild, text: 'tall; slim' });
+    rule(log, { type: ScribeLogCore.Ruling.RemoveFact, fact: factNamed(state, 'slim').id });
+    state = rule(log, { ...buildPin, text: dragonScales });
+
+    assert.deepEqual(statusesIn(state, 'build'), {
+      slim: Removed,
+      'In human form she is pale': ScribeReplay.Status.Disputed,
+      'tall; slim': InForce,
+      [dragonScales]: InForce,
+    });
+  });
+
+  /**
+   * @param {object} state
+   * @param {string} subject
+   * @param {string} category
+   * @returns {Record<string, string>}
+   */
+  const statusesOf = (state, subject, category) => {
+    return Object.fromEntries(
+      state.facts.filter((fact) => fact.subject === subject && fact.category === category).map((fact) => [fact.text, fact.status]),
+    );
+  };
+
+  /**
+   * @param {object} log
+   * @param {string} id
+   * @returns {void}
+   * @throws {Error}
+   */
+  const splitAway = (log, id) => {
+    rule(log, {
+      type: ScribeLogCore.Ruling.Split,
+      subject: 'S1',
+      label: 'Ilse Shade',
+      kind: ScribeCategory.SubjectKinds.Character,
+      facts: [id],
+    });
+  };
+
+  it('lets a Pin act on its own subject when its winner was split away beside a later card value', () => {
+    const { log } = buildCastLog();
+    addStoryFact(log, { category: 'hair', text: 'black' });
+    rule(log, { ...hairPin, text: 'black' });
+    rule(log, { ...decidedHair, text: 'red' });
+    splitAway(log, factNamed(ScribeReplay.run(log, storyOrder), 'black').id);
+    const state = ScribeReplay.run(log, storyOrder);
+
+    assert.deepEqual(statusesOf(state, 'S1', 'hair'), { red: InForce, black: Reported });
+    assert.deepEqual(statusesOf(state, 'S3', 'hair'), { black: InForce });
+  });
+
+  it('files the copy of a confirming Pin on its own subject when the confirmed card fact was split away', () => {
+    const { log } = buildCastLog();
+    let state = rule(log, { ...decidedHair, text: 'red' });
+    rule(log, { ...hairPin, text: 'red' });
+    splitAway(log, factNamed(state, 'red').id);
+    state = ScribeReplay.run(log, storyOrder);
+
+    assert.deepEqual(statusesOf(state, 'S1', 'hair'), { red: InForce });
+    assert.equal(state.facts.find((fact) => fact.subject === 'S1' && fact.category === 'hair').pinned, true);
+    assert.deepEqual(statusesOf(state, 'S3', 'hair'), { red: InForce });
+  });
+
+  it('keeps the copy of a Pin on its own subject and decides the split-away subject by its own card value', () => {
+    const { log } = buildCastLog();
+    addStoryFact(log, { category: 'hair', text: 'black' });
+    rule(log, { ...hairPin, text: 'black' });
+    splitAway(log, factNamed(ScribeReplay.run(log, storyOrder), 'black').id);
+    const state = rule(log, { ...decidedHair, subject: 'S3', text: 'grey' });
+
+    assert.deepEqual(statusesOf(state, 'S1', 'hair'), { black: InForce });
+    assert.equal(state.facts.find((fact) => fact.subject === 'S1' && fact.category === 'hair').pinned, true);
+    assert.deepEqual(statusesOf(state, 'S3', 'hair'), { black: Reported, grey: InForce });
+  });
+
+  it('keeps a Pin on a refined winner as the candidate in the refined fact form', () => {
+    const { log } = buildCastLog();
+    addStoryFact(log, { category: 'build', text: 'covered in black scales' });
+    const first = factNamed(ScribeReplay.run(log, storyOrder), 'covered in black scales');
+    rule(log, { ...buildPin, text: 'covered in black scales' });
+    addStoryFact(log, {
+      type: ScribeAnswer.Type.Refine,
+      fact: first.id,
+      becomes: ScribeLogCore.nextFactId(log),
+      category: 'build',
+      text: dragonScales,
+    });
+    const state = rule(log, { ...decidedBuild, text: 'slim' });
+
+    assert.deepEqual(statusesIn(state, 'build'), {
+      'covered in black scales': ScribeReplay.Status.Replaced,
+      [dragonScales]: InForce,
+      slim: InForce,
+    });
+    assert.equal(factNamed(state, dragonScales).pinned, true);
+    assert.equal(state.facts.filter((fact) => fact.category === 'build').length, 3);
+  });
+
+  it('keeps a refined winner of a Pin and the card hair both in force when the refinement names an attribute', () => {
+    const { log } = buildCastLog();
+    addStoryFact(log, { category: 'hair', text: 'black' });
+    const first = factNamed(ScribeReplay.run(log, storyOrder), 'black');
+    rule(log, { ...hairPin, text: 'black' });
+    addStoryFact(log, {
+      type: ScribeAnswer.Type.Refine,
+      fact: first.id,
+      becomes: ScribeLogCore.nextFactId(log),
+      category: 'hair',
+      text: 'jet black',
+      evidence: { messageId: 'msg-1', attribute: 'hair color' },
+    });
+    const state = rule(log, { ...decidedHair, text: 'red' });
+
+    assert.deepEqual(statusesIn(state, 'hair'), { black: ScribeReplay.Status.Replaced, 'jet black': InForce, red: InForce });
+    assert.equal(state.facts.filter((fact) => fact.category === 'hair').length, 3);
+  });
+
+  it('reuses a Reported form-wise build for a confirming Pin that has no winner, in that build form', () => {
+    const { log, white } = dragonChangedToWhite();
+    addStoryFact(log, { category: 'build', text: 'In dragon form she is 20 ft long' });
+    rule(log, { ...decidedBuild, text: 'slim' });
+    const line = factNamed(ScribeReplay.run(log, storyOrder), 'In dragon form she is 20 ft long');
+    ScribeLogCore.rule(log, ScribeReplay.run(log, storyOrder), {
+      type: ScribeLogCore.Ruling.EditFact,
+      fact: line.id,
+      text: 'In dragon form she is 25 ft long',
+      expected: ScribeLogCore.editExpected(line),
+    });
+    let state = ScribeReplay.run(log, storyOrder);
+    assert.equal(factNamed(state, whiteScales).status, Reported);
+    state = rule(log, { ...buildPin, ...ScribeCategory.scope(white), text: whiteScales, hidden: white.hidden });
+
+    assert.deepEqual(statusesIn(state, 'build'), {
+      [dragonScales]: ScribeReplay.Status.Replaced,
+      [whiteScales]: InForce,
+      'In dragon form she is 25 ft long': Reported,
+      slim: InForce,
+    });
+    assert.equal(state.facts.filter((fact) => fact.text === whiteScales).length, 1);
+    assert.equal(factNamed(state, whiteScales).pinned, true);
+  });
+
+  it('keeps the form of a build through a ruled replacement edit and lets a later edit that names a form win', () => {
+    const { log } = buildCastLog();
+    addStoryFact(log, { category: 'build', text: dragonScales });
+    rule(log, { ...decidedBuild, text: 'slim' });
+    const story = factNamed(ScribeReplay.run(log, storyOrder), dragonScales);
+    ScribeLogCore.rule(log, ScribeReplay.run(log, storyOrder), {
+      type: ScribeLogCore.Ruling.EditFact,
+      fact: story.id,
+      text: 'covered in obsidian scales',
+      expected: ScribeLogCore.editExpected(story),
+    });
+    let state = ScribeReplay.run(log, storyOrder);
+    const edited = factNamed(state, 'covered in obsidian scales');
+    state = rule(log, { ...buildPin, ...ScribeCategory.scope(edited), text: 'covered in obsidian scales' });
+    assert.deepEqual(statusesIn(state, 'build'), { 'covered in obsidian scales': InForce, slim: InForce });
+    assert.equal(state.facts.filter((fact) => fact.text === 'covered in obsidian scales').length, 1);
+    assert.equal(factNamed(state, 'covered in obsidian scales').pinned, true);
+
+    ScribeLogCore.rule(log, state, {
+      type: ScribeLogCore.Ruling.EditFact,
+      fact: story.id,
+      text: 'In human form she is slim',
+      expected: ScribeLogCore.editExpected(factNamed(state, 'covered in obsidian scales')),
+    });
+    state = ScribeReplay.run(log, storyOrder);
+    assert.equal(factNamed(state, 'In human form she is slim').status, InForce);
+    assert.equal(factNamed(state, 'slim').status, InForce);
+  });
+
+  /**
+   * @param {object} log
+   * @param {string} id
+   * @param {string} text
+   * @returns {void}
+   * @throws {Error}
+   */
+  const editFact = (log, id, text) => {
+    const current = ScribeReplay.run(log, storyOrder);
+    ScribeLogCore.rule(log, current, {
+      type: ScribeLogCore.Ruling.EditFact,
+      fact: id,
+      text,
+      expected: ScribeLogCore.editExpected(current.facts.find((fact) => fact.id === id)),
+    });
+  };
+
+  it('keeps the form a build had before each edit through a chain of edits', () => {
+    const named = buildCastLog().log;
+    addStoryFact(named, { category: 'build', text: dragonScales });
+    const story = factNamed(ScribeReplay.run(named, storyOrder), dragonScales);
+    for (const text of ['In human form she is slim', 'slim', 'lean']) {
+      editFact(named, story.id, text);
+    }
+    const state = rule(named, { ...decidedBuild, text: 'In dragon form she is winged' });
+    assert.deepEqual(statusesIn(state, 'build'), { lean: InForce, 'In dragon form she is winged': InForce });
+
+    const { log, white } = dragonChangedToWhite();
+    for (const text of ['In human form she is slim', 'slim']) {
+      editFact(log, white.id, text);
+    }
+    assert.deepEqual(
+      statusesIn(rule(log, { ...decidedBuild, text: 'In dragon form she is winged' }), 'build'),
+      { [dragonScales]: ScribeReplay.Status.Replaced, slim: InForce, 'In dragon form she is winged': InForce },
+    );
+  });
+
+  it('falls back to the field of the own text of a Pin with no winner when its value sits in two forms', () => {
+    const { log } = buildCastLog();
+    addStoryFact(log, { category: 'build', text: 'covered in black scales' });
+    addStoryFact(log, { category: 'build', text: dragonScales });
+    addStoryFact(log, {
+      type: ScribeAnswer.Type.Change,
+      fact: factNamed(ScribeReplay.run(log, storyOrder), dragonScales).id,
+      becomes: ScribeLogCore.nextFactId(log),
+      category: 'build',
+      text: 'covered in black scales',
+    });
+    rule(log, { ...decidedBuild, text: 'slim' });
+    rule(log, { ...decidedBuild, text: 'In dragon form she is winged' });
+    const state = rule(log, { ...buildPin, text: 'covered in black scales' });
+
+    assert.deepEqual(
+      state.facts.filter((fact) => fact.text === 'covered in black scales').map((fact) => [fact.status, fact.pinned]),
+      [[InForce, true], [Reported, false]],
+    );
+    assert.equal(factNamed(state, 'slim').status, Reported);
+    assert.equal(factNamed(state, 'In dragon form she is winged').status, InForce);
+  });
+
+  it('lets a Pin compete with decided values of every attribute in its slot, and a Pin ignore the attribute name', () => {
+    const { log } = buildCastLog();
+    rule(log, { ...decidedHair, text: 'grey' });
+    rule(log, { ...hairPin, text: 'red' });
+    addStoryFact(log, { category: 'hair', text: 'black', evidence: { messageId: 'msg-1', attribute: 'hair color' } });
+    const state = rule(log, { ...hairPin, text: 'black' });
+
+    assert.deepEqual(statusesIn(state, 'hair'), { grey: Reported, red: Reported, black: InForce });
+    assert.equal(factNamed(state, 'black').pinned, true);
+    assert.equal(state.facts.filter((fact) => fact.text === 'black').length, 1);
+  });
+
+  it('orders a Pin against an edited story fact of another attribute by their log entries', () => {
+    /**
+     * @param {boolean} pinFirst
+     * @returns {object}
+     * @throws {Error}
+     */
+    const edited = (pinFirst) => {
+      const { log } = buildCastLog();
+      addStoryFact(log, { category: 'hair', text: 'black', evidence: { messageId: 'msg-1', attribute: 'hair color' } });
+      /**
+       * @returns {void}
+       * @throws {Error}
+       */
+      const edit = () => {
+        const current = ScribeReplay.run(log, storyOrder);
+        const story = current.facts.find((fact) => fact.category === 'hair' && fact.made === false);
+        ScribeLogCore.rule(log, current, {
+          type: ScribeLogCore.Ruling.EditFact,
+          fact: story.id,
+          text: 'brown',
+          expected: ScribeLogCore.editExpected(story),
+        });
+      };
+      if (pinFirst) {
+        rule(log, { ...hairPin, text: 'red' });
+        edit();
+      } else {
+        edit();
+        rule(log, { ...hairPin, text: 'red' });
+      }
+      return ScribeReplay.run(log, storyOrder);
+    };
+
+    const newerPin = edited(false);
+    assert.deepEqual(statusesIn(newerPin, 'hair'), { brown: Reported, red: InForce });
+    assert.equal(factNamed(newerPin, 'red').pinned, true);
+    assert.deepEqual(statusesIn(edited(true), 'hair'), { brown: InForce, red: Reported });
+  });
+
+  it('copies the value of a Pin when an Ended or Replaced fact holds it and a decided value is in the field', () => {
+    const ended = buildCastLog().log;
+    addStoryFact(ended, { category: 'hair', text: 'blonde' });
+    rule(ended, { ...decidedHair, text: 'red' });
+    addStoryFact(ended, { type: ScribeAnswer.Type.End, fact: factNamed(ScribeReplay.run(ended, storyOrder), 'blonde').id, reason: 'dyed' });
+    assert.deepEqual(hairIn(rule(ended, { ...hairPin, text: 'blonde' })), [
+      ['red', Reported],
+      ['blonde', ScribeReplay.Status.Ended],
+      ['blonde', InForce],
+    ]);
+
+    const replaced = buildCastLog().log;
+    addStoryFact(replaced, { category: 'hair', text: 'blonde' });
+    rule(replaced, { ...decidedHair, text: 'red' });
+    addStoryFact(replaced, {
+      type: ScribeAnswer.Type.Change,
+      fact: factNamed(ScribeReplay.run(replaced, storyOrder), 'blonde').id,
+      becomes: ScribeLogCore.nextFactId(replaced),
+      category: 'hair',
+      text: 'platinum',
+    });
+    const state = rule(replaced, { ...hairPin, text: 'blonde' });
+    assert.deepEqual(hairIn(state), [
+      ['red', Reported],
+      ['blonde', ScribeReplay.Status.Replaced],
+      ['platinum', Reported],
+      ['blonde', InForce],
+    ]);
+    assert.equal(state.facts.at(-1).pinned, true);
+  });
+
+  it('keeps the older Pin copy of a field without a decided value readable beside a card build of another form', () => {
+    const copies = buildCastLog().log;
+    rule(copies, { ...decidedBuild, text: 'slim' });
+    rule(copies, { ...buildPin, text: dragonScales });
+    assert.deepEqual(statusesIn(rule(copies, { ...buildPin, text: 'In dragon form she is covered in red scales' }), 'build'), {
+      slim: InForce,
+      [dragonScales]: Reported,
+      'In dragon form she is covered in red scales': InForce,
+    });
+
+    const story = buildCastLog().log;
+    addStoryFact(story, { category: 'build', text: dragonScales });
+    rule(story, { ...decidedBuild, text: 'slim' });
+    rule(story, { ...buildPin, text: dragonScales });
+    assert.deepEqual(statusesIn(rule(story, { ...buildPin, text: 'In dragon form she is covered in red scales' }), 'build'), {
+      slim: InForce,
+      [dragonScales]: ScribeReplay.Status.Disputed,
+      'In dragon form she is covered in red scales': InForce,
+    });
+  });
+
+  /**
+   * @param {object} log
+   * @param {string} text
+   * @returns {string}
+   * @throws {TypeError}
+   */
+  const idOf = (log, text) => ScribeReplay.run(log, storyOrder).facts.filter((fact) => fact.text === text).at(-1).id;
+
+  /**
+   * @param {object} log
+   * @param {string} id
+   * @param {string} replacement
+   * @returns {object}
+   * @throws {Error}
+   */
+  const pedantOn = (log, id, replacement) => {
+    const turns = [{ id: 'msg-1', seq: 1 }];
+    const order = turns.map((turn) => ({ id: turn.id, position: turn.seq }));
+    const state = ScribeReplay.run(log, order, null, new Map(), null, null, []);
+    const fact = state.facts.find((item) => item.id === id);
+    const finding = {
+      id: 'P1',
+      status: FindingStatus.Open,
+      kind: FindingKind.Contradiction,
+      subjectId: fact.subject,
+      subjectName: 'Ilse',
+      speakerCharacterId: null,
+      factId: id,
+      category: fact.category,
+      bookText: fact.text,
+      summary: 'x',
+      quote: replacement,
+    };
+    const store = {
+      /**
+       * @returns {{items: object[], nextCursor: null}}
+       */
+      listFindings: () => ({ items: [finding], nextCursor: null }),
+      /**
+       * @returns {void}
+       */
+      saveScribeBook: () => {},
+      /**
+       * @param {string} campaignId
+       * @param {string} findingId
+       * @param {string} resolved
+       * @returns {object}
+       */
+      resolveFinding: (campaignId, findingId, resolved) => ({ ...finding, status: resolved }),
+    };
+    const scribeService = {
+      /**
+       * @returns {object}
+       */
+      loadState: () => ({ log, turns, messages: [], lastTurnSeq: 1, dirty: false, state }),
+    };
+    new PedantService({ store, scribeService }).resolveFinding({
+      campaignId: 'C1',
+      findingId: 'P1',
+      action: FindingStatus.Ruled,
+      replacementText: replacement,
+    });
+    return ScribeReplay.run(log, storyOrder);
+  };
+
+  /**
+   * @param {object} log
+   * @param {string} named
+   * @returns {void}
+   * @throws {Error}
+   */
+  const refineToOtherSubject = (log, named) => {
+    log.entries.push({
+      sequence: log.nextSequence,
+      kind: ScribeLogCore.Kind.Update,
+      origin: ScribeLogCore.Origin.Story,
+      messageIds: ['msg-1'],
+      operations: [
+        {
+          type: ScribeAnswer.Type.Refine,
+          fact: named,
+          becomes: ScribeLogCore.nextFactId(log),
+          subject: 'S2',
+          label: 'Garrick Fenn',
+          changedSubject: true,
+          category: 'hair',
+          text: 'jet black',
+          target: null,
+          targetText: null,
+          other: null,
+          cite: 'msg-1',
+          position: 1,
+          hidden: false,
+        },
+      ],
+      withdrawn: false,
+    });
+    log.read['msg-1'] = log.nextSequence;
+    log.nextSequence += 1;
+    log.revision += 1;
+  };
+
+  /**
+   * @param {object} state
+   * @param {string} subject
+   * @param {string} category
+   * @returns {Array<[string, string, boolean, boolean]>}
+   */
+  const detailsOf = (state, subject, category) => {
+    return state.facts
+      .filter((fact) => fact.subject === subject && fact.category === category)
+      .map((fact) => [fact.text, fact.status, fact.pinned, fact.made]);
+  };
+
+  it('matches a held fact in the subject of its standing fact when a refinement moved it to another subject', () => {
+    const { log } = buildCastLog();
+    rule(log, { ...decidedHair, text: 'red' });
+    addStoryFact(log, { category: 'hair', text: 'black' });
+    rule(log, { ...hairPin, text: 'black' });
+    refineToOtherSubject(log, idOf(log, 'black'));
+    assert.deepEqual(detailsOf(ScribeReplay.run(log, storyOrder), 'S1', 'hair'), [
+      ['red', Reported, false, false],
+      ['black', ScribeReplay.Status.Replaced, false, false],
+      ['black', InForce, true, true],
+    ]);
+    assert.deepEqual(detailsOf(ScribeReplay.run(log, storyOrder), 'S2', 'hair'), [['jet black', InForce, false, false]]);
+
+    const state = rule(log, { ...decidedHair, subject: 'S2', text: 'grey' });
+    assert.deepEqual(detailsOf(state, 'S2', 'hair'), [['grey', InForce, false, false], ['jet black', Reported, false, false]]);
+    assert.equal(detailsOf(state, 'S1', 'hair').at(-1)[1], InForce);
+  });
+
+  it('matches a held fact in the subject of its standing fact when nothing is decided on the first subject', () => {
+    const { log } = buildCastLog();
+    addStoryFact(log, { category: 'hair', text: 'black' });
+    rule(log, { ...hairPin, text: 'black' });
+    refineToOtherSubject(log, idOf(log, 'black'));
+    const state = rule(log, { ...decidedHair, subject: 'S2', text: 'grey' });
+
+    assert.deepEqual(detailsOf(state, 'S1', 'hair'), [
+      ['black', ScribeReplay.Status.Replaced, false, false],
+      ['black', InForce, true, true],
+    ]);
+    assert.deepEqual(detailsOf(state, 'S2', 'hair'), [['grey', InForce, false, false], ['jet black', Reported, false, false]]);
+  });
+
+  it('files the Pin of a ruled replacement that names a form in that form, whatever the old fact form', () => {
+    const { log } = buildCastLog();
+    addStoryFact(log, { category: 'build', text: dragonScales });
+    for (const text of ['slim', 'In dragon form she is winged', 'In human form she is stocky']) {
+      rule(log, { ...decidedBuild, text });
+    }
+    const state = pedantOn(log, idOf(log, dragonScales), 'In human form she is lean');
+
+    assert.deepEqual(statusesIn(state, 'build'), {
+      slim: InForce,
+      'In dragon form she is winged': InForce,
+      'In human form she is stocky': Reported,
+      [dragonScales]: Reported,
+      'In human form she is lean': InForce,
+    });
+    assert.equal(factNamed(state, 'In human form she is lean').pinned, true);
+  });
+
+  /**
+   * @param {string} replacement
+   * @returns {object}
+   * @throws {Error}
+   */
+  const replacedOlderCopy = (replacement) => {
+    const { log } = buildCastLog();
+    rule(log, { ...decidedBuild, text: 'slim' });
+    rule(log, { ...buildPin, text: dragonScales });
+    const copy = idOf(log, dragonScales);
+    rule(log, { ...buildPin, text: 'In dragon form she is covered in red scales' });
+    return pedantOn(log, copy, replacement);
+  };
+
+  it('lets the form-keeping replacement Pin of a Reported copy compete with the other Pins of its form', () => {
+    for (const replacement of ['covered in obsidian scales', 'In dragon form she is covered in obsidian scales']) {
+      const state = replacedOlderCopy(replacement);
+      assert.deepEqual(statusesIn(state, 'build'), {
+        slim: InForce,
+        [dragonScales]: Reported,
+        'In dragon form she is covered in red scales': Reported,
+        [replacement]: InForce,
+      });
+      assert.equal(factNamed(state, replacement).pinned, true);
+    }
+
+    const { log } = buildCastLog();
+    rule(log, { ...decidedBuild, text: 'slim' });
+    rule(log, { ...buildPin, text: dragonScales });
+    rule(log, { ...buildPin, text: 'In dragon form she is covered in red scales' });
+    const control = rule(log, { ...buildPin, text: 'In dragon form she is covered in obsidian scales' });
+    assert.deepEqual(
+      statusesIn(control, 'build'),
+      statusesIn(replacedOlderCopy('In dragon form she is covered in obsidian scales'), 'build'),
+    );
+  });
+
+  it('places the made copy of a Pin, its edit and the Pins that confirm or replace it in the form of that Pin', () => {
+    const obsidian = 'covered in obsidian scales';
+    /**
+     * @param {object} state
+     * @returns {number}
+     */
+    const count = (state) => state.facts.filter((fact) => fact.text === obsidian).length;
+    for (const [card, expected] of [
+      ['slim', { slim: InForce, [obsidian]: InForce }],
+      ['In dragon form she is winged', { 'In dragon form she is winged': Reported, [obsidian]: InForce }],
+    ]) {
+      const { log } = buildCastLog();
+      rule(log, { ...decidedBuild, text: card });
+      rule(log, { ...buildPin, text: dragonScales });
+      const replaced = pedantOn(log, idOf(log, dragonScales), obsidian);
+      assert.deepEqual(statusesIn(replaced, 'build'), expected, card);
+      assert.equal(count(replaced), 1, card);
+      assert.equal(factNamed(replaced, obsidian).pinned, true, card);
+    }
+
+    const edited = buildCastLog().log;
+    rule(edited, { ...decidedBuild, text: 'slim' });
+    rule(edited, { ...buildPin, text: dragonScales });
+    editFact(edited, idOf(edited, dragonScales), obsidian);
+    assert.deepEqual(statusesIn(ScribeReplay.run(edited, storyOrder), 'build'), { slim: InForce, [obsidian]: InForce });
+    const confirmed = pedantOn(edited, idOf(edited, obsidian), obsidian);
+    assert.deepEqual(statusesIn(confirmed, 'build'), { slim: InForce, [obsidian]: InForce });
+    assert.equal(count(confirmed), 1);
+    assert.equal(factNamed(confirmed, obsidian).pinned, true);
+
+    const later = buildCastLog().log;
+    rule(later, { ...buildPin, text: dragonScales });
+    editFact(later, idOf(later, dragonScales), obsidian);
+    assert.deepEqual(statusesIn(rule(later, { ...decidedBuild, text: 'slim' }), 'build'), { slim: InForce, [obsidian]: InForce });
+  });
+
+  it('places the made copy of a hair Pin replaced by the Pedant as the newest decision with one value', () => {
+    const { log } = buildCastLog();
+    rule(log, { ...decidedHair, text: 'red' });
+    rule(log, { ...hairPin, text: 'black' });
+    const state = pedantOn(log, idOf(log, 'black'), 'auburn');
+
+    assert.deepEqual(detailsOf(state, 'S1', 'hair'), [['red', Reported, false, false], ['auburn', InForce, true, true]]);
+  });
+
+  it('reports the edited made copy of a Pin that a later card build of the edited form beats', () => {
+    const { log } = buildCastLog();
+    rule(log, { ...buildPin, text: 'In human form she is lean' });
+    editFact(log, idOf(log, 'In human form she is lean'), dragonScales);
+    const state = rule(log, { ...decidedBuild, text: dragonScales });
+
+    assert.deepEqual(
+      state.facts.filter((fact) => fact.text === dragonScales).map((fact) => [fact.made, fact.status]),
+      [[false, InForce], [true, Reported]],
+    );
+  });
+
+  it('decides an edit that names another form than the scope it carries by the form the edited text names', () => {
+    const { log } = buildCastLog();
+    addStoryFact(log, { category: 'build', text: 'In dragon form she is 20 ft long' });
+    rule(log, { ...decidedBuild, text: 'slim' });
+    editFact(log, idOf(log, 'In dragon form she is 20 ft long'), 'In human form she is lean');
+    const state = rule(log, { ...decidedBuild, text: 'In human form she is stocky' });
+
+    assert.deepEqual(statusesIn(state, 'build'), {
+      slim: InForce,
+      'In human form she is lean': Reported,
+      'In human form she is stocky': InForce,
+    });
+  });
+
+  it('follows only the edits that replay when it keeps the form of an edit chain', () => {
+    const { log } = buildCastLog();
+    addStoryFact(log, { category: 'build', text: dragonScales });
+    const story = idOf(log, dragonScales);
+    editFact(log, story, 'In human form she is slim');
+    const first = log.entries.at(-1).sequence;
+    editFact(log, story, 'slim');
+    ScribeLogCore.revoke(log, first);
+    const state = rule(log, { ...decidedBuild, text: 'In dragon form she is winged' });
+
+    assert.deepEqual(statusesIn(state, 'build'), { slim: Reported, 'In dragon form she is winged': InForce });
+  });
+
+  it('takes the first matching fact of a no-winner Pin only when all matches share one form', () => {
+    const { log } = buildCastLog();
+    addStoryFact(log, { category: 'build', text: dragonScales });
+    addStoryFact(log, {
+      type: ScribeAnswer.Type.Change,
+      fact: idOf(log, dragonScales),
+      becomes: ScribeLogCore.nextFactId(log),
+      category: 'build',
+      text: 'covered in black scales',
+    });
+    addStoryFact(log, { category: 'build', text: 'covered in black scales' });
+    rule(log, { ...decidedBuild, text: 'slim' });
+    rule(log, { ...decidedBuild, text: 'In dragon form she is winged' });
+    const state = rule(log, { ...buildPin, text: 'covered in black scales' });
+
+    assert.deepEqual(
+      state.facts.filter((fact) => fact.text === 'covered in black scales').map((fact) => [fact.status, fact.pinned]),
+      [[Reported, false], [InForce, true]],
+    );
+    assert.equal(factNamed(state, 'In dragon form she is winged').status, InForce);
+  });
+
+  it('matches a no-winner Pin with the standing fact of a refined match, not with the refined fact', () => {
+    const { log } = buildCastLog();
+    addStoryFact(log, { category: 'build', text: 'covered in black scales' });
+    addStoryFact(log, {
+      type: ScribeAnswer.Type.Refine,
+      fact: idOf(log, 'covered in black scales'),
+      becomes: ScribeLogCore.nextFactId(log),
+      category: 'build',
+      text: dragonScales,
+    });
+    rule(log, { ...decidedBuild, text: 'slim' });
+    rule(log, { ...decidedBuild, text: 'In dragon form she is winged' });
+    const state = rule(log, { ...buildPin, text: 'covered in black scales' });
+
+    assert.equal(state.facts.filter((fact) => fact.made).length, 0);
+    assert.equal(factNamed(state, dragonScales).status, InForce);
+    assert.equal(factNamed(state, dragonScales).pinned, true);
+    assert.equal(factNamed(state, 'In dragon form she is winged').status, Reported);
+    assert.equal(factNamed(state, 'slim').status, InForce);
+  });
+
+  it('files the ruled replacement of an InForce and of a Disputed form-wise build without the old form keeping', () => {
+    const { log } = buildCastLog();
+    addStoryFact(log, { category: 'build', text: dragonScales });
+    rule(log, { ...decidedBuild, text: 'slim' });
+    const inForce = pedantOn(log, idOf(log, dragonScales), 'covered in obsidian scales');
+    assert.deepEqual(statusesIn(inForce, 'build'), { slim: InForce, 'covered in obsidian scales': InForce });
+    const kept = log.entries.at(-1).operations[0];
+    assert.equal(Object.hasOwn(kept, 'form'), false);
+    assert.equal(kept.winner !== null, true);
+
+    const disputed = buildCastLog().log;
+    addStoryFact(disputed, { category: 'build', text: dragonScales });
+    addStoryFact(disputed, { category: 'build', text: 'In dragon form she is covered in red scales' });
+    rule(disputed, { ...buildPin, text: 'In dragon form she is covered in red scales' });
+    rule(disputed, { ...decidedBuild, text: 'slim' });
+    assert.equal(factNamed(ScribeReplay.run(disputed, storyOrder), dragonScales).status, ScribeReplay.Status.Disputed);
+    const state = pedantOn(disputed, idOf(disputed, dragonScales), 'covered in obsidian scales');
+    assert.equal(factNamed(state, 'covered in obsidian scales').status, InForce);
+    assert.equal(factNamed(state, 'slim').status, InForce);
+  });
+
+  it('files the same-text replacement of a Reported inherited build as a confirming Pin without a duplicate', () => {
+    const { log, white } = dragonChangedToWhite();
+    rule(log, { ...decidedBuild, text: 'slim' });
+    rule(log, { ...decidedBuild, text: 'In dragon form she is winged' });
+    const state = pedantOn(log, white.id, whiteScales);
+
+    assert.equal(state.facts.filter((fact) => fact.text === whiteScales).length, 1);
+    assert.deepEqual(statusesIn(state, 'build'), {
+      [dragonScales]: ScribeReplay.Status.Replaced,
+      [whiteScales]: InForce,
+      slim: InForce,
+      'In dragon form she is winged': Reported,
+    });
+    assert.equal(Object.hasOwn(log.entries.at(-1).operations[0], 'form'), false);
   });
 });
 
@@ -3608,6 +5105,43 @@ describe('Card filing into the book', () => {
     assert.equal(operationsOf(loadBook(empty).log, ScribeLogCore.Ruling.AddFact).length, 0);
   });
 
+  it('files a build from its worded parts only and files a bare unknown only when no part has words', () => {
+    const { state } = loadBook(createCardWorld());
+    for (const [height, body, expected] of [
+      ['', '', null],
+      ['  ', '\t', null],
+      ['', '?', '?'],
+      ['?', '?', '?'],
+      ['..', '-', '?'],
+      ['?', '  ', '?'],
+      ['slim', '?', 'slim'],
+      ['?', 'slim', 'slim'],
+      ['  ', ' slim ', 'slim'],
+      ['6 ft', 'slim', '6 ft; slim'],
+      ['6 ft?', '?', '6 ft?'],
+    ]) {
+      const steps = CardFiling.operations({
+        state,
+        subjectId: 'S2',
+        before: CharacterCard.empty(),
+        after: CharacterCard.fromObject({ height, body }),
+      });
+      assert.deepEqual(steps.map((step) => step.operation.text), expected === null ? [] : [expected], `${height}|${body}`);
+    }
+  });
+
+  it('saves a card with unknown build parts and files them without a bare unknown inside a build', () => {
+    const world = createCardWorld();
+    saveCard(world, { height: '?', body: '-' });
+    assert.deepEqual(factsIn(loadBook(world).state, 'build'), [['?', InForce]]);
+
+    saveCard(world, { body: 'slim' });
+    saveCard(world, { height: "5'6\"", body: '?' });
+    const { state } = loadBook(world);
+    assert.deepEqual(factsIn(state, 'build'), [['?', Reported], ['slim', Reported], ["5'6\"", InForce]]);
+    assert.equal(world.service.bookAppearance({ state, subjectId: 'S2' }).build, "5'6\"");
+  });
+
   it('builds the filing steps as card-position, public, uncited operator facts with decided only on fixed slots', () => {
     const { state } = loadBook(createCardWorld());
     const steps = CardFiling.operations({
@@ -3654,6 +5188,67 @@ describe('Card filing into the book', () => {
       features: 'a scar; a tattoo',
     });
     assert.deepEqual(world.service.bookAppearance({ state, subjectId: 'S4' }), {});
+  });
+
+  /**
+   * @param {{service: ScribeService, campaignId: string, card: CharacterCard}} world
+   * @returns {Readonly<Record<string, string>>}
+   * @throws {Error}
+   */
+  const hintsOf = (world) => {
+    return world.service.bookHints({ state: loadBook(world).state, subjectId: 'S2', card: world.card });
+  };
+
+  it('gives no hint for a field whose book text is what the saved card files, whatever the unknown combination', () => {
+    for (const [height, body] of [['?', 'slim'], ["5'6", '?'], ['?', '?'], ['', 'slim'], ["5'6", ''], ['-', '...'], ['  ', '?']]) {
+      const world = createCardWorld();
+      saveCard(world, { ...fullCard, height, body });
+      assert.deepEqual(hintsOf(world), {}, `${height}|${body}`);
+    }
+    const world = createCardWorld();
+    saveCard(world, { age: '-', hair: '?', eyes: '  green ', face: 'freckled', features: 'a scar; a burn' });
+    assert.deepEqual(hintsOf(world), {});
+  });
+
+  it('hints the book text of every field the book holds differently from what the saved card files', () => {
+    const world = createCardWorld();
+    saveCard(world, { ...fullCard, eyes: '?' });
+    addOperatorFact(world, { category: 'age', text: '30', decided: true });
+    addOperatorFact(world, { category: 'hair', text: 'black', decided: true });
+    addOperatorFact(world, { category: 'eyes', text: 'blue', decided: true });
+    addOperatorFact(world, { category: 'build', text: 'stocky', decided: true });
+    addOperatorFact(world, { category: 'appearance', text: 'a long nose' });
+    addOperatorFact(world, { category: 'feature', text: 'a tattoo' });
+
+    assert.deepEqual(hintsOf(world), {
+      age: '30',
+      hair: 'black',
+      eyes: 'blue',
+      build: 'stocky',
+      face: 'freckled; a long nose',
+      features: 'a scar; a tattoo',
+    });
+  });
+
+  it('leaves out Reported book values and fields the book does not hold when it hints', () => {
+    const world = createCardWorld();
+    saveCard(world, { hair: 'red', height: 'tall' });
+    addOperatorFact(world, { category: 'hair', text: 'black', decided: true });
+    addOperatorFact(world, { category: 'hair', text: 'white', decided: true });
+
+    assert.deepEqual(hintsOf(world), { hair: 'white' });
+    assert.deepEqual(
+      world.service.bookHints({
+        state: loadBook(world).state,
+        subjectId: 'S2',
+        card: CharacterCard.fromObject({ ...world.card.toObject(), eyes: 'green', face: 'pale', age: '5' }),
+      }),
+      { hair: 'white' },
+    );
+    assert.deepEqual(
+      world.service.bookHints({ state: loadBook(world).state, subjectId: 'S4', card: world.card }),
+      {},
+    );
   });
 
   it('puts the card build in force over imported builds even when a word like tall scopes them', () => {
@@ -3844,6 +5439,121 @@ describe('Card filing into the book', () => {
 
     assert.match(ledgerPrompt, /F\d+ \| Mara \| age \| unknown/);
     assert.doesNotMatch(ledgerPrompt, /\| age \| \?/);
+  });
+
+  /**
+   * @param {{store: SqliteStore, service: ScribeService, campaignId: string, mara: object}} world
+   * @param {string} category
+   * @param {string} factText
+   * @param {string} replacement
+   * @returns {void}
+   * @throws {Error}
+   */
+  const ruleReplacement = (world, category, factText, replacement) => {
+    const { state, turns } = loadBook(world);
+    const fact = state.facts.find((item) => item.text === factText);
+    const [finding] = world.store.insertFindings(world.campaignId, turns.at(-1).id, [
+      {
+        kind: FindingKind.Contradiction,
+        subjectId: 'S2',
+        subjectName: 'Mara',
+        speakerCharacterId: world.mara.id,
+        factId: fact.id,
+        category,
+        bookText: factText,
+        summary: 'Changed',
+        quote: replacement,
+      },
+    ]);
+    new PedantService({ store: world.store, scribeService: world.service }).resolveFinding({
+      campaignId: world.campaignId,
+      findingId: finding.id,
+      action: FindingStatus.Ruled,
+      replacementText: replacement,
+    });
+  };
+
+  it('makes the ruled replacement of a Reported hair the newest decision and leaves the old facts Reported', () => {
+    const world = createCardWorld();
+    addStory(world, [{ type: ScribeAnswer.Type.Fact, category: 'hair', text: 'black' }]);
+    saveCard(world, { hair: 'red' });
+    assert.deepEqual(factsIn(loadBook(world).state, 'hair'), [['red', InForce], ['black', Reported]]);
+
+    ruleReplacement(world, 'hair', 'black', 'auburn');
+    const { state } = loadBook(world);
+    assert.deepEqual(factsIn(state, 'hair'), [['red', Reported], ['black', Reported], ['auburn', InForce]]);
+    assert.equal(state.facts.find((fact) => fact.text === 'auburn').pinned, true);
+    assert.equal(operationsOf(loadBook(world).log, ScribeLogCore.Ruling.EditFact).length, 0);
+  });
+
+  it('keeps the form of a Reported form-wise build when its ruled replacement is filed', () => {
+    const world = createCardWorld();
+    const dragon = 'In dragon form she is covered in black scales';
+    addStory(world, [{ type: ScribeAnswer.Type.Fact, category: 'build', text: dragon }]);
+    saveCard(world, { body: 'slim' });
+    saveCard(world, { body: 'In dragon form she is winged' });
+    assert.equal(factsIn(loadBook(world).state, 'build').find(([text]) => text === dragon)[1], Reported);
+
+    ruleReplacement(world, 'build', dragon, 'covered in obsidian scales');
+    const { state } = loadBook(world);
+    assert.deepEqual(Object.fromEntries(factsIn(state, 'build')), {
+      slim: InForce,
+      'In dragon form she is winged': Reported,
+      [dragon]: Reported,
+      'covered in obsidian scales': InForce,
+    });
+    assert.equal(state.facts.find((fact) => fact.text === 'covered in obsidian scales').pinned, true);
+  });
+
+  it('describes a model Change of a form-wise build without a line for the inherited form', () => {
+    const world = createCardWorld();
+    const dragon = 'In dragon form she is covered in black scales';
+    addStory(world, [{ type: ScribeAnswer.Type.Fact, category: 'build', text: dragon }]);
+    const before = loadBook(world).state;
+    addStory(world, [
+      {
+        type: ScribeAnswer.Type.Change,
+        fact: before.facts.find((fact) => fact.text === dragon).id,
+        becomes: ScribeLogCore.nextFactId(loadBook(world).log),
+        category: 'build',
+        text: 'covered in white scales',
+      },
+    ]);
+    const after = loadBook(world).state;
+    assert.equal(Object.hasOwn(before, 'inheritedForms'), false);
+    assert.equal(Object.hasOwn(after, 'inheritedForms'), true);
+
+    const lines = world.service.describeChanges(before, after);
+    assert.equal(lines.some((line) => line.startsWith('Something else')), false);
+    assert.equal(lines.length > 0 && lines[0] !== 'Nothing in the book would change.', true);
+  });
+
+  it('keeps the form of an inherited build when its ruled replacement of a Reported fact is filed', () => {
+    const world = createCardWorld();
+    const dragon = 'In dragon form she is covered in black scales';
+    addStory(world, [{ type: ScribeAnswer.Type.Fact, category: 'build', text: dragon }]);
+    addStory(world, [
+      {
+        type: ScribeAnswer.Type.Refine,
+        fact: loadBook(world).state.facts.find((fact) => fact.text === dragon).id,
+        category: 'build',
+        text: 'covered in white scales',
+      },
+    ]);
+    saveCard(world, { body: 'In dragon form she is winged' });
+    saveCard(world, { body: 'slim' });
+    assert.equal(factsIn(loadBook(world).state, 'build').find(([text]) => text === 'covered in white scales')[1], Reported);
+
+    ruleReplacement(world, 'build', 'covered in white scales', 'covered in silver scales');
+    const { state } = loadBook(world);
+    assert.deepEqual(Object.fromEntries(factsIn(state, 'build')), {
+      [dragon]: ScribeReplay.Status.Replaced,
+      'covered in white scales': Reported,
+      'In dragon form she is winged': Reported,
+      slim: InForce,
+      'covered in silver scales': InForce,
+    });
+    assert.equal(state.facts.find((fact) => fact.text === 'covered in silver scales').pinned, true);
   });
 
   it('turns every text field of a card that has no letter or digit into the unknown value, except speech examples', () => {

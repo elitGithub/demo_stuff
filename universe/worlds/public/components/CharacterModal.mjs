@@ -14,8 +14,6 @@ export class CharacterModal {
   ]);
 
   static #BasicsSectionKey = 'basics';
-  static #BuildBookKey = 'build';
-  static #BuildSeparator = '; ';
   static #HintPrefix = 'In the book now: ';
   static #ExampleAddButtonId = 'char-example-add';
   static #ExampleInputIdPrefix = 'char-example-';
@@ -232,8 +230,8 @@ export class CharacterModal {
   }
 
   /**
-   * @param {{name?: string, slug?: string, aliases?: Array<string>, tier?: string, isPlayer?: boolean, modelOverride?: string | null, card: Record<string, string | Array<string>>, bookAppearance: Record<string, string>, avatarToken?: string, avatarInitials?: string} | null} character
-   * @returns {{name: string, slug: string, aliasesText: string, tier: string, isPlayer: boolean, modelOverride: string, card: Record<string, string>, speechExamples: Array<string>, bookAppearance: Record<string, string>, avatarToken: string, avatarInitials: string}}
+   * @param {{name?: string, slug?: string, aliases?: Array<string>, tier?: string, isPlayer?: boolean, modelOverride?: string | null, card: Record<string, string | Array<string>>, bookHints: Record<string, string>, avatarToken?: string, avatarInitials?: string} | null} character
+   * @returns {{name: string, slug: string, aliasesText: string, tier: string, isPlayer: boolean, modelOverride: string, card: Record<string, string>, speechExamples: Array<string>, bookHints: Record<string, string>, avatarToken: string, avatarInitials: string}}
    * @throws {TypeError}
    */
   static #buildValues(character) {
@@ -249,7 +247,7 @@ export class CharacterModal {
         CharacterModal.#TextFieldNames.map((fieldName) => [fieldName, isEdit ? character.card[fieldName] : '']),
       ),
       speechExamples: isEdit ? [...character.card.speechExamples] : [],
-      bookAppearance: isEdit ? character.bookAppearance : {},
+      bookHints: isEdit ? character.bookHints : {},
       avatarToken: isEdit && typeof character.avatarToken === 'string' ? character.avatarToken : 'slate',
       avatarInitials: isEdit && typeof character.avatarInitials === 'string' ? character.avatarInitials : '',
     };
@@ -558,29 +556,6 @@ export class CharacterModal {
     tokenGroup.append(tokenLabel, tokenPicker);
     basics.content.append(tokenGroup);
 
-    const hintElements = new Map();
-    /**
-     * @returns {void}
-     */
-    const refreshHints = () => {
-      for (const [bookKey, hintElement] of hintElements) {
-        const cardText = bookKey === CharacterModal.#BuildBookKey
-          ? [state.values.card.height, state.values.card.body]
-              .map((part) => part.trim())
-              .filter((part) => part.length > 0)
-              .join(CharacterModal.#BuildSeparator)
-          : state.values.card[bookKey].trim();
-        const bookText = state.values.bookAppearance[bookKey];
-        const differs = bookText !== undefined && bookText !== cardText;
-        hintElement.textContent = differs ? `${CharacterModal.#HintPrefix}${bookText}` : '';
-        if (differs) {
-          hintElement.classList.remove('is-hidden');
-        } else {
-          hintElement.classList.add('is-hidden');
-        }
-      }
-    };
-
     for (const section of CharacterModal.#CardSections) {
       const cardSection = this.#createSection(state, section.key, section.title);
       for (const field of section.fields) {
@@ -596,14 +571,14 @@ export class CharacterModal {
         }
         control.addEventListener('input', () => {
           state.values.card[field.name] = control.value;
-          refreshHints();
         });
         const group = this.#createField(field.label, control);
         if (field.book !== null) {
+          const bookText = state.values.bookHints[field.book];
           const hint = this.#documentRef.createElement('p');
           hint.id = `${CharacterModal.#CardHintIdPrefix}${field.book}`;
-          hint.className = 'field-hint';
-          hintElements.set(field.book, hint);
+          hint.className = bookText === undefined ? 'field-hint is-hidden' : 'field-hint';
+          hint.textContent = bookText === undefined ? '' : `${CharacterModal.#HintPrefix}${bookText}`;
           group.append(hint);
         }
         cardSection.content.append(group);
@@ -663,7 +638,6 @@ export class CharacterModal {
       }
       body.append(cardSection.details);
     }
-    refreshHints();
 
     if (state.errorMessage.length > 0) {
       const errorBox = this.#documentRef.createElement('div');

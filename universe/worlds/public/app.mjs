@@ -384,9 +384,18 @@ export class WorldsApp {
           if (campaignId === null) {
             return;
           }
-          const fullCharacter = await this.#api.getCharacter(campaignId, character.id);
+          let fullCharacter = null;
+          let failure = null;
+          try {
+            fullCharacter = await this.#api.getCharacter(campaignId, character.id);
+          } catch (loadError) {
+            failure = loadError;
+          }
           if (this.#activeCampaignId !== campaignId) {
             return;
+          }
+          if (failure !== null) {
+            throw failure;
           }
           this.#characterModal.open({
             character: fullCharacter,
@@ -1042,6 +1051,11 @@ export class WorldsApp {
 
     let turnCommitted = false;
     try {
+      /**
+       * @param {{event: string, data: object | null}} streamEvent
+       * @returns {Promise<void>}
+       * @throws {Error}
+       */
       const onEvent = async ({ event, data }) => {
         if (this.#activeCampaignId !== campaignId) {
           return;

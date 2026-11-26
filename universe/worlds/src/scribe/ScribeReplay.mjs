@@ -217,7 +217,7 @@ export const ScribeReplay = Object.freeze({
       return null;
     }
     let source = book.byId.get(operation.winner);
-    if (!source && operation.category === 'build' && operation.winner && operation.cite && !('form' in operation)) {
+    if (!source && operation.category === ScribeCategory.Names.Build && operation.winner && operation.cite && !('form' in operation)) {
       const matching = book.facts.filter((fact) => {
         return (
           fact.cite === operation.cite &&
@@ -235,6 +235,90 @@ export const ScribeReplay = Object.freeze({
       { ...operation, ...scope, subject: ScribeReplay.resolve(book, operation.subject) },
       ScribeCategory.Kind.Fixed,
     )[0];
+  },
+
+  /**
+   * @param {{inheritedForms?: Readonly<Record<string, string>>}} book
+   * @param {{id?: string, text?: string, form?: string | null, dimension?: string | null}} fact
+   * @returns {string | null}
+   */
+  decisionForm(book, fact) {
+    const forms = book.inheritedForms;
+    return forms !== undefined && Object.hasOwn(forms, fact.id) ? forms[fact.id] : ScribeCategory.derive(fact).form;
+  },
+
+  /**
+   * @param {{inheritedForms?: Readonly<Record<string, string>>}} book
+   * @param {{id?: string, subject: string, category: string, text?: string, form?: string | null, dimension?: string | null, target?: string | null, targetText?: string | null}} fact
+   * @param {string} [subject]
+   * @returns {string}
+   * @throws {TypeError}
+   */
+  decisionBase(book, fact, subject = fact.subject) {
+    return fact.category === ScribeCategory.Names.Build
+      ? JSON.stringify([subject, fact.category, ScribeReplay.decisionForm(book, fact)])
+      : ScribeReplay.keys({ ...fact, subject }, ScribeCategory.Kind.Fixed)[0];
+  },
+
+  /**
+   * @param {{inheritedForms?: Readonly<Record<string, string>>}} book
+   * @param {{id?: string, subject: string, category: string, text?: string, evidence?: {attribute?: string}, form?: string | null, dimension?: string | null, target?: string | null, targetText?: string | null}} fact
+   * @returns {string}
+   * @throws {TypeError}
+   */
+  decisionField(book, fact) {
+    return JSON.stringify([ScribeReplay.decisionBase(book, fact), fact.evidence?.attribute ?? fact.category]);
+  },
+
+  /**
+   * @param {{inheritedForms: Record<string, string>, editForms: ReadonlyMap<string, string>}} book
+   * @param {{id: string, category: string, text?: string, form?: string | null, dimension?: string | null}} fact
+   * @param {{id?: string, category: string, text?: string, form?: string | null, dimension?: string | null}} named
+   * @returns {void}
+   */
+  inherit(book, fact, named) {
+    if (fact.category !== ScribeCategory.Names.Build || Object.hasOwn(book.inheritedForms, fact.id)) {
+      return;
+    }
+    if (book.editForms.has(fact.id)) {
+      book.inheritedForms[fact.id] = book.editForms.get(fact.id);
+      return;
+    }
+    if (ScribeCategory.derive(fact).form !== null) {
+      return;
+    }
+    const form = named.category === ScribeCategory.Names.Build ? ScribeReplay.decisionForm(book, named) : null;
+    if (form !== null) {
+      book.inheritedForms[fact.id] = form;
+    }
+  },
+
+  /**
+   * @param {object} book
+   * @param {string} id
+   * @returns {{id: string, subject: string, category: string, text: string, status: string, made: boolean, evidence?: {attribute?: string}, form?: string | null, dimension?: string | null, target: string | null, targetText: string | null}}
+   * @throws {TypeError}
+   */
+  standing(book, id) {
+    const fact = ScribeReplay.follow(book, id);
+    if (fact === undefined) {
+      throw new TypeError(`Fact not found: ${id}`);
+    }
+    return fact;
+  },
+
+  /**
+   * @param {object} book
+   * @param {{operation: object, position: number, origin: string}} item
+   * @param {object | undefined} named
+   * @returns {void}
+   * @throws {TypeError}
+   */
+  refuse(book, item, named) {
+    const fact = ScribeReplay.file(book, item, item.operation.becomes);
+    if (fact !== null && named !== undefined) {
+      ScribeReplay.inherit(book, fact, named);
+    }
   },
 
   /**
@@ -381,8 +465,8 @@ export const ScribeReplay = Object.freeze({
 
   /**
    * @param {object} book
-   * @param {string} id
-   * @returns {object | undefined}
+   * @param {string | null | undefined} id
+   * @returns {{id: string, subject: string, category: string, text: string, status: string, made: boolean, evidence?: {attribute?: string}, form?: string | null, dimension?: string | null, target: string | null, targetText: string | null} | undefined}
    */
   follow(book, id) {
     const passed = [];
@@ -537,6 +621,9 @@ export const ScribeReplay = Object.freeze({
     if (ScribeReplay.erase(book, fact)) {
       return null;
     }
+    if (book.edits.has(id)) {
+      ScribeReplay.inherit(book, fact, { category: fact.category, text: operation.text });
+    }
     const keys = ScribeReplay.keys(fact, kind);
     if (
       (kind === ScribeCategory.Kind.Moving &&
@@ -609,6 +696,7 @@ export const ScribeReplay = Object.freeze({
     if (ScribeReplay.erase(book, fact)) {
       return null;
     }
+    ScribeReplay.inherit(book, fact, named);
     fact.status = named.status;
     fact.replacedBy = named.replacedBy;
     const kind = ScribeReplay.kindOf(named.category);
@@ -646,7 +734,7 @@ export const ScribeReplay = Object.freeze({
       const operation = item.operation;
       const named = book.byId.get(operation.fact);
       if (!ScribeReplay.takes(book, operation, named)) {
-        ScribeReplay.file(book, item, operation.becomes);
+        ScribeReplay.refuse(book, item, named);
         return;
       }
       const fact = ScribeReplay.succeed(book, item, named);
@@ -670,7 +758,7 @@ export const ScribeReplay = Object.freeze({
       const operation = item.operation;
       const named = ScribeReplay.follow(book, operation.fact);
       if (!ScribeReplay.takes(book, operation, named)) {
-        ScribeReplay.file(book, item, operation.becomes);
+        ScribeReplay.refuse(book, item, named);
         return;
       }
       const fact = ScribeReplay.succeed(book, item, named);
@@ -940,28 +1028,39 @@ export const ScribeReplay = Object.freeze({
     Pin(book, operation) {
       const status = ScribeReplay.Status;
       const slot = ScribeReplay.pinSlot(book, operation);
-      if (slot === null || book.pins.get(slot) !== operation) {
+      if (slot === null || !book.actingPins.has(operation)) {
         return;
       }
-      const newestDecision = book.decidedSlots.get(slot);
-      if (newestDecision !== undefined && book.rulingSequences.get(operation) < newestDecision) {
-        return;
-      }
-      const held = book.held.get(slot) ?? [];
+      const decision = book.pinDecisions.get(operation);
+      const losing =
+        book.supersededPins.has(operation) ||
+        (decision !== undefined && book.rulingSequences.get(operation) < decision.sequence);
+      const slotHeld = book.held.get(slot) ?? [];
+      const held = book.narrowedPins.has(operation)
+        ? slotHeld.filter((fact) => {
+            return ScribeReplay.decisionBase(book, ScribeReplay.standing(book, fact.id)) === book.pinBases.get(operation);
+          })
+        : slotHeld;
       const candidates = new Set();
       for (const fact of held) {
-        const standing = ScribeReplay.follow(book, fact.id);
+        const standing = ScribeReplay.standing(book, fact.id);
         const edit = book.edits.get(fact.id);
         const kept =
           (operation.winner === fact.id && operation.editedSource) ||
           (edit && (operation.winner === fact.id || operation.winner === edit.source.fact));
         const pinned = { ...operation, ...ScribeCategory.scope(fact) };
-        if ((kept || ScribeCategory.value(fact) === ScribeCategory.value(pinned)) && ScribeReplay.live(standing)) {
+        const available =
+          ScribeReplay.live(standing) ||
+          (standing.status === status.Reported && (decision !== undefined || standing.made));
+        if ((kept || ScribeCategory.value(fact) === ScribeCategory.value(pinned)) && available) {
           candidates.add(standing);
         }
       }
       const preferred = operation.winner === null ? undefined : ScribeReplay.follow(book, operation.winner);
       let winner = candidates.has(preferred) ? preferred : candidates.values().next().value;
+      if (losing && winner !== undefined) {
+        return;
+      }
       if (winner === undefined) {
         const told = [];
         for (const id of operation.told) {
@@ -1000,12 +1099,31 @@ export const ScribeReplay = Object.freeze({
           return;
         }
         ScribeReplay.keep(book, winner);
+        ScribeReplay.inherit(book, winner, operation);
+        const [copySlot] = ScribeReplay.keys(winner, ScribeCategory.Kind.Fixed);
+        book.held.set(copySlot, [...(book.held.get(copySlot) ?? []), winner]);
+        if (losing) {
+          winner.status = status.Reported;
+          return;
+        }
       }
+      const displaced = decision === undefined ? status.Disputed : status.Reported;
       for (const fact of held) {
         if (fact !== winner && fact.status === status.InForce) {
           ScribeReplay.leave(book, fact, [slot]);
-          fact.status = status.Disputed;
+          fact.status = displaced;
         }
+      }
+      if (
+        decision !== undefined &&
+        decision.decided !== winner &&
+        ScribeReplay.live(decision.decided) &&
+        !held.includes(decision.decided)
+      ) {
+        if (decision.decided.status === status.InForce) {
+          ScribeReplay.leave(book, decision.decided, ScribeReplay.keys(decision.decided, ScribeCategory.Kind.Fixed));
+        }
+        decision.decided.status = status.Reported;
       }
       if (winner.status !== status.InForce) {
         winner.status = status.InForce;
@@ -1108,7 +1226,7 @@ export const ScribeReplay = Object.freeze({
    * @param {ReadonlyMap<string, object> | null} [edits]
    * @param {Array<object> | null} [sources]
    * @param {ReadonlyMap<string, object> | readonly object[] | null} [messages]
-   * @returns {Readonly<{revision: number, subjects: readonly object[], facts: readonly object[], scenes: readonly object[], nights: readonly object[], threads: readonly object[], conflicts: readonly object[], lookAlikes: readonly object[], stale: readonly object[], refinements: readonly object[], aliases: readonly object[], questions: readonly object[], unaliased: readonly object[], distinct: readonly object[], contradictions: readonly object[]}>}
+   * @returns {Readonly<{revision: number, subjects: readonly object[], facts: readonly object[], scenes: readonly object[], nights: readonly object[], threads: readonly object[], conflicts: readonly object[], lookAlikes: readonly object[], stale: readonly object[], refinements: readonly object[], aliases: readonly object[], questions: readonly object[], unaliased: readonly object[], distinct: readonly object[], contradictions: readonly object[], inheritedForms?: Readonly<Record<string, string>>}>}
    * @throws {TypeError}
    */
   run(log, order, pending = null, fingerprints = null, edits = null, sources = null, messages = null) {
@@ -1119,6 +1237,7 @@ export const ScribeReplay = Object.freeze({
     const rulingTypes = ScribeLogCore.Ruling;
     const targets = new Map();
     const decisionSequences = new Map();
+    const editForms = new Map();
     if (edits === null) {
       edits = new Map();
       const corrections = log.entries
@@ -1141,6 +1260,13 @@ export const ScribeReplay = Object.freeze({
           const fact = ScribeReplay.supportedFact(originals, source);
           if (fact && (fact.id === source.fact || (source.sourcePrint !== null && fingerprints !== null))) {
             if (operation.type === rulingTypes.EditFact) {
+              if (fact.category === ScribeCategory.Names.Build) {
+                const named = ScribeCategory.derive({ category: fact.category, text: operation.text }).form;
+                const earlier = editForms.get(fact.id) ?? ScribeCategory.derive(fact).form;
+                if ((named ?? earlier) !== null) {
+                  editForms.set(fact.id, named ?? earlier);
+                }
+              }
               edits.set(fact.id, operation);
               decisionSequences.set(fact.id, sequence);
             } else {
@@ -1201,7 +1327,14 @@ export const ScribeReplay = Object.freeze({
       answers: new Map(),
       dismissals: new Map(),
       contradictions: new Map(),
-      decidedSlots: new Map(),
+      actingPins: new Set(),
+      decisionBases: new Map(),
+      editForms,
+      inheritedForms: {},
+      narrowedPins: new Set(),
+      pinBases: new Map(),
+      pinDecisions: new Map(),
+      supersededPins: new Set(),
       rulingSequences: new Map(),
     };
     const counted = [];
@@ -1415,16 +1548,14 @@ export const ScribeReplay = Object.freeze({
       }
     }
 
-    /**
-     * @param {{evidence?: {attribute?: string}, category: string}} fact
-     * @returns {string}
-     */
-    const decisionField = (fact) => {
-      const slot = fact.category === ScribeCategory.Names.Build
-        ? JSON.stringify([fact.subject, fact.category, ScribeCategory.scope(fact).form ?? null])
-        : ScribeReplay.keys(fact, ScribeCategory.Kind.Fixed)[0];
-      return JSON.stringify([slot, fact.evidence?.attribute ?? fact.category]);
-    };
+    const pinRulings = [];
+    for (const operation of rulings) {
+      const slot = operation.type === rulingTypes.Pin ? ScribeReplay.pinSlot(book, operation) : null;
+      if (slot !== null) {
+        book.pins.set(slot, operation);
+        pinRulings.push({ operation, slot });
+      }
+    }
     const chosen = new Map();
     for (const fact of book.facts) {
       if (
@@ -1432,7 +1563,7 @@ export const ScribeReplay = Object.freeze({
         ScribeReplay.live(fact) &&
         [ScribeCategory.Kind.Fixed, ScribeCategory.Kind.Moving].includes(ScribeReplay.kindOf(fact.category))
       ) {
-        const field = decisionField(fact);
+        const field = ScribeReplay.decisionField(book, fact);
         const held = chosen.get(field);
         if (held === undefined || decisionSequences.get(fact.id) > decisionSequences.get(held.id)) {
           chosen.set(field, fact);
@@ -1440,10 +1571,96 @@ export const ScribeReplay = Object.freeze({
       }
     }
     for (const fact of chosen.values()) {
+      const base = ScribeReplay.decisionBase(book, fact);
+      const sequence = decisionSequences.get(fact.id);
+      if (!book.decisionBases.has(base) || sequence > book.decisionBases.get(base).sequence) {
+        book.decisionBases.set(base, { decided: fact, sequence });
+      }
+    }
+    const slotFacts = new Map();
+    const narrowedSlots = new Set();
+    for (const fact of book.facts) {
+      if (fact.status === status.Removed) {
+        continue;
+      }
       const [slot] = ScribeReplay.keys(fact, ScribeCategory.Kind.Fixed);
-      const newest = book.decidedSlots.get(slot);
-      if (newest === undefined || decisionSequences.get(fact.id) > newest) {
-        book.decidedSlots.set(slot, decisionSequences.get(fact.id));
+      slotFacts.set(slot, [...(slotFacts.get(slot) ?? []), fact]);
+      if (book.decisionBases.has(ScribeReplay.decisionBase(book, fact))) {
+        narrowedSlots.add(slot);
+      }
+    }
+    const copies = [];
+    for (const { operation, slot } of pinRulings) {
+      const subject = ScribeReplay.resolve(book, operation.subject);
+      let source = ScribeReplay.follow(book, operation.winner);
+      if (source === undefined) {
+        const pool = [
+          ...(slotFacts.get(slot) ?? []).map((fact) => ({ fact, standing: ScribeReplay.standing(book, fact.id) })),
+          ...copies
+            .filter((copy) => copy.slot === slot)
+            .map((copy) => ({ fact: copy.fact, standing: { ...copy.fact, form: copy.form, dimension: null } })),
+        ];
+        const standings = pool
+          .filter(({ fact }) => {
+            return ScribeCategory.value(fact) === ScribeCategory.value({ ...operation, ...ScribeCategory.scope(fact) });
+          })
+          .map(({ standing }) => standing);
+        const bases = new Set(standings.map((fact) => ScribeReplay.decisionBase(book, fact, subject)));
+        source = bases.size === 1 ? standings[0] : undefined;
+      }
+      const carried = source === undefined && book.editForms.has(operation.fact) ? book.editForms.get(operation.fact) : undefined;
+      const base = ScribeReplay.decisionBase(
+        book,
+        carried === undefined ? (source ?? operation) : { ...operation, form: carried, dimension: null },
+        subject,
+      );
+      if (source === undefined) {
+        const copy = {
+          id: operation.fact,
+          subject,
+          category: operation.category,
+          text: book.edits.get(operation.fact)?.text ?? operation.text,
+          ...ScribeCategory.scope(operation),
+          ...ScribeCategory.scope({ ...book.edits.get(operation.fact), category: operation.category }),
+        };
+        copies.push({
+          slot: ScribeReplay.keys(copy, ScribeCategory.Kind.Fixed)[0],
+          fact: copy,
+          form: carried === undefined ? ScribeReplay.decisionForm(book, operation) : carried,
+        });
+      }
+      book.pinBases.set(operation, base);
+      if (book.decisionBases.has(base)) {
+        narrowedSlots.add(slot);
+      }
+    }
+    for (const { operation, slot } of pinRulings) {
+      if (narrowedSlots.has(slot)) {
+        book.narrowedPins.add(operation);
+      }
+      if (book.narrowedPins.has(operation) || book.pins.get(slot) === operation) {
+        book.actingPins.add(operation);
+      }
+    }
+    const newestOfBase = new Map();
+    for (const operation of book.actingPins) {
+      const base = book.pinBases.get(operation);
+      const newest = newestOfBase.get(base);
+      if (newest === undefined || book.rulingSequences.get(operation) > book.rulingSequences.get(newest)) {
+        newestOfBase.set(base, operation);
+      }
+    }
+    for (const operation of book.actingPins) {
+      const newest = newestOfBase.get(book.pinBases.get(operation));
+      if (newest !== operation && (book.narrowedPins.has(operation) || book.narrowedPins.has(newest))) {
+        book.supersededPins.add(operation);
+      }
+    }
+    for (const operation of book.actingPins) {
+      const decision = book.decisionBases.get(book.pinBases.get(operation));
+      if (decision !== undefined) {
+        decision.sequence = Math.max(decision.sequence, book.rulingSequences.get(operation));
+        book.pinDecisions.set(operation, decision);
       }
     }
     if (chosen.size > 0) {
@@ -1451,7 +1668,7 @@ export const ScribeReplay = Object.freeze({
         if (!ScribeReplay.live(fact)) {
           continue;
         }
-        const winner = chosen.get(decisionField(fact));
+        const winner = chosen.get(ScribeReplay.decisionField(book, fact));
         if (winner !== undefined && winner !== fact) {
           if (fact.status === status.InForce) {
             ScribeReplay.leave(book, fact, ScribeReplay.keys(fact, ScribeCategory.Kind.Fixed));
@@ -1470,12 +1687,6 @@ export const ScribeReplay = Object.freeze({
           cite: operation.cite,
           position: positions.get(operation.cite) ?? operation.position,
         };
-      }
-    }
-    for (const operation of rulings) {
-      const slot = operation.type === rulingTypes.Pin ? ScribeReplay.pinSlot(book, operation) : null;
-      if (slot !== null) {
-        book.pins.set(slot, operation);
       }
     }
     for (const fact of book.facts) {
@@ -1770,6 +1981,7 @@ export const ScribeReplay = Object.freeze({
     const state = ScribeReplay.seal({
       revision: log.revision,
       ...(log.editRun?.through === log.revision ? { editedSince: log.editRun.from } : {}),
+      ...(Object.keys(book.inheritedForms).length > 0 ? { inheritedForms: { ...book.inheritedForms } } : {}),
       ...(edits.size > 0
         ? { editOrigins: Object.fromEntries([...edits].map(([id, operation]) => [id, { ...operation.source }])) }
         : {}),

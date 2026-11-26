@@ -950,7 +950,7 @@ export class InspectorDrawer {
                   this.render();
                 }
                 if (failed) {
-                  this.#drawerElement.querySelector(`#${InspectorDrawer.#EditButtonIdPrefix}${character.id}`).focus();
+                  this.#drawerElement.querySelector(`#${InspectorDrawer.#EditButtonIdPrefix}${character.id}`)?.focus();
                 }
               },
             });

@@ -63,8 +63,20 @@ export class CardFiling {
   }
 
   /**
+   * @param {Readonly<{fields: readonly string[]}>} slot
+   * @param {CharacterCard} card
+   * @returns {string}
+   */
+  static text(slot, card) {
+    const parts = slot.fields.map((field) => card[field].trim()).filter((part) => part.length > 0);
+    const worded = parts.filter((part) => part !== CharacterCard.Unknown);
+    return parts.length > 0 && worded.length === 0 ? CharacterCard.Unknown : worded.join(CardFiling.Separator);
+  }
+
+  /**
    * @param {{state: object, subjectId: string, before: CharacterCard, after: CharacterCard}} options
-   * @returns {readonly Readonly<{field: string, operation: Readonly<object>}>[]}
+   * @returns {readonly Readonly<{field: string, operation: Readonly<{type: string, fact?: string, exact?: boolean, subject?: string, category?: string, target?: null, text?: string, hidden?: boolean, cite?: null, position?: number, decided?: boolean}>}>[]}
+   * @throws {TypeError}
    */
   static operations({ state, subjectId, before, after }) {
     const changed = CardFiling.changedFields(before, after);
@@ -74,10 +86,7 @@ export class CardFiling {
       if (!slot.fields.some((field) => changed.includes(field))) {
         continue;
       }
-      const text = slot.fields
-        .map((field) => after[field].trim())
-        .filter((part) => part.length > 0)
-        .join(CardFiling.Separator);
+      const text = CardFiling.text(slot, after);
       const replaced = new Set();
       if (slot.kind === ScribeCategory.Kind.List) {
         const chain = [];

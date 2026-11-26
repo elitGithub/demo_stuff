@@ -349,6 +349,9 @@ function createFakeDomEnvironment() {
         type: eventType,
         target: this,
         defaultPrevented: false,
+        /**
+         * @returns {void}
+         */
         preventDefault() {
           this.defaultPrevented = true;
         },
@@ -415,6 +418,11 @@ function createFakeDomEnvironment() {
      */
     querySelectorAll(selector) {
       const found = [];
+      /**
+       * @param {FakeElement} node
+       * @returns {void}
+       * @throws {Error}
+       */
       const visit = (node) => {
         for (const child of node.children) {
           if (matchesSelector(child, selector)) {
@@ -504,7 +512,13 @@ function createFakeDomEnvironment() {
     async dispatchKeydown(keyName) {
       const handlers = [...(docListeners.get('keydown') ?? [])];
       for (const handler of handlers) {
-        await handler({ key: keyName, preventDefault() {} });
+        await handler({
+          key: keyName,
+          /**
+           * @returns {void}
+           */
+          preventDefault() {},
+        });
       }
     },
     /**
@@ -733,10 +747,10 @@ function buildCard(overrides = {}) {
 }
 
 /**
- * @param {{card?: Record<string, string | Array<string>>, bookAppearance?: Record<string, string>, id?: string, name?: string, slug?: string}} [options]
+ * @param {{card?: Record<string, string | Array<string>>, bookHints?: Record<string, string>, id?: string, name?: string, slug?: string}} [options]
  * @returns {object}
  */
-function buildCharacter({ card = {}, bookAppearance = {}, id = 'char-1', name = 'Maya', slug = 'maya' } = {}) {
+function buildCharacter({ card = {}, bookHints = {}, id = 'char-1', name = 'Maya', slug = 'maya' } = {}) {
   return {
     id,
     slug,
@@ -749,7 +763,7 @@ function buildCharacter({ card = {}, bookAppearance = {}, id = 'char-1', name = 
     avatarToken: 'slate',
     avatarInitials: 'MA',
     card: buildCard(card),
-    bookAppearance,
+    bookHints,
   };
 }
 
@@ -815,7 +829,7 @@ function listAlertTexts(root, levelClass) {
 }
 
 /**
- * @param {{catalogHandler?: (request: object) => Promise<{status: number, body: object}> | {status: number, body: object}, refreshHandler?: (request: object) => Promise<{status: number, body: object}> | {status: number, body: object}, settingsPutHandler?: (request: object) => {status: number, body: object}, characterHandler?: (request: object) => {status: number, body: object}, characterGetHandler?: (request: object) => Promise<{status: number, body: object}> | {status: number, body: object}, castItems?: Array<object>, ignoreAbortForModels?: boolean}} [options]
+ * @param {{catalogHandler?: (request: object) => Promise<{status: number, body: object}> | {status: number, body: object}, refreshHandler?: (request: object) => Promise<{status: number, body: object}> | {status: number, body: object}, settingsPutHandler?: (request: object) => {status: number, body: object}, characterHandler?: (request: object) => {status: number, body: object}, characterGetHandler?: (request: object) => Promise<{status: number, body: object}> | {status: number, body: object}, castItems?: Array<object>, secondCampaign?: boolean, secondCastItems?: Array<object>, ignoreAbortForModels?: boolean}} [options]
  * @returns {{app: WorldsApp, shell: object, documentRef: object, requests: Array<object>, unexpected: Array<string>}}
  * @throws {TypeError}
  */
@@ -826,6 +840,8 @@ function createBrowserHarness({
   characterHandler = (request) => ({ status: 200, body: { id: 'char-1', slug: 'maya', name: 'Maya', isPlayer: false, warnings: [], ...request.body } }),
   characterGetHandler = () => ({ status: 200, body: buildCharacter() }),
   castItems = [],
+  secondCampaign = false,
+  secondCastItems = [],
   ignoreAbortForModels = false,
 } = {}) {
   const { documentRef, createRootShell } = createFakeDomEnvironment();
@@ -872,19 +888,22 @@ function createBrowserHarness({
         return jsonResponse(answer.status, answer.body);
       }
       if (routeKey === 'GET /api/campaigns') {
-        return jsonResponse(200, buildPage([BrowserCampaign]));
+        return jsonResponse(200, buildPage(secondCampaign ? [BrowserCampaign, { ...BrowserCampaign, id: 'camp-2', title: 'Second' }] : [BrowserCampaign]));
       }
       if (routeKey === 'GET /api/campaigns/camp-1/characters') {
         return jsonResponse(200, buildPage(castItems));
+      }
+      if (secondCampaign && routeKey === 'GET /api/campaigns/camp-2/characters') {
+        return jsonResponse(200, buildPage(secondCastItems));
       }
       if (/^GET \/api\/campaigns\/camp-1\/characters\/char-\d+$/.test(routeKey)) {
         const answer = await characterGetHandler(record);
         return jsonResponse(answer.status, answer.body);
       }
-      if (/^GET \/api\/campaigns\/camp-1\/(turns|findings)$/.test(routeKey)) {
+      if (/^GET \/api\/campaigns\/camp-[12]\/(turns|findings)$/.test(routeKey)) {
         return jsonResponse(200, buildPage([]));
       }
-      if (routeKey === 'GET /api/campaigns/camp-1/memory') {
+      if (/^GET \/api\/campaigns\/camp-[12]\/memory$/.test(routeKey)) {
         return jsonResponse(200, {
           ...buildPage([]),
           section: 'subjects',
@@ -1169,23 +1188,35 @@ describe('WorldsApi SSE stream parser and CSRF enforcement', () => {
     let releaseCalled = false;
     let resolvePendingRead = null;
     const fakeReader = {
+      /**
+       * @returns {Promise<{done: boolean, value: undefined}>}
+       */
       read() {
         return new Promise((resolve) => {
           resolvePendingRead = resolve;
         });
       },
+      /**
+       * @returns {Promise<void>}
+       */
       async cancel() {
         cancelCalled = true;
         if (resolvePendingRead !== null) {
           resolvePendingRead({ done: true, value: undefined });
         }
       },
+      /**
+       * @returns {void}
+       */
       releaseLock() {
         releaseCalled = true;
       },
     };
     const fakeResponse = {
       body: {
+        /**
+         * @returns {object}
+         */
         getReader() {
           return fakeReader;
         },
@@ -2342,11 +2373,11 @@ describe('Browser model catalog: boot, races, dropdowns, status lines, alerts an
     assert.equal(documentRef.activeElement, modalRoot.querySelector('#char-example-add'));
   });
 
-  it('shows In the book now only where the book differs, with the build line once under Body', async () => {
+  it('shows In the book now from the payload only, with the build line once under Body, and never compares while typing', async () => {
     const { modalRoot } = createModalHarness({
       character: buildCharacter({
         card: { hair: 'red', eyes: 'green', height: "5'6", body: 'slim', age: '30' },
-        bookAppearance: { hair: 'black', eyes: 'green', build: "5'6; slim", features: 'a scar' },
+        bookHints: { hair: 'black', build: 'stocky', features: 'a scar' },
       }),
     });
     /**
@@ -2362,8 +2393,8 @@ describe('Browser model catalog: boot, races, dropdowns, status lines, alerts an
     assert.equal(modalRoot.querySelector('#char-card-hint-height'), null);
     assert.deepEqual(hintOf('hair'), { text: 'In the book now: black', hidden: false });
     assert.deepEqual(hintOf('features'), { text: 'In the book now: a scar', hidden: false });
+    assert.deepEqual(hintOf('build'), { text: 'In the book now: stocky', hidden: false });
     assert.deepEqual(hintOf('eyes'), { text: '', hidden: true });
-    assert.deepEqual(hintOf('build'), { text: '', hidden: true });
     assert.deepEqual(hintOf('age'), { text: '', hidden: true });
     assert.deepEqual(hintOf('face'), { text: '', hidden: true });
     assert.equal(
@@ -2371,26 +2402,18 @@ describe('Browser model catalog: boot, races, dropdowns, status lines, alerts an
       true,
     );
 
-    const hairInput = modalRoot.querySelector('#char-card-hair');
-    hairInput.value = 'black';
-    await hairInput.dispatchEvent('input');
-    assert.deepEqual(hintOf('hair'), { text: '', hidden: true });
-
-    const bodyInput = modalRoot.querySelector('#char-card-body');
-    bodyInput.value = 'athletic';
-    await bodyInput.dispatchEvent('input');
-    assert.deepEqual(hintOf('build'), { text: "In the book now: 5'6; slim", hidden: false });
+    for (const [fieldName, typed] of [['hair', 'black'], ['body', 'stocky'], ['features', 'a scar'], ['eyes', 'blue']]) {
+      const input = modalRoot.querySelector(`#char-card-${fieldName}`);
+      input.value = typed;
+      await input.dispatchEvent('input');
+    }
     const heightInput = modalRoot.querySelector('#char-card-height');
     heightInput.value = '';
     await heightInput.dispatchEvent('input');
-    bodyInput.value = "5'6; slim";
-    await bodyInput.dispatchEvent('input');
-    assert.deepEqual(hintOf('build'), { text: '', hidden: true });
-    heightInput.value = "5'6";
-    await heightInput.dispatchEvent('input');
-    bodyInput.value = 'slim';
-    await bodyInput.dispatchEvent('input');
-    assert.deepEqual(hintOf('build'), { text: '', hidden: true });
+    assert.deepEqual(hintOf('hair'), { text: 'In the book now: black', hidden: false });
+    assert.deepEqual(hintOf('build'), { text: 'In the book now: stocky', hidden: false });
+    assert.deepEqual(hintOf('features'), { text: 'In the book now: a scar', hidden: false });
+    assert.deepEqual(hintOf('eyes'), { text: '', hidden: true });
   });
 
   it('shows no hints for a new character', () => {
@@ -2497,7 +2520,7 @@ describe('Browser model catalog: boot, races, dropdowns, status lines, alerts an
 
     answer.resolve({
       status: 200,
-      body: buildCharacter({ card: { hair: 'red' }, bookAppearance: { hair: 'black' } }),
+      body: buildCharacter({ card: { hair: 'red' }, bookHints: { hair: 'black' } }),
     });
     await pendingClick;
     assert.equal(modalRoot.querySelector('#character-modal-title').textContent, 'Edit Character');
@@ -2573,6 +2596,58 @@ describe('Browser model catalog: boot, races, dropdowns, status lines, alerts an
     assert.equal(modalRoot.querySelector('#character-modal-title'), null);
   });
 
+  it('drops a failed character fetch that lands after the active campaign changed', async () => {
+    const answer = createDeferred();
+    const harness = createBrowserHarness({
+      castItems: [buildCharacter()],
+      secondCampaign: true,
+      secondCastItems: [buildCharacter()],
+      characterGetHandler: () => answer.promise,
+    });
+    await harness.app.init();
+    const drawerEl = harness.shell.querySelector('#inspector-drawer');
+    const modalRoot = harness.shell.querySelector('#modal-root');
+    await harness.shell.querySelector('#inspector-toggle-btn').dispatchEvent('click');
+    await findButton(drawerEl, 'Cast').dispatchEvent('click');
+
+    const pendingClick = drawerEl.querySelector('#cast-edit-char-1').dispatchEvent('click');
+    await waitUntil(() => harness.requests.some((request) => request.path.endsWith('/characters/char-1')));
+    await harness.app.selectCampaign('camp-2');
+    assert.notEqual(drawerEl.querySelector('#cast-edit-char-1'), null);
+    answer.resolve({ status: 404, body: { error: 'Character not found: char-1' } });
+    await pendingClick;
+
+    assert.equal(modalRoot.querySelector('#character-modal-title'), null);
+    assert.deepEqual(listAlertTexts(drawerEl, 'is-danger'), []);
+    assert.deepEqual(harness.unexpected, []);
+  });
+
+  it('survives a failed character fetch that lands after the drawer tab changed, without moving focus', async () => {
+    const answer = createDeferred();
+    const harness = createBrowserHarness({
+      castItems: [buildCharacter()],
+      characterGetHandler: () => answer.promise,
+    });
+    await harness.app.init();
+    const drawerEl = harness.shell.querySelector('#inspector-drawer');
+    const modalRoot = harness.shell.querySelector('#modal-root');
+    await harness.shell.querySelector('#inspector-toggle-btn').dispatchEvent('click');
+    await findButton(drawerEl, 'Cast').dispatchEvent('click');
+
+    const pendingClick = drawerEl.querySelector('#cast-edit-char-1').dispatchEvent('click');
+    await waitUntil(() => harness.requests.some((request) => request.path.endsWith('/characters/char-1')));
+    await findButton(drawerEl, 'Settings').dispatchEvent('click');
+    assert.equal(drawerEl.querySelector('#cast-edit-char-1'), null);
+    const focusedBefore = harness.documentRef.activeElement;
+    answer.resolve({ status: 404, body: { error: 'Character not found: char-1' } });
+    await pendingClick;
+
+    assert.equal(modalRoot.querySelector('#character-modal-title'), null);
+    assert.equal(drawerEl.querySelector('#cast-edit-char-1'), null);
+    assert.equal(harness.documentRef.activeElement, focusedBefore);
+    assert.deepEqual(harness.unexpected, []);
+  });
+
   it('moves focus to the previous example Remove button, or to Add when the first example goes', async () => {
     const { modalRoot, documentRef } = createModalHarness({
       character: buildCharacter({ card: { speechExamples: ['one', 'two', 'three'] } }),
@@ -2599,11 +2674,10 @@ describe('Browser model catalog: boot, races, dropdowns, status lines, alerts an
     assert.equal(rules.some((rule) => rule.selector.split(',').map((part) => part.trim()).includes('summary:focus-visible')), true);
   });
 
-  it('shows no hint when the card and the book both hold the unknown value, and trims the single-line comparison', async () => {
+  it('shows no hint for a field the payload leaves out, whatever is typed into it', async () => {
     const { modalRoot } = createModalHarness({
       character: buildCharacter({
-        card: { age: '?', hair: 'red' },
-        bookAppearance: { age: '?', hair: 'red' },
+        card: { age: '?', hair: 'red', height: '?', body: '?' },
       }),
     });
     /**
@@ -2611,17 +2685,16 @@ describe('Browser model catalog: boot, races, dropdowns, status lines, alerts an
      * @returns {object}
      */
     const hint = (bookKey) => modalRoot.querySelector(`#char-card-hint-${bookKey}`);
-    assert.equal(hint('age').textContent, '');
-    assert.equal(hint('age').classList.contains('is-hidden'), true);
+    for (const bookKey of ['age', 'hair', 'build']) {
+      assert.equal(hint(bookKey).textContent, '');
+      assert.equal(hint(bookKey).classList.contains('is-hidden'), true);
+    }
 
     const hairInput = modalRoot.querySelector('#char-card-hair');
-    hairInput.value = '  red  ';
+    hairInput.value = 'reddish';
     await hairInput.dispatchEvent('input');
     assert.equal(hint('hair').textContent, '');
     assert.equal(hint('hair').classList.contains('is-hidden'), true);
-    hairInput.value = 'reddish';
-    await hairInput.dispatchEvent('input');
-    assert.equal(hint('hair').textContent, 'In the book now: red');
   });
 
   it('shows the error where the Edit click was and does not open the window when the fetch fails', async () => {
@@ -2808,7 +2881,7 @@ describe('Browser model catalog: boot, races, dropdowns, status lines, alerts an
           slug: 'maya',
           name: 'Maya',
           isPlayer: false,
-          bookAppearance: {},
+          bookHints: {},
           ...request.body,
           warnings: request.method === 'POST' ? characterWarnings : [],
         },
@@ -2860,7 +2933,7 @@ describe('Browser model catalog: boot, races, dropdowns, status lines, alerts an
           slug: 'maya',
           name: 'Maya',
           isPlayer: false,
-          bookAppearance: { hair: 'black' },
+          bookHints: { hair: 'black' },
           ...request.body,
           warnings: request.method === 'POST' ? [warningText] : [],
         },

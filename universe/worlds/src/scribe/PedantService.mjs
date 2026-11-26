@@ -596,7 +596,8 @@ export class PedantService {
         existingFact !== undefined &&
         [ScribeReplay.Status.InForce, ScribeReplay.Status.Disputed, ScribeReplay.Status.Reported].includes(existingFact.status)
       ) {
-        if (existingFact.text !== trimmedReplacement) {
+        const reported = existingFact.status === ScribeReplay.Status.Reported;
+        if (existingFact.text !== trimmedReplacement && !reported) {
           try {
             ScribeLogCore.rule(log, state, {
               type: ScribeLogCore.Ruling.EditFact,
@@ -622,11 +623,21 @@ export class PedantService {
           refreshedFact.status !== ScribeReplay.Status.Removed &&
           ScribeLogCore.categoryKind(refreshedFact.category) === ScribeCategory.Kind.Fixed
         ) {
+          const scope = ScribeCategory.scope(refreshedFact);
+          const form = ScribeReplay.decisionForm(state, refreshedFact);
+          const keepsForm =
+            reported &&
+            existingFact.text !== trimmedReplacement &&
+            refreshedFact.category === ScribeCategory.Names.Build &&
+            !Object.hasOwn(scope, 'form') &&
+            ScribeCategory.derive({ category: refreshedFact.category, text: trimmedReplacement }).form === null &&
+            form !== null;
           ScribeLogCore.rule(log, state, {
             type: ScribeLogCore.Ruling.Pin,
             subject: refreshedFact.subject,
             category: refreshedFact.category,
-            ...ScribeCategory.scope(refreshedFact),
+            ...scope,
+            ...(keepsForm ? { form } : {}),
             target: null,
             text: trimmedReplacement,
             hidden: refreshedFact.hidden,

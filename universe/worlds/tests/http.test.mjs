@@ -299,9 +299,19 @@ describe('HTTP Security, RateLimiter, and SseStream primitives', () => {
     const reqListeners = new Map();
     const resListeners = new Map();
     const fakeReq = {
+      /**
+       * @param {string} eventName
+       * @param {Function} handler
+       * @returns {void}
+       */
       on(eventName, handler) {
         reqListeners.set(eventName, handler);
       },
+      /**
+       * @param {string} eventName
+       * @param {Function} handler
+       * @returns {void}
+       */
       off(eventName, handler) {
         if (reqListeners.get(eventName) === handler) {
           reqListeners.delete(eventName);
@@ -311,17 +321,39 @@ describe('HTTP Security, RateLimiter, and SseStream primitives', () => {
     const fakeRes = {
       writableEnded: false,
       destroyed: false,
+      /**
+       * @param {string} eventName
+       * @param {Function} handler
+       * @returns {void}
+       */
       on(eventName, handler) {
         resListeners.set(eventName, handler);
       },
+      /**
+       * @param {string} eventName
+       * @param {Function} handler
+       * @returns {void}
+       */
       off(eventName, handler) {
         if (resListeners.get(eventName) === handler) {
           resListeners.delete(eventName);
         }
       },
+      /**
+       * @returns {void}
+       */
       writeHead() {},
+      /**
+       * @returns {void}
+       */
       flushHeaders() {},
+      /**
+       * @returns {void}
+       */
       write() {},
+      /**
+       * @returns {void}
+       */
       end() {
         this.writableEnded = true;
       },
@@ -1390,14 +1422,25 @@ describe('Full REST & SSE lifecycle, concurrency, Scribe sync, and client discon
     let currentSyncStatus = { mode: 'r2', status: 'initializing' };
 
     const fakeSyncService = {
+      /**
+       * @returns {{mode: string, status: string}}
+       */
       getStatus() {
         return currentSyncStatus;
       },
+      /**
+       * @param {{dbPath: string}} options
+       * @returns {Promise<{mode: string, status: string}>}
+       */
       async pullOnStartup({ dbPath }) {
         callLog.push({ step: 'pullOnStartup', dbExistsBeforePull: fs.existsSync(dbPath) });
         currentSyncStatus = { mode: 'r2', status: 'synced', lastHead: 'head-1' };
         return currentSyncStatus;
       },
+      /**
+       * @param {{store: object | null, signal?: AbortSignal}} options
+       * @returns {Promise<{status: string, head?: string, message?: string}>}
+       */
       async pushSnapshot({ store, signal }) {
         callLog.push({
           step: 'pushSnapshot',
@@ -2130,9 +2173,16 @@ describe('Task 6 adversarial review regressions', () => {
 
     const envPushErr = createTempEnvironment({ envApiKey: 'sk-cleanup-push-key' });
     const failingSyncService = {
+      /**
+       * @returns {Promise<{status: string}>}
+       */
       async pullOnStartup() {
         return { status: 'local' };
       },
+      /**
+       * @returns {Promise<never>}
+       * @throws {Error}
+       */
       async pushSnapshot() {
         throw new Error('Simulated R2 outage on shutdown.');
       },
@@ -2574,7 +2624,7 @@ describe('Model availability over HTTP', () => {
     assert.equal(listed[0].card.hair, 'red');
   });
 
-  it('character routes file appearance into the book, start the book only when an appearance field changes, and answer bookAppearance', async () => {
+  it('character routes file appearance into the book, start the book only when an appearance field changes, and answer bookHints', async () => {
     const context = await startModelServer({ catalogOptions: { answerProvider: deadAnswer } });
     const campaign = (await send(context, 'POST', '/api/campaigns', { title: 'Card Filing' })).json;
     const charactersPath = `/api/campaigns/${campaign.id}/characters`;
@@ -2590,18 +2640,18 @@ describe('Model availability over HTTP', () => {
 
     const plain = await send(context, 'POST', charactersPath, { slug: 'plain', name: 'Plain', card: { traits: 'bold' } });
     assert.equal(plain.status, 201);
-    assert.deepEqual(plain.json.bookAppearance, {});
+    assert.deepEqual(plain.json.bookHints, {});
     assert.equal(context.store.getScribeBook(campaign.id), null);
     const renamed = await send(context, 'PATCH', `${charactersPath}/${plain.json.id}`, {
       name: 'Plain Renamed',
       card: { traits: 'bolder', hair: '   ' },
     });
     assert.equal(renamed.status, 200);
-    assert.deepEqual(renamed.json.bookAppearance, {});
+    assert.deepEqual(renamed.json.bookHints, {});
     assert.equal(context.store.getScribeBook(campaign.id), null);
     const fetchedPlain = await send(context, 'GET', `${charactersPath}/${plain.json.id}`);
     assert.equal(fetchedPlain.status, 200);
-    assert.deepEqual(fetchedPlain.json.bookAppearance, {});
+    assert.deepEqual(fetchedPlain.json.bookHints, {});
     assert.equal(fetchedPlain.json.card.traits, 'bolder');
     assert.equal(fetchedPlain.json.name, 'Plain Renamed');
 
@@ -2626,7 +2676,7 @@ describe('Model availability over HTTP', () => {
     });
     assert.equal(archived.status, 201);
     assert.equal(archived.json.scribeSubjectId, null);
-    assert.deepEqual(archived.json.bookAppearance, {});
+    assert.deepEqual(archived.json.bookHints, {});
     assert.equal(archived.json.card.hair, 'grey');
     assert.equal(context.store.getScribeBook(campaign.id), null);
 
@@ -2637,12 +2687,7 @@ describe('Model availability over HTTP', () => {
     });
     assert.equal(created.status, 201);
     assert.notEqual(context.store.getScribeBook(campaign.id), null);
-    assert.deepEqual(created.json.bookAppearance, {
-      hair: 'red',
-      eyes: 'green',
-      build: "5'6; slim",
-      features: 'a scar',
-    });
+    assert.deepEqual(created.json.bookHints, {});
     assert.deepEqual(Object.keys(created.json.card.filedFactIds), ['features']);
     const subjectId = created.json.scribeSubjectId;
     const filed = replayBook(campaign.id).facts.filter((fact) => fact.subject === subjectId);
@@ -2667,12 +2712,7 @@ describe('Model availability over HTTP', () => {
       card: { hair: 'black', features: 'a burn' },
     });
     assert.equal(dyed.status, 200);
-    assert.deepEqual(dyed.json.bookAppearance, {
-      hair: 'black',
-      eyes: 'green',
-      build: "5'6; slim",
-      features: 'a burn',
-    });
+    assert.deepEqual(dyed.json.bookHints, {});
     const refiled = replayBook(campaign.id).facts.filter((fact) => fact.subject === subjectId);
     assert.deepEqual(
       refiled.map((fact) => [fact.category, fact.text, fact.status]),
@@ -2689,8 +2729,50 @@ describe('Model availability over HTTP', () => {
 
     const fetched = await send(context, 'GET', `${charactersPath}/${created.json.id}`);
     assert.equal(fetched.status, 200);
-    assert.deepEqual(fetched.json.bookAppearance, dyed.json.bookAppearance);
+    assert.deepEqual(fetched.json.bookHints, {});
     assert.equal(fetched.json.card.hair, 'black');
+
+    const row = context.store.getScribeBook(campaign.id);
+    const log = JSON.parse(row.bookJson);
+    for (const [category, text] of [['build', 'stocky'], ['hair', 'white']]) {
+      ScribeLogCore.rule(log, ScribeReplay.run(log, []), {
+        type: ScribeLogCore.Ruling.AddFact,
+        subject: subjectId,
+        category,
+        target: null,
+        text,
+        hidden: false,
+        cite: null,
+        position: 0,
+        decided: true,
+      });
+    }
+    ScribeLogCore.rule(log, ScribeReplay.run(log, []), {
+      type: ScribeLogCore.Ruling.AddFact,
+      subject: subjectId,
+      category: 'feature',
+      target: null,
+      text: 'a tattoo',
+      hidden: false,
+      cite: null,
+      position: 0,
+    });
+    context.store.saveScribeBook(campaign.id, { bookJson: JSON.stringify(log), lastTurnSeq: row.lastTurnSeq, dirty: row.dirty });
+    const differing = { build: 'stocky', hair: 'white', features: 'a burn; a tattoo' };
+    const hinted = await send(context, 'GET', `${charactersPath}/${created.json.id}`);
+    assert.deepEqual(hinted.json.bookHints, differing);
+    const renamedAgain = await send(context, 'PATCH', `${charactersPath}/${created.json.id}`, { name: 'Mara Two' });
+    assert.deepEqual(renamedAgain.json.bookHints, differing);
+    const typed = await send(context, 'PATCH', `${charactersPath}/${created.json.id}`, {
+      card: { height: '?', body: 'stocky', hair: 'white' },
+    });
+    assert.deepEqual(typed.json.bookHints, { features: 'a burn; a tattoo' });
+    const unknownBuild = await send(context, 'PATCH', `${charactersPath}/${created.json.id}`, {
+      card: { height: '5\'6', body: '?' },
+    });
+    assert.deepEqual(unknownBuild.json.bookHints, { features: 'a burn; a tattoo' });
+    const builds = replayBook(campaign.id).facts.filter((fact) => fact.category === 'build' && fact.status === 'InForce');
+    assert.deepEqual(builds.map((fact) => fact.text), ["5'6"]);
     const missing = await send(context, 'GET', `${charactersPath}/no-such-character`);
     assert.equal(missing.status, 404);
     const missingCampaign = await send(context, 'GET', '/api/campaigns/no-such-campaign/characters/x');
@@ -2714,12 +2796,12 @@ describe('Model availability over HTTP', () => {
     assert.equal(created.status, 201);
     assert.equal(created.json.card.age, '?');
     assert.deepEqual(created.json.card.speechExamples, ['...']);
-    assert.deepEqual(created.json.bookAppearance, { age: '?' });
+    assert.deepEqual(created.json.bookHints, {});
 
     const patched = await send(context, 'PATCH', `${charactersPath}/${created.json.id}`, { card: { eyes: '...' } });
     assert.equal(patched.status, 200);
     assert.equal(patched.json.card.eyes, '?');
-    assert.deepEqual(patched.json.bookAppearance, { age: '?', eyes: '?' });
+    assert.deepEqual(patched.json.bookHints, {});
     const facts = ScribeReplay.run(JSON.parse(context.store.getScribeBook(campaign.id).bookJson), []).facts;
     assert.deepEqual(facts.map((fact) => [fact.category, fact.text]), [['age', '?'], ['eyes', '?']]);
   });
@@ -2742,7 +2824,7 @@ describe('Model availability over HTTP', () => {
     const restored = await send(context, 'PATCH', `${charactersPath}/${ghost.json.id}`, { archived: false });
     assert.equal(restored.status, 200);
     assert.notEqual(restored.json.scribeSubjectId, null);
-    assert.deepEqual(restored.json.bookAppearance, { hair: 'grey', eyes: 'pale' });
+    assert.deepEqual(restored.json.bookHints, {});
     assert.notEqual(context.store.getScribeBook(campaign.id), null);
 
     const sprite = await send(context, 'POST', charactersPath, {
@@ -2753,15 +2835,39 @@ describe('Model availability over HTTP', () => {
     });
     assert.equal(sprite.json.scribeSubjectId, null);
     const woken = await send(context, 'PATCH', `${charactersPath}/${sprite.json.id}`, { archived: false });
-    assert.deepEqual(woken.json.bookAppearance, { age: '12' });
+    assert.deepEqual(woken.json.bookHints, {});
     assert.deepEqual(
       woken.json.card.filedFactIds,
       {},
     );
     const quiet = await send(context, 'PATCH', `${charactersPath}/${woken.json.id}`, { name: 'Sprite Two' });
-    assert.deepEqual(quiet.json.bookAppearance, { age: '12' });
+    assert.deepEqual(quiet.json.bookHints, {});
     const facts = ScribeReplay.run(JSON.parse(context.store.getScribeBook(campaign.id).bookJson), []).facts;
     assert.equal(facts.filter((fact) => fact.category === 'age').length, 1);
+  });
+
+  it('answers the hints of a book subject a created character adopts', async () => {
+    const context = await startModelServer({ catalogOptions: { answerProvider: deadAnswer } });
+    const campaign = (await send(context, 'POST', '/api/campaigns', { title: 'Adopted Subject' })).json;
+    const charactersPath = `/api/campaigns/${campaign.id}/characters`;
+
+    const first = await send(context, 'POST', charactersPath, {
+      slug: 'mara',
+      name: 'Mara',
+      card: { hair: 'red', eyes: 'green' },
+    });
+    assert.equal(first.status, 201);
+    const removed = await send(context, 'DELETE', `${charactersPath}/${first.json.id}`);
+    assert.equal(removed.status, 200);
+
+    const second = await send(context, 'POST', charactersPath, {
+      slug: 'mara-again',
+      name: 'Mara',
+      card: { hair: 'black' },
+    });
+    assert.equal(second.status, 201);
+    assert.equal(second.json.scribeSubjectId, first.json.scribeSubjectId);
+    assert.deepEqual(second.json.bookHints, { eyes: 'green' });
   });
 
   it('PUT /api/settings saves an unchecked model with a warning and an unchanged slot sends no request', async () => {

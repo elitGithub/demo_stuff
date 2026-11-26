@@ -109,16 +109,13 @@ export const ScribeCategory = Object.freeze({
 
   /**
    * @param {object} statement
-   * @returns {object}
+   * @returns {Readonly<{form: string | null, dimension: string | null, explicit: boolean}>}
    */
-  scope(statement) {
-    if (statement.category !== 'build') {
-      return {};
-    }
+  derive(statement) {
     if ('form' in statement || 'dimension' in statement) {
       const form = statement.form?.trim().toLowerCase().replace(/\s+/g, ' ') || null;
       const dimension = statement.dimension?.trim().toLowerCase() || null;
-      return { form, dimension };
+      return Object.freeze({ form, dimension, explicit: true });
     }
     const text = statement.text ?? '';
     const forms = [...text.matchAll(/\b(human|full[- ]dragon|dragon)\s+form\b/gi)];
@@ -137,11 +134,23 @@ export const ScribeCategory = Object.freeze({
       dimensions.add('length');
     }
     if (forms.length > 1 || dimensions.size > 1) {
-      return {};
+      return Object.freeze({ form: null, dimension: null, explicit: false });
     }
     const form = forms[0]?.[1].toLowerCase().replace('-', ' ') ?? null;
     const dimension = [...dimensions][0] ?? null;
-    return dimension ? { form, dimension } : {};
+    return Object.freeze({ form, dimension, explicit: false });
+  },
+
+  /**
+   * @param {object} statement
+   * @returns {object}
+   */
+  scope(statement) {
+    if (statement.category !== ScribeCategory.Names.Build) {
+      return {};
+    }
+    const { form, dimension, explicit } = ScribeCategory.derive(statement);
+    return explicit || dimension ? { form, dimension } : {};
   },
 
   /**

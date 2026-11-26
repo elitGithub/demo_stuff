@@ -700,7 +700,7 @@ export class Router {
                 this.#store.updateCampaign(campaignId, { playerCharacterId: character.id });
               }
               character = this.#syncCharacterInBook(campaignId, character, CharacterCard.empty());
-              return { ...character, bookAppearance: this.#bookAppearance(campaignId, character) };
+              return { ...character, bookHints: this.#bookHints(campaignId, character) };
             });
 
             this.#sendJson(response, 201, { ...created, warnings: createWarnings });
@@ -718,7 +718,7 @@ export class Router {
             if (character === null) {
               throw this.#createHttpError(404, `Character not found: ${characterId}`);
             }
-            this.#sendJson(response, 200, { ...character, bookAppearance: this.#bookAppearance(campaignId, character) });
+            this.#sendJson(response, 200, { ...character, bookHints: this.#bookHints(campaignId, character) });
             return;
           }
           if (method === 'PATCH') {
@@ -805,7 +805,7 @@ export class Router {
                 this.#store.updateCampaign(campaignId, { playerCharacterId: null });
               }
               character = this.#syncCharacterInBook(campaignId, character, freshExisting.card);
-              return { ...character, bookAppearance: this.#bookAppearance(campaignId, character) };
+              return { ...character, bookHints: this.#bookHints(campaignId, character) };
             });
 
             this.#sendJson(response, 200, { ...updated, warnings: updateWarnings });
@@ -1586,12 +1586,12 @@ export class Router {
    * @returns {Readonly<Record<string, string>>}
    * @throws {Error}
    */
-  #bookAppearance(campaignId, character) {
+  #bookHints(campaignId, character) {
     if (character.scribeSubjectId === null || this.#store.getScribeBook(campaignId) === null) {
       return Object.freeze({});
     }
     const { state } = this.#scribeService.loadState(campaignId);
-    return this.#scribeService.bookAppearance({ state, subjectId: character.scribeSubjectId });
+    return this.#scribeService.bookHints({ state, subjectId: character.scribeSubjectId, card: character.card });
   }
 
   /**

@@ -216,7 +216,6 @@ export const NarratorComposer = Object.freeze({
       [
         'DIRECTOR PLAN:',
         `Pacing: ${directorPlan.pacing ?? 'focused_one'}`,
-        `Target length: ~${directorPlan.targetChars ?? 1350} chars`,
         `Narrator directive: ${directorPlan.narratorDirective || '(none)'}`,
         ...(directorPlan.encounterAccepted && directorPlan.encounterBrief
           ? [`Encounter brief: ${directorPlan.encounterBrief}`]

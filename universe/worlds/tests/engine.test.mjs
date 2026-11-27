@@ -9,6 +9,7 @@ import { NarrationParts } from '../src/engine/NarrationParts.mjs';
 import { NarratorComposer } from '../src/engine/NarratorComposer.mjs';
 import { RequestBudget } from '../src/engine/RequestBudget.mjs';
 import { StorySlice } from '../src/engine/StorySlice.mjs';
+import { TagReader } from '../src/engine/TagReader.mjs';
 import { TurnEngine } from '../src/engine/TurnEngine.mjs';
 import { WitnessFilter } from '../src/engine/WitnessFilter.mjs';
 import { OpenRouterClient } from '../src/openrouter/OpenRouterClient.mjs';
@@ -23,6 +24,7 @@ import { ScribeService } from '../src/scribe/ScribeService.mjs';
 import { AvatarToken } from '../src/store/enums/AvatarToken.mjs';
 import { CharacterTier } from '../src/store/enums/CharacterTier.mjs';
 import { FindingKind } from '../src/store/enums/FindingKind.mjs';
+import { SceneStyle } from '../src/store/enums/SceneStyle.mjs';
 import { SceneType } from '../src/store/enums/SceneType.mjs';
 import { SpeakerType } from '../src/store/enums/SpeakerType.mjs';
 import { SpendStage } from '../src/store/enums/SpendStage.mjs';
@@ -252,6 +254,64 @@ function createWorldFixture({
   });
 
   return { store, campaign: updatedCampaign, frost, lize, viola, collette, mirra, kira, maya };
+}
+
+/**
+ * @param {{sceneChanged?: boolean, location?: string, day?: number, timeLabel?: string, sceneType?: string, userInputKind?: string, presentSlugs?: readonly string[] | null, remoteSlugs?: readonly string[] | null, offscreenNotes?: Record<string, string>, walkOnsEnter?: readonly string[], walkOnsLeave?: readonly string[], encounterAccepted?: boolean, encounterBrief?: string, pacing?: string, situation?: string, responders?: ReadonlyArray<{slug: string, beatGoal: string, length: string, reacting?: string}>, narratorDirective?: string, style?: string}} [options]
+ * @returns {string}
+ */
+function buildTaggedDirectorPlan({
+  sceneChanged = false,
+  location = 'Oak Bedroom',
+  day = 1,
+  timeLabel = 'Evening',
+  sceneType = SceneType.Private,
+  userInputKind = Director.Settings.InputKind.PlayerInScene,
+  presentSlugs = [],
+  remoteSlugs = [],
+  offscreenNotes = {},
+  walkOnsEnter = [],
+  walkOnsLeave = [],
+  encounterAccepted = false,
+  encounterBrief = Director.Settings.EmptyText,
+  pacing = Director.Settings.Pacing.FocusedOne,
+  situation = 'Scene in progress.',
+  responders = [],
+  narratorDirective = Director.Settings.EmptyText,
+  style = SceneStyle.None,
+} = {}) {
+  const settings = Director.Settings;
+  const changedFlag = sceneChanged ? settings.Bool.Yes : settings.Bool.No;
+  const inputTagValue = userInputKind === settings.InputKind.NarratorDirection
+    ? settings.InputKind.NarratorTag
+    : settings.InputKind.PlayerTag;
+  const acceptedFlag = encounterAccepted ? settings.Bool.Yes : settings.Bool.No;
+  const lines = [
+    `<scene changed="${changedFlag}">${location} | day ${day} | ${timeLabel} | ${sceneType}</scene>`,
+    `<situation>${situation}</situation>`,
+    `<input>${inputTagValue}</input>`,
+  ];
+  if (presentSlugs !== null) {
+    lines.push(`<present>${presentSlugs.join(', ')}</present>`);
+  }
+  if (remoteSlugs !== null) {
+    lines.push(`<remote>${remoteSlugs.join(', ')}</remote>`);
+  }
+  for (const [slug, note] of Object.entries(offscreenNotes)) {
+    lines.push(`<offscreen to="${slug}">${note}</offscreen>`);
+  }
+  lines.push(`<walkons enter="${walkOnsEnter.join(', ')}" leave="${walkOnsLeave.join(', ')}"/>`);
+  lines.push(`<encounter accepted="${acceptedFlag}">${encounterBrief}</encounter>`);
+  lines.push(`<pacing>${pacing}</pacing>`);
+  lines.push(`<narrator>${narratorDirective}</narrator>`);
+  for (const responder of responders) {
+    const reactingSlug = responder.reacting ?? settings.ReactingPlayer;
+    lines.push(
+      `<direction to="${responder.slug}" reacting="${reactingSlug}" length="${responder.length}">${responder.beatGoal}</direction>`,
+    );
+  }
+  lines.push(`<style>${style}</style>`);
+  return lines.join('\n');
 }
 
 describe('EncounterRoller', () => {
@@ -550,8 +610,8 @@ describe('BeatParser', () => {
   });
 });
 
-describe('Director invariants and repair retry', () => {
-  it('enforces disjoint slugs, player responder exclusion, walk-on resets, offscreen clearing, targetChars clamping, and JSON repair retry', async () => {
+describe('Director tagged invariants and full-miss fallback', () => {
+  it('enforces disjoint slugs, player/absent responder exclusion, walk-on resets, offscreen rules, single call, and no targetChars', async () => {
     const fixture = createWorldFixture();
     const { store, campaign, frost, lize, viola, collette } = fixture;
     const preState = {
@@ -559,42 +619,32 @@ describe('Director invariants and repair retry', () => {
       activeWalkOns: ['Innkeeper Bram', 'Guard'],
     };
 
-    const { client, calls } = createScriptedClient([
-      { text: 'Sure, here is the plan: {not valid json' },
-      {
-        text: '```json\n' + JSON.stringify({
-          sceneChanged: true,
-          location: '  Market Square  ',
-          day: 0,
-          timeLabel: '',
-          sceneType: 'invalid_type',
-          userInputKind: 'player_in_scene',
-          presentSlugs: ['FROST', 'lize', 'unknown_ghost', 'lize'],
-          remoteSlugs: ['lize', 'collette'],
-          offscreenNotes: {
-            __proto__: 'polluted',
-            constructor: 'polluted',
-            frost: 'Should be cleared because frost is present',
-            viola: '  Sorting dried herbs  ',
-            unknown_slug: 'Should be dropped',
-          },
-          walkOnsEnter: ['Guard', 'guard', 'Peddler'],
-          walkOnsLeave: ['Guard'],
-          encounterAccepted: true,
-          encounterBrief: 'A wild wolf appears',
-          pacing: 'group_banter',
-          targetChars: 99999,
-          responders: [
-            { slug: 'frost', beatGoal: 'Never player', length: 'short' },
-            { slug: 'viola', beatGoal: 'Absent char cannot respond', length: 'long' },
-            { slug: 'lize', beatGoal: 'Check prices', length: 'short' },
-            { slug: 'lize', beatGoal: 'Duplicate dropped', length: 'long' },
-            { slug: 'collette', beatGoal: 'Call over the stall', length: 'weird' },
-          ],
-          narratorDirective: 'Keep banter brisk.',
-        }) + '\n```',
-      },
-    ], { store });
+    const taggedReply = [
+      '<scene changed="yes">  Market Square  | day 0 |   | invalid_type</scene>',
+      '<situation>  Dawn crowds gather around the spice carts.  </situation>',
+      '<input>player</input>',
+      '<present>FROST, lize, unknown_ghost, lize</present>',
+      '<remote>lize, collette</remote>',
+      '<offscreen to="__proto__">polluted</offscreen>',
+      '<offscreen to="constructor">polluted</offscreen>',
+      '<offscreen to="frost">Should be cleared because frost is present</offscreen>',
+      '<offscreen to="viola">  Sorting dried herbs  </offscreen>',
+      '<offscreen to="collette"></offscreen>',
+      '<offscreen to="unknown_slug">Should be dropped</offscreen>',
+      '<walkons enter="Guard, guard, Peddler" leave="Guard"/>',
+      '<walkons enter=\'SingleQuotedIgnored\'/>',
+      '<encounter accepted="yes">A wild wolf appears</encounter>',
+      '<pacing>group_banter</pacing>',
+      '<direction to="frost" length="short">Never player</direction>',
+      '<direction to="viola" length="long">Absent char cannot respond</direction>',
+      '<direction to="lize" reacting="collette" length="short">Check prices</direction>',
+      '<direction to="lize" length="long">Duplicate dropped</direction>',
+      '<direction to="collette" reacting="ghost" length="weird">Call over the stall</direction>',
+      '<narrator>  Keep banter brisk.  </narrator>',
+      '<style>Banter</style>',
+    ].join('\n');
+
+    const { client, calls } = createScriptedClient([{ text: taggedReply }], { store });
 
     const result = await Director.planTurn({
       campaign,
@@ -614,39 +664,69 @@ describe('Director invariants and repair retry', () => {
       client,
     });
 
-    assert.equal(calls.length, 2);
-    assert.equal(result.spendIds.length, 2);
+    assert.equal(calls.length, 1);
+    assert.equal(result.spendIds.length, 1);
+    assert.equal(result.plan.directorMissed, false);
     assert.equal(result.nextState.sceneNumber, 2);
     assert.equal(result.nextState.day, 1);
     assert.equal(result.nextState.timeLabel, 'Evening');
     assert.equal(result.nextState.location, 'Market Square');
     assert.equal(result.nextState.sceneType, SceneType.Private);
+    assert.equal(result.plan.situation, 'Dawn crowds gather around the spice carts.');
+    assert.equal(result.plan.narratorDirective, 'Keep banter brisk.');
+    assert.equal(result.plan.style, SceneStyle.Banter);
     assert.deepEqual(result.nextState.presentIds, [frost.id, lize.id]);
     assert.deepEqual(result.nextState.remoteIds, [collette.id]);
     assert.deepEqual(result.nextState.activeWalkOns, ['Peddler']);
     assert.deepEqual(result.nextState.offscreenNotes, { viola: 'Sorting dried herbs' });
     assert.equal(Object.hasOwn(result.nextState.offscreenNotes, 'frost'), false);
+    assert.equal(Object.hasOwn(result.nextState.offscreenNotes, 'collette'), false);
     assert.equal(Object.hasOwn(result.nextState.offscreenNotes, '__proto__'), false);
     assert.equal(result.plan.encounterAccepted, false);
     assert.equal(result.plan.encounterBrief, '');
-    assert.equal(result.plan.targetChars, 2200);
+    assert.equal(Object.hasOwn(result.plan, 'targetChars'), false);
+    assert.equal('targetChars' in result.plan, false);
     assert.equal(result.plan.responders.length, 2);
-    assert.equal(result.plan.responders[0].slug, 'lize');
-    assert.equal(result.plan.responders[1].slug, 'collette');
-    assert.equal(result.plan.responders[1].length, 'medium');
+    assert.deepEqual(result.plan.responders[0], {
+      characterId: lize.id,
+      slug: 'lize',
+      name: 'Lize',
+      beatGoal: 'Check prices',
+      length: Director.Settings.Length.Short,
+      reacting: 'collette',
+    });
+    assert.deepEqual(result.plan.responders[1], {
+      characterId: collette.id,
+      slug: 'collette',
+      name: 'Collette',
+      beatGoal: 'Call over the stall',
+      length: Director.Settings.Length.Medium,
+      reacting: Director.Settings.ReactingPlayer,
+    });
+  });
 
-    const failFixture = createWorldFixture();
-    const { client: failClient } = createScriptedClient([
-      { text: 'broken json 1' },
-      { text: '["array", "not", "object"]' },
-    ], { store: failFixture.store });
+  it('falls back cleanly on full miss without a repair call and preserves preState and preState.style', async () => {
+    const fixture = createWorldFixture();
+    const { store, campaign, frost, lize, viola } = fixture;
+    const preState = {
+      ...campaign.sceneState,
+      presentIds: [frost.id, lize.id, viola.id],
+      offscreenNotes: { collette: 'In the kitchen' },
+      activeWalkOns: ['Gate Guard'],
+      style: SceneStyle.Tension,
+    };
 
-    let caughtError = null;
-    try {
-      await Director.planTurn({
-        campaign: failFixture.campaign,
-        characters: [failFixture.frost, failFixture.lize],
-        preState: failFixture.campaign.sceneState,
+    for (const missText of [
+      'Just some prose without any tags.',
+      '<unknown>not a recognised tag</unknown>',
+      '<scene changed="yes">unclosed scene tag',
+      '',
+    ]) {
+      const { client, calls } = createScriptedClient([{ text: missText }], { store });
+      const missResult = await Director.planTurn({
+        campaign,
+        characters: [frost, lize, viola],
+        preState,
         userText: 'Hello',
         mode: TurnMode.Normal,
         encounterRoll: {
@@ -657,15 +737,41 @@ describe('Director invariants and repair retry', () => {
           stance: null,
         },
         model: 'openai/gpt-4.1-mini',
-        client: failClient,
+        client,
       });
-    } catch (error) {
-      caughtError = error;
+
+      assert.equal(calls.length, 1);
+      assert.equal(missResult.plan.directorMissed, true);
+      assert.equal(missResult.plan.sceneChanged, false);
+      assert.equal(missResult.nextState.sceneNumber, preState.sceneNumber);
+      assert.equal(missResult.nextState.location, preState.location);
+      assert.deepEqual(missResult.nextState.presentIds, preState.presentIds);
+      assert.deepEqual(missResult.nextState.remoteIds, preState.remoteIds);
+      assert.deepEqual(missResult.nextState.offscreenNotes, { collette: 'In the kitchen' });
+      assert.deepEqual(missResult.nextState.activeWalkOns, ['Gate Guard']);
+      assert.equal(missResult.plan.style, SceneStyle.Tension);
+      assert.equal(missResult.plan.situation, '');
+      assert.equal(missResult.plan.narratorDirective, '');
+      assert.equal(missResult.plan.pacing, Director.Settings.Pacing.FocusedOne);
+      assert.deepEqual(missResult.plan.responders, [
+        {
+          characterId: lize.id,
+          slug: 'lize',
+          name: 'Lize',
+          beatGoal: '',
+          length: Director.Settings.Length.Medium,
+          reacting: Director.Settings.ReactingPlayer,
+        },
+        {
+          characterId: viola.id,
+          slug: 'viola',
+          name: 'Viola',
+          beatGoal: '',
+          length: Director.Settings.Length.Medium,
+          reacting: Director.Settings.ReactingPlayer,
+        },
+      ]);
     }
-    assert.notEqual(caughtError, null);
-    assert.equal(caughtError.spendIds.length, 2);
-    const utcDay = new Date().toISOString().slice(0, 10);
-    assert.equal(failFixture.store.getDailySpend(utcDay).callCount, 2);
   });
 });
 
@@ -677,25 +783,13 @@ describe('TurnEngine end-to-end regressions and adversarial invariants', () => {
 
     const { client, calls } = createScriptedClient([
       {
-        json: {
-          sceneChanged: false,
-          location: 'Oak Bedroom',
-          day: 1,
-          timeLabel: 'Evening',
-          sceneType: 'private',
-          userInputKind: 'player_in_scene',
+        text: buildTaggedDirectorPlan({
           presentSlugs: ['frost', 'lize'],
-          remoteSlugs: [],
           offscreenNotes: { viola: 'At the apothecary stall' },
-          walkOnsEnter: [],
-          walkOnsLeave: [],
-          encounterAccepted: false,
-          encounterBrief: '',
-          pacing: 'focused_one',
-          targetChars: 900,
-          responders: [{ slug: 'lize', beatGoal: 'Offer to check the pantry', length: 'short' }],
+          pacing: Director.Settings.Pacing.FocusedOne,
+          responders: [{ slug: 'lize', beatGoal: 'Offer to check the pantry', length: Director.Settings.Length.Short }],
           narratorDirective: 'Keep Viola offscreen.',
-        },
+        }),
       },
       {
         json: {
@@ -733,25 +827,13 @@ describe('TurnEngine end-to-end regressions and adversarial invariants', () => {
 
     const { client, calls } = createScriptedClient([
       {
-        json: {
-          sceneChanged: false,
-          location: 'Oak Bedroom',
-          day: 1,
-          timeLabel: 'Evening',
-          sceneType: 'private',
-          userInputKind: 'player_in_scene',
+        text: buildTaggedDirectorPlan({
           presentSlugs: ['frost', 'lize'],
-          remoteSlugs: [],
           offscreenNotes: { collette: 'In the tavern kitchen' },
-          walkOnsEnter: [],
-          walkOnsLeave: [],
-          encounterAccepted: false,
-          encounterBrief: '',
-          pacing: 'intimate_deep',
-          targetChars: 1000,
-          responders: [{ slug: 'lize', beatGoal: 'Confess the cipher location', length: 'medium' }],
+          pacing: Director.Settings.Pacing.IntimateDeep,
+          responders: [{ slug: 'lize', beatGoal: 'Confess the cipher location', length: Director.Settings.Length.Medium }],
           narratorDirective: 'Keep it quiet.',
-        },
+        }),
       },
       {
         json: {
@@ -773,25 +855,18 @@ describe('TurnEngine end-to-end regressions and adversarial invariants', () => {
         ].join('\n'),
       },
       {
-        json: {
+        text: buildTaggedDirectorPlan({
           sceneChanged: true,
           location: 'Tavern Kitchen',
-          day: 1,
           timeLabel: 'Late Evening',
-          sceneType: 'public',
-          userInputKind: 'narrator_direction',
+          sceneType: SceneType.Public,
+          userInputKind: Director.Settings.InputKind.NarratorDirection,
           presentSlugs: ['collette'],
-          remoteSlugs: [],
           offscreenNotes: { frost: 'Upstairs in Oak Bedroom', lize: 'Upstairs in Oak Bedroom' },
-          walkOnsEnter: [],
-          walkOnsLeave: [],
-          encounterAccepted: false,
-          encounterBrief: '',
-          pacing: 'focused_one',
-          targetChars: 900,
-          responders: [{ slug: 'collette', beatGoal: 'Taste the stew', length: 'short' }],
+          pacing: Director.Settings.Pacing.FocusedOne,
+          responders: [{ slug: 'collette', beatGoal: 'Taste the stew', length: Director.Settings.Length.Short }],
           narratorDirective: 'Show Collette alone.',
-        },
+        }),
       },
       {
         json: {
@@ -839,50 +914,33 @@ describe('TurnEngine end-to-end regressions and adversarial invariants', () => {
 
     const { client } = createScriptedClient([
       {
-        json: {
+        text: buildTaggedDirectorPlan({
           sceneChanged: true,
           location: 'Party Wagon',
-          day: 1,
           timeLabel: 'Night',
-          sceneType: 'public',
-          userInputKind: 'narrator_direction',
+          sceneType: SceneType.Public,
+          userInputKind: Director.Settings.InputKind.NarratorDirection,
           presentSlugs: ['mirra', 'kira', 'maya'],
-          remoteSlugs: [],
           offscreenNotes: { frost: 'doing his rounds' },
-          walkOnsEnter: [],
-          walkOnsLeave: [],
-          encounterAccepted: false,
-          encounterBrief: '',
-          pacing: 'narrator_only',
-          targetChars: 800,
-          responders: [],
+          pacing: Director.Settings.Pacing.NarratorOnly,
           narratorDirective: 'Set the wagon scene without Frost.',
-        },
+        }),
       },
       {
         type: 'stream',
         text: '[[BEAT:narrator]]\nMaya raps sharply on the wagon door while Mirra and Kira trade glances.',
       },
       {
-        json: {
-          sceneChanged: false,
+        text: buildTaggedDirectorPlan({
           location: 'Party Wagon',
-          day: 1,
           timeLabel: 'Night',
-          sceneType: 'public',
-          userInputKind: 'player_in_scene',
+          sceneType: SceneType.Public,
           presentSlugs: ['mirra', 'kira', 'maya'],
-          remoteSlugs: [],
           offscreenNotes: { frost: 'doing his rounds' },
-          walkOnsEnter: [],
-          walkOnsLeave: [],
-          encounterAccepted: false,
-          encounterBrief: '',
-          pacing: 'focused_one',
-          targetChars: 800,
-          responders: [{ slug: 'mirra', beatGoal: 'Greet Frost', length: 'short' }],
+          pacing: Director.Settings.Pacing.FocusedOne,
+          responders: [{ slug: 'mirra', beatGoal: 'Greet Frost', length: Director.Settings.Length.Short }],
           narratorDirective: 'Mirra answers Frost.',
-        },
+        }),
       },
       {
         json: {
@@ -898,25 +956,18 @@ describe('TurnEngine end-to-end regressions and adversarial invariants', () => {
         text: '[[BEAT:mirra]]\n*Mirra unlatches the shutter.*\nQuiet rounds tonight, Frost?',
       },
       {
-        json: {
+        text: buildTaggedDirectorPlan({
           sceneChanged: true,
           location: 'Watchtower Gate',
-          day: 1,
           timeLabel: 'Midnight',
-          sceneType: 'public',
-          userInputKind: 'player_in_scene',
+          sceneType: SceneType.Public,
           presentSlugs: ['mirra'],
           remoteSlugs: ['kira'],
           offscreenNotes: { frost: 'At the gatehouse' },
-          walkOnsEnter: [],
-          walkOnsLeave: [],
-          encounterAccepted: false,
-          encounterBrief: '',
-          pacing: 'focused_one',
-          targetChars: 800,
-          responders: [{ slug: 'mirra', beatGoal: 'Should be dropped', length: 'short' }],
+          pacing: Director.Settings.Pacing.FocusedOne,
+          responders: [{ slug: 'mirra', beatGoal: 'Should be dropped', length: Director.Settings.Length.Short }],
           narratorDirective: 'Cut back.',
-        },
+        }),
       },
       {
         type: 'stream',
@@ -979,28 +1030,18 @@ describe('TurnEngine end-to-end regressions and adversarial invariants', () => {
 
     const { client, calls } = createScriptedClient([
       {
-        json: {
-          sceneChanged: false,
-          location: 'Oak Bedroom',
-          day: 1,
-          timeLabel: 'Evening',
-          sceneType: 'public',
-          userInputKind: 'player_in_scene',
+        text: buildTaggedDirectorPlan({
+          sceneType: SceneType.Public,
           presentSlugs: ['frost', 'lize', 'collette'],
-          remoteSlugs: [],
-          offscreenNotes: {},
-          walkOnsEnter: [],
-          walkOnsLeave: [],
           encounterAccepted: true,
           encounterBrief: 'Collette knocks and steps inside carrying fresh bread.',
-          pacing: 'group_banter',
-          targetChars: 1100,
+          pacing: Director.Settings.Pacing.GroupBanter,
           responders: [
-            { slug: 'lize', beatGoal: 'Respond to Frost then pause', length: 'short' },
-            { slug: 'collette', beatGoal: 'Offer the bread upon entering', length: 'short' },
+            { slug: 'lize', beatGoal: 'Respond to Frost then pause', length: Director.Settings.Length.Short },
+            { slug: 'collette', beatGoal: 'Offer the bread upon entering', length: Director.Settings.Length.Short },
           ],
           narratorDirective: 'Lize replies before Collette enters.',
-        },
+        }),
       },
       {
         json: {
@@ -1069,28 +1110,15 @@ describe('TurnEngine end-to-end regressions and adversarial invariants', () => {
     let siblingAborted = false;
     const { client: mindFailClient } = createScriptedClient([
       {
-        json: {
-          sceneChanged: false,
-          location: 'Oak Bedroom',
-          day: 1,
-          timeLabel: 'Evening',
-          sceneType: 'private',
-          userInputKind: 'player_in_scene',
+        text: buildTaggedDirectorPlan({
           presentSlugs: ['frost', 'lize', 'collette'],
-          remoteSlugs: [],
-          offscreenNotes: {},
-          walkOnsEnter: [],
-          walkOnsLeave: [],
-          encounterAccepted: false,
-          encounterBrief: '',
-          pacing: 'group_banter',
-          targetChars: 1000,
+          pacing: Director.Settings.Pacing.GroupBanter,
           responders: [
-            { slug: 'lize', beatGoal: 'Fail quickly', length: 'short' },
-            { slug: 'collette', beatGoal: 'Wait on sibling', length: 'short' },
+            { slug: 'lize', beatGoal: 'Fail quickly', length: Director.Settings.Length.Short },
+            { slug: 'collette', beatGoal: 'Wait on sibling', length: Director.Settings.Length.Short },
           ],
           narratorDirective: 'Test abort.',
-        },
+        }),
       },
       { type: 'error', status: 401, message: 'Bad key' },
       ({ init }) => new Promise((resolve, reject) => {
@@ -1123,25 +1151,14 @@ describe('TurnEngine end-to-end regressions and adversarial invariants', () => {
 
     const { client: streamFailClient } = createScriptedClient([
       {
-        json: {
-          sceneChanged: false,
+        text: buildTaggedDirectorPlan({
           location: 'Tavern',
-          day: 1,
-          timeLabel: 'Evening',
-          sceneType: 'public',
-          userInputKind: 'player_in_scene',
+          sceneType: SceneType.Public,
           presentSlugs: ['frost', 'lize'],
-          remoteSlugs: [],
-          offscreenNotes: {},
-          walkOnsEnter: [],
-          walkOnsLeave: [],
-          encounterAccepted: false,
-          encounterBrief: '',
-          pacing: 'focused_one',
-          targetChars: 800,
-          responders: [{ slug: 'lize', beatGoal: 'Speak', length: 'short' }],
+          pacing: Director.Settings.Pacing.FocusedOne,
+          responders: [{ slug: 'lize', beatGoal: 'Speak', length: Director.Settings.Length.Short }],
           narratorDirective: 'Stream fails mid-flight.',
-        },
+        }),
       },
       {
         json: {
@@ -1186,23 +1203,9 @@ describe('TurnEngine end-to-end regressions and adversarial invariants', () => {
           JSON.stringify({
             choices: [{
               message: {
-                content: JSON.stringify({
-                  sceneChanged: false,
-                  location: 'Oak Bedroom',
-                  day: 1,
-                  timeLabel: 'Evening',
-                  sceneType: 'private',
-                  userInputKind: 'player_in_scene',
+                content: buildTaggedDirectorPlan({
                   presentSlugs: ['frost', 'lize'],
-                  remoteSlugs: [],
-                  offscreenNotes: {},
-                  walkOnsEnter: [],
-                  walkOnsLeave: [],
-                  encounterAccepted: false,
-                  encounterBrief: '',
-                  pacing: 'narrator_only',
-                  targetChars: 800,
-                  responders: [],
+                  pacing: Director.Settings.Pacing.NarratorOnly,
                   narratorDirective: 'Done.',
                 }),
               },
@@ -1244,25 +1247,12 @@ describe('TurnEngine end-to-end regressions and adversarial invariants', () => {
 
     const { client, calls } = createScriptedClient([
       {
-        json: {
-          sceneChanged: false,
-          location: 'Oak Bedroom',
-          day: 1,
-          timeLabel: 'Evening',
-          sceneType: 'private',
-          userInputKind: 'player_in_scene',
+        text: buildTaggedDirectorPlan({
           presentSlugs: ['frost', 'lize'],
-          remoteSlugs: [],
-          offscreenNotes: {},
-          walkOnsEnter: [],
-          walkOnsLeave: [],
-          encounterAccepted: false,
-          encounterBrief: '',
-          pacing: 'focused_one',
-          targetChars: 900,
-          responders: [{ slug: 'lize', beatGoal: 'Answer', length: 'short' }],
+          pacing: Director.Settings.Pacing.FocusedOne,
+          responders: [{ slug: 'lize', beatGoal: 'Answer', length: Director.Settings.Length.Short }],
           narratorDirective: 'Keep short.',
-        },
+        }),
       },
       {
         json: {
@@ -1281,25 +1271,12 @@ describe('TurnEngine end-to-end regressions and adversarial invariants', () => {
         text: '=== FACTS\nLize | trait | DISCARDED_SECRET_FACT_42 | #2',
       },
       {
-        json: {
-          sceneChanged: false,
-          location: 'Oak Bedroom',
-          day: 1,
-          timeLabel: 'Evening',
-          sceneType: 'private',
-          userInputKind: 'player_in_scene',
+        text: buildTaggedDirectorPlan({
           presentSlugs: ['frost', 'lize'],
-          remoteSlugs: [],
-          offscreenNotes: {},
-          walkOnsEnter: [],
-          walkOnsLeave: [],
-          encounterAccepted: false,
-          encounterBrief: '',
-          pacing: 'focused_one',
-          targetChars: 900,
-          responders: [{ slug: 'lize', beatGoal: 'Answer differently', length: 'short' }],
+          pacing: Director.Settings.Pacing.FocusedOne,
+          responders: [{ slug: 'lize', beatGoal: 'Answer differently', length: Director.Settings.Length.Short }],
           narratorDirective: 'Regenerate.',
-        },
+        }),
       },
       {
         json: {
@@ -1316,25 +1293,12 @@ describe('TurnEngine end-to-end regressions and adversarial invariants', () => {
         midStreamError: 'Dropped mid regen',
       },
       {
-        json: {
-          sceneChanged: false,
-          location: 'Oak Bedroom',
-          day: 1,
-          timeLabel: 'Evening',
-          sceneType: 'private',
-          userInputKind: 'player_in_scene',
+        text: buildTaggedDirectorPlan({
           presentSlugs: ['frost', 'lize'],
-          remoteSlugs: [],
-          offscreenNotes: {},
-          walkOnsEnter: [],
-          walkOnsLeave: [],
-          encounterAccepted: false,
-          encounterBrief: '',
-          pacing: 'focused_one',
-          targetChars: 900,
-          responders: [{ slug: 'lize', beatGoal: 'Answer differently', length: 'short' }],
+          pacing: Director.Settings.Pacing.FocusedOne,
+          responders: [{ slug: 'lize', beatGoal: 'Answer differently', length: Director.Settings.Length.Short }],
           narratorDirective: 'Second regen succeeds.',
-        },
+        }),
       },
       {
         json: {
@@ -1393,50 +1357,27 @@ describe('TurnEngine end-to-end regressions and adversarial invariants', () => {
 
     const { client, calls } = createScriptedClient([
       {
-        json: {
-          sceneChanged: false,
-          location: 'Oak Bedroom',
-          day: 1,
-          timeLabel: 'Evening',
-          sceneType: 'private',
-          userInputKind: 'player_in_scene',
+        text: buildTaggedDirectorPlan({
           presentSlugs: ['frost', 'lize'],
-          remoteSlugs: [],
-          offscreenNotes: {},
-          walkOnsEnter: [],
-          walkOnsLeave: [],
-          encounterAccepted: false,
-          encounterBrief: '',
-          pacing: 'narrator_only',
-          targetChars: 800,
-          responders: [],
+          pacing: Director.Settings.Pacing.NarratorOnly,
           narratorDirective: 'Scene 1 turn.',
-        },
+        }),
       },
       {
         type: 'stream',
         text: '[[BEAT:narrator]]\nScene 1 candle flickers.',
       },
       {
-        json: {
+        text: buildTaggedDirectorPlan({
           sceneChanged: true,
           location: 'Courtyard',
-          day: 1,
           timeLabel: 'Night',
-          sceneType: 'public',
-          userInputKind: 'player_in_scene',
+          sceneType: SceneType.Public,
           presentSlugs: ['frost', 'lize'],
-          remoteSlugs: [],
-          offscreenNotes: {},
           walkOnsEnter: ['Night Watchman'],
-          walkOnsLeave: [],
-          encounterAccepted: false,
-          encounterBrief: '',
-          pacing: 'narrator_only',
-          targetChars: 800,
-          responders: [],
+          pacing: Director.Settings.Pacing.NarratorOnly,
           narratorDirective: 'Scene 2 courtyard.',
-        },
+        }),
       },
       {
         type: 'stream',
@@ -1477,25 +1418,11 @@ describe('TurnEngine end-to-end regressions and adversarial invariants', () => {
       store,
       client: createScriptedClient([
         {
-          json: {
-            sceneChanged: false,
-            location: 'Oak Bedroom',
-            day: 1,
-            timeLabel: 'Evening',
-            sceneType: 'private',
-            userInputKind: 'player_in_scene',
+          text: buildTaggedDirectorPlan({
             presentSlugs: ['frost', 'lize'],
-            remoteSlugs: [],
-            offscreenNotes: {},
-            walkOnsEnter: [],
-            walkOnsLeave: [],
-            encounterAccepted: false,
-            encounterBrief: '',
-            pacing: 'narrator_only',
-            targetChars: 800,
-            responders: [],
+            pacing: Director.Settings.Pacing.NarratorOnly,
             narratorDirective: 'Check Step 4 resilience.',
-          },
+          }),
         },
         { type: 'stream', text: '[[BEAT:narrator]]\nCommitted despite Step 4 error.' },
       ], { store }).client,
@@ -1605,8 +1532,7 @@ describe('TurnEngine end-to-end regressions and adversarial invariants', () => {
         ],
         userBeat: { speakerType: SpeakerType.Player, speakerName: 'Frost', text: 'Hello.' },
         directorPlan: {
-          pacing: 'narrator_only',
-          targetChars: 800,
+          pacing: Director.Settings.Pacing.NarratorOnly,
           narratorDirective: '',
           encounterAccepted: false,
           encounterBrief: '',
@@ -1639,8 +1565,7 @@ describe('TurnEngine end-to-end regressions and adversarial invariants', () => {
       ],
       userBeat: { speakerType: SpeakerType.Player, speakerName: 'Frost', text: 'Look.' },
       directorPlan: {
-        pacing: 'focused_one',
-        targetChars: 800,
+        pacing: Director.Settings.Pacing.FocusedOne,
         narratorDirective: 'Brief.',
         encounterAccepted: false,
         encounterBrief: '',
@@ -1651,31 +1576,20 @@ describe('TurnEngine end-to-end regressions and adversarial invariants', () => {
     });
     assert.equal(composedTrunc.truncated, true);
     assert.equal(JSON.stringify(truncCalls[0].payload.messages).includes('WRONG_SCENE_TEXT'), false);
+    assert.equal(JSON.stringify(truncCalls[0].payload.messages).includes('Target length:'), false);
     assert.equal(composedTrunc.beats[0].mindPacket, null);
     assert.equal(composedTrunc.beats[1].mindPacket.internalThought, 'Guarded.');
     assert.equal(Object.hasOwn(composedTrunc.beats[1].mindPacket, 'spendIds'), false);
 
     const { client: encDirClient } = createScriptedClient([
       {
-        json: {
-          sceneChanged: false,
-          location: 'Oak Bedroom',
-          day: 1,
-          timeLabel: 'Evening',
-          sceneType: 'private',
-          userInputKind: 'player_in_scene',
+        text: buildTaggedDirectorPlan({
           presentSlugs: ['frost', 'lize'],
-          remoteSlugs: [],
-          offscreenNotes: {},
-          walkOnsEnter: [],
-          walkOnsLeave: [],
           encounterAccepted: false,
-          encounterBrief: '',
-          pacing: 'narrator_only',
-          targetChars: 800,
-          responders: [{ slug: 'lize', beatGoal: 'Should be cleared', length: 'short' }],
+          pacing: Director.Settings.Pacing.NarratorOnly,
+          responders: [{ slug: 'lize', beatGoal: 'Should be cleared', length: Director.Settings.Length.Short }],
           narratorDirective: 'Check overrides.',
-        },
+        }),
       },
     ], { store });
     const forcedEncPlan = await Director.planTurn({
@@ -1701,25 +1615,12 @@ describe('TurnEngine end-to-end regressions and adversarial invariants', () => {
     const parentController = new AbortController();
     const { client: abortMindClient } = createScriptedClient([
       {
-        json: {
-          sceneChanged: false,
-          location: 'Oak Bedroom',
-          day: 1,
-          timeLabel: 'Evening',
-          sceneType: 'private',
-          userInputKind: 'player_in_scene',
+        text: buildTaggedDirectorPlan({
           presentSlugs: ['frost', 'lize'],
-          remoteSlugs: [],
-          offscreenNotes: {},
-          walkOnsEnter: [],
-          walkOnsLeave: [],
-          encounterAccepted: false,
-          encounterBrief: '',
-          pacing: 'focused_one',
-          targetChars: 800,
-          responders: [{ slug: 'lize', beatGoal: 'Wait for abort', length: 'short' }],
+          pacing: Director.Settings.Pacing.FocusedOne,
+          responders: [{ slug: 'lize', beatGoal: 'Wait for abort', length: Director.Settings.Length.Short }],
           narratorDirective: 'Abort test.',
-        },
+        }),
       },
       ({ init }) => new Promise((resolve, reject) => {
         init.signal?.addEventListener('abort', () => {
@@ -1746,28 +1647,17 @@ describe('TurnEngine end-to-end regressions and adversarial invariants', () => {
 
     const { client: fullCycleClient } = createScriptedClient([
       {
-        json: {
-          sceneChanged: false,
-          location: 'Oak Bedroom',
-          day: 1,
-          timeLabel: 'Evening',
-          sceneType: 'private',
-          userInputKind: 'player_in_scene',
+        text: buildTaggedDirectorPlan({
           presentSlugs: ['frost', 'lize', 'collette'],
-          remoteSlugs: [],
-          offscreenNotes: {},
-          walkOnsEnter: [],
-          walkOnsLeave: [],
           encounterAccepted: true,
           encounterBrief: 'Collette arrives at the bedroom door.',
-          pacing: 'group_banter',
-          targetChars: 1000,
+          pacing: Director.Settings.Pacing.GroupBanter,
           responders: [
-            { slug: 'lize', beatGoal: 'Answer', length: 'short' },
-            { slug: 'collette', beatGoal: 'Speak', length: 'short' },
+            { slug: 'lize', beatGoal: 'Answer', length: Director.Settings.Length.Short },
+            { slug: 'collette', beatGoal: 'Speak', length: Director.Settings.Length.Short },
           ],
           narratorDirective: 'Narrator introduces encounter first.',
-        },
+        }),
       },
       {
         json: {
@@ -1795,28 +1685,17 @@ describe('TurnEngine end-to-end regressions and adversarial invariants', () => {
         text: '=== FACTS\nCollette | trait | TEMP_BOOK_FACT_TO_WITHDRAW | #2',
       },
       {
-        json: {
-          sceneChanged: false,
-          location: 'Oak Bedroom',
-          day: 1,
-          timeLabel: 'Evening',
-          sceneType: 'private',
-          userInputKind: 'player_in_scene',
+        text: buildTaggedDirectorPlan({
           presentSlugs: ['frost', 'lize', 'collette'],
-          remoteSlugs: [],
-          offscreenNotes: {},
-          walkOnsEnter: [],
-          walkOnsLeave: [],
           encounterAccepted: true,
           encounterBrief: 'Collette arrives at the bedroom door.',
-          pacing: 'group_banter',
-          targetChars: 1000,
+          pacing: Director.Settings.Pacing.GroupBanter,
           responders: [
-            { slug: 'lize', beatGoal: 'Answer', length: 'short' },
-            { slug: 'collette', beatGoal: 'Speak', length: 'short' },
+            { slug: 'lize', beatGoal: 'Answer', length: Director.Settings.Length.Short },
+            { slug: 'collette', beatGoal: 'Speak', length: Director.Settings.Length.Short },
           ],
           narratorDirective: 'Narrator introduces encounter first.',
-        },
+        }),
       },
       {
         json: {
@@ -1910,25 +1789,14 @@ describe('TurnEngine end-to-end regressions and adversarial invariants', () => {
     const noMainFixture = createWorldFixture({ models: { main: '' } });
     const { client: step2FailClient, calls: step2Calls } = createScriptedClient([
       {
-        json: {
-          sceneChanged: false,
-          location: 'Oak Bedroom',
-          day: 1,
-          timeLabel: 'Evening',
-          sceneType: 'private',
-          userInputKind: 'player_in_scene',
+        text: buildTaggedDirectorPlan({
           presentSlugs: ['frost', 'lize'],
-          remoteSlugs: [],
-          offscreenNotes: {},
-          walkOnsEnter: [],
-          walkOnsLeave: [],
           encounterAccepted: true,
           encounterBrief: 'A stray hound wanders past.',
-          pacing: 'focused_one',
-          targetChars: 800,
-          responders: [{ slug: 'lize', beatGoal: 'React', length: 'short' }],
+          pacing: Director.Settings.Pacing.FocusedOne,
+          responders: [{ slug: 'lize', beatGoal: 'React', length: Director.Settings.Length.Short }],
           narratorDirective: 'Check model before Step 2.',
-        },
+        }),
       },
     ], { store: noMainFixture.store });
     const noMainEngine = new TurnEngine({
@@ -1955,48 +1823,20 @@ describe('TurnEngine end-to-end regressions and adversarial invariants', () => {
     const { store, campaign } = fixture;
     const { client } = createScriptedClient([
       {
-        json: {
-          sceneChanged: false,
-          location: 'Oak Bedroom',
-          day: 1,
-          timeLabel: 'Evening',
-          sceneType: 'private',
-          userInputKind: 'player_in_scene',
+        text: buildTaggedDirectorPlan({
           presentSlugs: ['frost', 'lize'],
-          remoteSlugs: [],
-          offscreenNotes: {},
-          walkOnsEnter: [],
-          walkOnsLeave: [],
-          encounterAccepted: false,
-          encounterBrief: '',
-          pacing: 'narrator_only',
-          targetChars: 800,
-          responders: [],
+          pacing: Director.Settings.Pacing.NarratorOnly,
           narratorDirective: 'Turn 1.',
-        },
+        }),
       },
       { type: 'stream', text: '[[BEAT:narrator]]\nOriginal candle glow.' },
       { text: '=== FACTS\nLize | condition | holding brass key | #2' },
       {
-        json: {
-          sceneChanged: false,
-          location: 'Oak Bedroom',
-          day: 1,
-          timeLabel: 'Evening',
-          sceneType: 'private',
-          userInputKind: 'player_in_scene',
+        text: buildTaggedDirectorPlan({
           presentSlugs: ['frost', 'lize'],
-          remoteSlugs: [],
-          offscreenNotes: {},
-          walkOnsEnter: [],
-          walkOnsLeave: [],
-          encounterAccepted: false,
-          encounterBrief: '',
-          pacing: 'narrator_only',
-          targetChars: 800,
-          responders: [],
+          pacing: Director.Settings.Pacing.NarratorOnly,
           narratorDirective: 'Regenerate.',
-        },
+        }),
       },
       { type: 'stream', text: '[[BEAT:narrator]]\nRegenerated reply.' },
     ], { store });
@@ -2056,25 +1896,13 @@ describe('TurnEngine end-to-end regressions and adversarial invariants', () => {
 
     const { client, calls } = createScriptedClient([
       {
-        json: {
-          sceneChanged: false,
-          location: 'Oak Bedroom',
-          day: 1,
-          timeLabel: 'Evening',
-          sceneType: 'private',
-          userInputKind: 'player_in_scene',
+        text: buildTaggedDirectorPlan({
           presentSlugs: ['frost', 'lize'],
-          remoteSlugs: [],
           offscreenNotes: { collette: 'In kitchen' },
-          walkOnsEnter: [],
-          walkOnsLeave: [],
-          encounterAccepted: false,
-          encounterBrief: '',
-          pacing: 'focused_one',
-          targetChars: 900,
-          responders: [{ slug: 'lize', beatGoal: 'Hide cipher', length: 'short' }],
+          pacing: Director.Settings.Pacing.FocusedOne,
+          responders: [{ slug: 'lize', beatGoal: 'Hide cipher', length: Director.Settings.Length.Short }],
           narratorDirective: 'Turn 1.',
-        },
+        }),
       },
       {
         json: {
@@ -2088,25 +1916,13 @@ describe('TurnEngine end-to-end regressions and adversarial invariants', () => {
       { type: 'stream', text: '[[BEAT:lize]]\nThe cipher sits under the loose oak plank.' },
       { text: '=== FACTS\nLize | belonging | PRIVATE_CIPHER_IN_FLOOR | #2' },
       {
-        json: {
-          sceneChanged: false,
-          location: 'Oak Bedroom',
-          day: 1,
-          timeLabel: 'Evening',
-          sceneType: 'private',
-          userInputKind: 'player_in_scene',
+        text: buildTaggedDirectorPlan({
           presentSlugs: ['frost', 'lize'],
-          remoteSlugs: [],
           offscreenNotes: { collette: 'In kitchen' },
-          walkOnsEnter: [],
-          walkOnsLeave: [],
-          encounterAccepted: false,
-          encounterBrief: '',
-          pacing: 'focused_one',
-          targetChars: 900,
-          responders: [{ slug: 'lize', beatGoal: 'React', length: 'short' }],
+          pacing: Director.Settings.Pacing.FocusedOne,
+          responders: [{ slug: 'lize', beatGoal: 'React', length: Director.Settings.Length.Short }],
           narratorDirective: 'Turn 2.',
-        },
+        }),
       },
       {
         json: {
@@ -2120,25 +1936,13 @@ describe('TurnEngine end-to-end regressions and adversarial invariants', () => {
       { type: 'stream', text: '[[BEAT:lize]]\nSomeone is outside.' },
       { text: '=== FACTS\nLize | condition | DISCARDED_TURN2_FACT | #4' },
       {
-        json: {
-          sceneChanged: false,
-          location: 'Oak Bedroom',
-          day: 1,
-          timeLabel: 'Evening',
-          sceneType: 'private',
-          userInputKind: 'player_in_scene',
+        text: buildTaggedDirectorPlan({
           presentSlugs: ['frost', 'lize'],
-          remoteSlugs: [],
           offscreenNotes: { collette: 'In kitchen' },
-          walkOnsEnter: [],
-          walkOnsLeave: [],
-          encounterAccepted: false,
-          encounterBrief: '',
-          pacing: 'focused_one',
-          targetChars: 900,
-          responders: [{ slug: 'lize', beatGoal: 'React again', length: 'short' }],
+          pacing: Director.Settings.Pacing.FocusedOne,
+          responders: [{ slug: 'lize', beatGoal: 'React again', length: Director.Settings.Length.Short }],
           narratorDirective: 'Regenerate turn 2.',
-        },
+        }),
       },
       {
         json: {
@@ -2193,25 +1997,15 @@ describe('TurnEngine end-to-end regressions and adversarial invariants', () => {
 
     const { client } = createScriptedClient([
       {
-        json: {
-          sceneChanged: false,
-          location: 'Oak Bedroom',
-          day: 1,
-          timeLabel: 'Evening',
-          sceneType: 'public',
-          userInputKind: 'player_in_scene',
+        text: buildTaggedDirectorPlan({
+          sceneType: SceneType.Public,
           presentSlugs: ['frost', 'lize', 'collette'],
-          remoteSlugs: [],
-          offscreenNotes: {},
-          walkOnsEnter: [],
-          walkOnsLeave: [],
           encounterAccepted: true,
           encounterBrief: 'Collette walks up to the door.',
-          pacing: 'focused_one',
-          targetChars: 900,
-          responders: [{ slug: 'lize', beatGoal: 'Hide Ember', length: 'short' }],
+          pacing: Director.Settings.Pacing.FocusedOne,
+          responders: [{ slug: 'lize', beatGoal: 'Hide Ember', length: Director.Settings.Length.Short }],
           narratorDirective: 'Lize speaks first, then Narrator describes Collette.',
-        },
+        }),
       },
       {
         json: {
@@ -2227,25 +2021,15 @@ describe('TurnEngine end-to-end regressions and adversarial invariants', () => {
         text: '[[BEAT:lize]]\nGot it, Ember is safe.\n[[BEAT:narrator]]\nCollette shuts the door.',
       },
       {
-        json: {
-          sceneChanged: false,
-          location: 'Oak Bedroom',
-          day: 1,
-          timeLabel: 'Evening',
-          sceneType: 'public',
-          userInputKind: 'player_in_scene',
+        text: buildTaggedDirectorPlan({
+          sceneType: SceneType.Public,
           presentSlugs: ['frost', 'lize', 'collette'],
-          remoteSlugs: [],
-          offscreenNotes: {},
-          walkOnsEnter: [],
-          walkOnsLeave: [],
           encounterAccepted: true,
           encounterBrief: 'Collette approaches outside.',
-          pacing: 'focused_one',
-          targetChars: 900,
-          responders: [{ slug: 'lize', beatGoal: 'Whisper', length: 'short' }],
+          pacing: Director.Settings.Pacing.FocusedOne,
+          responders: [{ slug: 'lize', beatGoal: 'Whisper', length: Director.Settings.Length.Short }],
           narratorDirective: 'Collette never enters in beats.',
-        },
+        }),
       },
       {
         json: {
@@ -2261,28 +2045,20 @@ describe('TurnEngine end-to-end regressions and adversarial invariants', () => {
         text: '[[BEAT:lize]]\nStill secret.\n[[BEAT:narrator]]\nRain taps the glass.',
       },
       {
-        json: {
-          sceneChanged: false,
+        text: buildTaggedDirectorPlan({
           location: 'Party Wagon',
-          day: 1,
           timeLabel: 'Night',
-          sceneType: 'public',
-          userInputKind: 'player_in_scene',
+          sceneType: SceneType.Public,
           presentSlugs: ['mirra', 'frost', 'maya'],
-          remoteSlugs: [],
-          offscreenNotes: {},
-          walkOnsEnter: [],
-          walkOnsLeave: [],
           encounterAccepted: true,
           encounterBrief: 'Maya dashes up to the wagon.',
-          pacing: 'group_banter',
-          targetChars: 900,
+          pacing: Director.Settings.Pacing.GroupBanter,
           responders: [
-            { slug: 'mirra', beatGoal: 'Welcome Frost', length: 'short' },
-            { slug: 'maya', beatGoal: 'Deliver message', length: 'short' },
+            { slug: 'mirra', beatGoal: 'Welcome Frost', length: Director.Settings.Length.Short },
+            { slug: 'maya', beatGoal: 'Deliver message', length: Director.Settings.Length.Short },
           ],
           narratorDirective: 'Mirra greets Frost before Maya arrives.',
-        },
+        }),
       },
       {
         json: {
@@ -2423,28 +2199,15 @@ describe('TurnEngine end-to-end regressions and adversarial invariants', () => {
     let responderZeroAborted = false;
     const { client } = createScriptedClient([
       {
-        json: {
-          sceneChanged: false,
-          location: 'Oak Bedroom',
-          day: 1,
-          timeLabel: 'Evening',
-          sceneType: 'private',
-          userInputKind: 'player_in_scene',
+        text: buildTaggedDirectorPlan({
           presentSlugs: ['frost', 'lize', 'collette'],
-          remoteSlugs: [],
-          offscreenNotes: {},
-          walkOnsEnter: [],
-          walkOnsLeave: [],
-          encounterAccepted: false,
-          encounterBrief: '',
-          pacing: 'group_banter',
-          targetChars: 900,
+          pacing: Director.Settings.Pacing.GroupBanter,
           responders: [
-            { slug: 'lize', beatGoal: 'Slow mind', length: 'short' },
-            { slug: 'collette', beatGoal: 'Fails with 401', length: 'short' },
+            { slug: 'lize', beatGoal: 'Slow mind', length: Director.Settings.Length.Short },
+            { slug: 'collette', beatGoal: 'Fails with 401', length: Director.Settings.Length.Short },
           ],
           narratorDirective: 'Check root cause.',
-        },
+        }),
       },
       ({ init }) => new Promise((resolve, reject) => {
         init.signal?.addEventListener('abort', () => {
@@ -2479,30 +2242,20 @@ describe('TurnEngine end-to-end regressions and adversarial invariants', () => {
 
     const { client } = createScriptedClient([
       {
-        json: {
-          sceneChanged: 'false',
-          location: 'Oak Bedroom',
-          day: 1,
-          timeLabel: 'Evening',
-          sceneType: 'private',
-          userInputKind: 'player_in_scene',
-          presentSlugs: ['frost', 'lize', 'collette', 'viola', 'mirra'],
-          remoteSlugs: [],
-          offscreenNotes: {},
-          walkOnsEnter: [],
-          walkOnsLeave: [],
-          encounterAccepted: 'false',
-          encounterBrief: 'Should be ignored',
-          pacing: 'group_banter',
-          targetChars: 1400,
-          responders: [
-            { slug: 'lize', beatGoal: 'Speak 1', length: 'short' },
-            { slug: 'collette', beatGoal: 'Speak 2', length: 'short' },
-            { slug: 'viola', beatGoal: 'Speak 3', length: 'short' },
-            { slug: 'mirra', beatGoal: 'Speak 4', length: 'short' },
-          ],
-          narratorDirective: 'All four respond.',
-        },
+        text: [
+          '<scene changed="false">Oak Bedroom | day 1 | Evening | private</scene>',
+          '<input>player</input>',
+          '<present>frost, lize, collette, viola, mirra</present>',
+          '<remote></remote>',
+          '<walkons enter="" leave=""/>',
+          '<encounter accepted="false">Should be ignored</encounter>',
+          `<pacing>${Director.Settings.Pacing.GroupBanter}</pacing>`,
+          '<narrator>All four respond.</narrator>',
+          '<direction to="lize" length="short">Speak 1</direction>',
+          '<direction to="collette" length="short">Speak 2</direction>',
+          '<direction to="viola" length="short">Speak 3</direction>',
+          '<direction to="mirra" length="short">Speak 4</direction>',
+        ].join('\n'),
       },
     ], { store });
 
@@ -2530,30 +2283,17 @@ describe('TurnEngine end-to-end regressions and adversarial invariants', () => {
 
     const { client: ensembleClient, calls: ensembleCalls } = createScriptedClient([
       {
-        json: {
-          sceneChanged: false,
-          location: 'Oak Bedroom',
-          day: 1,
-          timeLabel: 'Evening',
-          sceneType: 'private',
-          userInputKind: 'player_in_scene',
+        text: buildTaggedDirectorPlan({
           presentSlugs: ['frost', 'lize', 'collette', 'viola', 'mirra'],
-          remoteSlugs: [],
-          offscreenNotes: {},
-          walkOnsEnter: [],
-          walkOnsLeave: [],
-          encounterAccepted: false,
-          encounterBrief: '',
-          pacing: 'group_banter',
-          targetChars: 1400,
+          pacing: Director.Settings.Pacing.GroupBanter,
           responders: [
-            { slug: 'lize', beatGoal: '1', length: 'short' },
-            { slug: 'collette', beatGoal: '2', length: 'short' },
-            { slug: 'viola', beatGoal: '3', length: 'short' },
-            { slug: 'mirra', beatGoal: '4', length: 'short' },
+            { slug: 'lize', beatGoal: '1', length: Director.Settings.Length.Short },
+            { slug: 'collette', beatGoal: '2', length: Director.Settings.Length.Short },
+            { slug: 'viola', beatGoal: '3', length: Director.Settings.Length.Short },
+            { slug: 'mirra', beatGoal: '4', length: Director.Settings.Length.Short },
           ],
           narratorDirective: 'All four reply.',
-        },
+        }),
       },
       { json: { internalThought: 'T1', physicalAction: 'A1', spokenLines: 'Lize here.', tone: 'calm', knowledgeBoundaries: [] } },
       { json: { internalThought: 'T2', physicalAction: 'A2', spokenLines: 'Collette here.', tone: 'warm', knowledgeBoundaries: [] } },
@@ -2583,24 +2323,9 @@ describe('TurnEngine end-to-end regressions and adversarial invariants', () => {
 });
 
 describe('Unknown card values reach requests as unknown', () => {
-  const directorReply = Object.freeze({
-    sceneChanged: false,
-    location: 'Oak Bedroom',
-    day: 1,
-    timeLabel: 'Evening',
-    sceneType: 'private',
-    userInputKind: 'player_in_scene',
+  const directorReply = buildTaggedDirectorPlan({
     presentSlugs: ['frost', 'lize'],
-    remoteSlugs: [],
-    offscreenNotes: {},
-    walkOnsEnter: [],
-    walkOnsLeave: [],
-    encounterAccepted: false,
-    encounterBrief: '',
-    pacing: 'focused_one',
-    targetChars: 800,
-    responders: [],
-    narratorDirective: '',
+    pacing: Director.Settings.Pacing.FocusedOne,
   });
 
   /**
@@ -2624,7 +2349,7 @@ describe('Unknown card values reach requests as unknown', () => {
     const fixture = createWorldFixture();
     const lize = unknownLize(fixture);
     assert.equal(lize.card.personalitySummary, '?');
-    const { client, calls } = createScriptedClient([{ json: directorReply }], { store: fixture.store });
+    const { client, calls } = createScriptedClient([{ text: directorReply }], { store: fixture.store });
 
     await Director.planTurn({
       campaign: fixture.campaign,
@@ -2697,8 +2422,7 @@ describe('Unknown card values reach requests as unknown', () => {
       recentSceneTurns: [],
       userBeat: { speakerType: SpeakerType.Player, speakerName: 'Frost', text: 'Look.' },
       directorPlan: {
-        pacing: 'narrator_only',
-        targetChars: 800,
+        pacing: Director.Settings.Pacing.NarratorOnly,
         narratorDirective: 'Brief.',
         encounterAccepted: false,
         encounterBrief: '',
@@ -2715,23 +2439,10 @@ describe('Unknown card values reach requests as unknown', () => {
 });
 
 describe('Player narration beat in the player turn', () => {
-  const directorPlan = Object.freeze({
-    sceneChanged: false,
-    location: 'Oak Bedroom',
-    day: 1,
-    timeLabel: 'Evening',
-    sceneType: 'private',
-    userInputKind: 'player_in_scene',
+  const directorReply = buildTaggedDirectorPlan({
     presentSlugs: ['frost', 'lize'],
-    remoteSlugs: [],
-    offscreenNotes: {},
-    walkOnsEnter: [],
-    walkOnsLeave: [],
-    encounterAccepted: false,
-    encounterBrief: '',
-    pacing: 'focused_one',
-    targetChars: 900,
-    responders: [{ slug: 'lize', beatGoal: 'React', length: 'short' }],
+    pacing: Director.Settings.Pacing.FocusedOne,
+    responders: [{ slug: 'lize', beatGoal: 'React', length: Director.Settings.Length.Short }],
     narratorDirective: 'Keep it close.',
   });
   const mindReply = Object.freeze({
@@ -2754,7 +2465,7 @@ describe('Player narration beat in the player turn', () => {
     }
     /** @type {Array<{json?: object, type?: string, text?: string}>} */
     const script = [
-      { json: directorPlan },
+      { text: directorReply },
       { json: mindReply },
       { type: 'stream', text: '[[BEAT:lize]]\n*Lize looks up.*\nHm.' },
     ];
@@ -2861,7 +2572,7 @@ describe('Player narration beat in the player turn', () => {
    */
   const regenerationEngine = (fixture) => {
     const { client, calls } = createScriptedClient([
-      { json: directorPlan },
+      { text: directorReply },
       { json: mindReply },
       { type: 'stream', text: '[[BEAT:lize]]\n*Lize nods.*\nYes.' },
     ], { store: fixture.store });
@@ -2871,14 +2582,19 @@ describe('Player narration beat in the player turn', () => {
 
   /**
    * @param {Array<{payload: {messages: Array<{content: string}>}}>} calls
+   * @param {string} directorUserText
+   * @param {string} directorNarrationText
    * @param {string} wholeMessage
    * @returns {void}
    * @throws {Error}
    */
-  const assertEveryModelGotThe = (calls, wholeMessage) => {
+  const assertEveryModelGotThe = (calls, directorUserText, directorNarrationText, wholeMessage) => {
     assert.equal(calls.length, 3);
-    for (const call of calls) {
-      assert.equal(call.payload.messages.map((message) => message.content).join('\n').includes(wholeMessage), true);
+    const directorUserContent = calls[0].payload.messages[1].content;
+    assert.equal(directorUserContent.includes(`userText: ${directorUserText}`), true);
+    assert.equal(directorUserContent.includes(`narration: ${directorNarrationText}`), true);
+    for (const downstreamCall of calls.slice(1)) {
+      assert.equal(downstreamCall.payload.messages.map((message) => message.content).join('\n').includes(wholeMessage), true);
     }
   };
 
@@ -2902,7 +2618,12 @@ describe('Player narration beat in the player turn', () => {
       const { engine, calls } = regenerationEngine(fixture);
       const regenerated = await engine.regenerateLastTurn({ campaignId: fixture.campaign.id });
 
-      assertEveryModelGotThe(calls, 'I look at her again.\n\nHer hair is dyed black.');
+      assertEveryModelGotThe(
+        calls,
+        'I look at her again.',
+        'Her hair is dyed black.',
+        'I look at her again.\n\nHer hair is dyed black.',
+      );
       assert.deepEqual(fixture.store.getTurn(fixture.campaign.id, result.userTurn.id), savedPlayerTurn);
       assert.deepEqual(regenerated.userTurn, savedPlayerTurn);
       assert.notEqual(regenerated.assistantTurn.id, previousAssistantId);
@@ -2949,7 +2670,12 @@ describe('Player narration beat in the player turn', () => {
     const { engine, calls } = regenerationEngine(fixture);
     const regenerated = await engine.regenerateLastTurn({ campaignId: campaign.id });
 
-    assertEveryModelGotThe(calls, 'She looks up.\n\nRain falls.\n\nShe waits.');
+    assertEveryModelGotThe(
+      calls,
+      'She looks up.\n\nShe waits.',
+      'Rain falls.',
+      'She looks up.\n\nRain falls.\n\nShe waits.',
+    );
     assert.deepEqual(store.getTurn(campaign.id, imported[0].id), saved);
     assert.equal(saved.beats.length, 3);
     assert.equal(store.getTurn(campaign.id, imported[1].id), null);
@@ -4962,5 +4688,462 @@ describe('StorySlice', () => {
       turnsById: null,
     });
     assert.equal(colletteWithoutTurns.text.includes('Known facts:\n- Shadow: role: courier'), true);
+  });
+});
+
+describe('TagReader', () => {
+  const SAMPLE_TAG_SCENE = 'scene';
+  const SAMPLE_TAG_DIRECTION = 'direction';
+  const SAMPLE_TAG_WALKONS = 'walkons';
+  const SAMPLE_TAG_THOUGHTS = 'thoughts';
+  const SAMPLE_TAG_NEXT = 'next';
+  const SAMPLE_TAG_NARRATOR = 'narrator';
+
+  it('reads paired, self-closing, mixed-case, and nested-looking tags while ignoring single-quoted, unquoted, and forbidden attributes', () => {
+    const complexPayload = [
+      '<SCENERY>Oak trees</SCENERY>',
+      '<scene:extra>Colon name</scene:extra>',
+      '<SCENE CHANGED="yes" To="ignore-me" __proto__="evil" constructor="evil" prototype="evil">First | day 1 | Dawn | public</scene   >',
+      '<direction TO="lize" to=\'single\' fake=\'to="evil"\' note="a > b" slash="x/>y" unquoted=yes LENGTH="short">Greet <em class="x">Frost</em></direction>',
+      '<walkons enter="Guard, Gatekeeper" leave="Bram"/>',
+      '<walkons enter="Courier" />',
+      '<scene>outer <scene>inner</scene></scene>',
+      '<scene attr="unclosed>Broken<scene changed="no">Recovered</scene>',
+      '<scene>Trailing unclosed',
+    ].join('\n');
+
+    const sceneMatches = TagReader.read(complexPayload, SAMPLE_TAG_SCENE);
+    assert.equal(Object.isFrozen(sceneMatches), true);
+    assert.equal(sceneMatches.length, 3);
+    assert.deepEqual(sceneMatches[0].attributes, { changed: 'yes', to: 'ignore-me' });
+    assert.equal(Object.isFrozen(sceneMatches[0]), true);
+    assert.equal(Object.isFrozen(sceneMatches[0].attributes), true);
+    assert.equal(sceneMatches[0].body, 'First | day 1 | Dawn | public');
+    assert.equal(sceneMatches[1].body, 'outer <scene>inner</scene>');
+    assert.deepEqual(sceneMatches[2].attributes, { changed: 'no' });
+    assert.equal(sceneMatches[2].body, 'Recovered');
+
+    const directionMatches = TagReader.read(complexPayload, SAMPLE_TAG_DIRECTION);
+    assert.equal(directionMatches.length, 1);
+    assert.deepEqual(directionMatches[0].attributes, {
+      to: 'lize',
+      note: 'a > b',
+      slash: 'x/>y',
+      length: 'short',
+    });
+    assert.equal(Object.hasOwn(directionMatches[0].attributes, 'fake'), false);
+    assert.equal(Object.hasOwn(directionMatches[0].attributes, 'unquoted'), false);
+    assert.equal(directionMatches[0].body, 'Greet <em class="x">Frost</em>');
+
+    const walkOnMatches = TagReader.read(complexPayload, SAMPLE_TAG_WALKONS);
+    assert.equal(walkOnMatches.length, 2);
+    assert.deepEqual(walkOnMatches[0], { attributes: { enter: 'Guard, Gatekeeper', leave: 'Bram' }, body: '' });
+    assert.deepEqual(walkOnMatches[1], { attributes: { enter: 'Courier' }, body: '' });
+
+    const brokenOuterThenValid = '<scene>broken outer <scene changed="no">valid inner</scene>';
+    const recoveredOnlyValid = TagReader.read(brokenOuterThenValid, SAMPLE_TAG_SCENE);
+    assert.equal(recoveredOnlyValid.length, 1);
+    assert.equal(recoveredOnlyValid[0].body, 'valid inner');
+
+    const nestedOther = '<narrator>Shadows fall over <unknown>the well</unknown>.</narrator>';
+    assert.equal(TagReader.read(nestedOther, SAMPLE_TAG_NARRATOR)[0].body, 'Shadows fall over <unknown>the well</unknown>.');
+  });
+
+  it('strips matched paired and self-closing tags via outside() while keeping unclosed and unrelated text', () => {
+    const text = [
+      '<THOUGHTS>I wonder if <next>lize</next> knows</THOUGHTS>',
+      'Visible line one.',
+      '<NEXT>lize</next>',
+      '<scenery>Pine</scenery>',
+      '<walkons enter="Guard"/>',
+      '<thoughts>Unclosed kept <next>stripped inside unclosed</next>',
+    ].join('\n');
+
+    const cleaned = TagReader.outside(text, [SAMPLE_TAG_THOUGHTS, SAMPLE_TAG_NEXT, SAMPLE_TAG_WALKONS]);
+    assert.equal(cleaned.includes('I wonder'), false);
+    assert.equal(cleaned.includes('Visible line one.'), true);
+    assert.equal(cleaned.includes('<scenery>Pine</scenery>'), true);
+    assert.equal(cleaned.includes('Guard'), false);
+    assert.equal(cleaned.includes('<thoughts>Unclosed kept'), true);
+    assert.equal(cleaned.includes('stripped inside unclosed'), false);
+    assert.equal(TagReader.outside('  Untouched text  ', []), 'Untouched text');
+  });
+
+  it('rejects invalid inputs with TypeError or RangeError', () => {
+    for (const badText of [null, 42, {}, []]) {
+      assert.throws(() => TagReader.read(badText, SAMPLE_TAG_SCENE), TypeError);
+      assert.throws(() => TagReader.outside(badText, [SAMPLE_TAG_SCENE]), TypeError);
+    }
+    for (const badTagName of [null, 123, {}]) {
+      assert.throws(() => TagReader.read('hi', badTagName), TypeError);
+      assert.throws(() => TagReader.outside('hi', [badTagName]), TypeError);
+    }
+    for (const badPatternName of ['', '1scene', 'bad tag', 'bad:tag', ' scene']) {
+      assert.throws(() => TagReader.read('hi', badPatternName), RangeError);
+      assert.throws(() => TagReader.outside('hi', [badPatternName]), RangeError);
+    }
+    for (const badList of [null, SAMPLE_TAG_SCENE, {}]) {
+      assert.throws(() => TagReader.outside('hi', badList), TypeError);
+    }
+  });
+
+  it('scans pathological unclosed and repeat tag streams in linear time', () => {
+    const repeatCount = 6000;
+    const maxLinearMs = 100;
+    const unclosedTags = '<scene>'.repeat(repeatCount);
+    const unclosedQuotes = '<scene a="'.repeat(repeatCount);
+
+    const tagsStartMs = performance.now();
+    const unclosedResult = TagReader.read(unclosedTags, SAMPLE_TAG_SCENE);
+    const tagsElapsedMs = performance.now() - tagsStartMs;
+    assert.deepEqual(unclosedResult, []);
+    assert.ok(tagsElapsedMs < maxLinearMs);
+
+    const quotesStartMs = performance.now();
+    const quotesResult = TagReader.read(unclosedQuotes, SAMPLE_TAG_SCENE);
+    const quotesElapsedMs = performance.now() - quotesStartMs;
+    assert.deepEqual(quotesResult, []);
+    assert.ok(quotesElapsedMs < maxLinearMs);
+
+    const nestedWithClose = `${unclosedTags}</scene>`;
+    const singleCloseStartMs = performance.now();
+    const singleCloseMatches = TagReader.read(nestedWithClose, SAMPLE_TAG_SCENE);
+    const singleCloseElapsedMs = performance.now() - singleCloseStartMs;
+    assert.equal(singleCloseMatches.length, 1);
+    assert.equal(singleCloseMatches[0].body, '');
+    assert.ok(singleCloseElapsedMs < maxLinearMs);
+
+    const pathologicalCases = [
+      `${'<scene '.repeat(repeatCount)}It's quiet.</narrator>`,
+      `${'<scene a="'.repeat(repeatCount)}'>`,
+      `${'<scene x="1" a="'.repeat(repeatCount)}'>`,
+    ];
+    for (const pathologicalInput of pathologicalCases) {
+      const caseStartMs = performance.now();
+      const caseMatches = TagReader.read(pathologicalInput, SAMPLE_TAG_SCENE);
+      const caseElapsedMs = performance.now() - caseStartMs;
+      assert.deepEqual(caseMatches, []);
+      assert.ok(caseElapsedMs < maxLinearMs);
+    }
+  });
+});
+
+describe('Director tagged parsing, styles, modes, and budgeted recent turns', () => {
+  /**
+   * @param {string} replyText
+   * @param {object} [extraOptions]
+   * @returns {Promise<{result: object, calls: Array<{payload: object}>}>}
+   * @throws {Error}
+   */
+  async function runDirectorWithReply(replyText, extraOptions = {}) {
+    const ownedFixture = extraOptions.fixture === undefined;
+    const fixture = ownedFixture ? createWorldFixture() : extraOptions.fixture;
+    const { store, campaign, frost, lize, viola, collette } = fixture;
+    const { client, calls } = createScriptedClient([{ text: replyText }], { store });
+    try {
+      const result = await Director.planTurn({
+        campaign,
+        characters: extraOptions.characters ?? [frost, lize, viola, collette],
+        preState: extraOptions.preState ?? campaign.sceneState,
+        recentTurns: extraOptions.recentTurns ?? [],
+        userText: extraOptions.userText ?? 'Hello.',
+        narrationText: extraOptions.narrationText ?? null,
+        mode: extraOptions.mode ?? TurnMode.Normal,
+        encounterRoll: extraOptions.encounterRoll ?? {
+          triggered: false,
+          forced: false,
+          plausibilityRequired: false,
+          targetKind: null,
+          stance: null,
+        },
+        model: 'openai/gpt-4.1-mini',
+        client,
+        maxResponders: extraOptions.maxResponders ?? null,
+        budget: extraOptions.budget ?? null,
+      });
+      return { result, calls };
+    } finally {
+      if (ownedFixture) {
+        store.close();
+      }
+    }
+  }
+
+  it('ignores broken and unknown tags, preserves omitted present/remote, and clears empty present before player auto-insert', async () => {
+    const fixture = createWorldFixture();
+    const { campaign, frost, lize, collette } = fixture;
+    const preStateWithRemote = {
+      ...campaign.sceneState,
+      presentIds: [frost.id, lize.id],
+      remoteIds: [collette.id],
+    };
+
+    const omittedPresence = await runDirectorWithReply(
+      [
+        '<unknown>ignored</unknown>',
+        '<narrator>Broken unclosed',
+        '<situation>Quiet watch.</situation>',
+      ].join('\n'),
+      { fixture, preState: preStateWithRemote },
+    );
+    assert.equal(omittedPresence.result.plan.directorMissed, false);
+    assert.deepEqual(omittedPresence.result.nextState.presentIds, [frost.id, lize.id]);
+    assert.deepEqual(omittedPresence.result.nextState.remoteIds, [collette.id]);
+    assert.equal(omittedPresence.result.plan.narratorDirective, '');
+    assert.equal(omittedPresence.result.plan.situation, 'Quiet watch.');
+
+    const clearedPresentAutoInsert = await runDirectorWithReply(
+      [
+        '<present></present>',
+        '<remote></remote>',
+        '<input>player</input>',
+      ].join('\n'),
+      { fixture, preState: preStateWithRemote },
+    );
+    assert.deepEqual(clearedPresentAutoInsert.result.nextState.presentIds, [frost.id]);
+    assert.deepEqual(clearedPresentAutoInsert.result.nextState.remoteIds, []);
+
+    const clearedPresentNarrator = await runDirectorWithReply(
+      [
+        '<present></present>',
+        '<remote></remote>',
+        '<input>narrator</input>',
+      ].join('\n'),
+      { fixture, preState: preStateWithRemote },
+    );
+    assert.deepEqual(clearedPresentNarrator.result.nextState.presentIds, []);
+    assert.deepEqual(clearedPresentNarrator.result.nextState.remoteIds, []);
+    fixture.store.close();
+  });
+
+  it('enforces Narrator and Encounter mode overrides, narrator_only suppression, and maxResponders on full miss', async () => {
+    const narratorOverride = await runDirectorWithReply(
+      [
+        '<input>player</input>',
+        '<encounter accepted="yes">Bandits ambush!</encounter>',
+        `<pacing>${Director.Settings.Pacing.NarratorOnly}</pacing>`,
+        `<direction to="lize" length="${Director.Settings.Length.Short}">Should drop under narrator_only</direction>`,
+      ].join('\n'),
+      {
+        mode: TurnMode.Narrator,
+        encounterRoll: { triggered: true, forced: false, plausibilityRequired: false, targetKind: 'cast', stance: 'enemy' },
+      },
+    );
+    assert.equal(narratorOverride.result.plan.userInputKind, Director.Settings.InputKind.NarratorDirection);
+    assert.equal(narratorOverride.result.plan.encounterAccepted, false);
+    assert.equal(narratorOverride.result.plan.encounterBrief, '');
+    assert.deepEqual(narratorOverride.result.plan.responders, []);
+
+    const encounterMiss = await runDirectorWithReply('untagged miss', {
+      mode: TurnMode.Encounter,
+      encounterRoll: { triggered: true, forced: true, plausibilityRequired: false, targetKind: 'stranger', stance: 'enemy' },
+    });
+    assert.equal(encounterMiss.result.plan.directorMissed, true);
+    assert.equal(encounterMiss.result.plan.encounterAccepted, true);
+    assert.ok(encounterMiss.result.plan.encounterBrief.length > 0);
+    assert.equal(encounterMiss.result.plan.style, SceneStyle.None);
+
+    const fixture = createWorldFixture();
+    const { campaign, frost, lize, viola } = fixture;
+    const cappedMiss = await runDirectorWithReply('untagged miss', {
+      fixture,
+      preState: { ...campaign.sceneState, presentIds: [frost.id, lize.id, viola.id] },
+      maxResponders: 1,
+    });
+    assert.equal(cappedMiss.result.plan.responders.length, 1);
+    assert.equal(cappedMiss.result.plan.responders[0].slug, 'lize');
+    fixture.store.close();
+  });
+
+  it('lists all 8 scene styles in prompt and parses <style> case-insensitively with first-tag and fallback rules', async () => {
+    const combatCase = await runDirectorWithReply('<style>  Combat  </style>');
+    assert.equal(combatCase.result.plan.style, SceneStyle.Combat);
+    const systemPrompt = combatCase.calls[0].payload.messages[0].content;
+    for (const styleName of SceneStyle.AllValues) {
+      assert.equal(systemPrompt.includes(`- ${styleName}:`), true);
+    }
+
+    const unknownStyle = await runDirectorWithReply('<style>dance</style>');
+    assert.equal(unknownStyle.result.plan.style, SceneStyle.None);
+
+    const twoStyles = await runDirectorWithReply(
+      `<style>${SceneStyle.Explicit}</style>\n<style>${SceneStyle.Banter}</style>`,
+    );
+    assert.equal(twoStyles.result.plan.style, SceneStyle.Explicit);
+  });
+
+  it('drops oldest RECENT TURNS whole when budget is tight and rejects bad budget or narrationText', async () => {
+    const fixture = createWorldFixture();
+    const { store, campaign, frost, lize } = fixture;
+    const { client: probeClient, calls: probeCalls } = createScriptedClient([{ text: '<style>none</style>' }], { store });
+    await Director.planTurn({
+      campaign,
+      characters: [frost, lize],
+      preState: campaign.sceneState,
+      recentTurns: [],
+      userText: 'Probe',
+      mode: TurnMode.Normal,
+      encounterRoll: { triggered: false, forced: false, plausibilityRequired: false, targetKind: null, stance: null },
+      model: 'openai/gpt-4.1-mini',
+      client: probeClient,
+    });
+
+    const probeBudget = RequestBudget.create({
+      contextLength: null,
+      replyReserve: 3000,
+      charsPerToken: RequestBudget.StartingCharsPerToken,
+    });
+    const baseTokens = probeBudget.estimate(probeCalls[0].payload.messages[0].content) +
+      probeBudget.estimate(probeCalls[0].payload.messages[1].content);
+    const tightBudget = RequestBudget.create({
+      contextLength: 3000 + baseTokens + 75,
+      replyReserve: 3000,
+      charsPerToken: RequestBudget.StartingCharsPerToken,
+    });
+
+    const turns = [];
+    for (let turnSeq = 1; turnSeq <= 10; turnSeq += 1) {
+      turns.push({
+        id: `turn-${turnSeq}`,
+        seq: turnSeq,
+        sceneNumber: 1,
+        mode: TurnMode.Normal,
+        beats: [{ speakerName: 'Frost', text: `UNIQUE_TURN_${turnSeq} ${'w'.repeat(70)}` }],
+      });
+    }
+
+    const budgeted = await runDirectorWithReply('<style>none</style>', {
+      fixture,
+      characters: [frost, lize],
+      recentTurns: turns,
+      userText: 'Probe',
+      budget: tightBudget,
+    });
+    const sentUserPrompt = budgeted.calls[0].payload.messages[1].content;
+    const sentSystemPrompt = budgeted.calls[0].payload.messages[0].content;
+    assert.equal(sentUserPrompt.includes('UNIQUE_TURN_10'), true);
+    assert.equal(sentUserPrompt.includes('UNIQUE_TURN_1 '), false);
+    assert.equal(sentUserPrompt.includes('UNIQUE_TURN_2 '), false);
+    assert.ok(
+      tightBudget.estimate(sentSystemPrompt) + tightBudget.estimate(sentUserPrompt) <= tightBudget.limitTokens,
+    );
+
+    const { client: badClient } = createScriptedClient([], { store });
+    const baseCall = {
+      campaign,
+      characters: [frost, lize],
+      preState: campaign.sceneState,
+      userText: 'Hi',
+      mode: TurnMode.Normal,
+      encounterRoll: { triggered: false, forced: false, plausibilityRequired: false, targetKind: null, stance: null },
+      model: 'openai/gpt-4.1-mini',
+      client: badClient,
+    };
+    await assert.rejects(() => Director.planTurn({ ...baseCall, narrationText: 5 }), TypeError);
+    await assert.rejects(() => Director.planTurn({ ...baseCall, budget: {} }), TypeError);
+    await assert.rejects(
+      () => Director.planTurn({
+        ...baseCall,
+        budget: {
+          limitTokens: -1,
+          /**
+           * @returns {number}
+           */
+          estimate() {
+            return 0;
+          },
+          /**
+           * @returns {boolean}
+           */
+          fits() {
+            return true;
+          },
+        },
+      }),
+      RangeError,
+    );
+    store.close();
+  });
+
+  it('resolves non-participant, self, and player reacting slugs to player', async () => {
+    const fixture = createWorldFixture();
+    const { campaign, frost, lize, collette } = fixture;
+    const preState = {
+      ...campaign.sceneState,
+      presentIds: [frost.id, lize.id, collette.id],
+      remoteIds: [],
+    };
+    try {
+      const absentReacting = await runDirectorWithReply(
+        `<direction to="lize" reacting="viola" length="${Director.Settings.Length.Medium}">Watch the hall.</direction>`,
+        { fixture, preState },
+      );
+      assert.equal(absentReacting.result.plan.responders.length, 1);
+      assert.equal(absentReacting.result.plan.responders[0].reacting, Director.Settings.ReactingPlayer);
+
+      const selfReacting = await runDirectorWithReply(
+        `<direction to="lize" reacting="lize" length="${Director.Settings.Length.Medium}">Steady yourself.</direction>`,
+        { fixture, preState },
+      );
+      assert.equal(selfReacting.result.plan.responders.length, 1);
+      assert.equal(selfReacting.result.plan.responders[0].reacting, Director.Settings.ReactingPlayer);
+
+      const playerReacting = await runDirectorWithReply(
+        `<direction to="lize" reacting="frost" length="${Director.Settings.Length.Medium}">Answer Frost.</direction>`,
+        { fixture, preState },
+      );
+      assert.equal(playerReacting.result.plan.responders.length, 1);
+      assert.equal(playerReacting.result.plan.responders[0].reacting, Director.Settings.ReactingPlayer);
+
+      const participantReacting = await runDirectorWithReply(
+        `<direction to="lize" reacting="collette" length="${Director.Settings.Length.Medium}">Answer Collette.</direction>`,
+        { fixture, preState },
+      );
+      assert.equal(participantReacting.result.plan.responders.length, 1);
+      assert.equal(participantReacting.result.plan.responders[0].reacting, collette.slug);
+    } finally {
+      fixture.store.close();
+    }
+  });
+
+  it('passes player narrationText cleanly from TurnEngine to Director on both Send and Regenerate', async () => {
+    const fixture = createWorldFixture({ scribeInterval: 10, pedantEnabled: false });
+    const { store, campaign } = fixture;
+    const directorResponse = buildTaggedDirectorPlan({
+      presentSlugs: ['frost', 'lize'],
+      pacing: Director.Settings.Pacing.FocusedOne,
+      responders: [{ slug: 'lize', beatGoal: 'React', length: Director.Settings.Length.Short }],
+      narratorDirective: 'Keep steady.',
+    });
+    const mindJson = {
+      internalThought: 'Okay.',
+      physicalAction: 'Nods.',
+      spokenLines: 'Understood.',
+      tone: 'calm',
+      knowledgeBoundaries: [],
+    };
+    const { client, calls } = createScriptedClient([
+      { text: directorResponse },
+      { json: mindJson },
+      { type: 'stream', text: '[[BEAT:lize]]\nUnderstood.' },
+      { text: directorResponse },
+      { json: mindJson },
+      { type: 'stream', text: '[[BEAT:lize]]\nUnderstood again.' },
+    ], { store });
+
+    const engine = new TurnEngine({ store, client, scribeService: new ScribeService({ store }) });
+    await engine.runTurn({
+      campaignId: campaign.id,
+      text: 'I step forward.',
+      narration: 'The lantern goes out.',
+      mode: TurnMode.Normal,
+    });
+    await engine.regenerateLastTurn({ campaignId: campaign.id });
+
+    const sendDirectorPrompt = calls[0].payload.messages[1].content;
+    const regenDirectorPrompt = calls[3].payload.messages[1].content;
+    assert.equal(sendDirectorPrompt.includes('userText: I step forward.\nnarration: The lantern goes out.'), true);
+    assert.equal(regenDirectorPrompt.includes('userText: I step forward.\nnarration: The lantern goes out.'), true);
+    store.close();
   });
 });

@@ -11,6 +11,7 @@ import { ScribeReplay } from '../scribe/ScribeReplay.mjs';
 import { ScribeText } from '../scribe/ScribeText.mjs';
 import { CharacterCard } from '../store/CharacterCard.mjs';
 import { FindingStatus } from '../store/enums/FindingStatus.mjs';
+import { SceneStyle } from '../store/enums/SceneStyle.mjs';
 import { TurnMode } from '../store/enums/TurnMode.mjs';
 import { RateLimiter } from './RateLimiter.mjs';
 import { Security } from './Security.mjs';
@@ -343,6 +344,7 @@ export class Router {
               body,
               [
                 'models',
+                'sceneStyles',
                 'publicOdds',
                 'privateOdds',
                 'scribeInterval',
@@ -369,6 +371,21 @@ export class Router {
                 const trimmedKey = candidateKey.trim();
                 if (trimmedKey.length > 0 && /\s/.test(trimmedKey)) {
                   throw this.#createHttpError(400, 'openRouterApiKey must not contain whitespace.');
+                }
+              }
+            }
+
+            if (body.sceneStyles !== undefined) {
+              if (body.sceneStyles === null || typeof body.sceneStyles !== 'object' || Array.isArray(body.sceneStyles)) {
+                throw this.#createHttpError(400, 'sceneStyles must be an object.');
+              }
+              const editableStyles = new Set(SceneStyle.EditableValues);
+              for (const [styleKey, styleText] of Object.entries(body.sceneStyles)) {
+                if (!editableStyles.has(styleKey)) {
+                  throw this.#createHttpError(400, `sceneStyles.${styleKey} is not an editable scene style.`);
+                }
+                if (typeof styleText !== 'string') {
+                  throw this.#createHttpError(400, `sceneStyles.${styleKey} must be a string.`);
                 }
               }
             }

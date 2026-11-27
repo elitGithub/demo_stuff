@@ -8,6 +8,7 @@ import { AvatarToken } from './enums/AvatarToken.mjs';
 import { CharacterTier } from './enums/CharacterTier.mjs';
 import { FindingKind } from './enums/FindingKind.mjs';
 import { FindingStatus } from './enums/FindingStatus.mjs';
+import { SceneStyle } from './enums/SceneStyle.mjs';
 import { SceneType } from './enums/SceneType.mjs';
 import { SpeakerType } from './enums/SpeakerType.mjs';
 import { SpendStage } from './enums/SpendStage.mjs';
@@ -105,7 +106,7 @@ export class SqliteStore {
   }
 
   /**
-   * @returns {{models: {director: string, composer: string, main: string, recurring: string, scribe: string}, publicOdds: number, privateOdds: number, scribeInterval: number, pedantEnabled: boolean, dailyWarnUsd: number | null, maxRepliesPerCharacter: number, replyReserve: number}}
+   * @returns {{models: {director: string, composer: string, main: string, recurring: string, scribe: string}, sceneStyles: {explicit: string, combat: string, tension: string, emotional: string, banter: string, travel: string, investigation: string}, publicOdds: number, privateOdds: number, scribeInterval: number, pedantEnabled: boolean, dailyWarnUsd: number | null, maxRepliesPerCharacter: number, replyReserve: number}}
    * @throws {SyntaxError}
    */
   getSettings() {
@@ -117,6 +118,7 @@ export class SqliteStore {
         recurring: '',
         scribe: '',
       },
+      sceneStyles: { ...SceneStyle.Defaults },
       publicOdds: 8,
       privateOdds: 30,
       scribeInterval: 1,
@@ -136,6 +138,16 @@ export class SqliteStore {
           recurring: typeof parsedValue.recurring === 'string' ? parsedValue.recurring : '',
           scribe: typeof parsedValue.scribe === 'string' ? parsedValue.scribe : '',
         };
+      } else if (row.key === 'sceneStyles') {
+        if (parsedValue !== null && typeof parsedValue === 'object' && !Array.isArray(parsedValue)) {
+          const nextStyles = { ...SceneStyle.Defaults };
+          for (const styleKey of SceneStyle.EditableValues) {
+            if (Object.hasOwn(parsedValue, styleKey) && typeof parsedValue[styleKey] === 'string') {
+              nextStyles[styleKey] = parsedValue[styleKey];
+            }
+          }
+          defaults.sceneStyles = nextStyles;
+        }
       } else if (Object.hasOwn(defaults, row.key)) {
         defaults[row.key] = parsedValue;
       }
@@ -145,7 +157,7 @@ export class SqliteStore {
 
   /**
    * @param {Record<string, unknown>} patch
-   * @returns {{models: {director: string, composer: string, main: string, recurring: string, scribe: string}, publicOdds: number, privateOdds: number, scribeInterval: number, pedantEnabled: boolean, dailyWarnUsd: number | null, maxRepliesPerCharacter: number, replyReserve: number}}
+   * @returns {{models: {director: string, composer: string, main: string, recurring: string, scribe: string}, sceneStyles: {explicit: string, combat: string, tension: string, emotional: string, banter: string, travel: string, investigation: string}, publicOdds: number, privateOdds: number, scribeInterval: number, pedantEnabled: boolean, dailyWarnUsd: number | null, maxRepliesPerCharacter: number, replyReserve: number}}
    * @throws {Error}
    */
   updateSettings(patch) {
@@ -154,6 +166,7 @@ export class SqliteStore {
     }
     const allowedKeys = new Set([
       'models',
+      'sceneStyles',
       'publicOdds',
       'privateOdds',
       'scribeInterval',
@@ -163,6 +176,7 @@ export class SqliteStore {
       'replyReserve',
     ]);
     const allowedModelSlots = new Set(['director', 'composer', 'main', 'recurring', 'scribe']);
+    const editableStyleSet = new Set(SceneStyle.EditableValues);
     const patchEntries = Object.entries(patch);
     for (const [patchKey] of patchEntries) {
       if (!allowedKeys.has(patchKey)) {
@@ -198,6 +212,33 @@ export class SqliteStore {
           }
           if (modelsChanged) {
             updates.push(['models', JSON.stringify(nextModels)]);
+          }
+        } else if (patchKey === 'sceneStyles') {
+          if (
+            patchValue === null ||
+            typeof patchValue !== 'object' ||
+            Array.isArray(patchValue) ||
+            (Object.getPrototypeOf(patchValue) !== Object.prototype && Object.getPrototypeOf(patchValue) !== null)
+          ) {
+            throw new TypeError('sceneStyles must be a plain object.');
+          }
+          const nextStyles = { ...current.sceneStyles };
+          let stylesChanged = false;
+          for (const [styleKey, styleText] of Object.entries(patchValue)) {
+            if (!editableStyleSet.has(styleKey)) {
+              throw new RangeError(`Unsupported scene style: ${styleKey}`);
+            }
+            if (styleText === undefined) {
+              continue;
+            }
+            if (typeof styleText !== 'string') {
+              throw new TypeError(`Scene style ${styleKey} must be a string.`);
+            }
+            nextStyles[styleKey] = styleText;
+            stylesChanged = true;
+          }
+          if (stylesChanged) {
+            updates.push(['sceneStyles', JSON.stringify(nextStyles)]);
           }
         } else if (patchKey === 'publicOdds' || patchKey === 'privateOdds' || patchKey === 'scribeInterval') {
           this.#validateNonNegativeInt(patchValue, patchKey);

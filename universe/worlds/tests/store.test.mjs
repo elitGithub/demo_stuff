@@ -10,6 +10,7 @@ import { AvatarToken } from '../src/store/enums/AvatarToken.mjs';
 import { CharacterTier } from '../src/store/enums/CharacterTier.mjs';
 import { FindingKind } from '../src/store/enums/FindingKind.mjs';
 import { FindingStatus } from '../src/store/enums/FindingStatus.mjs';
+import { SceneStyle } from '../src/store/enums/SceneStyle.mjs';
 import { SceneType } from '../src/store/enums/SceneType.mjs';
 import { SpeakerType } from '../src/store/enums/SpeakerType.mjs';
 import { SpendStage } from '../src/store/enums/SpendStage.mjs';
@@ -55,6 +56,7 @@ describe('Store enums', () => {
       { enumObject: TurnMode, expectedCases: ['normal', 'narrator', 'encounter'] },
       { enumObject: SpeakerType, expectedCases: ['narrator', 'character', 'player'] },
       { enumObject: SceneType, expectedCases: ['public', 'private'] },
+      { enumObject: SceneStyle, expectedCases: SceneStyle.AllValues },
       { enumObject: FindingKind, expectedCases: ['contradiction', 'secret_leak', 'name_mismatch'] },
       { enumObject: FindingStatus, expectedCases: ['open', 'dismissed', 'ruled', 'told'] },
       { enumObject: SpendStage, expectedCases: ['director', 'mind', 'composer', 'scribe', 'pedant', 'muse'] },
@@ -84,6 +86,7 @@ describe('SqliteStore settings and campaigns', () => {
       const defaults = store.getSettings();
       assert.deepEqual(defaults, {
         models: { director: '', composer: '', main: '', recurring: '', scribe: '' },
+        sceneStyles: { ...SceneStyle.Defaults },
         publicOdds: 8,
         privateOdds: 30,
         scribeInterval: 1,
@@ -1888,6 +1891,128 @@ describe('SqliteStore.commitTurnPair extra player beats', () => {
       assert.equal(store.getLocalChangeSeq(), changesBefore);
     } finally {
       store.close();
+    }
+  });
+});
+
+describe('SceneStyle enum and SqliteStore sceneStyles settings', () => {
+  const EXPECTED_SPEC_DEFAULTS = Object.freeze({
+    [SceneStyle.Explicit]:
+      'Match the tone and pace of the scene. Describe sexual activity in vivid, explicit detail: bodies, touch, taste, sound, breath, reactions. Build a hot scene loaded with sexual tension; let each beat escalate or linger instead of rushing to the end. Desire, hesitation and dominance follow who the character is.',
+    [SceneStyle.Combat]:
+      "Write a fluent, exciting fight, blow by blow: footing, distance, weapons, injuries, shifts in momentum. Build every move on what you know about the character: skills, gear, wounds, build. Follow what the player declared, and never decide the outcome of the player's own action. Use short, punchy sentences at the peaks.",
+    [SceneStyle.Tension]:
+      'Focus on a tense atmosphere: what is left unsaid, small sounds, glances, held breath, the sense that something is about to break. Slow the pace and hold back resolution. Characters guard their words and watch each other.',
+    [SceneStyle.Emotional]:
+      'Focus on feelings and the space between people: vulnerability, warmth, regret, comfort. Show emotion through small gestures, silences and tone of voice rather than naming it. Let moments breathe; no jokes that break the mood unless that is who the character is.',
+    [SceneStyle.Banter]:
+      'Light, quick, playful exchanges. Wit, teasing and personality over plot. Keep replies short and reactive, let characters bounce off each other, and keep descriptions brief.',
+    [SceneStyle.Travel]:
+      "Bring the place to life: landscape, weather, smells, sounds, distance, and the people and creatures met on the way. Leave things for the player to notice and choose from. Keep the group's mood and fatigue present.",
+    [SceneStyle.Investigation]:
+      'Focus on detail and clues: what can be seen, read, overheard or worked out. Characters reason aloud only from what they actually know and never reveal more than the scene supports. Leave the conclusions for the player to draw.',
+  });
+
+  const EXPECTED_LABELS = Object.freeze({
+    [SceneStyle.Explicit]: 'Explicit',
+    [SceneStyle.Combat]: 'Combat',
+    [SceneStyle.Tension]: 'Tension',
+    [SceneStyle.Emotional]: 'Emotional',
+    [SceneStyle.Banter]: 'Banter',
+    [SceneStyle.Travel]: 'Travel',
+    [SceneStyle.Investigation]: 'Investigation',
+    [SceneStyle.None]: 'None',
+  });
+
+  const INVALID_STYLE_KEYS = Object.freeze(['dance', SceneStyle.None, '__proto__', 'constructor', '']);
+
+  it('freezes SceneStyle, validates EditableValues/AllValues, matches exact spec defaults, and labels every case', () => {
+    assert.equal(Object.isFrozen(SceneStyle), true);
+    assert.equal(Object.isFrozen(SceneStyle.EditableValues), true);
+    assert.equal(Object.isFrozen(SceneStyle.AllValues), true);
+    assert.equal(Object.isFrozen(SceneStyle.Defaults), true);
+    assert.equal(Object.getPrototypeOf(SceneStyle.Defaults), Object.prototype);
+
+    assert.equal(SceneStyle.EditableValues.length, 7);
+    assert.equal(SceneStyle.EditableValues.includes(SceneStyle.None), false);
+    assert.equal(SceneStyle.AllValues.length, 8);
+    assert.deepEqual([...SceneStyle.AllValues], [...SceneStyle.EditableValues, SceneStyle.None]);
+    assert.deepEqual(SceneStyle.Defaults, EXPECTED_SPEC_DEFAULTS);
+
+    for (const styleKey of SceneStyle.AllValues) {
+      assert.equal(SceneStyle.label(styleKey), EXPECTED_LABELS[styleKey]);
+    }
+    assert.throws(() => SceneStyle.label('dance'), RangeError);
+    assert.throws(() => SceneStyle.label(''), RangeError);
+  });
+
+  it('merges partial sceneStyles updates, preserves untouched defaults, and rejects invalid keys or values', () => {
+    const tempDir = fs.mkdtempSync(path.join(os.tmpdir(), 'worlds-store-styles-test-'));
+    tempDirs.push(tempDir);
+    const dbPath = path.join(tempDir, 'styles.sqlite');
+    const store = new SqliteStore(dbPath);
+    try {
+      const initial = store.getSettings();
+      assert.deepEqual(initial.sceneStyles, EXPECTED_SPEC_DEFAULTS);
+
+      const seqBefore = store.getLocalChangeSeq();
+      const noOp = store.updateSettings({ sceneStyles: { [SceneStyle.Combat]: undefined } });
+      assert.deepEqual(noOp.sceneStyles, EXPECTED_SPEC_DEFAULTS);
+      assert.equal(store.getLocalChangeSeq(), seqBefore);
+
+      const merged = store.updateSettings({
+        sceneStyles: { [SceneStyle.Combat]: 'Custom fight instructions.' },
+      });
+      assert.equal(merged.sceneStyles[SceneStyle.Combat], 'Custom fight instructions.');
+      assert.equal(merged.sceneStyles[SceneStyle.Explicit], EXPECTED_SPEC_DEFAULTS[SceneStyle.Explicit]);
+      assert.equal(merged.sceneStyles[SceneStyle.Investigation], EXPECTED_SPEC_DEFAULTS[SceneStyle.Investigation]);
+      assert.equal(store.getLocalChangeSeq(), seqBefore + 1);
+
+      const mergedSecond = store.updateSettings({
+        sceneStyles: { [SceneStyle.Tension]: 'Custom tension instructions.' },
+      });
+      assert.equal(mergedSecond.sceneStyles[SceneStyle.Combat], 'Custom fight instructions.');
+      assert.equal(mergedSecond.sceneStyles[SceneStyle.Tension], 'Custom tension instructions.');
+
+      for (const badShape of [null, [], SceneStyle.Combat, 5, new Map()]) {
+        assert.throws(() => store.updateSettings({ sceneStyles: badShape }), TypeError);
+      }
+
+      for (const badKey of INVALID_STYLE_KEYS) {
+        const badPatch = JSON.parse(`{"sceneStyles":{"${badKey}":"bad text"}}`);
+        assert.throws(() => store.updateSettings(badPatch), RangeError);
+      }
+
+      for (const badValue of [null, 42, false, ['line'], { text: 'obj' }]) {
+        assert.throws(() => store.updateSettings({ sceneStyles: { [SceneStyle.Banter]: badValue } }), TypeError);
+      }
+
+      const persisted = store.getSettings();
+      assert.equal(persisted.sceneStyles[SceneStyle.Combat], 'Custom fight instructions.');
+      assert.equal(persisted.sceneStyles[SceneStyle.Tension], 'Custom tension instructions.');
+      assert.equal(persisted.sceneStyles[SceneStyle.Banter], EXPECTED_SPEC_DEFAULTS[SceneStyle.Banter]);
+    } finally {
+      store.close();
+    }
+
+    const rawDb = new DatabaseSync(dbPath);
+    try {
+      rawDb.prepare('INSERT OR REPLACE INTO settings (key, value_json) VALUES (?, ?)').run(
+        'sceneStyles',
+        JSON.stringify({ [SceneStyle.Combat]: 99, [SceneStyle.None]: 'forbidden', [SceneStyle.Banter]: 'Kept string' }),
+      );
+    } finally {
+      rawDb.close();
+    }
+
+    const reopened = new SqliteStore(dbPath);
+    try {
+      const recovered = reopened.getSettings();
+      assert.equal(recovered.sceneStyles[SceneStyle.Combat], EXPECTED_SPEC_DEFAULTS[SceneStyle.Combat]);
+      assert.equal(recovered.sceneStyles[SceneStyle.Banter], 'Kept string');
+      assert.equal(Object.hasOwn(recovered.sceneStyles, SceneStyle.None), false);
+    } finally {
+      reopened.close();
     }
   });
 });

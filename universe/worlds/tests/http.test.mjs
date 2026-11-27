@@ -5,6 +5,7 @@ import os from 'node:os';
 import path from 'node:path';
 import { after, describe, it } from 'node:test';
 import { WorldsConfig } from '../src/config.mjs';
+import { Director } from '../src/engine/Director.mjs';
 import { RateLimiter } from '../src/http/RateLimiter.mjs';
 import { Security } from '../src/http/Security.mjs';
 import { SseStream } from '../src/http/SseStream.mjs';
@@ -16,9 +17,53 @@ import { WorldsServer } from '../src/server.mjs';
 import { AvatarToken } from '../src/store/enums/AvatarToken.mjs';
 import { CharacterTier } from '../src/store/enums/CharacterTier.mjs';
 import { FindingStatus } from '../src/store/enums/FindingStatus.mjs';
+import { SceneStyle } from '../src/store/enums/SceneStyle.mjs';
+import { SceneType } from '../src/store/enums/SceneType.mjs';
 import { TurnMode } from '../src/store/enums/TurnMode.mjs';
 import { SqliteStore } from '../src/store/SqliteStore.mjs';
 import { createFakeModelCatalog } from './support/createFakeModelCatalog.mjs';
+
+/**
+ * @param {{sceneChanged?: boolean, location: string, day: number, timeLabel: string, sceneType: string, presentSlugs: readonly string[], offscreenNotes?: Record<string, string>, pacing?: string, responders?: ReadonlyArray<{slug: string, beatGoal: string, length: string, reacting?: string}>, narratorDirective?: string, style?: string}} options
+ * @returns {string}
+ */
+function buildTaggedDirectorReply({
+  sceneChanged = false,
+  location,
+  day,
+  timeLabel,
+  sceneType,
+  presentSlugs,
+  offscreenNotes = {},
+  pacing = Director.Settings.Pacing.FocusedOne,
+  responders = [],
+  narratorDirective = Director.Settings.EmptyText,
+  style = SceneStyle.None,
+}) {
+  const changedFlag = sceneChanged ? Director.Settings.Bool.Yes : Director.Settings.Bool.No;
+  const lines = [
+    `<scene changed="${changedFlag}">${location} | day ${day} | ${timeLabel} | ${sceneType}</scene>`,
+    '<situation>Scene beat in progress.</situation>',
+    `<input>${Director.Settings.InputKind.PlayerTag}</input>`,
+    `<present>${presentSlugs.join(', ')}</present>`,
+    '<remote></remote>',
+  ];
+  for (const [slug, note] of Object.entries(offscreenNotes)) {
+    lines.push(`<offscreen to="${slug}">${note}</offscreen>`);
+  }
+  lines.push('<walkons enter="" leave=""/>');
+  lines.push(`<encounter accepted="${Director.Settings.Bool.No}"></encounter>`);
+  lines.push(`<pacing>${pacing}</pacing>`);
+  lines.push(`<narrator>${narratorDirective}</narrator>`);
+  for (const responder of responders) {
+    const reactingSlug = responder.reacting ?? Director.Settings.ReactingPlayer;
+    lines.push(
+      `<direction to="${responder.slug}" reacting="${reactingSlug}" length="${responder.length}">${responder.beatGoal}</direction>`,
+    );
+  }
+  lines.push(`<style>${style}</style>`);
+  return lines.join('\n');
+}
 
 /**
  * @param {string} text
@@ -698,23 +743,15 @@ describe('Full REST & SSE lifecycle, concurrency, Scribe sync, and client discon
           JSON.stringify({
             choices: [{
               message: {
-                content: JSON.stringify({
-                  sceneChanged: false,
+                content: buildTaggedDirectorReply({
                   location: 'Harbor Inn',
                   day: 1,
                   timeLabel: 'Evening',
-                  sceneType: 'private',
-                  userInputKind: 'player_in_scene',
+                  sceneType: SceneType.Private,
                   presentSlugs: ['frost', 'lize'],
-                  remoteSlugs: [],
                   offscreenNotes: { collette: 'in the library' },
-                  walkOnsEnter: [],
-                  walkOnsLeave: [],
-                  encounterAccepted: false,
-                  encounterBrief: '',
-                  pacing: 'focused_one',
-                  targetChars: 800,
-                  responders: [{ slug: 'lize', beatGoal: 'Answer Frost quietly.', length: 'short' }],
+                  pacing: Director.Settings.Pacing.FocusedOne,
+                  responders: [{ slug: 'lize', beatGoal: 'Answer Frost quietly.', length: Director.Settings.Length.Short }],
                   narratorDirective: 'Keep it quiet.',
                 }),
               },
@@ -739,25 +776,17 @@ describe('Full REST & SSE lifecycle, concurrency, Scribe sync, and client discon
         text: '[[BEAT:narrator]]\nLantern light flickered.\n[[BEAT:lize]]\n*Lize leaned over the table.*\nI kept the cellar key safe.',
       },
       {
-        json: {
-          sceneChanged: false,
+        text: buildTaggedDirectorReply({
           location: 'Harbor Inn',
           day: 1,
           timeLabel: 'Evening',
-          sceneType: 'private',
-          userInputKind: 'player_in_scene',
+          sceneType: SceneType.Private,
           presentSlugs: ['frost', 'lize'],
-          remoteSlugs: [],
           offscreenNotes: { collette: 'in the library' },
-          walkOnsEnter: [],
-          walkOnsLeave: [],
-          encounterAccepted: false,
-          encounterBrief: '',
-          pacing: 'focused_one',
-          targetChars: 800,
-          responders: [{ slug: 'lize', beatGoal: 'Speak softly.', length: 'short' }],
+          pacing: Director.Settings.Pacing.FocusedOne,
+          responders: [{ slug: 'lize', beatGoal: 'Speak softly.', length: Director.Settings.Length.Short }],
           narratorDirective: 'Regenerated beat.',
-        },
+        }),
       },
       {
         json: {
@@ -1272,25 +1301,16 @@ describe('Full REST & SSE lifecycle, concurrency, Scribe sync, and client discon
 
     const { client } = createScriptedOpenRouterClient([
       {
-        json: {
-          sceneChanged: false,
+        text: buildTaggedDirectorReply({
           location: 'Study',
           day: 1,
           timeLabel: 'Night',
-          sceneType: 'private',
-          userInputKind: 'player_in_scene',
+          sceneType: SceneType.Private,
           presentSlugs: ['frost', 'lize'],
-          remoteSlugs: [],
-          offscreenNotes: {},
-          walkOnsEnter: [],
-          walkOnsLeave: [],
-          encounterAccepted: false,
-          encounterBrief: '',
-          pacing: 'focused_one',
-          targetChars: 800,
-          responders: [{ slug: 'lize', beatGoal: 'Answer.', length: 'short' }],
+          pacing: Director.Settings.Pacing.FocusedOne,
+          responders: [{ slug: 'lize', beatGoal: 'Answer.', length: Director.Settings.Length.Short }],
           narratorDirective: 'Keep steady.',
-        },
+        }),
       },
       {
         json: {
@@ -1594,25 +1614,16 @@ describe('Task 6 adversarial review regressions', () => {
 
     const { client } = createScriptedOpenRouterClient([
       {
-        json: {
-          sceneChanged: false,
+        text: buildTaggedDirectorReply({
           location: 'Vault',
           day: 1,
           timeLabel: 'Noon',
-          sceneType: 'public',
-          userInputKind: 'player_in_scene',
+          sceneType: SceneType.Public,
           presentSlugs: ['frost', 'lize'],
-          remoteSlugs: [],
-          offscreenNotes: {},
-          walkOnsEnter: [],
-          walkOnsLeave: [],
-          encounterAccepted: false,
-          encounterBrief: '',
-          pacing: 'focused_one',
-          targetChars: 800,
-          responders: [{ slug: 'lize', beatGoal: 'Reply.', length: 'short' }],
+          pacing: Director.Settings.Pacing.FocusedOne,
+          responders: [{ slug: 'lize', beatGoal: 'Reply.', length: Director.Settings.Length.Short }],
           narratorDirective: 'Keep brisk.',
-        },
+        }),
       },
       {
         json: {
@@ -1859,25 +1870,16 @@ describe('Task 6 adversarial review regressions', () => {
 
     const { client } = createScriptedOpenRouterClient([
       {
-        json: {
-          sceneChanged: false,
+        text: buildTaggedDirectorReply({
           location: 'Dock',
           day: 1,
           timeLabel: 'Morning',
-          sceneType: 'public',
-          userInputKind: 'player_in_scene',
+          sceneType: SceneType.Public,
           presentSlugs: ['hero_one', 'rowan_one'],
-          remoteSlugs: [],
-          offscreenNotes: {},
-          walkOnsEnter: [],
-          walkOnsLeave: [],
-          encounterAccepted: false,
-          encounterBrief: '',
-          pacing: 'narrator_only',
-          targetChars: 800,
+          pacing: Director.Settings.Pacing.NarratorOnly,
           responders: [],
           narratorDirective: 'Keep short.',
-        },
+        }),
       },
       {
         type: 'stream',
@@ -2548,6 +2550,52 @@ describe('Model availability over HTTP', () => {
     const afterRefusals = (await send(context, 'GET', '/api/settings')).json;
     assert.equal(afterRefusals.maxRepliesPerCharacter, 2);
     assert.equal(afterRefusals.replyReserve, 3000);
+  });
+
+  it('GET /api/settings returns SceneStyle defaults and PUT /api/settings merges sceneStyles while rejecting unknown names and non-strings', async () => {
+    const context = await startModelServer({ catalogOptions: { answerProvider: deadAnswer } });
+    const baselineRequests = context.fake.providerRequests.length;
+
+    const fresh = (await send(context, 'GET', '/api/settings')).json;
+    assert.deepEqual(fresh.sceneStyles, SceneStyle.Defaults);
+
+    const updated = await send(context, 'PUT', '/api/settings', {
+      sceneStyles: { [SceneStyle.Combat]: 'Custom combat prose guidance.' },
+    });
+    assert.equal(updated.status, 200);
+    assert.equal(updated.json.sceneStyles[SceneStyle.Combat], 'Custom combat prose guidance.');
+    assert.equal(updated.json.sceneStyles[SceneStyle.Explicit], SceneStyle.Defaults[SceneStyle.Explicit]);
+    assert.equal(updated.json.sceneStyles[SceneStyle.Investigation], SceneStyle.Defaults[SceneStyle.Investigation]);
+
+    for (const invalidStyles of [null, [], SceneStyle.Combat, 5]) {
+      const badShape = await send(context, 'PUT', '/api/settings', { sceneStyles: invalidStyles });
+      assert.equal(badShape.status, 400);
+    }
+
+    for (const badKey of ['dance', SceneStyle.None, '']) {
+      const badKeyResponse = await send(context, 'PUT', '/api/settings', { sceneStyles: { [badKey]: 'Text' } });
+      assert.equal(badKeyResponse.status, 400);
+    }
+
+    const protoPayload = '{"sceneStyles":{"__proto__":"polluted"}}';
+    const protoResponse = await fetch(`${context.started.url}/api/settings`, {
+      method: 'PUT',
+      headers: context.headers,
+      body: protoPayload,
+    });
+    assert.equal(protoResponse.status, 400);
+
+    for (const badValue of [null, 123, false, ['line'], { nested: 'x' }]) {
+      const badValueResponse = await send(context, 'PUT', '/api/settings', {
+        sceneStyles: { [SceneStyle.Tension]: badValue },
+      });
+      assert.equal(badValueResponse.status, 400);
+    }
+
+    assert.equal(context.fake.providerRequests.length, baselineRequests);
+    const persisted = (await send(context, 'GET', '/api/settings')).json;
+    assert.equal(persisted.sceneStyles[SceneStyle.Combat], 'Custom combat prose guidance.');
+    assert.equal(persisted.sceneStyles[SceneStyle.Tension], SceneStyle.Defaults[SceneStyle.Tension]);
   });
 
   it('character routes take a card, name the bad field in a 400, and refuse the old persona keys', async () => {
@@ -3373,25 +3421,16 @@ describe('Player narration over HTTP', () => {
     }
   });
 
-  const directorPlan = {
-    sceneChanged: false,
+  const directorReply = buildTaggedDirectorReply({
     location: 'Harbor Inn',
     day: 1,
     timeLabel: 'Evening',
-    sceneType: 'private',
-    userInputKind: 'player_in_scene',
+    sceneType: SceneType.Private,
     presentSlugs: ['frost', 'lize'],
-    remoteSlugs: [],
-    offscreenNotes: {},
-    walkOnsEnter: [],
-    walkOnsLeave: [],
-    encounterAccepted: false,
-    encounterBrief: '',
-    pacing: 'focused_one',
-    targetChars: 800,
-    responders: [{ slug: 'lize', beatGoal: 'Answer.', length: 'short' }],
+    pacing: Director.Settings.Pacing.FocusedOne,
+    responders: [{ slug: 'lize', beatGoal: 'Answer.', length: Director.Settings.Length.Short }],
     narratorDirective: 'Keep it quiet.',
-  };
+  });
 
   /**
    * @param {number} turnCount
@@ -3446,7 +3485,7 @@ describe('Player narration over HTTP', () => {
     const script = [];
     for (let turn = 0; turn < turnCount; turn += 1) {
       script.push(
-        { json: directorPlan },
+        { text: directorReply },
         { json: { internalThought: 'x', physicalAction: 'Lize nods.', spokenLines: 'Yes.', tone: 'dry', knowledgeBoundaries: [] } },
         { type: 'stream', text: '[[BEAT:lize]]\n*Lize nods.*\nYes.' },
       );

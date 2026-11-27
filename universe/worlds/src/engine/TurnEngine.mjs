@@ -12,6 +12,7 @@ import { Director } from './Director.mjs';
 import { EncounterRoller } from './EncounterRoller.mjs';
 import { NarrationParts } from './NarrationParts.mjs';
 import { NarratorComposer } from './NarratorComposer.mjs';
+import { RequestBudget } from './RequestBudget.mjs';
 import { WitnessFilter } from './WitnessFilter.mjs';
 
 export class TurnEngine {
@@ -549,8 +550,18 @@ export class TurnEngine {
     let narrationText = '';
     let effectiveMode = mode;
     let promptText;
+    let directorUserText;
+    let directorNarrationText = null;
     if (existingUserTurn !== null) {
       promptText = existingUserTurn.beats.map((beat) => beat.text).join(NarrationParts.Settings.Joiner);
+      const nonNarratorBeats = existingUserTurn.beats.filter((beat) => beat.speakerType !== SpeakerType.Narrator);
+      const narratorBeats = existingUserTurn.beats.filter((beat) => beat.speakerType === SpeakerType.Narrator);
+      if (nonNarratorBeats.length > 0 && narratorBeats.length > 0) {
+        directorUserText = nonNarratorBeats.map((beat) => beat.text).join(NarrationParts.Settings.Joiner);
+        directorNarrationText = narratorBeats.map((beat) => beat.text).join(NarrationParts.Settings.Joiner);
+      } else {
+        directorUserText = promptText;
+      }
     } else {
       const parts = NarrationParts.split(rawText, narration);
       narrationText = parts.narration;
@@ -566,10 +577,15 @@ export class TurnEngine {
         promptText = narrationText;
         narrationText = '';
       }
+      directorUserText = promptText;
+      directorNarrationText = narrationText.length > 0 ? narrationText : null;
     }
 
     if (effectiveMode === TurnMode.Encounter && promptText.length === 0) {
       promptText = '*(Encounter)*';
+      if (existingUserTurn === null) {
+        directorUserText = promptText;
+      }
     }
     if ((effectiveMode === TurnMode.Normal || effectiveMode === TurnMode.Narrator) && promptText.length === 0) {
       throw new RangeError('Turn text must not be blank.');
@@ -613,13 +629,23 @@ export class TurnEngine {
       .filter((thread) => thread.closed === null)
       .map((thread) => thread.text);
 
+    const directorBudget = RequestBudget.create({
+      contextLength: null,
+      replyReserve: settings.replyReserve,
+      charsPerToken: RequestBudget.charsPerToken({
+        store: this.#store,
+        model: directorModel,
+      }),
+    });
+
     const collectedSpendIds = new Set();
     const planResult = await Director.planTurn({
       campaign,
       characters: allCharacters,
       preState,
-      recentTurns: priorTurns.slice(-8),
-      userText: promptText,
+      recentTurns: priorTurns,
+      userText: directorUserText,
+      narrationText: directorNarrationText,
       mode: effectiveMode,
       oocNudge: normalizedOocNudge,
       encounterRoll,
@@ -628,6 +654,7 @@ export class TurnEngine {
       client: this.#client,
       signal,
       maxResponders: this.#maxResponders,
+      budget: directorBudget,
     });
     for (const spendId of planResult.spendIds) {
       if (typeof spendId === 'string' && spendId.length > 0) {

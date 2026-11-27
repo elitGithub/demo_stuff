@@ -29,11 +29,11 @@ When an instruction names an Anthropic model, use a native OpenAI/ChatGPT model 
 2. **Design document** at `<demo>/docs/superpowers/specs/YYYY-MM-DD-<topic>-design.md`, checked by a fresh reviewer reading as a builder, then approved by the operator.
 3. **Plan** at `<demo>/docs/superpowers/plans/YYYY-MM-DD-<topic>.md`: exact files, signatures, values and the tests that try to break each task. Approved by the operator.
 4. **Execution loop, one task at a time:**
-   - an implementer subagent builds the task (Haiku for mechanical edits, Sonnet or Opus for anything needing reasoning; never a Fable-class subagent);
+   - an implementer subagent builds the task using the smallest model tier that keeps quality without damaging it (Haiku for mechanical edits, Sonnet or Opus for anything needing reasoning; never a Fable-class subagent); every brief is self-reviewed before dispatch (clear, unambiguous, existing features mapped, review attack list and test code-law checklist included up front); implementers do not run mutant checks (reviewers keep them);
    - an adversarial Opus reviewer attacks it with the directive "Assume this code has defects and try to prove it. A finding counts only with an input that reproduces it; if you cannot break something, say so.";
    - the orchestrating assistant checks the reviewer's claims against the code, one focused check per claim, and never writes implementation code itself;
    - the hand-off to the operator opens with "Commit-ready." or "NOT commit-ready: <what is missing>";
-   - review findings of every severity are fixed before hand-off; fix rounds are proposed to the operator, who rules on them; fixes get a scoped re-review;
+   - review findings of every severity are fixed before hand-off; real-flow proof law applies (no functional fix without proof against real app/API/export flows; code-law hits are checked on the line and handled as laws); fix rounds are proposed to the operator, who rules on them; fixes get a scoped re-review;
    - the operator reviews and commits; only then is the next task proposed. No back-to-back dispatch, no skipping ahead.
 5. Briefs, reports, ledgers and review packages for this loop live outside the repository, under `~/.claude/projects/-var-www-demo-stuff/sdd-snapshots/<plan>/`, never under a demo's `.superpowers/`.
 6. Questions and fork answers are not go signals. A directive names the what, never approves the how: present the design before the first edit.
@@ -45,7 +45,7 @@ When an instruction names an Anthropic model, use a native OpenAI/ChatGPT model 
 - One declaration per file. Enum cases TitleCase with a `label()` method. Enums for enumerable values, readonly DTOs between layers, no loose arrays from new code.
 - Logic lives in services and actions; controllers validate, call and respond. FormRequests validate shape only.
 - Docblocks on every method, tag-only (`@param`, `@return`, `@throws`), no prose in comments anywhere. Braces always. No single-letter variables. Named arguments on DTO construction. Carbon for dates. `?type` for nullables, never implicit nulls. No `declare(strict_types=1)` in Laravel code.
-- No single-use wrappers, no private method with one caller, no defensive null-coalescing on guaranteed values, no swallowed errors, no magic status strings, no sorting in PHP that the query can do, no hardcoded data that belongs in config or the database.
+- No single-use wrappers, no private method with one caller, no defensive null-coalescing on guaranteed values, no swallowed errors, no magic strings or inline mode/phase literals (use booleans, enums, or frozen constants), no sorting in PHP that the query can do, no hardcoded data that belongs in config or the database. Code laws apply to test files and test helpers too (including no magic strings, no single-letter or `_` throwaway names, and tag-only docblocks with `@throws`).
 - Security: validate every input, derive identity from the authenticated principal, escape output, CSRF on every mutation, rate-limit entry points, serve private files through authorized routes, fail loudly on missing credentials.
 - Pint output is canonical; run it on touched files only (`vendor/bin/pint <files>`). A `pint.json` in a demo keeps bare docblock tags alive.
 

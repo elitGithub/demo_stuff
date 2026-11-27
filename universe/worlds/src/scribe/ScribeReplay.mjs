@@ -1070,10 +1070,10 @@ export const ScribeReplay = Object.freeze({
       }
       const preferred = operation.winner === null ? undefined : ScribeReplay.follow(book, operation.winner);
       let winner = candidates.has(preferred) ? preferred : candidates.values().next().value;
+      let won = !losing;
       if (losing && winner !== undefined) {
-        return;
-      }
-      if (winner === undefined) {
+        won = false;
+      } else if (winner === undefined) {
         const told = [];
         for (const id of operation.told) {
           const subject = ScribeReplay.resolve(book, id);
@@ -1116,33 +1116,39 @@ export const ScribeReplay = Object.freeze({
         book.held.set(copySlot, [...(book.held.get(copySlot) ?? []), winner]);
         if (losing) {
           winner.status = status.Reported;
-          return;
         }
       }
-      const displaced = decision === undefined ? status.Disputed : status.Reported;
-      for (const fact of held) {
-        if (fact !== winner && fact.status === status.InForce) {
-          ScribeReplay.leave(book, fact, [slot]);
-          fact.status = displaced;
+      if (won) {
+        const displaced = decision === undefined ? status.Disputed : status.Reported;
+        for (const fact of held) {
+          if (fact !== winner && fact.status === status.InForce) {
+            ScribeReplay.leave(book, fact, [slot]);
+            fact.status = displaced;
+          }
         }
-      }
-      if (
-        decision !== undefined &&
-        decision.decided !== winner &&
-        ScribeReplay.live(decision.decided) &&
-        !held.includes(decision.decided)
-      ) {
-        if (decision.decided.status === status.InForce) {
-          ScribeReplay.leave(book, decision.decided, ScribeReplay.keys(decision.decided, ScribeCategory.Kind.Fixed));
+        if (
+          decision !== undefined &&
+          decision.decided !== winner &&
+          ScribeReplay.live(decision.decided) &&
+          !held.includes(decision.decided)
+        ) {
+          if (decision.decided.status === status.InForce) {
+            ScribeReplay.leave(book, decision.decided, ScribeReplay.keys(decision.decided, ScribeCategory.Kind.Fixed));
+          }
+          decision.decided.status = status.Reported;
         }
-        decision.decided.status = status.Reported;
+        if (winner.status !== status.InForce) {
+          winner.status = status.InForce;
+          ScribeReplay.enter(book, winner, [slot]);
+        }
+        winner.pinned = true;
+        book.pinned.add(slot);
       }
-      if (winner.status !== status.InForce) {
-        winner.status = status.InForce;
-        ScribeReplay.enter(book, winner, [slot]);
+      const rulingSequence = book.rulingSequences.get(operation);
+      const previousSequence = book.pinDecided.get(winner.id);
+      if (previousSequence === undefined || rulingSequence < previousSequence) {
+        book.pinDecided.set(winner.id, rulingSequence);
       }
-      winner.pinned = true;
-      book.pinned.add(slot);
     },
   }),
 
@@ -1238,7 +1244,7 @@ export const ScribeReplay = Object.freeze({
    * @param {ReadonlyMap<string, object> | null} [edits]
    * @param {Array<object> | null} [sources]
    * @param {readonly object[] | null} [messages]
-   * @returns {Readonly<{revision: number, subjects: readonly object[], facts: readonly object[], scenes: readonly object[], nights: readonly object[], threads: readonly object[], conflicts: readonly object[], lookAlikes: readonly object[], stale: readonly object[], refinements: readonly object[], aliases: readonly object[], questions: readonly object[], unaliased: readonly object[], distinct: readonly object[], contradictions: readonly object[], inheritedForms?: Readonly<Record<string, string>>}>}
+   * @returns {Readonly<{revision: number, subjects: readonly object[], facts: readonly object[], scenes: readonly object[], nights: readonly object[], threads: readonly object[], conflicts: readonly object[], lookAlikes: readonly object[], stale: readonly object[], refinements: readonly object[], aliases: readonly object[], questions: readonly object[], unaliased: readonly object[], distinct: readonly object[], contradictions: readonly object[], inheritedForms?: Readonly<Record<string, string>>, decidedFacts?: Readonly<Record<string, number>>}>}
    * @throws {TypeError}
    */
   run(log, order, pending = null, fingerprints = null, edits = null, sources = null, messages = null) {
@@ -1307,6 +1313,7 @@ export const ScribeReplay = Object.freeze({
     );
     const book = {
       decided,
+      pinDecided: new Map(),
       edits,
       sources,
       positions,
@@ -1592,7 +1599,13 @@ export const ScribeReplay = Object.freeze({
       ) {
         const field = ScribeReplay.decisionField(book, fact);
         const held = chosen.get(field);
-        if (held === undefined || decisionSequences.get(fact.id) > decisionSequences.get(held.id)) {
+        const factSequence = decisionSequences.get(fact.id);
+        const heldSequence = held === undefined ? 0 : decisionSequences.get(held.id);
+        if (
+          held === undefined ||
+          factSequence > heldSequence ||
+          (factSequence === heldSequence && fact.position > held.position)
+        ) {
           chosen.set(field, fact);
         }
       }
@@ -2005,6 +2018,20 @@ export const ScribeReplay = Object.freeze({
       return first.position - second.position || first.earlierPosition - second.earlierPosition;
     });
 
+    const allDecidedIds = new Set([...decided, ...book.pinDecided.keys()]);
+    const decidedEntries = [...allDecidedIds]
+      .filter((factId) => book.byId.has(factId))
+      .map((factId) => {
+        const hasDecision = decisionSequences.has(factId);
+        const hasPin = book.pinDecided.has(factId);
+        const sequence = hasDecision && hasPin
+          ? Math.min(decisionSequences.get(factId), book.pinDecided.get(factId))
+          : hasDecision
+            ? decisionSequences.get(factId)
+            : book.pinDecided.get(factId);
+        return [factId, sequence];
+      });
+
     const state = ScribeReplay.seal({
       revision: log.revision,
       ...(log.editRun?.through === log.revision ? { editedSince: log.editRun.from } : {}),
@@ -2012,6 +2039,7 @@ export const ScribeReplay = Object.freeze({
       ...(edits.size > 0
         ? { editOrigins: Object.fromEntries([...edits].map(([id, operation]) => [id, { ...operation.source }])) }
         : {}),
+      ...(decidedEntries.length > 0 ? { decidedFacts: Object.fromEntries(decidedEntries) } : {}),
       subjects,
       facts: book.facts,
       ...(log.entries.some((entry) => !entry.withdrawn && entry.operatorText)

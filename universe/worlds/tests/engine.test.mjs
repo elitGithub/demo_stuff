@@ -4,12 +4,18 @@ import { BeatParser } from '../src/engine/BeatParser.mjs';
 import { CharacterMind } from '../src/engine/CharacterMind.mjs';
 import { Director } from '../src/engine/Director.mjs';
 import { EncounterRoller } from '../src/engine/EncounterRoller.mjs';
+import { HistoryWindow } from '../src/engine/HistoryWindow.mjs';
 import { NarrationParts } from '../src/engine/NarrationParts.mjs';
 import { NarratorComposer } from '../src/engine/NarratorComposer.mjs';
+import { RequestBudget } from '../src/engine/RequestBudget.mjs';
+import { StorySlice } from '../src/engine/StorySlice.mjs';
 import { TurnEngine } from '../src/engine/TurnEngine.mjs';
 import { WitnessFilter } from '../src/engine/WitnessFilter.mjs';
 import { OpenRouterClient } from '../src/openrouter/OpenRouterClient.mjs';
 import { PedantService } from '../src/scribe/PedantService.mjs';
+import { ScribeAnswer } from '../src/scribe/ScribeAnswer.mjs';
+import { ScribeCategory } from '../src/scribe/ScribeCategory.mjs';
+import { ScribeIntakeAdapter } from '../src/scribe/ScribeIntakeAdapter.mjs';
 import { ScribeKnowledge } from '../src/scribe/ScribeKnowledge.mjs';
 import { ScribeLogCore } from '../src/scribe/ScribeLogCore.mjs';
 import { ScribeReplay } from '../src/scribe/ScribeReplay.mjs';
@@ -3005,5 +3011,1956 @@ describe('Player narration beat in the player turn', () => {
     assert.deepEqual(hair, { red: 'Reported', 'black, freshly dyed': 'InForce' });
     const narrationMessage = loaded.messages.find((message) => message.position === 1);
     assert.deepEqual(narrationMessage.blocks.map((block) => block.role), ['Player', 'Narrator']);
+  });
+});
+
+describe('RequestBudget', () => {
+  it('resolves charsPerToken from model ratio, then overall ratio, then StartingCharsPerToken', () => {
+    const store = new SqliteStore(':memory:');
+    try {
+      const emptyRatio = RequestBudget.charsPerToken({ store, model: 'openai/gpt-4.1' });
+      assert.equal(emptyRatio, RequestBudget.StartingCharsPerToken);
+      assert.equal(emptyRatio, 3);
+
+      store.recordSpend({
+        model: 'other/model',
+        stage: SpendStage.Mind,
+        promptChars: 350,
+        promptTokens: 100,
+        completionTokens: 20,
+        costUsd: 0.001,
+      });
+      assert.equal(RequestBudget.charsPerToken({ store, model: 'openai/gpt-4.1' }), 3.5);
+
+      store.recordSpend({
+        model: 'openai/gpt-4.1',
+        stage: SpendStage.Mind,
+        promptChars: 600,
+        promptTokens: 150,
+        completionTokens: 20,
+        costUsd: 0.001,
+      });
+      store.recordSpend({
+        model: 'openai/gpt-4.1',
+        stage: SpendStage.Mind,
+        promptChars: 250,
+        promptTokens: 100,
+        completionTokens: 20,
+        costUsd: 0.001,
+      });
+      assert.equal(RequestBudget.charsPerToken({ store, model: ' openai/gpt-4.1 ' }), 2.5);
+
+      store.recordSpend({
+        model: 'low/model',
+        stage: SpendStage.Mind,
+        promptChars: 200,
+        promptTokens: 100,
+        completionTokens: 20,
+        costUsd: 0.001,
+      });
+      store.recordSpend({
+        model: 'high/model',
+        stage: SpendStage.Mind,
+        promptChars: 400,
+        promptTokens: 100,
+        completionTokens: 20,
+        costUsd: 0.001,
+      });
+      assert.equal(RequestBudget.charsPerToken({ store, model: 'high/model' }), 4);
+
+      const zeroStore = {
+        /**
+         * @returns {number}
+         */
+        lowestCharsPerToken() {
+          return 0;
+        },
+        /**
+         * @returns {number}
+         */
+        lowestCharsPerTokenOverall() {
+          return -1;
+        },
+      };
+      assert.equal(RequestBudget.charsPerToken({ store: zeroStore, model: 'a/b' }), 3);
+    } finally {
+      store.close();
+    }
+  });
+
+  it('computes limitTokens, estimate, and fits including null contextLength and contextLength <= replyReserve', () => {
+    const standard = RequestBudget.create({ contextLength: 4000, replyReserve: 3000, charsPerToken: 3 });
+    assert.equal(Object.isFrozen(standard), true);
+    assert.equal(standard.limitTokens, 1000);
+    assert.equal(standard.estimate(''), 0);
+    assert.equal(standard.estimate('a'), 1);
+    assert.equal(standard.estimate('abc'), 1);
+    assert.equal(standard.estimate('abcd'), 2);
+    assert.equal(standard.fits(998, 'abcdef'), true);
+    assert.equal(standard.fits(998, 'abcdefg'), false);
+
+    const equalLimit = RequestBudget.create({ contextLength: 3000, replyReserve: 3000, charsPerToken: 3 });
+    assert.equal(equalLimit.limitTokens, 0);
+    assert.equal(equalLimit.fits(0, ''), true);
+    assert.equal(equalLimit.fits(0, 'a'), false);
+
+    const smallerLimit = RequestBudget.create({ contextLength: 1500, replyReserve: 3000, charsPerToken: 3 });
+    assert.equal(smallerLimit.limitTokens, 0);
+
+    const unbounded = RequestBudget.create({ contextLength: null, replyReserve: 3000, charsPerToken: 3 });
+    assert.equal(unbounded.limitTokens, null);
+    assert.equal(unbounded.estimate('abcdef'), 2);
+    assert.equal(unbounded.fits(999999, 'x'.repeat(10000)), true);
+  });
+
+  it('rejects invalid inputs with TypeError or RangeError', () => {
+    const validStore = {
+      /**
+       * @returns {null}
+       */
+      lowestCharsPerToken() {
+        return null;
+      },
+      /**
+       * @returns {null}
+       */
+      lowestCharsPerTokenOverall() {
+        return null;
+      },
+    };
+    assert.throws(() => RequestBudget.charsPerToken(null), TypeError);
+    assert.throws(() => RequestBudget.charsPerToken([]), TypeError);
+    assert.throws(() => RequestBudget.charsPerToken({ store: null, model: 'a/b' }), TypeError);
+    assert.throws(() => RequestBudget.charsPerToken({ store: [], model: 'a/b' }), TypeError);
+    assert.throws(() => RequestBudget.charsPerToken({ store: {}, model: 'a/b' }), TypeError);
+    assert.throws(() => RequestBudget.charsPerToken({ store: validStore, model: 123 }), TypeError);
+    assert.throws(() => RequestBudget.charsPerToken({ store: validStore, model: '' }), RangeError);
+    assert.throws(() => RequestBudget.charsPerToken({ store: validStore, model: '   ' }), RangeError);
+
+    assert.throws(() => RequestBudget.create(null), TypeError);
+    assert.throws(() => RequestBudget.create([]), TypeError);
+    assert.throws(() => RequestBudget.create({ contextLength: '4000', replyReserve: 3000, charsPerToken: 3 }), TypeError);
+    assert.throws(() => RequestBudget.create({ contextLength: 0, replyReserve: 3000, charsPerToken: 3 }), RangeError);
+    assert.throws(() => RequestBudget.create({ contextLength: -5, replyReserve: 3000, charsPerToken: 3 }), RangeError);
+    assert.throws(() => RequestBudget.create({ contextLength: 4000.5, replyReserve: 3000, charsPerToken: 3 }), RangeError);
+    assert.throws(() => RequestBudget.create({ contextLength: Number.NaN, replyReserve: 3000, charsPerToken: 3 }), RangeError);
+    assert.throws(() => RequestBudget.create({ contextLength: 4000, replyReserve: '3000', charsPerToken: 3 }), TypeError);
+    assert.throws(() => RequestBudget.create({ contextLength: 4000, replyReserve: 0, charsPerToken: 3 }), RangeError);
+    assert.throws(() => RequestBudget.create({ contextLength: 4000, replyReserve: 1.5, charsPerToken: 3 }), RangeError);
+    assert.throws(() => RequestBudget.create({ contextLength: 4000, replyReserve: 3000, charsPerToken: '3' }), TypeError);
+    assert.throws(() => RequestBudget.create({ contextLength: 4000, replyReserve: 3000, charsPerToken: 0 }), RangeError);
+    assert.throws(() => RequestBudget.create({ contextLength: 4000, replyReserve: 3000, charsPerToken: -3 }), RangeError);
+    assert.throws(() => RequestBudget.create({ contextLength: 4000, replyReserve: 3000, charsPerToken: Number.POSITIVE_INFINITY }), RangeError);
+
+    const budget = RequestBudget.create({ contextLength: 4000, replyReserve: 3000, charsPerToken: 3 });
+    assert.throws(() => budget.estimate(42), TypeError);
+    assert.throws(() => budget.fits('0', 'hi'), TypeError);
+    assert.throws(() => budget.fits(0, 42), TypeError);
+    assert.throws(() => budget.fits(-1, 'hi'), RangeError);
+    assert.throws(() => budget.fits(Number.NaN, 'hi'), RangeError);
+    assert.throws(() => budget.fits(Number.POSITIVE_INFINITY, 'hi'), RangeError);
+  });
+});
+
+describe('HistoryWindow', () => {
+  it('bounds 300 Hero-Gone-scale turns plus StorySlice under 1000 tokens with newest turn intact and no partial turn', () => {
+    const log = ScribeLogCore.create();
+    let state = ScribeReplay.run(log, []);
+    for (const character of [
+      { id: 'S1', name: 'Frost' },
+      { id: 'S2', name: 'Lize' },
+    ]) {
+      ScribeLogCore.syncCharacterSubject(log, state, {
+        subjectId: null,
+        name: character.name,
+        aliases: [],
+      });
+      state = ScribeReplay.run(log, []);
+    }
+    ScribeLogCore.rule(log, state, {
+      type: ScribeLogCore.Ruling.AddFact,
+      subject: 'S2',
+      category: 'hair',
+      target: null,
+      text: 'red',
+      hidden: false,
+      cite: null,
+      position: 0,
+      decided: true,
+    });
+    state = ScribeReplay.run(log, []);
+
+    const budget = RequestBudget.create({ contextLength: 4000, replyReserve: 3000, charsPerToken: 3 });
+    const slice = StorySlice.build({
+      state,
+      viewer: { omniscient: false, subjectId: 'S2', characterId: 'c-lize' },
+      scene: { location: 'Tavern', day: 1, timeLabel: 'Evening', sceneType: SceneType.Public, situation: 'Calm.' },
+      presentSubjectIds: ['S1', 'S2'],
+      budget,
+      usedTokens: 0,
+    });
+
+    const turns = Array.from({ length: 300 }, (unusedEntry, index) => {
+      const turnNumber = index + 1;
+      const prefix = `Turn ${String(turnNumber).padStart(3, '0')}: `;
+      const paddedBody = `${prefix}${'a'.repeat(900 - prefix.length)}`;
+      return {
+        id: `t-${turnNumber}`,
+        seq: turnNumber,
+        role: TurnRole.Assistant,
+        mode: TurnMode.Normal,
+        sceneNumber: 1,
+        beats: [
+          {
+            id: `b-${turnNumber}`,
+            seq: 1,
+            speakerType: SpeakerType.Character,
+            characterId: 'c-lize',
+            speakerName: 'Lize',
+            text: paddedBody,
+            witnessIds: ['c-frost', 'c-lize'],
+            mindPacket: { internalThought: 'SECRET_MIND_DATA' },
+          },
+        ],
+      };
+    });
+
+    const history = HistoryWindow.build({
+      turns,
+      characterId: 'c-lize',
+      maxTurns: 25,
+      budget,
+      usedTokens: slice.tokens,
+    });
+
+    assert.equal(slice.tokens + history.tokens <= 1000, true);
+    assert.equal(history.turnCount >= 1 && history.turnCount <= 3, true);
+    assert.equal(history.text.includes('Turn 300: '), true);
+    assert.equal(history.text.includes('Turn 001: '), false);
+    assert.equal(history.text.includes('SECRET_MIND_DATA'), false);
+
+    const lines = history.text.split('\n');
+    assert.equal(lines.length, history.turnCount);
+    for (const line of lines) {
+      assert.equal(line.length, 'Lize: '.length + 900);
+    }
+  });
+
+  it('drops monotonically when a large turn blocks an older tiny turn', () => {
+    const budget = RequestBudget.create({ contextLength: 3100, replyReserve: 3000, charsPerToken: 3 });
+    const turns = [
+      {
+        id: 't1',
+        seq: 1,
+        beats: [{ seq: 1, speakerName: 'Frost', text: 'tiny one', witnessIds: ['c-lize'] }],
+      },
+      {
+        id: 't2',
+        seq: 2,
+        beats: [{ seq: 1, speakerName: 'Lize', text: 'x'.repeat(500), witnessIds: ['c-lize'] }],
+      },
+      {
+        id: 't3',
+        seq: 3,
+        beats: [{ seq: 1, speakerName: 'Frost', text: 'newest one', witnessIds: ['c-lize'] }],
+      },
+    ];
+
+    const history = HistoryWindow.build({
+      turns,
+      characterId: 'c-lize',
+      maxTurns: 10,
+      budget,
+      usedTokens: 0,
+    });
+
+    assert.equal(history.turnCount, 1);
+    assert.equal(history.text, 'Frost: newest one');
+    assert.equal(history.text.includes('tiny one'), false);
+  });
+
+  it('trims only by maxTurns when contextLength is null', () => {
+    const budget = RequestBudget.create({ contextLength: null, replyReserve: 3000, charsPerToken: 3 });
+    const turns = Array.from({ length: 40 }, (unusedEntry, index) => {
+      const turnNumber = index + 1;
+      return {
+        id: `t-${turnNumber}`,
+        seq: turnNumber,
+        beats: [{ seq: 1, speakerName: 'Frost', text: `Line ${turnNumber}`, witnessIds: ['c-lize'] }],
+      };
+    });
+
+    const history = HistoryWindow.build({
+      turns,
+      characterId: 'c-lize',
+      maxTurns: 25,
+      budget,
+      usedTokens: 50000,
+    });
+
+    assert.equal(history.turnCount, 25);
+    const lines = history.text.split('\n');
+    assert.equal(lines.length, 25);
+    assert.equal(lines[0], 'Frost: Line 16');
+    assert.equal(lines[24], 'Frost: Line 40');
+
+    const unfilteredHistory = HistoryWindow.build({
+      turns,
+      characterId: null,
+      maxTurns: 25,
+      budget,
+      usedTokens: 50000,
+    });
+
+    assert.equal(unfilteredHistory.turnCount, 25);
+    const unfilteredLines = unfilteredHistory.text.split('\n');
+    assert.equal(unfilteredLines.length, 25);
+    assert.equal(unfilteredLines[0], 'Frost: Line 16');
+    assert.equal(unfilteredLines[24], 'Frost: Line 40');
+  });
+
+  it('isolates mid-turn arrival for specific characterId, includes all beats for null characterId, excludes mindPacket, and renders multi-beat player turns in order', () => {
+    const budget = RequestBudget.create({ contextLength: null, replyReserve: 3000, charsPerToken: 3 });
+    const turns = [
+      {
+        id: 't2',
+        seq: 2,
+        role: TurnRole.Assistant,
+        mode: TurnMode.Normal,
+        sceneNumber: 1,
+        beats: [
+          {
+            id: 'b2a',
+            seq: 1,
+            speakerType: SpeakerType.Character,
+            characterId: 'c-lize',
+            speakerName: 'Lize',
+            text: 'Before Viola arrives.',
+            witnessIds: ['c-frost', 'c-lize'],
+            mindPacket: { internalThought: 'LIZE_PRIVATE_THOUGHT' },
+          },
+          {
+            id: 'b2b',
+            seq: 2,
+            speakerType: SpeakerType.Character,
+            characterId: 'c-viola',
+            speakerName: 'Viola',
+            text: 'Viola knocks and steps in.',
+            witnessIds: ['c-frost', 'c-lize', 'c-viola'],
+            mindPacket: { internalThought: 'VIOLA_PRIVATE_THOUGHT' },
+          },
+        ],
+      },
+      {
+        id: 't1',
+        seq: 1,
+        role: TurnRole.User,
+        mode: TurnMode.Normal,
+        sceneNumber: 1,
+        beats: [
+          {
+            id: 'b1b',
+            seq: 2,
+            speakerType: SpeakerType.Narrator,
+            characterId: null,
+            speakerName: 'Narrator',
+            text: 'Her hair is dyed black.',
+            witnessIds: ['c-frost', 'c-lize'],
+            mindPacket: null,
+          },
+          {
+            id: 'b1a',
+            seq: 1,
+            speakerType: SpeakerType.Player,
+            characterId: 'c-frost',
+            speakerName: 'Frost',
+            text: 'I look across the table.',
+            witnessIds: ['c-frost', 'c-lize'],
+            mindPacket: null,
+          },
+        ],
+      },
+    ];
+
+    const violaHistory = HistoryWindow.build({
+      turns,
+      characterId: 'c-viola',
+      maxTurns: 10,
+      budget,
+      usedTokens: 0,
+    });
+    assert.equal(violaHistory.turnCount, 1);
+    assert.equal(violaHistory.text, 'Viola: Viola knocks and steps in.');
+    assert.equal(violaHistory.text.includes('Before Viola arrives.'), false);
+    assert.equal(violaHistory.text.includes('PRIVATE_THOUGHT'), false);
+
+    const narratorHistory = HistoryWindow.build({
+      turns,
+      characterId: null,
+      maxTurns: 10,
+      budget,
+      usedTokens: 0,
+    });
+    assert.equal(narratorHistory.turnCount, 2);
+    assert.equal(
+      narratorHistory.text,
+      [
+        'Frost: I look across the table.',
+        'Narrator: Her hair is dyed black.',
+        'Lize: Before Viola arrives.',
+        'Viola: Viola knocks and steps in.',
+      ].join('\n'),
+    );
+    assert.equal(narratorHistory.text.includes('PRIVATE_THOUGHT'), false);
+  });
+
+  it('validates arguments strictly', () => {
+    const budget = RequestBudget.create({ contextLength: 4000, replyReserve: 3000, charsPerToken: 3 });
+    assert.throws(() => HistoryWindow.build(null), TypeError);
+    assert.throws(() => HistoryWindow.build({ turns: 'nope', maxTurns: 5, budget }), TypeError);
+    assert.throws(() => HistoryWindow.build({ turns: [], characterId: 5, maxTurns: 5, budget }), TypeError);
+    assert.throws(() => HistoryWindow.build({ turns: [], characterId: '  ', maxTurns: 5, budget }), RangeError);
+    assert.throws(() => HistoryWindow.build({ turns: [], maxTurns: '5', budget }), TypeError);
+    assert.throws(() => HistoryWindow.build({ turns: [], maxTurns: 0, budget }), RangeError);
+    assert.throws(() => HistoryWindow.build({ turns: [], maxTurns: 5, budget: null }), TypeError);
+    assert.throws(
+      () => HistoryWindow.build({ turns: [], maxTurns: 5, budget: { estimate: () => 0, fits: () => true, limitTokens: -1 } }),
+      RangeError,
+    );
+    assert.throws(() => HistoryWindow.build({ turns: [], maxTurns: 5, budget, usedTokens: -1 }), RangeError);
+    assert.throws(() => HistoryWindow.build({ turns: [{ seq: 1.5, beats: [] }], maxTurns: 5, budget }), RangeError);
+    assert.throws(() => HistoryWindow.build({ turns: [null], maxTurns: 5, budget }), TypeError);
+  });
+});
+
+describe('StorySlice', () => {
+  /**
+   * @param {ReadonlyArray<string>} names
+   * @param {{aliases?: Record<string, readonly string[]>}} [options]
+   * @returns {{log: object, subjects: Record<string, string>}}
+   * @throws {Error}
+   */
+  function createBookWithSubjects(names, { aliases = {} } = {}) {
+    const log = ScribeLogCore.create();
+    let state = ScribeReplay.run(log, []);
+    const subjects = {};
+    for (const name of names) {
+      const synced = ScribeLogCore.syncCharacterSubject(log, state, {
+        subjectId: null,
+        name,
+        aliases: aliases[name] ?? [],
+        kind: ScribeCategory.SubjectKinds.Character,
+      });
+      subjects[name] = synced.subjectId;
+      state = ScribeReplay.run(log, []);
+    }
+    return { log, subjects };
+  }
+
+  /**
+   * @param {object} log
+   * @param {Array<object>} turns
+   * @param {string} playerName
+   * @returns {{state: object, intake: object, order: Array<{id: string, position: number}>, fingerprints: Map<string, string>}}
+   * @throws {Error}
+   */
+  function replayBook(log, turns, playerName) {
+    const intake = ScribeIntakeAdapter.fromTurns(turns, { playerName });
+    const order = turns.map((turn) => ({ id: turn.id, position: turn.seq }));
+    const fingerprints = new Map(intake.messages.map((message) => [message.id, message.fingerprint]));
+    const state = ScribeReplay.run(log, order, null, fingerprints, null, null, intake.messages);
+    return { state, intake, order, fingerprints };
+  }
+
+  it('renders Option A fixed-attribute history, excludes undecided Reported hair, isolates build forms, and tracks merged history', () => {
+    const { log, subjects } = createBookWithSubjects(['Frost', 'Lize', 'OldLize']);
+    const turns = [
+      { id: 't1', seq: 1, role: TurnRole.User, mode: TurnMode.Normal, rawText: 'Lize dyes her hair black.', sceneNumber: 1, beats: [] },
+      { id: 't2', seq: 2, role: TurnRole.Assistant, mode: TurnMode.Normal, rawText: 'Lize blinks.', sceneNumber: 1, beats: [] },
+    ];
+    let replayed = replayBook(log, turns, 'Frost');
+
+    ScribeLogCore.rule(log, replayed.state, {
+      type: ScribeLogCore.Ruling.AddFact,
+      subject: subjects.Lize,
+      category: 'hair',
+      target: null,
+      text: 'red',
+      hidden: false,
+      cite: null,
+      position: 0,
+      decided: true,
+    });
+    ScribeLogCore.rule(log, replayBook(log, turns, 'Frost').state, {
+      type: ScribeLogCore.Ruling.AddFact,
+      subject: subjects.Lize,
+      category: 'build',
+      target: null,
+      text: 'In dragon form she is huge',
+      hidden: false,
+      cite: null,
+      position: 0,
+      decided: true,
+    });
+    ScribeLogCore.rule(log, replayBook(log, turns, 'Frost').state, {
+      type: ScribeLogCore.Ruling.AddFact,
+      subject: subjects.OldLize,
+      category: 'eyes',
+      target: null,
+      text: 'amber',
+      hidden: false,
+      cite: null,
+      position: 0,
+      decided: true,
+    });
+    ScribeLogCore.rule(log, replayBook(log, turns, 'Frost').state, {
+      type: ScribeLogCore.Ruling.Merge,
+      from: subjects.OldLize,
+      into: subjects.Lize,
+    });
+
+    replayed = replayBook(log, turns, 'Frost');
+    ScribeLogCore.append(
+      log,
+      replayed.state,
+      [
+        {
+          type: ScribeAnswer.Type.Scene,
+          day: 1,
+          first: 1,
+          last: 1,
+          place: 'Tavern',
+          reach: ScribeAnswer.Reach.Public,
+          present: [
+            { subject: subjects.Frost, label: 'Frost', from: null, until: null },
+            { subject: subjects.Lize, label: 'Lize', from: null, until: null },
+          ],
+          summary: 'Tavern',
+        },
+        { type: ScribeAnswer.Type.Fact, label: 'Lize', category: 'hair', target: null, text: 'black', position: 1, hidden: false },
+        { type: ScribeAnswer.Type.Fact, label: 'Lize', category: 'eyes', target: null, text: 'emerald', position: 1, hidden: false },
+        { type: ScribeAnswer.Type.Fact, label: 'Lize', category: 'build', target: null, text: 'In dragon form she is tiny', position: 1, hidden: false },
+        { type: ScribeAnswer.Type.Fact, label: 'Lize', category: 'build', target: null, text: 'In human form she is slim', position: 1, hidden: false },
+      ],
+      { messages: [replayed.intake.messages[0]], origin: ScribeLogCore.Origin.Story },
+    );
+
+    replayed = replayBook(log, turns, 'Frost');
+    ScribeLogCore.append(
+      log,
+      replayed.state,
+      [
+        {
+          type: ScribeAnswer.Type.Scene,
+          day: 1,
+          first: 1,
+          last: 2,
+          place: 'Tavern',
+          reach: ScribeAnswer.Reach.Public,
+          present: [
+            { subject: subjects.Frost, label: 'Frost', from: null, until: null },
+            { subject: subjects.Lize, label: 'Lize', from: null, until: null },
+          ],
+          summary: 'Tavern',
+        },
+        { type: ScribeAnswer.Type.Fact, label: 'Lize', category: 'hair', target: null, text: 'blonde', position: 2, hidden: false },
+        { type: ScribeAnswer.Type.Fact, label: 'Lize', category: 'skin', target: null, text: 'freckled', position: 2, hidden: false },
+        { type: ScribeAnswer.Type.Fact, label: 'Lize', category: 'skin', target: null, text: 'pale', position: 2, hidden: false },
+      ],
+      { messages: [replayed.intake.messages[1]], origin: ScribeLogCore.Origin.Story },
+    );
+
+    const finalState = replayBook(log, turns, 'Frost').state;
+    const budget = RequestBudget.create({ contextLength: null, replyReserve: 3000, charsPerToken: 3 });
+    const slice = StorySlice.build({
+      state: finalState,
+      viewer: { omniscient: false, subjectId: subjects.Frost },
+      scene: { location: 'Tavern', day: 1, timeLabel: 'Evening', sceneType: SceneType.Public, situation: '' },
+      presentSubjectIds: [subjects.Frost, subjects.Lize],
+      budget,
+    });
+
+    assert.equal(slice.text.includes('hair: black (originally red)'), true);
+    assert.equal(slice.text.includes('blonde'), false);
+    assert.equal(slice.text.includes('eyes: emerald (originally amber)'), true);
+    assert.equal(slice.text.includes('build: In dragon form she is tiny (originally In dragon form she is huge)'), true);
+    assert.equal(slice.text.includes('build: In human form she is slim'), true);
+    assert.equal(slice.text.includes('In human form she is slim (originally'), false);
+    assert.equal(slice.text.includes('skin: freckled'), true);
+    assert.equal(slice.text.includes('pale'), false);
+  });
+
+  it('never leaks hidden or private-scene prior decided facts, maps ? to unknown, and respects told/widened and omniscient hidden filtering', () => {
+    const { log, subjects } = createBookWithSubjects(['Frost', 'Lize', 'Viola', 'Collette']);
+    const turns = [
+      {
+        id: 't1',
+        seq: 1,
+        role: TurnRole.User,
+        mode: TurnMode.Normal,
+        rawText: 'Private talk.',
+        sceneNumber: 1,
+        witnessIds: ['c-frost', 'c-lize'],
+        beats: [{ id: 'b1', seq: 1, speakerType: SpeakerType.Player, characterId: 'c-frost', speakerName: 'Frost', text: 'Private talk.', witnessIds: ['c-frost', 'c-lize'] }],
+      },
+      {
+        id: 't2',
+        seq: 2,
+        role: TurnRole.Assistant,
+        mode: TurnMode.Normal,
+        rawText: 'Lize whispers.',
+        sceneNumber: 1,
+        witnessIds: ['c-frost', 'c-lize'],
+        beats: [{ id: 'b2', seq: 1, speakerType: SpeakerType.Character, characterId: 'c-lize', speakerName: 'Lize', text: 'Lize whispers.', witnessIds: ['c-frost', 'c-lize'] }],
+      },
+      {
+        id: 't3',
+        seq: 3,
+        role: TurnRole.User,
+        mode: TurnMode.Normal,
+        rawText: 'Public hall.',
+        sceneNumber: 2,
+        witnessIds: ['c-frost', 'c-lize', 'c-viola', 'c-collette'],
+        beats: [{ id: 'b3', seq: 1, speakerType: SpeakerType.Player, characterId: 'c-frost', speakerName: 'Frost', text: 'Public hall.', witnessIds: ['c-frost', 'c-lize', 'c-viola', 'c-collette'] }],
+      },
+    ];
+
+    let replayed = replayBook(log, turns, 'Frost');
+    ScribeLogCore.rule(log, replayed.state, {
+      type: ScribeLogCore.Ruling.AddFact,
+      subject: subjects.Lize,
+      category: 'age',
+      target: null,
+      text: '?',
+      hidden: false,
+      cite: null,
+      position: 0,
+      decided: true,
+    });
+    ScribeLogCore.rule(log, replayBook(log, turns, 'Frost').state, {
+      type: ScribeLogCore.Ruling.AddFact,
+      subject: subjects.Lize,
+      category: 'eyes',
+      target: null,
+      text: 'silver',
+      hidden: true,
+      cite: null,
+      position: 0,
+      decided: true,
+    });
+
+    replayed = replayBook(log, turns, 'Frost');
+    ScribeLogCore.append(
+      log,
+      replayed.state,
+      [
+        {
+          type: ScribeAnswer.Type.Scene,
+          day: 1,
+          first: 1,
+          last: 2,
+          place: 'Bedroom',
+          reach: ScribeAnswer.Reach.Private,
+          present: [
+            { subject: subjects.Frost, label: 'Frost', from: null, until: null },
+            { subject: subjects.Lize, label: 'Lize', from: null, until: null },
+          ],
+          summary: 'Bedroom talk',
+        },
+        { type: ScribeAnswer.Type.Fact, label: 'Lize', category: 'hair', target: null, text: 'red', position: 1, hidden: false },
+        { type: ScribeAnswer.Type.Fact, label: 'Lize', category: 'location', target: null, text: 'upstairs bedroom', position: 2, hidden: false },
+        { type: ScribeAnswer.Type.Fact, label: 'Lize', category: 'trait', target: null, text: 'smuggles ciphers', position: 2, hidden: true },
+        { type: ScribeAnswer.Type.ThreadOpen, text: 'Find Lize cipher key', position: 2, subject: subjects.Lize },
+      ],
+      { messages: replayed.intake.messages.slice(0, 2), origin: ScribeLogCore.Origin.Story },
+    );
+
+    replayed = replayBook(log, turns, 'Frost');
+    ScribeLogCore.append(
+      log,
+      replayed.state,
+      [
+        {
+          type: ScribeAnswer.Type.Scene,
+          day: 1,
+          first: 3,
+          last: 3,
+          place: 'Main Hall',
+          reach: ScribeAnswer.Reach.Public,
+          present: [
+            { subject: subjects.Frost, label: 'Frost', from: null, until: null },
+            { subject: subjects.Lize, label: 'Lize', from: null, until: null },
+            { subject: subjects.Viola, label: 'Viola', from: null, until: null },
+          ],
+          summary: 'Main Hall',
+        },
+        { type: ScribeAnswer.Type.Fact, label: 'Lize', category: 'eyes', target: null, text: 'green', position: 3, hidden: false },
+        { type: ScribeAnswer.Type.Fact, label: 'Lize', category: 'hair', target: null, text: 'black', position: 3, hidden: false },
+      ],
+      { messages: [replayed.intake.messages[2]], origin: ScribeLogCore.Origin.Story },
+    );
+
+    const stateBeforeTold = replayBook(log, turns, 'Frost').state;
+    const secretTrait = stateBeforeTold.facts.find((fact) => fact.text === 'smuggles ciphers');
+    const silverEyes = stateBeforeTold.facts.find((fact) => fact.text === 'silver');
+    ScribeLogCore.rule(log, stateBeforeTold, {
+      type: ScribeLogCore.Ruling.Widen,
+      fact: secretTrait.id,
+      to: [subjects.Viola],
+      exact: true,
+    });
+    ScribeLogCore.rule(log, replayBook(log, turns, 'Frost').state, {
+      type: ScribeLogCore.Ruling.Widen,
+      fact: silverEyes.id,
+      to: [subjects.Viola],
+      exact: true,
+    });
+
+    const finalState = replayBook(log, turns, 'Frost').state;
+    const turnsById = new Map(turns.map((turn) => [turn.id, turn]));
+    const budget = RequestBudget.create({ contextLength: null, replyReserve: 3000, charsPerToken: 3 });
+    const scene = { location: 'Main Hall', day: 1, timeLabel: '', sceneType: SceneType.Public, situation: 'Gathering.' };
+
+    const colletteSlice = StorySlice.build({
+      state: finalState,
+      viewer: { omniscient: false, subjectId: subjects.Collette, characterId: 'c-collette' },
+      scene,
+      presentSubjectIds: [subjects.Frost, subjects.Lize, subjects.Collette],
+      budget,
+      turnsById,
+    });
+    assert.equal(colletteSlice.text.includes('age: unknown'), true);
+    assert.equal(colletteSlice.text.includes('?'), false);
+    assert.equal(colletteSlice.text.includes('originally silver'), false);
+    assert.equal(colletteSlice.text.includes('originally red'), false);
+    assert.equal(colletteSlice.text.includes('upstairs bedroom'), false);
+    assert.equal(colletteSlice.text.includes('smuggles ciphers'), false);
+    assert.equal(colletteSlice.text.includes('Find Lize cipher key'), false);
+
+    const violaSlice = StorySlice.build({
+      state: finalState,
+      viewer: { omniscient: false, subjectId: subjects.Viola, characterId: 'c-viola' },
+      scene,
+      presentSubjectIds: [subjects.Frost, subjects.Lize, subjects.Viola],
+      budget,
+      turnsById,
+    });
+    assert.equal(violaSlice.text.includes('eyes: green (originally silver)'), true);
+    assert.equal(violaSlice.text.includes('smuggles ciphers'), true);
+    assert.equal(violaSlice.text.includes('Find Lize cipher key'), false);
+
+    const frostSlice = StorySlice.build({
+      state: finalState,
+      viewer: { omniscient: false, subjectId: subjects.Frost, characterId: 'c-frost' },
+      scene,
+      presentSubjectIds: [subjects.Frost, subjects.Lize],
+      budget,
+      turnsById,
+    });
+    assert.equal(frostSlice.text.includes('hair: black (originally red)'), true);
+    assert.equal(frostSlice.text.includes('Find Lize cipher key'), true);
+
+    const narratorSlice = StorySlice.build({
+      state: finalState,
+      viewer: { omniscient: true, subjectId: null },
+      scene,
+      presentSubjectIds: [subjects.Frost, subjects.Lize],
+      budget,
+      turnsById,
+    });
+    assert.equal(narratorSlice.text.includes('smuggles ciphers'), false);
+    assert.equal(narratorSlice.text.includes('originally silver'), false);
+    assert.equal(narratorSlice.text.includes('Find Lize cipher key'), true);
+  });
+
+  it('orders rulings before newer story facts, deduplicates viewer, matches aliases safely in Section 6, and stops cleanly at tight budget after Sections 1-3', () => {
+    const { log, subjects } = createBookWithSubjects(
+      ['Frost', 'Lize', 'Collette', 'Al', 'Mirra'],
+      { aliases: { Collette: ['Cook Collette'] } },
+    );
+    const turns = [
+      { id: 't1', seq: 1, role: TurnRole.Assistant, mode: TurnMode.Normal, rawText: 'Turn 1', sceneNumber: 1, beats: [] },
+      { id: 't2', seq: 2, role: TurnRole.Assistant, mode: TurnMode.Normal, rawText: 'Turn 2', sceneNumber: 1, beats: [] },
+    ];
+    let replayed = replayBook(log, turns, 'Frost');
+    ScribeLogCore.rule(log, replayed.state, {
+      type: ScribeLogCore.Ruling.AddFact,
+      subject: subjects.Frost,
+      category: 'role',
+      target: null,
+      text: 'caravan scout',
+      hidden: false,
+      cite: null,
+      position: 0,
+    });
+    ScribeLogCore.rule(log, replayBook(log, turns, 'Frost').state, {
+      type: ScribeLogCore.Ruling.AddFact,
+      subject: subjects.Lize,
+      category: 'role',
+      target: null,
+      text: 'quartermaster',
+      hidden: false,
+      cite: null,
+      position: 0,
+    });
+    ScribeLogCore.rule(log, replayBook(log, turns, 'Frost').state, {
+      type: ScribeLogCore.Ruling.AddFact,
+      subject: subjects.Al,
+      category: 'role',
+      target: null,
+      text: 'blacksmith',
+      hidden: false,
+      cite: null,
+      position: 0,
+    });
+    ScribeLogCore.rule(log, replayBook(log, turns, 'Frost').state, {
+      type: ScribeLogCore.Ruling.AddFact,
+      subject: subjects.Mirra,
+      category: 'role',
+      target: null,
+      text: 'cart driver',
+      hidden: false,
+      cite: null,
+      position: 0,
+    });
+
+    replayed = replayBook(log, turns, 'Frost');
+    ScribeLogCore.append(
+      log,
+      replayed.state,
+      [
+        {
+          type: ScribeAnswer.Type.Scene,
+          day: 2,
+          first: 1,
+          last: 2,
+          place: 'Courtyard',
+          reach: ScribeAnswer.Reach.Public,
+          present: [
+            { subject: subjects.Frost, label: 'Frost', from: null, until: null },
+            { subject: subjects.Lize, label: 'Lize', from: null, until: null },
+          ],
+          summary: 'Courtyard',
+        },
+        { type: ScribeAnswer.Type.Fact, label: 'Frost', category: 'belonging', target: null, text: 'lantern', position: 2, hidden: false },
+        { type: ScribeAnswer.Type.Fact, label: 'Lize', category: 'condition', target: null, text: 'tired from watch', position: 2, hidden: false },
+        { type: ScribeAnswer.Type.Fact, label: 'Collette', category: 'trait', target: null, text: 'cheerful cook', position: 2, hidden: false },
+        { type: ScribeAnswer.Type.Fact, label: 'Frost', category: 'relation', target: 'Lize', text: 'trusts her implicitly', position: 2, hidden: false },
+        { type: ScribeAnswer.Type.ThreadOpen, text: 'Inspect Frost and Lize wagon', position: 2 },
+      ],
+      { messages: replayed.intake.messages, origin: ScribeLogCore.Origin.Story },
+    );
+
+    const state = replayBook(log, turns, 'Frost').state;
+    const scene = { location: 'Courtyard', day: 2, timeLabel: 'Dusk', sceneType: SceneType.Public, situation: 'Packing.' };
+    const unboundedBudget = RequestBudget.create({ contextLength: null, replyReserve: 3000, charsPerToken: 3 });
+
+    const fullSlice = StorySlice.build({
+      state,
+      viewer: { omniscient: false, subjectId: subjects.Frost, characterId: 'c-frost' },
+      scene,
+      presentSubjectIds: [subjects.Frost, subjects.Lize],
+      namedText: 'I always ask Collette-chan about supper.',
+      playerName: 'Frost',
+      budget: unboundedBudget,
+    });
+
+    assert.deepEqual(fullSlice.text.match(/^- Frost:/gm), ['- Frost:']);
+    assert.equal(
+      fullSlice.text.indexOf('role: quartermaster') < fullSlice.text.indexOf('condition: tired from watch'),
+      true,
+    );
+    assert.equal(fullSlice.text.includes('Relations:\n- Frost -> Lize: trusts her implicitly'), true);
+    assert.equal(fullSlice.text.includes('Open threads:\n- Inspect Frost and Lize wagon'), true);
+    assert.equal(fullSlice.text.includes('Known facts:\n- Collette: trait: cheerful cook'), true);
+    assert.equal(fullSlice.text.includes('blacksmith'), false);
+    assert.equal(fullSlice.text.includes('cart driver'), false);
+
+    const sectionsOneToThree = [
+      '<story_state>',
+      'Location: Courtyard | Time: Day 2, Dusk | public',
+      'Present: Frost, Lize',
+      'Situation: Packing.',
+      '- Frost: role: caravan scout | Items: lantern',
+      '- Lize: role: quartermaster; condition: tired from watch',
+      '</story_state>',
+    ].join('\n');
+    const exactTokensForOneToThree = Math.ceil(sectionsOneToThree.length / 3);
+    const tightBudget = RequestBudget.create({
+      contextLength: 3000 + exactTokensForOneToThree,
+      replyReserve: 3000,
+      charsPerToken: 3,
+    });
+
+    const tightSlice = StorySlice.build({
+      state,
+      viewer: { omniscient: false, subjectId: subjects.Frost, characterId: 'c-frost' },
+      scene,
+      presentSubjectIds: [subjects.Frost, subjects.Lize],
+      namedText: 'I always ask Collette-chan about supper.',
+      playerName: 'Frost',
+      budget: tightBudget,
+    });
+
+    assert.equal(tightSlice.text, sectionsOneToThree);
+    assert.equal(tightSlice.tokens <= exactTokensForOneToThree, true);
+    assert.equal(tightSlice.text.includes('Relations:'), false);
+    assert.equal(tightSlice.text.includes('Open threads:'), false);
+    assert.equal(tightSlice.text.includes('Known facts:'), false);
+
+    const zeroBudget = RequestBudget.create({ contextLength: 3000, replyReserve: 3000, charsPerToken: 3 });
+    const emptySlice = StorySlice.build({
+      state,
+      viewer: { omniscient: false, subjectId: subjects.Frost },
+      scene,
+      presentSubjectIds: [subjects.Frost],
+      budget: zeroBudget,
+    });
+    assert.deepEqual(emptySlice, { text: '', tokens: 0 });
+  });
+
+  it('validates arguments strictly', () => {
+    const budget = RequestBudget.create({ contextLength: null, replyReserve: 3000, charsPerToken: 3 });
+    const state = { subjects: [], facts: [], threads: [], scenes: [] };
+    const viewer = { omniscient: false, subjectId: null };
+    const scene = { location: 'Hall', day: 1, timeLabel: '', sceneType: SceneType.Public, situation: '' };
+
+    assert.throws(() => StorySlice.build(null), TypeError);
+    assert.throws(() => StorySlice.build({ state: null, viewer, scene, budget }), TypeError);
+    assert.throws(() => StorySlice.build({ state: { subjects: [] }, viewer, scene, budget }), TypeError);
+    assert.throws(() => StorySlice.build({ state, viewer: { omniscient: 'yes', subjectId: null }, scene, budget }), TypeError);
+    assert.throws(() => StorySlice.build({ state, viewer: { omniscient: false, subjectId: '' }, scene, budget }), RangeError);
+    assert.throws(() => StorySlice.build({ state, viewer: { omniscient: false, subjectId: null, characterId: '  ' }, scene, budget }), RangeError);
+    assert.throws(() => StorySlice.build({ state, viewer, scene: { ...scene, day: 0 }, budget }), RangeError);
+    assert.throws(() => StorySlice.build({ state, viewer, scene: { ...scene, sceneType: 'secret' }, budget }), RangeError);
+    assert.throws(() => StorySlice.build({ state, viewer, scene, presentSubjectIds: [5], budget }), TypeError);
+    assert.throws(() => StorySlice.build({ state, viewer, scene, remoteSubjectIds: [null], budget }), TypeError);
+    assert.throws(() => StorySlice.build({ state, viewer, scene, namedText: 5, budget }), TypeError);
+    assert.throws(() => StorySlice.build({ state, viewer, scene, playerName: 5, budget }), TypeError);
+    assert.throws(() => StorySlice.build({ state, viewer, scene, budget, usedTokens: -1 }), RangeError);
+    assert.throws(() => StorySlice.build({ state, viewer, scene, budget, turnsById: [] }), TypeError);
+  });
+
+  it('handles pinned build forms in Option A, remote deduplication, omniscient and alias relations, thread priority with turnsById, and Section 2 overflow packing', () => {
+    const { log, subjects } = createBookWithSubjects(['Frost', 'Lize', 'Viola']);
+    const turns = [
+      { id: 't1', seq: 1, role: TurnRole.User, mode: TurnMode.Normal, rawText: 'Dragon shifts.', sceneNumber: 1, beats: [] },
+      {
+        id: 't2',
+        seq: 2,
+        role: TurnRole.Assistant,
+        mode: TurnMode.Normal,
+        rawText: 'Lize speaks.',
+        sceneNumber: 1,
+        beats: [{ id: 'b2', seq: 1, speakerType: SpeakerType.Character, characterId: 'c-lize', speakerName: 'Lize', text: 'Lize speaks.', witnessIds: ['c-frost', 'c-lize'] }],
+      },
+    ];
+
+    let replayed = replayBook(log, turns, 'Frost');
+    ScribeLogCore.rule(log, replayed.state, {
+      type: ScribeLogCore.Ruling.AddFact,
+      subject: subjects.Frost,
+      category: 'role',
+      target: null,
+      text: 'scout captain',
+      hidden: false,
+      cite: null,
+      position: 0,
+    });
+    ScribeLogCore.rule(log, replayBook(log, turns, 'Frost').state, {
+      type: ScribeLogCore.Ruling.AddFact,
+      subject: subjects.Frost,
+      category: 'build',
+      target: null,
+      text: 'In dragon form he is massive',
+      hidden: false,
+      cite: null,
+      position: 0,
+      decided: true,
+    });
+    ScribeLogCore.rule(log, replayBook(log, turns, 'Frost').state, {
+      type: ScribeLogCore.Ruling.AddFact,
+      subject: subjects.Frost,
+      category: 'build',
+      target: null,
+      text: 'In human form he is wiry',
+      hidden: false,
+      cite: null,
+      position: 0,
+      decided: true,
+    });
+    ScribeLogCore.rule(log, replayBook(log, turns, 'Frost').state, {
+      type: ScribeLogCore.Ruling.Pin,
+      subject: subjects.Frost,
+      category: 'build',
+      target: null,
+      text: 'In dragon form he is sleek',
+      hidden: false,
+      winner: null,
+    });
+    ScribeLogCore.append(
+      log,
+      replayBook(log, turns, 'Frost').state,
+      [{ type: ScribeAnswer.Type.ThreadOpen, text: 'Frost must guard the gate', position: 0 }],
+      { messages: [], origin: ScribeLogCore.Origin.Notes },
+    );
+
+    replayed = replayBook(log, turns, 'Frost');
+    ScribeLogCore.append(
+      log,
+      replayed.state,
+      [
+        {
+          type: ScribeAnswer.Type.Scene,
+          day: 1,
+          first: 1,
+          last: 1,
+          place: 'Bridge',
+          reach: ScribeAnswer.Reach.Public,
+          present: [
+            { subject: subjects.Frost, label: 'Frost', from: null, until: null },
+            { subject: subjects.Lize, label: 'Lize', from: null, until: null },
+            { subject: subjects.Viola, label: 'Viola', from: null, until: null },
+          ],
+          summary: 'Bridge',
+        },
+        { type: ScribeAnswer.Type.Fact, label: 'Frost', category: 'relation', target: 'Lady Lize', text: 'covers her flank', position: 1, hidden: false },
+      ],
+      { messages: [replayed.intake.messages[0]], origin: ScribeLogCore.Origin.Story },
+    );
+
+    replayed = replayBook(log, turns, 'Frost');
+    ScribeLogCore.append(
+      log,
+      replayed.state,
+      [
+        {
+          type: ScribeAnswer.Type.Scene,
+          day: 1,
+          first: 1,
+          last: 2,
+          place: 'Bridge',
+          reach: ScribeAnswer.Reach.Public,
+          present: [
+            { subject: subjects.Frost, label: 'Frost', from: null, until: null },
+            { subject: subjects.Lize, label: 'Lize', from: null, until: null },
+            { subject: subjects.Viola, label: 'Viola', from: null, until: null },
+          ],
+          summary: 'Bridge',
+        },
+        { type: ScribeAnswer.Type.Alias, label: 'Lize', name: 'Lady Lize', position: 2 },
+        { type: ScribeAnswer.Type.Fact, label: 'Frost', category: 'condition', target: null, text: 'soaked by freezing rain', position: 2, hidden: false },
+        { type: ScribeAnswer.Type.Fact, label: 'Lize', category: 'relation', target: 'Viola', text: 'owes her a favor', position: 2, hidden: false },
+        { type: ScribeAnswer.Type.ThreadOpen, text: 'Unlock Frost seal before dawn', position: 2 },
+      ],
+      { messages: [replayed.intake.messages[1]], origin: ScribeLogCore.Origin.Story },
+    );
+
+    const state = replayBook(log, turns, 'Frost').state;
+    const turnsPlain = Object.fromEntries(turns.map((turn) => [turn.id, turn]));
+    const scene = { location: 'Bridge', day: 1, timeLabel: 'Dawn', sceneType: SceneType.Public, situation: 'Stand.' };
+    const unbounded = RequestBudget.create({ contextLength: null, replyReserve: 3000, charsPerToken: 3 });
+
+    const frostSlice = StorySlice.build({
+      state,
+      viewer: { omniscient: false, subjectId: subjects.Frost, characterId: 'c-frost' },
+      scene,
+      presentSubjectIds: [subjects.Frost, subjects.Lize],
+      remoteSubjectIds: [subjects.Lize, subjects.Viola],
+      budget: unbounded,
+      turnsById: turnsPlain,
+    });
+    assert.equal(frostSlice.text.includes('Present: Frost, Lize\nRemote: Viola\n'), true);
+    assert.equal(frostSlice.text.includes('build: In dragon form he is sleek (originally In dragon form he is massive)'), true);
+    assert.equal(frostSlice.text.includes('build: In human form he is wiry'), true);
+    assert.equal(frostSlice.text.includes('- Frost -> Lady Lize: covers her flank'), true);
+    assert.equal(frostSlice.text.includes('owes her a favor'), false);
+    assert.equal(
+      frostSlice.text.indexOf('- Frost must guard the gate') < frostSlice.text.indexOf('- Unlock Frost seal before dawn'),
+      true,
+    );
+
+    const narratorSlice = StorySlice.build({
+      state,
+      viewer: { omniscient: true, subjectId: null },
+      scene,
+      presentSubjectIds: [subjects.Lize],
+      remoteSubjectIds: [subjects.Viola],
+      budget: unbounded,
+    });
+    assert.equal(narratorSlice.text.includes('- Lize -> Viola: owes her a favor'), true);
+
+    const prefixWithTwoFacts = [
+      '<story_state>',
+      'Location: Bridge | Time: Day 1, Dawn | public',
+      'Present: Frost, Lize',
+      'Remote: Viola',
+      'Situation: Stand.',
+      '- Frost: role: scout captain; build: In human form he is wiry',
+      '</story_state>',
+    ].join('\n');
+    const sec2Budget = RequestBudget.create({
+      contextLength: 3000 + Math.ceil(prefixWithTwoFacts.length / 3),
+      replyReserve: 3000,
+      charsPerToken: 3,
+    });
+    const sec2OverflowSlice = StorySlice.build({
+      state,
+      viewer: { omniscient: false, subjectId: subjects.Frost },
+      scene,
+      presentSubjectIds: [subjects.Frost, subjects.Lize],
+      remoteSubjectIds: [subjects.Viola],
+      budget: sec2Budget,
+    });
+    assert.equal(sec2OverflowSlice.text, prefixWithTwoFacts);
+    assert.equal(sec2OverflowSlice.text.includes('sleek'), false);
+    assert.equal(sec2OverflowSlice.text.includes('soaked by freezing rain'), false);
+    assert.equal(sec2OverflowSlice.text.includes('Relations:'), false);
+  });
+
+  it('blocks secret hidden or private-scene aka aliases across Sections 4-6 for character and omniscient viewers', () => {
+    const { log, subjects } = createBookWithSubjects(['Frost', 'Lize', 'Viola', 'Collette', 'Shadow']);
+    const turns = [
+      { id: 't1', seq: 1, role: TurnRole.User, mode: TurnMode.Normal, rawText: 'Public rumor.', sceneNumber: 1, beats: [] },
+      { id: 't2', seq: 2, role: TurnRole.Assistant, mode: TurnMode.Normal, rawText: 'Private meeting.', sceneNumber: 2, beats: [] },
+      { id: 't3', seq: 3, role: TurnRole.User, mode: TurnMode.Normal, rawText: 'Hall scene.', sceneNumber: 3, beats: [] },
+    ];
+
+    let replayed = replayBook(log, turns, 'Frost');
+    ScribeLogCore.rule(log, replayed.state, {
+      type: ScribeLogCore.Ruling.AddFact,
+      subject: subjects.Collette,
+      category: 'role',
+      target: null,
+      text: 'tavern cook',
+      hidden: false,
+      cite: null,
+      position: 0,
+    });
+    ScribeLogCore.rule(log, replayBook(log, turns, 'Frost').state, {
+      type: ScribeLogCore.Ruling.AddFact,
+      subject: subjects.Shadow,
+      category: 'role',
+      target: null,
+      text: 'courier',
+      hidden: false,
+      cite: null,
+      position: 0,
+    });
+
+    replayed = replayBook(log, turns, 'Frost');
+    ScribeLogCore.append(
+      log,
+      replayed.state,
+      [
+        {
+          type: ScribeAnswer.Type.Scene,
+          day: 1,
+          first: 1,
+          last: 1,
+          place: 'Square',
+          reach: ScribeAnswer.Reach.Public,
+          present: [
+            { subject: subjects.Frost, label: 'Frost', from: null, until: null },
+            { subject: subjects.Viola, label: 'Viola', from: null, until: null },
+          ],
+          summary: 'Square',
+        },
+        { type: ScribeAnswer.Type.Fact, label: 'Viola', category: 'relation', target: 'Nightblade', text: 'suspects her secretly', position: 1, hidden: false },
+      ],
+      { messages: [replayed.intake.messages[0]], origin: ScribeLogCore.Origin.Story },
+    );
+
+    replayed = replayBook(log, turns, 'Frost');
+    ScribeLogCore.append(
+      log,
+      replayed.state,
+      [
+        {
+          type: ScribeAnswer.Type.Scene,
+          day: 1,
+          first: 2,
+          last: 2,
+          place: 'Cellar',
+          reach: ScribeAnswer.Reach.Private,
+          present: [
+            { subject: subjects.Frost, label: 'Frost', from: null, until: null },
+            { subject: subjects.Lize, label: 'Lize', from: null, until: null },
+          ],
+          summary: 'Cellar',
+        },
+        { type: ScribeAnswer.Type.Fact, label: 'Shadow', category: 'aka', target: null, text: 'Whisper', position: 2, hidden: false },
+        { type: ScribeAnswer.Type.Fact, label: 'Lize', category: 'aka', target: null, text: 'Raven', position: 2, hidden: false },
+      ],
+      { messages: [replayed.intake.messages[1]], origin: ScribeLogCore.Origin.Story },
+    );
+
+    replayed = replayBook(log, turns, 'Frost');
+    ScribeLogCore.append(
+      log,
+      replayed.state,
+      [
+        {
+          type: ScribeAnswer.Type.Scene,
+          day: 1,
+          first: 3,
+          last: 3,
+          place: 'Hall',
+          reach: ScribeAnswer.Reach.Public,
+          present: [
+            { subject: subjects.Frost, label: 'Frost', from: null, until: null },
+            { subject: subjects.Viola, label: 'Viola', from: null, until: null },
+            { subject: subjects.Collette, label: 'Collette', from: null, until: null },
+            { subject: subjects.Lize, label: 'Lize', from: null, until: null },
+          ],
+          summary: 'Hall',
+        },
+        { type: ScribeAnswer.Type.Fact, label: 'Collette', category: 'aka', target: null, text: 'Nightblade', position: 3, hidden: true },
+        { type: ScribeAnswer.Type.ThreadOpen, text: 'Ask Nightblade about the ledger', position: 3 },
+        { type: ScribeAnswer.Type.ThreadOpen, text: 'Track Raven at the docks', position: 3 },
+      ],
+      { messages: [replayed.intake.messages[2]], origin: ScribeLogCore.Origin.Story },
+    );
+
+    const state = replayBook(log, turns, 'Frost').state;
+    const budget = RequestBudget.create({ contextLength: null, replyReserve: 3000, charsPerToken: 3 });
+    const scene = { location: 'Hall', day: 1, timeLabel: 'Noon', sceneType: SceneType.Public, situation: 'Busy.' };
+
+    const violaSlice = StorySlice.build({
+      state,
+      viewer: { omniscient: false, subjectId: subjects.Viola, characterId: 'c-viola' },
+      scene,
+      presentSubjectIds: [subjects.Viola, subjects.Collette, subjects.Lize],
+      namedText: 'I heard Whisper and Nightblade mentioned earlier.',
+      budget,
+    });
+    assert.equal(violaSlice.text.includes('suspects her secretly'), false);
+    assert.equal(violaSlice.text.includes('Ask Nightblade about the ledger'), false);
+    assert.equal(violaSlice.text.includes('Track Raven at the docks'), false);
+    assert.equal(violaSlice.text.includes('courier'), false);
+
+    const frostSlice = StorySlice.build({
+      state,
+      viewer: { omniscient: false, subjectId: subjects.Frost, characterId: 'c-frost' },
+      scene,
+      presentSubjectIds: [subjects.Frost, subjects.Viola, subjects.Lize],
+      namedText: 'Look for Whisper and Nightblade.',
+      budget,
+    });
+    assert.equal(frostSlice.text.includes('Track Raven at the docks'), true);
+    assert.equal(frostSlice.text.includes('Known facts:\n- Shadow: role: courier'), true);
+    assert.equal(frostSlice.text.includes('tavern cook'), false);
+
+    const narratorSlice = StorySlice.build({
+      state,
+      viewer: { omniscient: true, subjectId: null },
+      scene,
+      presentSubjectIds: [subjects.Viola, subjects.Collette],
+      namedText: 'Search for Whisper and Nightblade.',
+      budget,
+    });
+    assert.equal(narratorSlice.text.includes('suspects her secretly'), false);
+    assert.equal(narratorSlice.text.includes('Ask Nightblade about the ledger'), false);
+    assert.equal(narratorSlice.text.includes('Known facts:\n- Shadow: role: courier'), true);
+  });
+
+  it('suppresses originally on reverted or normalized-identical values, keeps 3-step earliest history, and handles superseded Pin and same-batch player turns', () => {
+    const { log, subjects } = createBookWithSubjects(['Frost', 'Lize']);
+    const turns = [
+      { id: 't1', seq: 1, role: TurnRole.User, mode: TurnMode.Normal, rawText: 'Hair black, eyes gray.', sceneNumber: 1, beats: [] },
+      { id: 't2', seq: 2, role: TurnRole.User, mode: TurnMode.Normal, rawText: 'Hair silver or red.', sceneNumber: 1, beats: [] },
+      { id: 't3', seq: 3, role: TurnRole.User, mode: TurnMode.Normal, rawText: 'Skin tan.', sceneNumber: 1, beats: [] },
+    ];
+
+    let replayed = replayBook(log, turns, 'Frost');
+    ScribeLogCore.rule(log, replayed.state, {
+      type: ScribeLogCore.Ruling.AddFact,
+      subject: subjects.Lize,
+      category: 'hair',
+      target: null,
+      text: 'red',
+      hidden: false,
+      cite: null,
+      position: 0,
+      decided: true,
+    });
+    ScribeLogCore.rule(log, replayBook(log, turns, 'Frost').state, {
+      type: ScribeLogCore.Ruling.AddFact,
+      subject: subjects.Lize,
+      category: 'eyes',
+      target: null,
+      text: 'grey',
+      hidden: false,
+      cite: null,
+      position: 0,
+      decided: true,
+    });
+    ScribeLogCore.rule(log, replayBook(log, turns, 'Frost').state, {
+      type: ScribeLogCore.Ruling.Pin,
+      subject: subjects.Lize,
+      category: 'skin',
+      target: null,
+      text: 'porcelain',
+      hidden: false,
+      winner: null,
+    });
+
+    replayed = replayBook(log, turns, 'Frost');
+    ScribeLogCore.append(
+      log,
+      replayed.state,
+      [
+        {
+          type: ScribeAnswer.Type.Scene,
+          day: 1,
+          first: 1,
+          last: 2,
+          place: 'Hall',
+          reach: ScribeAnswer.Reach.Public,
+          present: [
+            { subject: subjects.Frost, label: 'Frost', from: null, until: null },
+            { subject: subjects.Lize, label: 'Lize', from: null, until: null },
+          ],
+          summary: 'Hall',
+        },
+        { type: ScribeAnswer.Type.Fact, label: 'Lize', category: 'hair', target: null, text: 'black', position: 1, hidden: false },
+        { type: ScribeAnswer.Type.Fact, label: 'Lize', category: 'eyes', target: null, text: 'gray', position: 1, hidden: false },
+        { type: ScribeAnswer.Type.Fact, label: 'Lize', category: 'age', target: null, text: 'twenty', position: 1, hidden: false },
+        { type: ScribeAnswer.Type.Fact, label: 'Lize', category: 'age', target: null, text: 'twenty-two', position: 2, hidden: false },
+      ],
+      { messages: replayed.intake.messages.slice(0, 2), origin: ScribeLogCore.Origin.Story },
+    );
+
+    replayed = replayBook(log, turns, 'Frost');
+    ScribeLogCore.append(
+      log,
+      replayed.state,
+      [
+        {
+          type: ScribeAnswer.Type.Scene,
+          day: 1,
+          first: 1,
+          last: 3,
+          place: 'Hall',
+          reach: ScribeAnswer.Reach.Public,
+          present: [
+            { subject: subjects.Frost, label: 'Frost', from: null, until: null },
+            { subject: subjects.Lize, label: 'Lize', from: null, until: null },
+          ],
+          summary: 'Hall',
+        },
+        { type: ScribeAnswer.Type.Fact, label: 'Lize', category: 'hair', target: null, text: 'red', position: 3, hidden: false },
+        { type: ScribeAnswer.Type.Fact, label: 'Lize', category: 'skin', target: null, text: 'sun-tanned', position: 3, hidden: false },
+      ],
+      { messages: [replayed.intake.messages[2]], origin: ScribeLogCore.Origin.Story },
+    );
+
+    const budget = RequestBudget.create({ contextLength: null, replyReserve: 3000, charsPerToken: 3 });
+    const scene = { location: 'Hall', day: 1, timeLabel: 'Day', sceneType: SceneType.Public, situation: '' };
+    const revertedSlice = StorySlice.build({
+      state: replayBook(log, turns, 'Frost').state,
+      viewer: { omniscient: false, subjectId: subjects.Frost },
+      scene,
+      presentSubjectIds: [subjects.Frost, subjects.Lize],
+      budget,
+    });
+    assert.equal(revertedSlice.text.includes('hair: red;'), true);
+    assert.equal(revertedSlice.text.includes('hair: red (originally'), false);
+    assert.equal(revertedSlice.text.includes('eyes: gray'), true);
+    assert.equal(revertedSlice.text.includes('eyes: gray (originally'), false);
+    assert.equal(revertedSlice.text.includes('age: twenty-two (originally twenty)'), true);
+    assert.equal(revertedSlice.text.includes('skin: sun-tanned (originally porcelain)'), true);
+
+    const threeStepSetup = createBookWithSubjects(['Frost', 'Lize']);
+    const threeTurns = [
+      { id: 'u1', seq: 1, role: TurnRole.User, mode: TurnMode.Normal, rawText: 'Black hair.', sceneNumber: 1, beats: [] },
+      { id: 'u2', seq: 2, role: TurnRole.User, mode: TurnMode.Normal, rawText: 'Silver hair.', sceneNumber: 1, beats: [] },
+    ];
+    let threeReplayed = replayBook(threeStepSetup.log, threeTurns, 'Frost');
+    ScribeLogCore.rule(threeStepSetup.log, threeReplayed.state, {
+      type: ScribeLogCore.Ruling.AddFact,
+      subject: threeStepSetup.subjects.Lize,
+      category: 'hair',
+      target: null,
+      text: 'red',
+      hidden: false,
+      cite: null,
+      position: 0,
+      decided: true,
+    });
+    threeReplayed = replayBook(threeStepSetup.log, threeTurns, 'Frost');
+    ScribeLogCore.append(
+      threeStepSetup.log,
+      threeReplayed.state,
+      [
+        {
+          type: ScribeAnswer.Type.Scene,
+          day: 1,
+          first: 1,
+          last: 1,
+          place: 'Hall',
+          reach: ScribeAnswer.Reach.Public,
+          present: [
+            { subject: threeStepSetup.subjects.Frost, label: 'Frost', from: null, until: null },
+            { subject: threeStepSetup.subjects.Lize, label: 'Lize', from: null, until: null },
+          ],
+          summary: 'Hall',
+        },
+        { type: ScribeAnswer.Type.Fact, label: 'Lize', category: 'hair', target: null, text: 'black', position: 1, hidden: false },
+      ],
+      { messages: [threeReplayed.intake.messages[0]], origin: ScribeLogCore.Origin.Story },
+    );
+    threeReplayed = replayBook(threeStepSetup.log, threeTurns, 'Frost');
+    ScribeLogCore.append(
+      threeStepSetup.log,
+      threeReplayed.state,
+      [
+        {
+          type: ScribeAnswer.Type.Scene,
+          day: 1,
+          first: 1,
+          last: 2,
+          place: 'Hall',
+          reach: ScribeAnswer.Reach.Public,
+          present: [
+            { subject: threeStepSetup.subjects.Frost, label: 'Frost', from: null, until: null },
+            { subject: threeStepSetup.subjects.Lize, label: 'Lize', from: null, until: null },
+          ],
+          summary: 'Hall',
+        },
+        { type: ScribeAnswer.Type.Fact, label: 'Lize', category: 'hair', target: null, text: 'silver', position: 2, hidden: false },
+      ],
+      { messages: [threeReplayed.intake.messages[1]], origin: ScribeLogCore.Origin.Story },
+    );
+    const threeSlice = StorySlice.build({
+      state: replayBook(threeStepSetup.log, threeTurns, 'Frost').state,
+      viewer: { omniscient: false, subjectId: threeStepSetup.subjects.Frost },
+      scene,
+      presentSubjectIds: [threeStepSetup.subjects.Frost, threeStepSetup.subjects.Lize],
+      budget,
+    });
+    assert.equal(threeSlice.text.includes('hair: silver (originally red)'), true);
+  });
+
+  it('matches adjacent RP formatting, enforces turnsById witness authority in public scenes, skips duplicating present subjects in Section 6, and orders story facts newest-first', () => {
+    const { log, subjects } = createBookWithSubjects(['Frost', 'Lize', 'Collette', 'Al']);
+    const turns = [
+      {
+        id: 't1',
+        seq: 1,
+        role: TurnRole.Assistant,
+        mode: TurnMode.Normal,
+        rawText: 'Quiet chat.',
+        sceneNumber: 1,
+        witnessIds: ['c-frost', 'c-lize'],
+        beats: [{ id: 'b1', seq: 1, speakerType: SpeakerType.Character, characterId: 'c-lize', speakerName: 'Lize', text: 'Quiet chat.', witnessIds: ['c-frost', 'c-lize'] }],
+      },
+      {
+        id: 't2',
+        seq: 2,
+        role: TurnRole.Assistant,
+        mode: TurnMode.Normal,
+        rawText: 'Hall talk.',
+        sceneNumber: 1,
+        witnessIds: ['c-frost', 'c-lize', 'c-collette'],
+        beats: [{ id: 'b2', seq: 1, speakerType: SpeakerType.Character, characterId: 'c-collette', speakerName: 'Collette', text: 'Hall talk.', witnessIds: ['c-frost', 'c-lize', 'c-collette'] }],
+      },
+      {
+        id: 't3',
+        seq: 3,
+        role: TurnRole.Assistant,
+        mode: TurnMode.Normal,
+        rawText: 'Later talk.',
+        sceneNumber: 1,
+        witnessIds: ['c-frost', 'c-lize', 'c-collette'],
+        beats: [{ id: 'b3', seq: 1, speakerType: SpeakerType.Character, characterId: 'c-lize', speakerName: 'Lize', text: 'Later talk.', witnessIds: ['c-frost', 'c-lize', 'c-collette'] }],
+      },
+    ];
+
+    let replayed = replayBook(log, turns, 'Frost');
+    ScribeLogCore.rule(log, replayed.state, {
+      type: ScribeLogCore.Ruling.AddFact,
+      subject: subjects.Collette,
+      category: 'role',
+      target: null,
+      text: 'camp cook',
+      hidden: false,
+      cite: null,
+      position: 0,
+    });
+    ScribeLogCore.rule(log, replayBook(log, turns, 'Frost').state, {
+      type: ScribeLogCore.Ruling.AddFact,
+      subject: subjects.Al,
+      category: 'role',
+      target: null,
+      text: 'stablehand',
+      hidden: false,
+      cite: null,
+      position: 0,
+    });
+
+    replayed = replayBook(log, turns, 'Frost');
+    ScribeLogCore.append(
+      log,
+      replayed.state,
+      [
+        {
+          type: ScribeAnswer.Type.Scene,
+          day: 1,
+          first: 1,
+          last: 1,
+          place: 'Hall',
+          reach: ScribeAnswer.Reach.Public,
+          present: [
+            { subject: subjects.Frost, label: 'Frost', from: null, until: null },
+            { subject: subjects.Lize, label: 'Lize', from: null, until: null },
+          ],
+          summary: 'Hall',
+        },
+        { type: ScribeAnswer.Type.Fact, label: 'Lize', category: 'trait', target: null, text: 'quiet early', position: 1, hidden: false },
+        { type: ScribeAnswer.Type.ThreadOpen, text: 'Meet "Collette"*waves* at dawn', position: 1 },
+      ],
+      { messages: [replayed.intake.messages[0]], origin: ScribeLogCore.Origin.Story },
+    );
+
+    replayed = replayBook(log, turns, 'Frost');
+    ScribeLogCore.append(
+      log,
+      replayed.state,
+      [
+        {
+          type: ScribeAnswer.Type.Scene,
+          day: 1,
+          first: 1,
+          last: 3,
+          place: 'Hall',
+          reach: ScribeAnswer.Reach.Public,
+          present: [
+            { subject: subjects.Frost, label: 'Frost', from: null, until: null },
+            { subject: subjects.Lize, label: 'Lize', from: null, until: null },
+            { subject: subjects.Collette, label: 'Collette', from: null, until: null },
+          ],
+          summary: 'Hall',
+        },
+        { type: ScribeAnswer.Type.Fact, label: 'Lize', category: 'trait', target: null, text: 'observant later', position: 3, hidden: false },
+      ],
+      { messages: replayed.intake.messages.slice(1, 3), origin: ScribeLogCore.Origin.Story },
+    );
+
+    const state = replayBook(log, turns, 'Frost').state;
+    const turnsById = new Map(turns.map((turn) => [turn.id, turn]));
+    const budget = RequestBudget.create({ contextLength: null, replyReserve: 3000, charsPerToken: 3 });
+    const scene = { location: 'Hall', day: 1, timeLabel: '', sceneType: SceneType.Public, situation: '' };
+
+    const colletteSlice = StorySlice.build({
+      state,
+      viewer: { omniscient: false, subjectId: subjects.Collette, characterId: 'c-collette' },
+      scene,
+      presentSubjectIds: [subjects.Collette, subjects.Lize],
+      namedText: 'I always check with Lize.',
+      budget,
+      turnsById,
+    });
+    assert.equal(colletteSlice.text.includes('Meet "Collette"*waves* at dawn'), false);
+    assert.equal(colletteSlice.text.includes('Known facts:'), false);
+    assert.deepEqual(colletteSlice.text.match(/^- Lize:/gm), ['- Lize:']);
+    assert.equal(
+      colletteSlice.text.indexOf('trait: observant later') < colletteSlice.text.indexOf('trait: quiet early'),
+      true,
+    );
+    assert.equal(colletteSlice.text.includes('stablehand'), false);
+
+    const lizeSlice = StorySlice.build({
+      state,
+      viewer: { omniscient: false, subjectId: subjects.Lize, characterId: 'c-lize' },
+      scene,
+      presentSubjectIds: [subjects.Lize, subjects.Collette],
+      budget,
+      turnsById,
+    });
+    assert.equal(lizeSlice.text.includes('Meet "Collette"*waves* at dawn'), true);
+
+    const rpNamedSlice = StorySlice.build({
+      state,
+      viewer: { omniscient: false, subjectId: subjects.Lize, characterId: 'c-lize' },
+      scene,
+      presentSubjectIds: [subjects.Lize],
+      namedText: '*smiles at Collette*"Hi!"',
+      budget,
+      turnsById,
+    });
+    assert.equal(rpNamedSlice.text.includes('Known facts:\n- Collette: role: camp cook'), true);
+    assert.equal(rpNamedSlice.text.includes('stablehand'), false);
+  });
+
+  it('preserves card earliest decided sequence on re-Pin over player turn without falsely showing the player override as original', () => {
+    const { log, subjects } = createBookWithSubjects(['Frost', 'Lize']);
+    const turns = [
+      { id: 't-black', seq: 1, role: TurnRole.User, mode: TurnMode.Normal, rawText: 'Lize dyes her hair black.', sceneNumber: 1, beats: [] },
+      { id: 't-silver', seq: 2, role: TurnRole.User, mode: TurnMode.Normal, rawText: 'Lize dyes her hair silver.', sceneNumber: 1, beats: [] },
+    ];
+
+    let replayed = replayBook(log, turns, 'Frost');
+    ScribeLogCore.rule(log, replayed.state, {
+      type: ScribeLogCore.Ruling.AddFact,
+      subject: subjects.Lize,
+      category: ScribeCategory.Names.Hair,
+      target: null,
+      text: 'red',
+      hidden: false,
+      cite: null,
+      position: 0,
+      decided: true,
+    });
+
+    replayed = replayBook(log, turns, 'Frost');
+    const redFact = replayed.state.facts.find((fact) => fact.text === 'red');
+    ScribeLogCore.append(
+      log,
+      replayed.state,
+      [
+        {
+          type: ScribeAnswer.Type.Scene,
+          day: 1,
+          first: 1,
+          last: 1,
+          place: 'Hall',
+          reach: ScribeAnswer.Reach.Public,
+          present: [
+            { subject: subjects.Frost, label: 'Frost', from: null, until: null },
+            { subject: subjects.Lize, label: 'Lize', from: null, until: null },
+          ],
+          summary: 'Hall',
+        },
+        { type: ScribeAnswer.Type.Fact, label: 'Lize', category: ScribeCategory.Names.Hair, target: null, text: 'black', position: 1, hidden: false },
+      ],
+      { messages: replayed.intake.messages.slice(0, 1), origin: ScribeLogCore.Origin.Story },
+    );
+
+    replayed = replayBook(log, turns, 'Frost');
+    ScribeLogCore.rule(log, replayed.state, {
+      type: ScribeLogCore.Ruling.Pin,
+      subject: subjects.Lize,
+      category: ScribeCategory.Names.Hair,
+      target: null,
+      text: 'red',
+      hidden: false,
+      winner: redFact.id,
+    });
+
+    const budget = RequestBudget.create({ contextLength: null, replyReserve: 3000, charsPerToken: 3 });
+    const scene = { location: 'Hall', day: 1, timeLabel: '', sceneType: SceneType.Public, situation: '' };
+    const repinState = replayBook(log, turns, 'Frost').state;
+    const afterRepinSlice = StorySlice.build({
+      state: repinState,
+      viewer: { omniscient: false, subjectId: subjects.Frost },
+      scene,
+      presentSubjectIds: [subjects.Frost, subjects.Lize],
+      budget,
+    });
+    assert.equal(afterRepinSlice.text.includes('- Lize: hair: red'), true);
+    assert.equal(afterRepinSlice.text.includes('originally'), false);
+    assert.equal(afterRepinSlice.text.includes('black'), false);
+
+    ScribeLogCore.append(
+      log,
+      repinState,
+      [
+        {
+          type: ScribeAnswer.Type.Scene,
+          day: 1,
+          first: 1,
+          last: 2,
+          place: 'Hall',
+          reach: ScribeAnswer.Reach.Public,
+          present: [
+            { subject: subjects.Frost, label: 'Frost', from: null, until: null },
+            { subject: subjects.Lize, label: 'Lize', from: null, until: null },
+          ],
+          summary: 'Hall',
+        },
+        { type: ScribeAnswer.Type.Fact, label: 'Lize', category: ScribeCategory.Names.Hair, target: null, text: 'silver', position: 2, hidden: false },
+      ],
+      { messages: replayed.intake.messages.slice(1, 2), origin: ScribeLogCore.Origin.Story },
+    );
+
+    const silverState = replayBook(log, turns, 'Frost').state;
+    const afterSilverSlice = StorySlice.build({
+      state: silverState,
+      viewer: { omniscient: false, subjectId: subjects.Frost },
+      scene,
+      presentSubjectIds: [subjects.Frost, subjects.Lize],
+      budget,
+    });
+    assert.equal(afterSilverSlice.text.includes('- Lize: hair: silver (originally red)'), true);
+    assert.equal(afterSilverSlice.text.includes('originally black'), false);
+  });
+
+  it('retains earliest Pin sequence in pinDecided when a story fact is pinned before and after a player override', () => {
+    const { log, subjects } = createBookWithSubjects(['Frost', 'Lize']);
+    const turns = [
+      { id: 't-story-red', seq: 1, role: TurnRole.Assistant, mode: TurnMode.Normal, rawText: 'Lize has red hair.', sceneNumber: 1, beats: [] },
+      { id: 't-player-black', seq: 2, role: TurnRole.User, mode: TurnMode.Normal, rawText: 'Lize dyes her hair black.', sceneNumber: 1, beats: [] },
+    ];
+
+    let replayed = replayBook(log, turns, 'Frost');
+    ScribeLogCore.append(
+      log,
+      replayed.state,
+      [
+        {
+          type: ScribeAnswer.Type.Scene,
+          day: 1,
+          first: 1,
+          last: 1,
+          place: 'Hall',
+          reach: ScribeAnswer.Reach.Public,
+          present: [
+            { subject: subjects.Frost, label: 'Frost', from: null, until: null },
+            { subject: subjects.Lize, label: 'Lize', from: null, until: null },
+          ],
+          summary: 'Hall',
+        },
+        { type: ScribeAnswer.Type.Fact, label: 'Lize', category: ScribeCategory.Names.Hair, target: null, text: 'red', position: 1, hidden: false },
+      ],
+      { messages: replayed.intake.messages.slice(0, 1), origin: ScribeLogCore.Origin.Story },
+    );
+
+    replayed = replayBook(log, turns, 'Frost');
+    const redFact = replayed.state.facts.find((fact) => fact.text === 'red');
+    const firstPinEntry = ScribeLogCore.rule(log, replayed.state, {
+      type: ScribeLogCore.Ruling.Pin,
+      subject: subjects.Lize,
+      category: ScribeCategory.Names.Hair,
+      target: null,
+      text: 'red',
+      hidden: false,
+      winner: redFact.id,
+    });
+
+    replayed = replayBook(log, turns, 'Frost');
+    const playerAppend = ScribeLogCore.append(
+      log,
+      replayed.state,
+      [
+        {
+          type: ScribeAnswer.Type.Scene,
+          day: 1,
+          first: 1,
+          last: 2,
+          place: 'Hall',
+          reach: ScribeAnswer.Reach.Public,
+          present: [
+            { subject: subjects.Frost, label: 'Frost', from: null, until: null },
+            { subject: subjects.Lize, label: 'Lize', from: null, until: null },
+          ],
+          summary: 'Hall',
+        },
+        { type: ScribeAnswer.Type.Fact, label: 'Lize', category: ScribeCategory.Names.Hair, target: null, text: 'black', position: 2, hidden: false },
+      ],
+      { messages: replayed.intake.messages.slice(1, 2), origin: ScribeLogCore.Origin.Story },
+    );
+
+    replayed = replayBook(log, turns, 'Frost');
+    ScribeLogCore.rule(log, replayed.state, {
+      type: ScribeLogCore.Ruling.Pin,
+      subject: subjects.Lize,
+      category: ScribeCategory.Names.Hair,
+      target: null,
+      text: 'red',
+      hidden: false,
+      winner: redFact.id,
+    });
+
+    const finalState = replayBook(log, turns, 'Frost').state;
+    assert.equal(finalState.decidedFacts[redFact.id], firstPinEntry.sequence);
+    assert.equal(finalState.decidedFacts[redFact.id] < playerAppend.entry.sequence, true);
+
+    const budget = RequestBudget.create({ contextLength: null, replyReserve: 3000, charsPerToken: 3 });
+    const scene = { location: 'Hall', day: 1, timeLabel: '', sceneType: SceneType.Public, situation: '' };
+    const slice = StorySlice.build({
+      state: finalState,
+      viewer: { omniscient: false, subjectId: subjects.Frost },
+      scene,
+      presentSubjectIds: [subjects.Frost, subjects.Lize],
+      budget,
+    });
+    assert.equal(slice.text.includes('- Lize: hair: red'), true);
+    assert.equal(slice.text.includes('(originally black)'), false);
+  });
+
+  it('gates private-scene Story aliases via turnsById across Sections 4-6 for absent, witnessing, and omniscient viewers', () => {
+    const { log, subjects } = createBookWithSubjects(['Frost', 'Lize', 'Collette', 'Shadow']);
+    const turns = [
+      {
+        id: 't-public-early',
+        seq: 1,
+        role: TurnRole.User,
+        mode: TurnMode.Normal,
+        rawText: 'Hall meeting.',
+        sceneNumber: 1,
+        witnessIds: ['c-frost', 'c-lize', 'c-collette'],
+        beats: [{ id: 'b-early', seq: 1, speakerType: SpeakerType.Player, characterId: 'c-frost', speakerName: 'Frost', text: 'Hall meeting.', witnessIds: ['c-frost', 'c-lize', 'c-collette'] }],
+      },
+      {
+        id: 't-private-alias',
+        seq: 2,
+        role: TurnRole.Assistant,
+        mode: TurnMode.Normal,
+        rawText: 'Whispered alias exchange.',
+        sceneNumber: 2,
+        witnessIds: ['c-frost'],
+        beats: [{ id: 'b-priv', seq: 1, speakerType: SpeakerType.Character, characterId: 'c-lize', speakerName: 'Lize', text: 'Call me Nightjar and tell Whisper.', witnessIds: ['c-frost', 'c-lize'] }],
+      },
+      {
+        id: 't-public-thread',
+        seq: 3,
+        role: TurnRole.User,
+        mode: TurnMode.Normal,
+        rawText: 'Back in the hall.',
+        sceneNumber: 3,
+        witnessIds: ['c-frost', 'c-lize', 'c-collette'],
+        beats: [{ id: 'b-pub', seq: 1, speakerType: SpeakerType.Player, characterId: 'c-frost', speakerName: 'Frost', text: 'Back in the hall.', witnessIds: ['c-frost', 'c-lize', 'c-collette'] }],
+      },
+    ];
+
+    let replayed = replayBook(log, turns, 'Frost');
+    ScribeLogCore.rule(log, replayed.state, {
+      type: ScribeLogCore.Ruling.AddFact,
+      subject: subjects.Shadow,
+      category: 'role',
+      target: null,
+      text: 'courier',
+      hidden: false,
+      cite: null,
+      position: 0,
+    });
+
+    replayed = replayBook(log, turns, 'Frost');
+    ScribeLogCore.append(
+      log,
+      replayed.state,
+      [
+        {
+          type: ScribeAnswer.Type.Scene,
+          day: 1,
+          first: 1,
+          last: 1,
+          place: 'Hall',
+          reach: ScribeAnswer.Reach.Public,
+          present: [
+            { subject: subjects.Frost, label: 'Frost', from: null, until: null },
+            { subject: subjects.Lize, label: 'Lize', from: null, until: null },
+            { subject: subjects.Collette, label: 'Collette', from: null, until: null },
+          ],
+          summary: 'Hall',
+        },
+        { type: ScribeAnswer.Type.Fact, label: 'Collette', category: ScribeCategory.Settings.RelationCategory, target: 'Nightjar', text: 'avoids contact', position: 1, hidden: false },
+      ],
+      { messages: replayed.intake.messages.slice(0, 1), origin: ScribeLogCore.Origin.Story },
+    );
+
+    replayed = replayBook(log, turns, 'Frost');
+    ScribeLogCore.append(
+      log,
+      replayed.state,
+      [
+        {
+          type: ScribeAnswer.Type.Scene,
+          day: 1,
+          first: 2,
+          last: 2,
+          place: 'Cellar',
+          reach: ScribeAnswer.Reach.Private,
+          present: [
+            { subject: subjects.Frost, label: 'Frost', from: null, until: null },
+            { subject: subjects.Lize, label: 'Lize', from: null, until: null },
+          ],
+          summary: 'Cellar',
+        },
+        { type: ScribeAnswer.Type.Alias, label: 'Lize', name: 'Nightjar', position: 2 },
+        { type: ScribeAnswer.Type.Alias, label: 'Shadow', name: 'Whisper', position: 2 },
+      ],
+      { messages: replayed.intake.messages.slice(1, 2), origin: ScribeLogCore.Origin.Story },
+    );
+
+    replayed = replayBook(log, turns, 'Frost');
+    ScribeLogCore.append(
+      log,
+      replayed.state,
+      [
+        {
+          type: ScribeAnswer.Type.Scene,
+          day: 1,
+          first: 3,
+          last: 3,
+          place: 'Hall',
+          reach: ScribeAnswer.Reach.Public,
+          present: [
+            { subject: subjects.Frost, label: 'Frost', from: null, until: null },
+            { subject: subjects.Lize, label: 'Lize', from: null, until: null },
+            { subject: subjects.Collette, label: 'Collette', from: null, until: null },
+          ],
+          summary: 'Hall',
+        },
+        { type: ScribeAnswer.Type.ThreadOpen, text: 'Ask Nightjar about the map', position: 3 },
+      ],
+      { messages: replayed.intake.messages.slice(2, 3), origin: ScribeLogCore.Origin.Story },
+    );
+
+    const state = replayBook(log, turns, 'Frost').state;
+    const turnsById = new Map(turns.map((turn) => [turn.id, turn]));
+    const budget = RequestBudget.create({ contextLength: null, replyReserve: 3000, charsPerToken: 3 });
+    const scene = { location: 'Hall', day: 1, timeLabel: '', sceneType: SceneType.Public, situation: '' };
+
+    const colletteSlice = StorySlice.build({
+      state,
+      viewer: { omniscient: false, subjectId: subjects.Collette, characterId: 'c-collette' },
+      scene,
+      presentSubjectIds: [subjects.Lize, subjects.Collette],
+      namedText: 'Someone mentioned Whisper.',
+      budget,
+      turnsById,
+    });
+    assert.equal(colletteSlice.text.includes('avoids contact'), false);
+    assert.equal(colletteSlice.text.includes('Ask Nightjar about the map'), false);
+    assert.equal(colletteSlice.text.includes('courier'), false);
+
+    const lizeSlice = StorySlice.build({
+      state,
+      viewer: { omniscient: false, subjectId: subjects.Lize, characterId: 'c-lize' },
+      scene,
+      presentSubjectIds: [subjects.Lize, subjects.Collette],
+      namedText: 'Someone mentioned Whisper.',
+      budget,
+      turnsById,
+    });
+    assert.equal(lizeSlice.text.includes('- Collette -> Nightjar: avoids contact'), true);
+    assert.equal(lizeSlice.text.includes('- Ask Nightjar about the map'), true);
+    assert.equal(lizeSlice.text.includes('Known facts:\n- Shadow: role: courier'), true);
+
+    const narratorSlice = StorySlice.build({
+      state,
+      viewer: { omniscient: true, subjectId: null },
+      scene,
+      presentSubjectIds: [subjects.Lize, subjects.Collette],
+      namedText: 'Someone mentioned Whisper.',
+      budget,
+      turnsById,
+    });
+    assert.equal(narratorSlice.text.includes('- Collette -> Nightjar: avoids contact'), true);
+    assert.equal(narratorSlice.text.includes('- Ask Nightjar about the map'), true);
+    assert.equal(narratorSlice.text.includes('Known facts:\n- Shadow: role: courier'), true);
+
+    const colletteWithoutTurns = StorySlice.build({
+      state,
+      viewer: { omniscient: false, subjectId: subjects.Collette, characterId: 'c-collette' },
+      scene,
+      presentSubjectIds: [subjects.Lize, subjects.Collette],
+      namedText: 'Someone mentioned Whisper.',
+      budget,
+      turnsById: null,
+    });
+    assert.equal(colletteWithoutTurns.text.includes('Known facts:\n- Shadow: role: courier'), true);
   });
 });

@@ -41,6 +41,7 @@ export class ModelCatalog {
   #unservedIds = new Set();
   #uncheckedIds = new Set();
   #verdicts = new Map();
+  #contextLengths = new Map();
   #refreshVerdicts = null;
 
   /**
@@ -536,6 +537,14 @@ export class ModelCatalog {
   }
 
   /**
+   * @param {string} modelId
+   * @returns {number | null}
+   */
+  contextLength(modelId) {
+    return this.#contextLengths.get(modelId) ?? null;
+  }
+
+  /**
    * @returns {void}
    */
   close() {
@@ -598,13 +607,20 @@ export class ModelCatalog {
    * @returns {void}
    */
   #setCache({ models, atMs, atIso, unservedIds, uncheckedIds, verdicts }) {
+    const modelList = models ?? [];
     this.#cachedModels = models;
     this.#cachedAtMs = atMs;
     this.#cachedAtIso = atIso;
-    this.#servedIds = new Set((models ?? []).map((model) => model.id));
+    this.#servedIds = new Set(modelList.map((model) => model.id));
     this.#unservedIds = new Set(unservedIds);
     this.#uncheckedIds = new Set(uncheckedIds);
     this.#verdicts = verdicts;
+    this.#contextLengths = new Map();
+    for (const model of modelList) {
+      if (Number.isInteger(model.contextLength) && model.contextLength > 0) {
+        this.#contextLengths.set(model.id, model.contextLength);
+      }
+    }
   }
 
   /**

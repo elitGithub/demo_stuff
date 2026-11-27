@@ -6111,5 +6111,287 @@ describe('Player-stated changes and model-written fixed values', () => {
       store.close();
     }
   });
+
+  it('exposes decidedFacts only when decided facts exist and covers decidedFacts in describeChanges', () => {
+    const { store, campaign, rowan, mara } = createSeededCampaign();
+    try {
+      const log = ScribeLogCore.create();
+      let state = ScribeReplay.run(log, []);
+      for (const character of [rowan, mara]) {
+        ScribeLogCore.syncCharacterSubject(log, state, {
+          subjectId: character.scribeSubjectId,
+          name: character.name,
+          aliases: character.aliases,
+        });
+        state = ScribeReplay.run(log, []);
+      }
+
+      assert.equal(Object.hasOwn(state, 'decidedFacts'), false);
+
+      const userTurn = { id: 'u-dec', seq: 1, role: TurnRole.User, mode: TurnMode.Normal, rawText: 'Mara dyes her hair black.', sceneNumber: 1, beats: [] };
+      const assistantTurn = { id: 'a-dec', seq: 2, role: TurnRole.Assistant, mode: TurnMode.Normal, rawText: 'Mara laughs.', sceneNumber: 1, beats: [] };
+      const intakeLocal = ScribeIntakeAdapter.fromTurns([userTurn, assistantTurn], { playerName: rowan.name });
+      const localOrder = [userTurn, assistantTurn].map((turn) => ({ id: turn.id, position: turn.seq }));
+      const localFingerprints = new Map(intakeLocal.messages.map((message) => [message.id, message.fingerprint]));
+
+      ScribeLogCore.append(
+        log,
+        state,
+        [
+          {
+            type: ScribeAnswer.Type.Fact,
+            label: mara.name,
+            category: 'trait',
+            target: null,
+            text: 'clever',
+            position: 2,
+            hidden: false,
+          },
+        ],
+        { messages: [intakeLocal.messages[1]], origin: ScribeLogCore.Origin.Story },
+      );
+
+      const beforeDecided = ScribeReplay.run(log, localOrder, null, localFingerprints, null, null, intakeLocal.messages);
+      assert.equal(Object.hasOwn(beforeDecided, 'decidedFacts'), false);
+
+      const cardSequence = log.nextSequence;
+      ScribeLogCore.rule(log, beforeDecided, {
+        type: ScribeLogCore.Ruling.AddFact,
+        subject: mara.scribeSubjectId,
+        category: 'hair',
+        target: null,
+        text: 'red',
+        hidden: false,
+        cite: null,
+        position: 0,
+        decided: true,
+      });
+
+      const afterCard = ScribeReplay.run(log, localOrder, null, localFingerprints, null, null, intakeLocal.messages);
+      assert.equal(Object.hasOwn(afterCard, 'decidedFacts'), true);
+      assert.equal(Object.isFrozen(afterCard.decidedFacts), true);
+      const redFact = afterCard.facts.find((fact) => fact.text === 'red');
+      const traitFact = afterCard.facts.find((fact) => fact.text === 'clever');
+      assert.equal(afterCard.decidedFacts[redFact.id], cardSequence);
+      assert.equal(Object.hasOwn(afterCard.decidedFacts, traitFact.id), false);
+
+      const playerSequence = log.nextSequence;
+      ScribeLogCore.append(
+        log,
+        afterCard,
+        [
+          {
+            type: ScribeAnswer.Type.Fact,
+            label: mara.name,
+            category: 'hair',
+            target: null,
+            text: 'black',
+            position: 1,
+            hidden: false,
+          },
+        ],
+        { messages: [intakeLocal.messages[0]], origin: ScribeLogCore.Origin.Story },
+      );
+
+      const afterPlayer = ScribeReplay.run(log, localOrder, null, localFingerprints, null, null, intakeLocal.messages);
+      const blackFact = afterPlayer.facts.find((fact) => fact.text === 'black');
+      assert.equal(afterPlayer.decidedFacts[redFact.id], cardSequence);
+      assert.equal(afterPlayer.decidedFacts[blackFact.id], playerSequence);
+
+      const scribeService = new ScribeService({ store });
+      const changeLines = scribeService.describeChanges(beforeDecided, afterPlayer);
+      assert.equal(
+        changeLines.some((line) => line.startsWith('Something else in the book would change')),
+        false,
+      );
+
+      ScribeLogCore.withdraw(log, userTurn.id);
+      const afterWithdraw = ScribeReplay.run(log, localOrder, null, localFingerprints, null, null, intakeLocal.messages);
+      assert.equal(Object.hasOwn(afterWithdraw.decidedFacts, blackFact.id), false);
+      assert.equal(afterWithdraw.decidedFacts[redFact.id], cardSequence);
+
+      ScribeLogCore.rule(log, afterWithdraw, {
+        type: ScribeLogCore.Ruling.RemoveFact,
+        fact: redFact.id,
+        exact: true,
+      });
+      const afterRemove = ScribeReplay.run(log, localOrder, null, localFingerprints, null, null, intakeLocal.messages);
+      assert.equal(Object.hasOwn(afterRemove, 'decidedFacts'), false);
+      assert.equal(campaign.id.length > 0, true);
+    } finally {
+      store.close();
+    }
+  });
+
+  it('records superseded Pin decisions in decidedFacts and breaks same-batch player ties by position', () => {
+    const { store, rowan, mara } = createSeededCampaign();
+    try {
+      const log = ScribeLogCore.create();
+      let state = ScribeReplay.run(log, []);
+      for (const character of [rowan, mara]) {
+        ScribeLogCore.syncCharacterSubject(log, state, {
+          subjectId: character.scribeSubjectId,
+          name: character.name,
+          aliases: character.aliases,
+        });
+        state = ScribeReplay.run(log, []);
+      }
+
+      const turns = [
+        { id: 'u1', seq: 1, role: TurnRole.User, mode: TurnMode.Normal, rawText: 'Mara has black hair.', sceneNumber: 1, beats: [] },
+        { id: 'u2', seq: 2, role: TurnRole.User, mode: TurnMode.Normal, rawText: 'Mara dyes hair silver.', sceneNumber: 1, beats: [] },
+        { id: 'a1', seq: 3, role: TurnRole.Assistant, mode: TurnMode.Normal, rawText: 'Mara has auburn eyes.', sceneNumber: 1, beats: [] },
+        { id: 'u3', seq: 4, role: TurnRole.User, mode: TurnMode.Normal, rawText: 'Mara eyes turn gold.', sceneNumber: 1, beats: [] },
+      ];
+      const intakeLocal = ScribeIntakeAdapter.fromTurns(turns, { playerName: rowan.name });
+      const localOrder = turns.map((turn) => ({ id: turn.id, position: turn.seq }));
+      const localFingerprints = new Map(intakeLocal.messages.map((message) => [message.id, message.fingerprint]));
+
+      const pinNullSequence = log.nextSequence;
+      ScribeLogCore.rule(log, state, {
+        type: ScribeLogCore.Ruling.Pin,
+        subject: mara.scribeSubjectId,
+        category: 'hair',
+        target: null,
+        text: 'crimson',
+        hidden: false,
+        winner: null,
+      });
+
+      const afterPinNull = ScribeReplay.run(log, localOrder, null, localFingerprints, null, null, intakeLocal.messages);
+      const crimsonFact = afterPinNull.facts.find((fact) => fact.text === 'crimson');
+      assert.equal(afterPinNull.decidedFacts[crimsonFact.id], pinNullSequence);
+
+      ScribeLogCore.append(
+        log,
+        afterPinNull,
+        [
+          { type: ScribeAnswer.Type.Fact, label: mara.name, category: 'hair', target: null, text: 'black', position: 1, hidden: false },
+          { type: ScribeAnswer.Type.Fact, label: mara.name, category: 'hair', target: null, text: 'silver', position: 2, hidden: false },
+        ],
+        { messages: intakeLocal.messages.slice(0, 2), origin: ScribeLogCore.Origin.Story },
+      );
+
+      const afterBatch = ScribeReplay.run(log, localOrder, null, localFingerprints, null, null, intakeLocal.messages);
+      const hairStatuses = Object.fromEntries(
+        afterBatch.facts.filter((fact) => fact.category === 'hair').map((fact) => [fact.text, fact.status]),
+      );
+      assert.deepEqual(hairStatuses, {
+        crimson: ScribeReplay.Status.Reported,
+        black: ScribeReplay.Status.Reported,
+        silver: ScribeReplay.Status.InForce,
+      });
+      assert.equal(afterBatch.decidedFacts[crimsonFact.id], pinNullSequence);
+
+      ScribeLogCore.append(
+        log,
+        afterBatch,
+        [{ type: ScribeAnswer.Type.Fact, label: mara.name, category: 'eyes', target: null, text: 'auburn', position: 3, hidden: false }],
+        { messages: [intakeLocal.messages[2]], origin: ScribeLogCore.Origin.Story },
+      );
+      const withAuburn = ScribeReplay.run(log, localOrder, null, localFingerprints, null, null, intakeLocal.messages);
+      const auburnFact = withAuburn.facts.find((fact) => fact.text === 'auburn');
+
+      const pinExistingSequence = log.nextSequence;
+      ScribeLogCore.rule(log, withAuburn, {
+        type: ScribeLogCore.Ruling.Pin,
+        subject: mara.scribeSubjectId,
+        category: 'eyes',
+        target: null,
+        text: 'auburn',
+        hidden: false,
+        winner: auburnFact.id,
+      });
+
+      const withPinnedExisting = ScribeReplay.run(log, localOrder, null, localFingerprints, null, null, intakeLocal.messages);
+      assert.equal(withPinnedExisting.decidedFacts[auburnFact.id], pinExistingSequence);
+
+      ScribeLogCore.append(
+        log,
+        withPinnedExisting,
+        [{ type: ScribeAnswer.Type.Fact, label: mara.name, category: 'eyes', target: null, text: 'gold', position: 4, hidden: false }],
+        { messages: [intakeLocal.messages[3]], origin: ScribeLogCore.Origin.Story },
+      );
+      const afterGold = ScribeReplay.run(log, localOrder, null, localFingerprints, null, null, intakeLocal.messages);
+      assert.equal(afterGold.facts.find((fact) => fact.id === auburnFact.id).status, ScribeReplay.Status.Reported);
+      assert.equal(afterGold.decidedFacts[auburnFact.id], pinExistingSequence);
+    } finally {
+      store.close();
+    }
+  });
+
+  it('keeps the earliest decided sequence in decidedFacts when an already-decided card fact is re-pinned after a player override', () => {
+    const { store, rowan, mara } = createSeededCampaign();
+    try {
+      const log = ScribeLogCore.create();
+      let state = ScribeReplay.run(log, []);
+      for (const character of [rowan, mara]) {
+        ScribeLogCore.syncCharacterSubject(log, state, {
+          subjectId: character.scribeSubjectId,
+          name: character.name,
+          aliases: character.aliases,
+        });
+        state = ScribeReplay.run(log, []);
+      }
+
+      const turns = [
+        { id: 't-black', seq: 1, role: TurnRole.User, mode: TurnMode.Normal, rawText: 'Mara dyes her hair black.', sceneNumber: 1, beats: [] },
+        { id: 't-silver', seq: 2, role: TurnRole.User, mode: TurnMode.Normal, rawText: 'Mara dyes her hair silver.', sceneNumber: 1, beats: [] },
+      ];
+      const intakeLocal = ScribeIntakeAdapter.fromTurns(turns, { playerName: rowan.name });
+      const localOrder = turns.map((turn) => ({ id: turn.id, position: turn.seq }));
+      const localFingerprints = new Map(intakeLocal.messages.map((message) => [message.id, message.fingerprint]));
+
+      const cardSequence = log.nextSequence;
+      ScribeLogCore.rule(log, state, {
+        type: ScribeLogCore.Ruling.AddFact,
+        subject: mara.scribeSubjectId,
+        category: ScribeCategory.Names.Hair,
+        target: null,
+        text: 'red',
+        hidden: false,
+        cite: null,
+        position: 0,
+        decided: true,
+      });
+
+      const afterCard = ScribeReplay.run(log, localOrder, null, localFingerprints, null, null, intakeLocal.messages);
+      const redFact = afterCard.facts.find((fact) => fact.text === 'red');
+      assert.equal(afterCard.decidedFacts[redFact.id], cardSequence);
+
+      const playerSequence = log.nextSequence;
+      ScribeLogCore.append(
+        log,
+        afterCard,
+        [{ type: ScribeAnswer.Type.Fact, label: mara.name, category: ScribeCategory.Names.Hair, target: null, text: 'black', position: 1, hidden: false }],
+        { messages: [intakeLocal.messages[0]], origin: ScribeLogCore.Origin.Story },
+      );
+
+      const afterPlayer = ScribeReplay.run(log, localOrder, null, localFingerprints, null, null, intakeLocal.messages);
+      const blackFact = afterPlayer.facts.find((fact) => fact.text === 'black');
+      assert.equal(afterPlayer.facts.find((fact) => fact.id === redFact.id).status, ScribeReplay.Status.Reported);
+      assert.equal(afterPlayer.decidedFacts[blackFact.id], playerSequence);
+
+      const repinSequence = log.nextSequence;
+      assert.equal(repinSequence > playerSequence, true);
+      ScribeLogCore.rule(log, afterPlayer, {
+        type: ScribeLogCore.Ruling.Pin,
+        subject: mara.scribeSubjectId,
+        category: ScribeCategory.Names.Hair,
+        target: null,
+        text: 'red',
+        hidden: false,
+        winner: redFact.id,
+      });
+
+      const afterRepin = ScribeReplay.run(log, localOrder, null, localFingerprints, null, null, intakeLocal.messages);
+      assert.equal(afterRepin.facts.find((fact) => fact.id === redFact.id).status, ScribeReplay.Status.InForce);
+      assert.equal(afterRepin.facts.find((fact) => fact.id === blackFact.id).status, ScribeReplay.Status.Reported);
+      assert.equal(afterRepin.decidedFacts[redFact.id], cardSequence);
+      assert.equal(afterRepin.decidedFacts[blackFact.id], playerSequence);
+    } finally {
+      store.close();
+    }
+  });
 });
 

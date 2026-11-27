@@ -955,6 +955,7 @@ export class ScribeService {
       'editOrigins',
       'editedSince',
       'inheritedForms',
+      'decidedFacts',
     ];
     const subjectCoveredKeys = ['id', 'kind', 'label', 'aka'];
     const factCoveredKeys = ['id', 'status', 'hidden', 'told', 'widened'];

@@ -1452,3 +1452,83 @@ describe('ModelAvailabilityService', () => {
     assert.equal(context.service.blockingMessage('campaign-1'), null);
   });
 });
+
+describe('ModelCatalog.contextLength', () => {
+  it('returns cached context length for listed served models across live refresh and disk cache, and null for unlisted, unserved, unchecked, and null-context models', async (testContext) => {
+    silenceStderr(testContext);
+    const tempDir = createTempDir();
+    const cachePath = path.join(tempDir, 'cache.json');
+    const fake = createFakeModelCatalog({
+      cachePath,
+      nowProvider: () => NowMs,
+      configuredIds: ['cfg/unlisted'],
+      answerList: () => new Response(
+        JSON.stringify({
+          data: [
+            { id: 'ok/served', name: 'Served Model', context_length: 131072 },
+            { id: 'ok/no-ctx', name: 'No Context Model', context_length: null },
+            { id: 'dead/unserved', name: 'Dead Model', context_length: 65536 },
+            { id: 'flaky/unchecked', name: 'Flaky Model', context_length: 32768 },
+          ],
+        }),
+        { status: 200 },
+      ),
+      answerProvider: (modelId) => {
+        switch (modelId) {
+          case 'dead/unserved': {
+            return endpointsResponse(0);
+          }
+          case 'flaky/unchecked': {
+            return new Response('boom', { status: 500 });
+          }
+          default: {
+            return undefined;
+          }
+        }
+      },
+    });
+
+    assert.equal(fake.catalog.contextLength('ok/served'), null);
+    await fake.catalog.listModels();
+    await fake.catalog.checkModel('typed/checked');
+
+    assert.equal(fake.catalog.contextLength('ok/served'), 131072);
+    assert.equal(fake.catalog.contextLength('ok/no-ctx'), null);
+    assert.equal(fake.catalog.contextLength('dead/unserved'), null);
+    assert.equal(fake.catalog.contextLength('flaky/unchecked'), null);
+    assert.equal(fake.catalog.contextLength('cfg/unlisted'), null);
+    assert.equal(fake.catalog.contextLength('typed/checked'), null);
+    assert.equal(fake.catalog.contextLength('never/seen'), null);
+
+    const reloaded = createFakeModelCatalog({ cachePath, nowProvider: () => NowMs + 60_000 });
+    assert.equal(reloaded.listRequests, 0);
+    assert.equal(reloaded.catalog.contextLength('ok/served'), 131072);
+    assert.equal(reloaded.catalog.contextLength('ok/no-ctx'), null);
+    assert.equal(reloaded.catalog.contextLength('dead/unserved'), null);
+    assert.equal(reloaded.catalog.contextLength('flaky/unchecked'), null);
+    assert.equal(reloaded.catalog.contextLength('cfg/unlisted'), null);
+    assert.equal(reloaded.catalog.contextLength('never/seen'), null);
+
+    let includeContext = true;
+    const mutatingFake = createFakeModelCatalog({
+      nowProvider: () => NowMs,
+      answerList: () => {
+        const models = includeContext
+          ? [
+              { id: 'ok/served', name: 'Served', context_length: 65536 },
+              { id: 'ok/dropped', name: 'Dropped', context_length: 32768 },
+            ]
+          : [{ id: 'ok/served', name: 'Served', context_length: null }];
+        return new Response(JSON.stringify({ data: models }), { status: 200 });
+      },
+    });
+    await mutatingFake.catalog.listModels({ refresh: true });
+    assert.equal(mutatingFake.catalog.contextLength('ok/served'), 65536);
+    assert.equal(mutatingFake.catalog.contextLength('ok/dropped'), 32768);
+
+    includeContext = false;
+    await mutatingFake.catalog.listModels({ refresh: true });
+    assert.equal(mutatingFake.catalog.contextLength('ok/served'), null);
+    assert.equal(mutatingFake.catalog.contextLength('ok/dropped'), null);
+  });
+});

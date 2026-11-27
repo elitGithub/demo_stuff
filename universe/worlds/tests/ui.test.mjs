@@ -11,13 +11,108 @@ import { ChatView } from '../public/components/ChatView.mjs';
 import { ComposerBar } from '../public/components/ComposerBar.mjs';
 import { ConfirmModal } from '../public/components/ConfirmModal.mjs';
 import { InspectorDrawer } from '../public/components/InspectorDrawer.mjs';
+import { TurnEngine } from '../src/engine/TurnEngine.mjs';
 import { Security } from '../src/http/Security.mjs';
 import { OpenRouterClient } from '../src/openrouter/OpenRouterClient.mjs';
 import { WorldsServer } from '../src/server.mjs';
 import { SqliteStore } from '../src/store/SqliteStore.mjs';
+import { AvatarToken } from '../src/store/enums/AvatarToken.mjs';
+import { CharacterTier } from '../src/store/enums/CharacterTier.mjs';
+import { SceneStyle } from '../src/store/enums/SceneStyle.mjs';
+import { SpeakerType } from '../src/store/enums/SpeakerType.mjs';
+import { TurnMode } from '../src/store/enums/TurnMode.mjs';
+import { TurnRole } from '../src/store/enums/TurnRole.mjs';
 import { createFakeModelCatalog } from './support/createFakeModelCatalog.mjs';
 
 const PublicDirPath = path.resolve(import.meta.dirname, '..', 'public');
+
+const UiConstants = Object.freeze({
+  PhaseLabel: Object.freeze({
+    Directing: 'Directing...',
+    DirectorDone: 'Scene planned...',
+    Narrating: 'Narrating...',
+    Replying: 'Replying...',
+    StreamingHeader: 'Replying...',
+    RegeneratingHeader: 'Regenerating reply...',
+  }),
+  SceneStyleLabel: Object.freeze({
+    Automatic: 'Automatic',
+    ActiveNone: 'Active style: None',
+    ActiveCombat: 'Active style: Combat',
+    ActiveCombatPinned: 'Active style: Combat (pinned)',
+    ActiveBanterPinned: 'Active style: Banter (pinned)',
+  }),
+  SettingsText: Object.freeze({
+    NarratorModelLabel: 'Narrator model',
+    OldComposerModelLabel: 'Composer model',
+    MaxRepliesLabel: 'Replies per character per turn',
+    ReplyReserveLabel: 'Reply length cap (tokens)',
+    SceneStylesHeading: 'Scene styles',
+    SavingStatus: 'Saving...',
+    SavedSuccess: 'Settings saved.',
+  }),
+  ThoughtsText: Object.freeze({
+    ButtonLabel: 'Thoughts',
+    TogglePrefix: 'beat-thoughts-toggle-',
+    PanelPrefix: 'beat-thoughts-panel-',
+  }),
+  HttpMethod: Object.freeze({
+    Put: 'PUT',
+  }),
+  HttpHeader: Object.freeze({
+    ContentType: 'content-type',
+  }),
+  ContentType: Object.freeze({
+    Sse: 'text/event-stream',
+  }),
+  ModelFinishReason: Object.freeze({
+    Stop: 'stop',
+  }),
+  HealthStatus: Object.freeze({
+    Ok: 'ok',
+  }),
+  SyncStatus: Object.freeze({
+    LocalOnly: 'local_only',
+  }),
+  MemorySection: Object.freeze({
+    Subjects: 'subjects',
+  }),
+  SseEvent: Object.freeze({
+    Phase: 'phase',
+    Done: 'done',
+  }),
+  DrawerTab: Object.freeze({
+    Scene: 'Scene',
+    Settings: 'Settings',
+  }),
+  CampaignId: Object.freeze({
+    First: 'camp-1',
+    Second: 'camp-2',
+  }),
+  CampaignTitle: Object.freeze({
+    Second: 'Second',
+  }),
+  AriaAttribute: Object.freeze({
+    Expanded: 'aria-expanded',
+    True: 'true',
+    False: 'false',
+  }),
+  PinTestText: Object.freeze({
+    CampaignAError: 'Campaign A pin update failed.',
+    TurnId: 'turn-camp-1',
+    BeatId: 'beat-camp-1',
+    SpeakerName: 'Lize',
+    BeatText: 'Watch the pier.',
+    BeatThoughts: 'Keep watch quietly.',
+    TurnRawText: 'Watch the pier.',
+  }),
+  DefaultLocalDirName: 'local',
+  DefaultDbName: 'worlds.sqlite',
+  DefaultSecretsName: 'secrets.json',
+  DefaultSyncStateName: 'sync-state.json',
+  DefaultConflictsName: 'conflicts',
+  TempPrefix: 'worlds-ui-task8-',
+});
 
 /**
  * @param {string} directoryPath
@@ -704,11 +799,14 @@ function buildBrowserSettings() {
       recurring: 'vendor/model-004',
       scribe: 'vendor/model-005',
     },
+    sceneStyles: { ...SceneStyle.Defaults },
     publicOdds: 8,
     privateOdds: 30,
-    scribeInterval: 10,
+    scribeInterval: 1,
     pedantEnabled: true,
     dailyWarnUsd: null,
+    maxRepliesPerCharacter: 1,
+    replyReserve: 3000,
     apiKey: { configured: true, source: 'env' },
   };
 }
@@ -829,7 +927,7 @@ function listAlertTexts(root, levelClass) {
 }
 
 /**
- * @param {{catalogHandler?: (request: object) => Promise<{status: number, body: object}> | {status: number, body: object}, refreshHandler?: (request: object) => Promise<{status: number, body: object}> | {status: number, body: object}, settingsPutHandler?: (request: object) => {status: number, body: object}, characterHandler?: (request: object) => {status: number, body: object}, characterGetHandler?: (request: object) => Promise<{status: number, body: object}> | {status: number, body: object}, castItems?: Array<object>, secondCampaign?: boolean, secondCastItems?: Array<object>, ignoreAbortForModels?: boolean}} [options]
+ * @param {{catalogHandler?: (request: object) => Promise<{status: number, body: object}> | {status: number, body: object}, refreshHandler?: (request: object) => Promise<{status: number, body: object}> | {status: number, body: object}, settingsPutHandler?: (request: object) => {status: number, body: object}, campaignPatchHandler?: (request: object) => Promise<{status: number, body: object}> | {status: number, body: object}, characterHandler?: (request: object) => {status: number, body: object}, characterGetHandler?: (request: object) => Promise<{status: number, body: object}> | {status: number, body: object}, castItems?: Array<object>, secondCampaign?: boolean, secondCastItems?: Array<object>, turnsByCampaign?: Record<string, Array<object>> | null, ignoreAbortForModels?: boolean}} [options]
  * @returns {{app: WorldsApp, shell: object, documentRef: object, requests: Array<object>, unexpected: Array<string>}}
  * @throws {TypeError}
  */
@@ -837,11 +935,13 @@ function createBrowserHarness({
   catalogHandler = () => ({ status: 200, body: buildCatalog(2) }),
   refreshHandler = () => ({ status: 200, body: buildCatalog(2) }),
   settingsPutHandler = (request) => ({ status: 200, body: { ...request.body, warnings: [] } }),
+  campaignPatchHandler = null,
   characterHandler = (request) => ({ status: 200, body: { id: 'char-1', slug: 'maya', name: 'Maya', isPlayer: false, warnings: [], ...request.body } }),
   characterGetHandler = () => ({ status: 200, body: buildCharacter() }),
   castItems = [],
   secondCampaign = false,
   secondCastItems = [],
+  turnsByCampaign = null,
   ignoreAbortForModels = false,
 } = {}) {
   const { documentRef, createRootShell } = createFakeDomEnvironment();
@@ -890,6 +990,10 @@ function createBrowserHarness({
       if (routeKey === 'GET /api/campaigns') {
         return jsonResponse(200, buildPage(secondCampaign ? [BrowserCampaign, { ...BrowserCampaign, id: 'camp-2', title: 'Second' }] : [BrowserCampaign]));
       }
+      if (campaignPatchHandler !== null && /^PATCH \/api\/campaigns\/camp-[12]$/.test(routeKey)) {
+        const answer = await campaignPatchHandler(record);
+        return jsonResponse(answer.status, answer.body);
+      }
       if (routeKey === 'GET /api/campaigns/camp-1/characters') {
         return jsonResponse(200, buildPage(castItems));
       }
@@ -900,7 +1004,12 @@ function createBrowserHarness({
         const answer = await characterGetHandler(record);
         return jsonResponse(answer.status, answer.body);
       }
-      if (/^GET \/api\/campaigns\/camp-[12]\/(turns|findings)$/.test(routeKey)) {
+      const turnsMatch = /^GET \/api\/campaigns\/(camp-[12])\/turns$/.exec(routeKey);
+      if (turnsMatch !== null) {
+        const turnItems = turnsByCampaign !== null ? (turnsByCampaign[turnsMatch[1]] ?? []) : [];
+        return jsonResponse(200, buildPage(turnItems));
+      }
+      if (/^GET \/api\/campaigns\/camp-[12]\/findings$/.test(routeKey)) {
         return jsonResponse(200, buildPage([]));
       }
       if (/^GET \/api\/campaigns\/camp-[12]\/memory$/.test(routeKey)) {
@@ -1076,6 +1185,12 @@ describe('Static Screen-Law, Security, and Code-Law Audit across public/**', () 
     assert.ok(indexHtml.includes('<script type="module" src="/app.mjs"></script>'));
 
     const stylesCss = fs.readFileSync(path.join(PublicDirPath, 'styles.css'), 'utf8');
+    for (const cssRule of parseCssRules(stylesCss)) {
+      if (cssRule.selector !== ':root') {
+        assert.equal(rawHexColorPattern.test(cssRule.body), false, `Raw hex color outside :root in ${cssRule.selector}`);
+        assert.equal(rawFuncColorPattern.test(cssRule.body), false, `Raw rgb/hsl color outside :root in ${cssRule.selector}`);
+      }
+    }
     for (const requiredClass of [
       '.avatar-sage',
       '.avatar-rose',
@@ -1087,6 +1202,12 @@ describe('Static Screen-Law, Security, and Code-Law Audit across public/**', () 
       '.avatar-coral',
       '.avatar-narrator',
       '.avatar-player',
+      '.beat-thoughts-toggle',
+      '.beat-thoughts',
+      '.scene-style-meta',
+      '.scene-style-status',
+      '.settings-styles-section',
+      '.settings-style-textarea',
       ':focus-visible',
       '@media (prefers-reduced-motion: reduce)',
       '@media (min-width: 960px)',
@@ -3944,6 +4065,975 @@ describe('Browser model catalog: boot, races, dropdowns, status lines, alerts an
       assert.equal(refreshRequest.headers['X-Worlds-CSRF'], 'ui-test-csrf');
     }
     assert.equal(harness.requests.filter((request) => request.method === 'GET' && request.url === '/api/models').length, 1);
+    assert.deepEqual(harness.unexpected, []);
+  });
+});
+
+describe('Reply tuning UI: sequential boxes, Thoughts toggle, phase labels, Settings fields, and Scene style pin', () => {
+  const cleanups = [];
+
+  after(async () => {
+    for (const cleanupFn of cleanups) {
+      await cleanupFn();
+    }
+  });
+
+  /**
+   * @param {string} rawText
+   * @param {number} promptTokens
+   * @param {number} completionTokens
+   * @returns {Response}
+   */
+  function createSseModelResponse(rawText, promptTokens, completionTokens) {
+    const encoder = new TextEncoder();
+    const bodyStream = new ReadableStream({
+      start(controller) {
+        controller.enqueue(
+          encoder.encode(`data: ${JSON.stringify({ choices: [{ delta: { content: rawText } }] })}\n\n`),
+        );
+        controller.enqueue(
+          encoder.encode(
+            `data: ${JSON.stringify({ choices: [{ delta: {}, finish_reason: UiConstants.ModelFinishReason.Stop }], usage: { prompt_tokens: promptTokens, completion_tokens: completionTokens, cost: 0.001 } })}\n\n`,
+          ),
+        );
+        controller.enqueue(encoder.encode('data: [DONE]\n\n'));
+        controller.close();
+      },
+    });
+    return new Response(bodyStream, {
+      status: 200,
+      headers: { [UiConstants.HttpHeader.ContentType]: UiConstants.ContentType.Sse },
+    });
+  }
+
+  it('streams sequential boxes in order with live phase labels, and toggles private Thoughts without leaking into .beat-text', async () => {
+    const tempRoot = fs.mkdtempSync(path.join(os.tmpdir(), UiConstants.TempPrefix));
+    const localDir = path.join(tempRoot, UiConstants.DefaultLocalDirName);
+    fs.mkdirSync(localDir, { recursive: true, mode: 0o700 });
+    const config = Object.freeze({
+      port: 0,
+      rootDir: tempRoot,
+      localDir,
+      dbPath: path.join(localDir, UiConstants.DefaultDbName),
+      secretsPath: path.join(localDir, UiConstants.DefaultSecretsName),
+      syncStatePath: path.join(localDir, UiConstants.DefaultSyncStateName),
+      conflictsDir: path.join(localDir, UiConstants.DefaultConflictsName),
+      envApiKey: null,
+      r2: null,
+    });
+
+    const store = new SqliteStore(config.dbPath);
+    const stepGates = [createDeferred(), createDeferred(), createDeferred(), createDeferred()];
+    const stepEntered = [createDeferred(), createDeferred(), createDeferred(), createDeferred()];
+    let callCounter = 0;
+
+    const client = new OpenRouterClient({
+      apiKeyProvider: () => 'sk-task8-e2e-key',
+      retryOptions: { delaysMs: [0], wait: async () => {} },
+      fetchImpl: async () => {
+        const currentIndex = callCounter;
+        callCounter += 1;
+        stepEntered[currentIndex].resolve(true);
+        return await stepGates[currentIndex].promise;
+      },
+      onSpend: (dto) => store.recordSpend(dto),
+    });
+
+    const modelIds = ['openrouter/dir', 'openrouter/comp', 'openrouter/main', 'openrouter/rec', 'openrouter/scribe'];
+    const server = await WorldsServer.create({
+      config,
+      store,
+      client,
+      publicDir: PublicDirPath,
+      modelCatalog: createFakeModelCatalog({ modelIds }).catalog,
+    });
+    const started = await server.start();
+    cleanups.push(async () => {
+      await server.stop();
+      store.close();
+      fs.rmSync(tempRoot, { recursive: true, force: true });
+    });
+
+    const { documentRef, createRootShell } = createFakeDomEnvironment();
+    const shell = createRootShell();
+    const liveApi = new WorldsApi({
+      baseUrl: started.url,
+      csrfToken: started.csrfToken,
+      fetchImpl: (url, init) => {
+        return fetch(url, {
+          ...init,
+          headers: {
+            ...(init?.headers ?? {}),
+            Origin: started.url,
+          },
+        });
+      },
+    });
+
+    await liveApi.updateSettings({
+      models: {
+        director: modelIds[0],
+        composer: modelIds[1],
+        main: modelIds[2],
+        recurring: modelIds[3],
+        scribe: modelIds[4],
+      },
+      publicOdds: 0,
+      privateOdds: 0,
+      scribeInterval: 0,
+      pedantEnabled: false,
+      dailyWarnUsd: null,
+    });
+
+    const campaign = await liveApi.createCampaign({
+      title: 'Harbor Crossing',
+      premise: 'Dockside standoff.',
+    });
+    const frost = await liveApi.createCharacter(campaign.id, {
+      slug: 'frost',
+      name: 'Frost',
+      isPlayer: true,
+      tier: CharacterTier.Main,
+      avatarToken: AvatarToken.Slate,
+    });
+    const lize = await liveApi.createCharacter(campaign.id, {
+      slug: 'lize',
+      name: 'Lize',
+      tier: CharacterTier.Main,
+      avatarToken: AvatarToken.Rose,
+    });
+    const yumi = await liveApi.createCharacter(campaign.id, {
+      slug: 'yumi',
+      name: 'Yumi',
+      tier: CharacterTier.Main,
+      avatarToken: AvatarToken.Teal,
+    });
+    await liveApi.updateCampaign(campaign.id, {
+      sceneState: {
+        ...campaign.sceneState,
+        location: 'West Jetty',
+        presentIds: [frost.id, lize.id, yumi.id],
+      },
+    });
+
+    const app = new WorldsApp({ api: liveApi, rootElement: shell, documentRef });
+    await app.init();
+
+    const composerBar = shell.querySelector('#composer-bar');
+    const composerInput = shell.querySelector('#composer-text-input');
+    const chatContainer = shell.querySelector('#chat-view');
+    const phaseBanner = composerBar.querySelector('.phase-banner');
+    const sendButton = findButton(composerBar, 'Send');
+
+    composerInput.value = 'Did anyone bring a lantern?';
+    await composerInput.dispatchEvent('input');
+    const turnPromise = sendButton.dispatchEvent('click');
+
+    try {
+      await stepEntered[0].promise;
+      await waitUntil(() => phaseBanner.textContent === UiConstants.PhaseLabel.Directing);
+      const streamingAssistantCard = chatContainer
+        .querySelectorAll('.turn-streaming')
+        .find((card) => card.classList.contains('turn-role-assistant'));
+      assert.notEqual(streamingAssistantCard, undefined);
+      assert.equal(
+        streamingAssistantCard.querySelector('.turn-header').textContent,
+        UiConstants.PhaseLabel.StreamingHeader,
+      );
+      assert.equal(chatContainer.querySelectorAll('.beat-thoughts-toggle').length, 0);
+
+      const directorXml = [
+        '<scene changed="no">West Jetty | day 1 | Dusk | public</scene>',
+        '<situation>Lize and Yumi check the crates near Frost.</situation>',
+        '<input>player</input>',
+        '<present>frost, lize, yumi</present>',
+        '<remote></remote>',
+        '<walkons enter="" leave=""/>',
+        '<encounter accepted="no"></encounter>',
+        '<pacing>group_banter</pacing>',
+        '<narrator>Describe the lantern light on the pier.</narrator>',
+        '<direction to="lize" reacting="player" length="short">Answer Frost first.</direction>',
+        '<direction to="yumi" reacting="lize" length="short">Follow Lize.</direction>',
+        '<style>combat</style>',
+      ].join('\n');
+      stepGates[0].resolve(
+        jsonResponse(200, {
+          choices: [{ message: { content: directorXml }, finish_reason: UiConstants.ModelFinishReason.Stop }],
+          usage: { prompt_tokens: 45, completion_tokens: 30, cost: 0.002 },
+        }),
+      );
+
+      await stepEntered[1].promise;
+      await waitUntil(() => phaseBanner.textContent === UiConstants.PhaseLabel.Narrating);
+      assert.equal(chatContainer.querySelectorAll('.beat-thoughts-toggle').length, 0);
+      stepGates[1].resolve(createSseModelResponse('<narration>Salt spray drifted across the pier.</narration>', 30, 15));
+
+      await stepEntered[2].promise;
+      await waitUntil(() => phaseBanner.textContent === 'Lize is replying...');
+      assert.equal(chatContainer.querySelectorAll('.beat-thoughts-toggle').length, 0);
+      stepGates[2].resolve(
+        createSseModelResponse(
+          '<thoughts>Keep my dagger hidden.</thoughts>\n<reply>"Watch the dock," *Lize murmured.*</reply>\n<next>none</next>',
+          40,
+          20,
+        ),
+      );
+
+      await stepEntered[3].promise;
+      await waitUntil(() => phaseBanner.textContent === 'Yumi is replying...');
+      const streamingText = chatContainer
+        .querySelectorAll('.turn-streaming')
+        .find((card) => card.classList.contains('turn-role-assistant')).textContent;
+      assert.ok(streamingText.includes('Salt spray drifted across the pier.'));
+      assert.ok(streamingText.includes('Watch the dock,'));
+      assert.equal(streamingText.includes('Keep my dagger hidden.'), false);
+      assert.equal(chatContainer.querySelectorAll('.beat-thoughts-toggle').length, 0);
+      stepGates[3].resolve(
+        createSseModelResponse(
+          '<thoughts>Lize looks tense.</thoughts>\n<reply>*Yumi nodded slowly.* "I see them."</reply>\n<next>none</next>',
+          42,
+          22,
+        ),
+      );
+
+      await turnPromise;
+    } finally {
+      for (const gate of stepGates) {
+        gate.resolve(createSseModelResponse('', 1, 1));
+      }
+      await turnPromise;
+    }
+    await waitUntil(() => sendButton.textContent === 'Send');
+
+    const turnCards = chatContainer.querySelectorAll('.turn-card');
+    assert.equal(turnCards.length, 2);
+    const assistantCard = turnCards[1];
+    const beatRows = assistantCard.querySelectorAll('.beat-row');
+    assert.equal(beatRows.length, 3);
+    assert.deepEqual(
+      beatRows.map((row) => row.querySelector('.beat-speaker').textContent),
+      ['Narrator', 'Lize', 'Yumi'],
+    );
+    assert.deepEqual(
+      beatRows.map((row) => row.querySelector('.beat-text').textContent),
+      [
+        'Salt spray drifted across the pier.',
+        '"Watch the dock," *Lize murmured.*',
+        '*Yumi nodded slowly.* "I see them."',
+      ],
+    );
+
+    assert.equal(beatRows[0].querySelector('.beat-thoughts-toggle'), null);
+    const lizeToggle = beatRows[1].querySelector('.beat-thoughts-toggle');
+    const yumiToggle = beatRows[2].querySelector('.beat-thoughts-toggle');
+    assert.notEqual(lizeToggle, null);
+    assert.notEqual(yumiToggle, null);
+    assert.equal(lizeToggle.textContent, UiConstants.ThoughtsText.ButtonLabel);
+    assert.equal(lizeToggle.getAttribute('aria-expanded'), 'false');
+    assert.equal(yumiToggle.getAttribute('aria-expanded'), 'false');
+    assert.ok(lizeToggle.id.startsWith(UiConstants.ThoughtsText.TogglePrefix));
+    const lizeBeatId = lizeToggle.id.slice(UiConstants.ThoughtsText.TogglePrefix.length);
+    assert.equal(lizeToggle.getAttribute('aria-controls'), `${UiConstants.ThoughtsText.PanelPrefix}${lizeBeatId}`);
+    assert.equal(chatContainer.textContent.includes('Keep my dagger hidden.'), false);
+    assert.equal(chatContainer.textContent.includes('Lize looks tense.'), false);
+    assert.equal(chatContainer.querySelectorAll('.beat-thoughts').length, 0);
+
+    await lizeToggle.dispatchEvent('click');
+    const reopenedToggle = chatContainer.querySelector(`#${UiConstants.ThoughtsText.TogglePrefix}${lizeBeatId}`);
+    assert.equal(reopenedToggle.getAttribute('aria-expanded'), 'true');
+    assert.equal(documentRef.activeElement, reopenedToggle);
+    const thoughtsPanel = chatContainer.querySelector(`#${UiConstants.ThoughtsText.PanelPrefix}${lizeBeatId}`);
+    assert.notEqual(thoughtsPanel, null);
+    assert.equal(thoughtsPanel.className, 'beat-thoughts');
+    assert.equal(thoughtsPanel.textContent, 'Keep my dagger hidden.');
+    const refreshedRows = chatContainer.querySelectorAll('.turn-card')[1].querySelectorAll('.beat-row');
+    assert.equal(refreshedRows[1].querySelector('.beat-text').textContent, '"Watch the dock," *Lize murmured.*');
+    assert.equal(refreshedRows[1].querySelector('.beat-text').textContent.includes('Keep my dagger hidden.'), false);
+    assert.equal(refreshedRows[2].querySelector('.beat-thoughts-toggle').getAttribute('aria-expanded'), 'false');
+    assert.equal(chatContainer.textContent.includes('Lize looks tense.'), false);
+
+    await reopenedToggle.dispatchEvent('click');
+    const collapsedToggle = chatContainer.querySelector(`#${UiConstants.ThoughtsText.TogglePrefix}${lizeBeatId}`);
+    assert.equal(collapsedToggle.getAttribute('aria-expanded'), 'false');
+    assert.equal(documentRef.activeElement, collapsedToggle);
+    assert.equal(chatContainer.querySelector(`#${UiConstants.ThoughtsText.PanelPrefix}${lizeBeatId}`), null);
+    assert.equal(chatContainer.textContent.includes('Keep my dagger hidden.'), false);
+
+    const drawerEl = shell.querySelector('#inspector-drawer');
+    assert.ok(drawerEl.textContent.includes(UiConstants.SceneStyleLabel.ActiveCombat));
+  });
+
+  it('handles Thoughts edge cases, clears expanded thoughts on campaign deactivation, and shows Replying fallback or Regenerating header', async () => {
+    const { documentRef, createRootShell } = createFakeDomEnvironment();
+    const shell = createRootShell();
+    const chatContainer = shell.querySelector('#chat-view');
+    const chatView = new ChatView({
+      container: chatContainer,
+      documentRef,
+      onLoadEarlier: async () => {},
+      onRegenerate: async () => {},
+      onSaveEdit: async () => {},
+      onRequestDelete: () => {},
+    });
+    chatView.setCampaignActive(true);
+    chatView.setTurnsPage({
+      total: 1,
+      nextCursor: null,
+      items: [
+        {
+          id: 'turn-1',
+          seq: 1,
+          role: TurnRole.Assistant,
+          mode: TurnMode.Normal,
+          sceneNumber: 1,
+          rawText: 'Line one',
+          beats: [
+            {
+              id: 'beat-narrator',
+              speakerType: SpeakerType.Narrator,
+              characterId: null,
+              speakerName: SpeakerType.label(SpeakerType.Narrator),
+              text: 'Rain falls.',
+              mindPacket: { thoughts: 'Should never render.' },
+            },
+            {
+              id: 'beat-blank',
+              speakerType: SpeakerType.Character,
+              characterId: 'char-1',
+              speakerName: 'Lize',
+              text: 'Hello.',
+              mindPacket: { thoughts: '   ' },
+            },
+            {
+              id: 'beat-xss',
+              speakerType: SpeakerType.Character,
+              characterId: 'char-2',
+              speakerName: 'Yumi',
+              text: 'Look closely.',
+              mindPacket: { thoughts: '  <script>alert(1)</script> Secret motive.  ' },
+            },
+          ],
+        },
+      ],
+    });
+
+    assert.equal(chatContainer.querySelector(`#${UiConstants.ThoughtsText.TogglePrefix}beat-narrator`), null);
+    assert.equal(chatContainer.querySelector(`#${UiConstants.ThoughtsText.TogglePrefix}beat-blank`), null);
+    const xssToggle = chatContainer.querySelector(`#${UiConstants.ThoughtsText.TogglePrefix}beat-xss`);
+    assert.notEqual(xssToggle, null);
+    await xssToggle.dispatchEvent('click');
+
+    const xssPanel = chatContainer.querySelector(`#${UiConstants.ThoughtsText.PanelPrefix}beat-xss`);
+    assert.equal(xssPanel.textContent, '<script>alert(1)</script> Secret motive.');
+    assert.equal(chatContainer.querySelectorAll('script').length, 0);
+
+    chatView.setCampaignActive(false);
+    chatView.setCampaignActive(true);
+    chatView.setTurnsPage({
+      total: 1,
+      nextCursor: null,
+      items: [
+        {
+          id: 'turn-1',
+          seq: 1,
+          role: TurnRole.Assistant,
+          mode: TurnMode.Normal,
+          sceneNumber: 1,
+          rawText: 'Look closely.',
+          beats: [
+            {
+              id: 'beat-xss',
+              speakerType: SpeakerType.Character,
+              characterId: 'char-2',
+              speakerName: 'Yumi',
+              text: 'Look closely.',
+              mindPacket: { thoughts: 'Secret motive.' },
+            },
+          ],
+        },
+      ],
+    });
+    assert.equal(
+      chatContainer.querySelector(`#${UiConstants.ThoughtsText.TogglePrefix}beat-xss`).getAttribute('aria-expanded'),
+      'false',
+    );
+    assert.equal(chatContainer.querySelector(`#${UiConstants.ThoughtsText.PanelPrefix}beat-xss`), null);
+
+    chatView.startStreaming({ regenerating: true });
+    const regenCard = chatContainer
+      .querySelectorAll('.turn-streaming')
+      .find((card) => card.classList.contains('turn-role-assistant'));
+    assert.notEqual(regenCard, undefined);
+    assert.equal(
+      regenCard.querySelector('.turn-header').textContent,
+      UiConstants.PhaseLabel.RegeneratingHeader,
+    );
+    chatView.clearStreaming();
+
+    const harnessShell = createRootShell();
+    const gate = createDeferred();
+    const phaseLog = [];
+    const api = new WorldsApi({
+      csrfToken: 'ui-phase-csrf',
+      /**
+       * @param {string} url
+       * @returns {Promise<Response>}
+       * @throws {TypeError}
+       */
+      fetchImpl: async (url) => {
+        const parsed = new URL(url, 'http://worlds.example');
+        if (parsed.pathname === '/api/models') {
+          return jsonResponse(200, buildCatalog(1));
+        }
+        if (parsed.pathname === '/api/health') {
+          return jsonResponse(200, {
+            status: UiConstants.HealthStatus.Ok,
+            sync: { status: UiConstants.SyncStatus.LocalOnly, mode: UiConstants.SyncStatus.LocalOnly },
+            dailySpend: { totalUsd: 0, unpricedCount: 0 },
+          });
+        }
+        if (parsed.pathname === '/api/settings') {
+          return jsonResponse(200, buildBrowserSettings());
+        }
+        if (parsed.pathname === '/api/campaigns') {
+          return jsonResponse(200, buildPage([BrowserCampaign]));
+        }
+        if (parsed.pathname === '/api/campaigns/camp-1/characters') {
+          return jsonResponse(200, buildPage([]));
+        }
+        if (parsed.pathname === '/api/campaigns/camp-1/turns' && url.includes('limit=')) {
+          return jsonResponse(200, buildPage([]));
+        }
+        if (parsed.pathname === '/api/campaigns/camp-1/findings') {
+          return jsonResponse(200, buildPage([]));
+        }
+        if (parsed.pathname === '/api/campaigns/camp-1/memory') {
+          return jsonResponse(200, {
+            ...buildPage([]),
+            section: UiConstants.MemorySection.Subjects,
+            dirty: false,
+            lastTurnSeq: 0,
+            turnsSinceScribe: 0,
+            counts: { subjects: 0, facts: 0, relations: 0, threads: 0, rulings: 0 },
+          });
+        }
+        if (parsed.pathname === '/api/campaigns/camp-1/turns') {
+          const encoder = new TextEncoder();
+          const stream = new ReadableStream({
+            async start(controller) {
+              for (const payload of [
+                { phase: TurnEngine.Settings.Phase.DirectorDone },
+                { phase: TurnEngine.Settings.Phase.Replying, name: '   ' },
+              ]) {
+                controller.enqueue(encoder.encode(`event: ${UiConstants.SseEvent.Phase}\ndata: ${JSON.stringify(payload)}\n\n`));
+                await new Promise((resolve) => setTimeout(resolve, 10));
+              }
+              await gate.promise;
+              controller.enqueue(
+                encoder.encode(
+                  `event: ${UiConstants.SseEvent.Done}\ndata: ${JSON.stringify({ sceneState: BrowserCampaign.sceneState })}\n\n`,
+                ),
+              );
+              controller.close();
+            },
+          });
+          return new Response(stream, {
+            status: 200,
+            headers: { [UiConstants.HttpHeader.ContentType]: UiConstants.ContentType.Sse },
+          });
+        }
+        return jsonResponse(404, { error: 'Not found' });
+      },
+    });
+    const app = new WorldsApp({ api, rootElement: harnessShell, documentRef });
+    await app.init();
+
+    const banner = harnessShell.querySelector('#composer-bar').querySelector('.phase-banner');
+    const textInput = harnessShell.querySelector('#composer-text-input');
+    textInput.value = 'Hello.';
+    await textInput.dispatchEvent('input');
+    const runPromise = findButton(harnessShell.querySelector('#composer-bar'), 'Send').dispatchEvent('click');
+    await waitUntil(() => {
+      if (banner.textContent.length > 0 && !phaseLog.includes(banner.textContent)) {
+        phaseLog.push(banner.textContent);
+      }
+      return banner.textContent === UiConstants.PhaseLabel.Replying;
+    });
+    assert.ok(phaseLog.includes(UiConstants.PhaseLabel.DirectorDone));
+    assert.equal(banner.textContent, UiConstants.PhaseLabel.Replying);
+    gate.resolve(true);
+    await runPromise;
+  });
+
+  it('shows Narrator model, validates and persists maxRepliesPerCharacter, replyReserve, and sceneStyles, and resets on Cancel', async () => {
+    const tempRoot = fs.mkdtempSync(path.join(os.tmpdir(), UiConstants.TempPrefix));
+    const localDir = path.join(tempRoot, UiConstants.DefaultLocalDirName);
+    fs.mkdirSync(localDir, { recursive: true, mode: 0o700 });
+    const config = Object.freeze({
+      port: 0,
+      rootDir: tempRoot,
+      localDir,
+      dbPath: path.join(localDir, UiConstants.DefaultDbName),
+      secretsPath: path.join(localDir, UiConstants.DefaultSecretsName),
+      syncStatePath: path.join(localDir, UiConstants.DefaultSyncStateName),
+      conflictsDir: path.join(localDir, UiConstants.DefaultConflictsName),
+      envApiKey: null,
+      r2: null,
+    });
+
+    const store = new SqliteStore(config.dbPath);
+    const client = new OpenRouterClient({
+      apiKeyProvider: () => 'sk-task8-settings-key',
+      fetchImpl: async () => new Response('{}', { status: 200 }),
+      onSpend: (dto) => store.recordSpend(dto),
+    });
+    const modelIds = ['openrouter/dir', 'openrouter/comp', 'openrouter/main', 'openrouter/rec', 'openrouter/scribe'];
+    const server = await WorldsServer.create({
+      config,
+      store,
+      client,
+      publicDir: PublicDirPath,
+      modelCatalog: createFakeModelCatalog({ modelIds }).catalog,
+    });
+    const started = await server.start();
+    cleanups.push(async () => {
+      await server.stop();
+      store.close();
+      fs.rmSync(tempRoot, { recursive: true, force: true });
+    });
+
+    const putRequests = [];
+    const { documentRef, createRootShell } = createFakeDomEnvironment();
+    const shell = createRootShell();
+    const liveApi = new WorldsApi({
+      baseUrl: started.url,
+      csrfToken: started.csrfToken,
+      fetchImpl: (url, init) => {
+        if (init?.method === UiConstants.HttpMethod.Put && String(url).endsWith('/api/settings')) {
+          putRequests.push(JSON.parse(init.body));
+        }
+        return fetch(url, {
+          ...init,
+          headers: {
+            ...(init?.headers ?? {}),
+            Origin: started.url,
+          },
+        });
+      },
+    });
+    await liveApi.updateSettings({
+      models: {
+        director: modelIds[0],
+        composer: modelIds[1],
+        main: modelIds[2],
+        recurring: modelIds[3],
+        scribe: modelIds[4],
+      },
+    });
+    putRequests.length = 0;
+
+    const app = new WorldsApp({ api: liveApi, rootElement: shell, documentRef });
+    await app.init();
+
+    const drawerEl = shell.querySelector('#inspector-drawer');
+    await findButton(drawerEl, 'Settings').dispatchEvent('click');
+    await waitUntil(() => listMetaTexts(drawerEl).some((text) => text.startsWith('OpenRouter models: 5 · Cached ')));
+
+    const labels = drawerEl.querySelectorAll('label').map((label) => label.textContent);
+    assert.ok(labels.includes(UiConstants.SettingsText.NarratorModelLabel));
+    assert.equal(labels.includes(UiConstants.SettingsText.OldComposerModelLabel), false);
+    assert.ok(labels.includes(UiConstants.SettingsText.MaxRepliesLabel));
+    assert.ok(labels.includes(UiConstants.SettingsText.ReplyReserveLabel));
+    assert.ok(drawerEl.textContent.includes(UiConstants.SettingsText.SceneStylesHeading));
+    for (const styleValue of SceneStyle.EditableValues) {
+      assert.ok(labels.includes(SceneStyle.label(styleValue)));
+      assert.notEqual(drawerEl.querySelector(`#settings-scene-style-${styleValue}`), null);
+    }
+
+    const maxRepliesInput = drawerEl.querySelector('#settings-max-replies');
+    assert.equal(maxRepliesInput.value, '1');
+    assert.equal(maxRepliesInput.min, '1');
+    assert.equal(maxRepliesInput.max, '5');
+
+    for (const badMaxReplies of ['0', '6', '1.5', '-1']) {
+      const currentInput = drawerEl.querySelector('#settings-max-replies');
+      currentInput.value = badMaxReplies;
+      await currentInput.dispatchEvent('input');
+      await drawerEl.querySelector('form').dispatchEvent('submit');
+      assert.equal(putRequests.length, 0);
+      assert.equal(listAlertTexts(drawerEl, 'is-danger').length, 1);
+    }
+
+    const resetMaxReplies = drawerEl.querySelector('#settings-max-replies');
+    resetMaxReplies.value = '2';
+    await resetMaxReplies.dispatchEvent('input');
+
+    for (const badReserve of ['0', '-5', '2.5', '']) {
+      const reserveInput = drawerEl.querySelector('#settings-reply-reserve');
+      reserveInput.value = badReserve;
+      await reserveInput.dispatchEvent('input');
+      await drawerEl.querySelector('form').dispatchEvent('submit');
+      assert.equal(putRequests.length, 0);
+      assert.equal(listAlertTexts(drawerEl, 'is-danger').length, 1);
+    }
+
+    const validReserve = drawerEl.querySelector('#settings-reply-reserve');
+    validReserve.value = '2500';
+    await validReserve.dispatchEvent('input');
+
+    const combatStyleArea = drawerEl.querySelector(`#settings-scene-style-${SceneStyle.Combat}`);
+    combatStyleArea.value = 'Custom intense combat pacing.';
+    await combatStyleArea.dispatchEvent('input');
+
+    await drawerEl.querySelector('form').dispatchEvent('submit');
+    assert.equal(putRequests.length, 1);
+    assert.equal(putRequests[0].maxRepliesPerCharacter, 2);
+    assert.equal(putRequests[0].replyReserve, 2500);
+    assert.equal(putRequests[0].sceneStyles[SceneStyle.Combat], 'Custom intense combat pacing.');
+    assert.ok(drawerEl.textContent.includes(UiConstants.SettingsText.SavedSuccess));
+
+    const persisted = await liveApi.getSettings();
+    assert.equal(persisted.maxRepliesPerCharacter, 2);
+    assert.equal(persisted.replyReserve, 2500);
+    assert.equal(persisted.sceneStyles[SceneStyle.Combat], 'Custom intense combat pacing.');
+
+    const dirtyMaxReplies = drawerEl.querySelector('#settings-max-replies');
+    dirtyMaxReplies.value = '4';
+    await dirtyMaxReplies.dispatchEvent('input');
+    const dirtyReserve = drawerEl.querySelector('#settings-reply-reserve');
+    dirtyReserve.value = '4096';
+    await dirtyReserve.dispatchEvent('input');
+    const dirtyCombat = drawerEl.querySelector(`#settings-scene-style-${SceneStyle.Combat}`);
+    dirtyCombat.value = 'Unsaved style edit.';
+    await dirtyCombat.dispatchEvent('input');
+
+    await drawerEl.querySelector('#settings-cancel').dispatchEvent('click');
+    assert.equal(putRequests.length, 1);
+    assert.equal(drawerEl.querySelector('#settings-max-replies').value, '2');
+    assert.equal(drawerEl.querySelector('#settings-reply-reserve').value, '2500');
+    assert.equal(
+      drawerEl.querySelector(`#settings-scene-style-${SceneStyle.Combat}`).value,
+      'Custom intense combat pacing.',
+    );
+
+    const { drawer, drawerEl: isolatedDrawerEl, documentRef: isolatedDoc } = createDrawerHarness();
+    const combatField = isolatedDrawerEl.querySelector(`#settings-scene-style-${SceneStyle.Combat}`);
+    combatField.focus();
+    combatField.selectionStart = 4;
+    combatField.selectionEnd = 10;
+    drawer.setModelCatalog(buildCatalog(3));
+    const restoredCombatField = isolatedDrawerEl.querySelector(`#settings-scene-style-${SceneStyle.Combat}`);
+    assert.equal(isolatedDoc.activeElement, restoredCombatField);
+    assert.equal(restoredCombatField.selectionStart, 4);
+    assert.equal(restoredCombatField.selectionEnd, 10);
+
+    for (const numberFieldId of ['settings-max-replies', 'settings-reply-reserve']) {
+      const numberField = isolatedDrawerEl.querySelector(`#${numberFieldId}`);
+      numberField.focus();
+      drawer.setModelCatalogLoading(true);
+      assert.equal(isolatedDoc.activeElement, isolatedDrawerEl.querySelector(`#${numberFieldId}`));
+      drawer.setModelCatalog(buildCatalog(3));
+      assert.equal(isolatedDoc.activeElement, isolatedDrawerEl.querySelector(`#${numberFieldId}`));
+    }
+  });
+
+  it('pins and clears Scene style via PATCH with immediate loading state, draft preservation, FocusKeeper, and error recovery', async () => {
+    const patchGates = [];
+    let currentSceneState = {
+      ...BrowserCampaign.sceneState,
+      style: SceneStyle.None,
+      pinnedStyle: null,
+    };
+    const harness = createBrowserHarness({
+      campaignPatchHandler: async (request) => {
+        const entry = { request, deferred: createDeferred() };
+        patchGates.push(entry);
+        return await entry.deferred.promise;
+      },
+    });
+    const { shell, documentRef } = harness;
+    await harness.app.init();
+
+    const drawerEl = shell.querySelector('#inspector-drawer');
+    await shell.querySelector('#inspector-toggle-btn').dispatchEvent('click');
+    await findButton(drawerEl, 'Scene').dispatchEvent('click');
+
+    assert.equal(drawerEl.querySelector('.scene-style-meta').textContent, UiConstants.SceneStyleLabel.ActiveNone);
+    const initialSelect = drawerEl.querySelector('#scene-style-pin');
+    assert.equal(initialSelect.value, '');
+    assert.deepEqual(
+      initialSelect.querySelectorAll('option').map((option) => [option.value, option.textContent]),
+      [
+        ['', UiConstants.SceneStyleLabel.Automatic],
+        ...SceneStyle.EditableValues.map((value) => [value, SceneStyle.label(value)]),
+      ],
+    );
+
+    const locationInput = drawerEl.querySelector('#scene-location-input');
+    locationInput.value = 'Unsaved Harbor Edit';
+    await locationInput.dispatchEvent('input');
+
+    const pinSelect = drawerEl.querySelector('#scene-style-pin');
+    pinSelect.focus();
+    pinSelect.value = SceneStyle.Combat;
+    const combatPromise = pinSelect.dispatchEvent('change');
+
+    await waitUntil(() => patchGates.length === 1);
+    const busySelect = drawerEl.querySelector('#scene-style-pin');
+    assert.equal(busySelect.disabled, true);
+    assert.equal(busySelect.classList.contains('is-loading'), true);
+    assert.equal(drawerEl.querySelector('.scene-style-status').textContent, UiConstants.SettingsText.SavingStatus);
+    assert.deepEqual(patchGates[0].request.body, { sceneState: { pinnedStyle: SceneStyle.Combat } });
+
+    currentSceneState = {
+      ...currentSceneState,
+      pinnedStyle: SceneStyle.Combat,
+    };
+    patchGates[0].deferred.resolve({
+      status: 200,
+      body: { ...BrowserCampaign, sceneState: currentSceneState },
+    });
+    await combatPromise;
+
+    const restoredSelect = drawerEl.querySelector('#scene-style-pin');
+    assert.equal(restoredSelect.disabled, false);
+    assert.equal(restoredSelect.value, SceneStyle.Combat);
+    assert.equal(drawerEl.querySelector('.scene-style-status'), null);
+    assert.equal(drawerEl.querySelector('.scene-style-meta').textContent, UiConstants.SceneStyleLabel.ActiveCombatPinned);
+    assert.equal(drawerEl.querySelector('#scene-location-input').value, 'Unsaved Harbor Edit');
+    assert.equal(documentRef.activeElement, restoredSelect);
+
+    restoredSelect.value = '';
+    const clearPromise = restoredSelect.dispatchEvent('change');
+    await waitUntil(() => patchGates.length === 2);
+    assert.deepEqual(patchGates[1].request.body, { sceneState: { pinnedStyle: null } });
+
+    currentSceneState = {
+      ...currentSceneState,
+      pinnedStyle: null,
+    };
+    patchGates[1].deferred.resolve({
+      status: 200,
+      body: { ...BrowserCampaign, sceneState: currentSceneState },
+    });
+    await clearPromise;
+
+    const clearedSelect = drawerEl.querySelector('#scene-style-pin');
+    assert.equal(clearedSelect.value, '');
+    assert.equal(drawerEl.querySelector('.scene-style-meta').textContent, UiConstants.SceneStyleLabel.ActiveNone);
+    assert.equal(documentRef.activeElement, clearedSelect);
+
+    clearedSelect.value = SceneStyle.Travel;
+    const failedPromise = clearedSelect.dispatchEvent('change');
+    await waitUntil(() => patchGates.length === 3);
+    patchGates[2].deferred.resolve({
+      status: 500,
+      body: { error: 'Failed to update scene style.' },
+    });
+    await failedPromise;
+
+    const afterErrorSelect = drawerEl.querySelector('#scene-style-pin');
+    assert.equal(afterErrorSelect.disabled, false);
+    assert.equal(afterErrorSelect.value, '');
+    assert.equal(documentRef.activeElement, afterErrorSelect);
+    assert.deepEqual(listAlertTexts(drawerEl, 'is-danger'), ['Failed to update scene style.']);
+
+    const outsideField = documentRef.createElement('input');
+    outsideField.id = 'outside-scene-pin-field';
+    shell.append(outsideField);
+    afterErrorSelect.value = SceneStyle.Banter;
+    const outsideFocusPromise = afterErrorSelect.dispatchEvent('change');
+    await waitUntil(() => patchGates.length === 4);
+    outsideField.focus();
+    currentSceneState = {
+      ...currentSceneState,
+      pinnedStyle: SceneStyle.Banter,
+    };
+    patchGates[3].deferred.resolve({
+      status: 200,
+      body: { ...BrowserCampaign, sceneState: currentSceneState },
+    });
+    await outsideFocusPromise;
+    assert.equal(documentRef.activeElement, outsideField);
+    assert.deepEqual(harness.unexpected, []);
+  });
+
+  it('isolates an in-flight pinnedStyle PATCH rejection across campaign switches without clearing busy state or stealing focus', async () => {
+    const patchGates = [];
+    const harness = createBrowserHarness({
+      secondCampaign: true,
+      campaignPatchHandler: async (request) => {
+        const entry = { request, deferred: createDeferred() };
+        patchGates.push(entry);
+        return await entry.deferred.promise;
+      },
+    });
+    const { shell, documentRef } = harness;
+    await harness.app.init();
+
+    const drawerEl = shell.querySelector('#inspector-drawer');
+    await shell.querySelector('#inspector-toggle-btn').dispatchEvent('click');
+    await findButton(drawerEl, UiConstants.DrawerTab.Scene).dispatchEvent('click');
+
+    const selectA = drawerEl.querySelector('#scene-style-pin');
+    selectA.value = SceneStyle.Combat;
+    const patchAPromise = selectA.dispatchEvent('change');
+    await waitUntil(() => patchGates.length === 1);
+    assert.equal(patchGates[0].request.path, `/api/campaigns/${UiConstants.CampaignId.First}`);
+
+    await harness.app.selectCampaign(UiConstants.CampaignId.Second);
+    const selectB = drawerEl.querySelector('#scene-style-pin');
+    assert.equal(selectB.disabled, false);
+    selectB.value = SceneStyle.Banter;
+    const patchBPromise = selectB.dispatchEvent('change');
+    await waitUntil(() => patchGates.length === 2);
+    assert.equal(patchGates[1].request.path, `/api/campaigns/${UiConstants.CampaignId.Second}`);
+
+    const locationB = drawerEl.querySelector('#scene-location-input');
+    locationB.focus();
+    assert.equal(documentRef.activeElement, locationB);
+
+    patchGates[0].deferred.resolve({
+      status: 500,
+      body: { error: UiConstants.PinTestText.CampaignAError },
+    });
+    await patchAPromise;
+
+    const busySelectB = drawerEl.querySelector('#scene-style-pin');
+    assert.equal(busySelectB.disabled, true);
+    assert.equal(drawerEl.querySelector('.scene-style-status').textContent, UiConstants.SettingsText.SavingStatus);
+    assert.deepEqual(listAlertTexts(drawerEl, 'is-danger'), []);
+    assert.equal(documentRef.activeElement, locationB);
+
+    patchGates[1].deferred.resolve({
+      status: 200,
+      body: {
+        ...BrowserCampaign,
+        id: UiConstants.CampaignId.Second,
+        title: UiConstants.CampaignTitle.Second,
+        sceneState: {
+          ...BrowserCampaign.sceneState,
+          style: SceneStyle.None,
+          pinnedStyle: SceneStyle.Banter,
+        },
+      },
+    });
+    await patchBPromise;
+
+    const finishedSelectB = drawerEl.querySelector('#scene-style-pin');
+    assert.equal(finishedSelectB.disabled, false);
+    assert.equal(finishedSelectB.value, SceneStyle.Banter);
+    assert.equal(drawerEl.querySelector('.scene-style-status'), null);
+    assert.deepEqual(listAlertTexts(drawerEl, 'is-danger'), []);
+    assert.equal(drawerEl.querySelector('.scene-style-meta').textContent, UiConstants.SceneStyleLabel.ActiveBanterPinned);
+    assert.deepEqual(harness.unexpected, []);
+  });
+
+  it('keeps focus on the active tab control when a pinnedStyle PATCH resolves after switching tabs', async () => {
+    const patchGates = [];
+    const harness = createBrowserHarness({
+      campaignPatchHandler: async (request) => {
+        const entry = { request, deferred: createDeferred() };
+        patchGates.push(entry);
+        return await entry.deferred.promise;
+      },
+    });
+    const { shell, documentRef } = harness;
+    await harness.app.init();
+
+    const drawerEl = shell.querySelector('#inspector-drawer');
+    await shell.querySelector('#inspector-toggle-btn').dispatchEvent('click');
+    await findButton(drawerEl, UiConstants.DrawerTab.Scene).dispatchEvent('click');
+
+    const pinSelect = drawerEl.querySelector('#scene-style-pin');
+    pinSelect.value = SceneStyle.Combat;
+    const pinPromise = pinSelect.dispatchEvent('change');
+    await waitUntil(() => patchGates.length === 1);
+
+    const settingsCallsBefore = harness.requests.filter((request) => request.path === '/api/settings').length;
+    await findButton(drawerEl, UiConstants.DrawerTab.Settings).dispatchEvent('click');
+    await waitUntil(
+      () => harness.requests.filter((request) => request.path === '/api/settings').length > settingsCallsBefore,
+    );
+    await new Promise((resolve) => setTimeout(resolve, 0));
+    const maxRepliesInput = drawerEl.querySelector('#settings-max-replies');
+    maxRepliesInput.focus();
+    assert.equal(documentRef.activeElement, maxRepliesInput);
+
+    patchGates[0].deferred.resolve({
+      status: 200,
+      body: {
+        ...BrowserCampaign,
+        sceneState: {
+          ...BrowserCampaign.sceneState,
+          style: SceneStyle.None,
+          pinnedStyle: SceneStyle.Combat,
+        },
+      },
+    });
+    await pinPromise;
+
+    assert.equal(documentRef.activeElement, drawerEl.querySelector('#settings-max-replies'));
+
+    await findButton(drawerEl, UiConstants.DrawerTab.Scene).dispatchEvent('click');
+    const returnedSelect = drawerEl.querySelector('#scene-style-pin');
+    assert.equal(returnedSelect.disabled, false);
+    assert.equal(returnedSelect.value, SceneStyle.Combat);
+    assert.equal(drawerEl.querySelector('.scene-style-status'), null);
+    assert.equal(drawerEl.querySelector('.scene-style-meta').textContent, UiConstants.SceneStyleLabel.ActiveCombatPinned);
+    assert.deepEqual(harness.unexpected, []);
+  });
+
+  it('collapses expanded Thoughts when switching campaigns via WorldsApp and returning', async () => {
+    const turnWithThoughts = {
+      id: UiConstants.PinTestText.TurnId,
+      seq: 1,
+      role: TurnRole.Assistant,
+      mode: TurnMode.Normal,
+      sceneNumber: 1,
+      rawText: UiConstants.PinTestText.TurnRawText,
+      beats: [
+        {
+          id: UiConstants.PinTestText.BeatId,
+          speakerType: SpeakerType.Character,
+          characterId: null,
+          speakerName: UiConstants.PinTestText.SpeakerName,
+          text: UiConstants.PinTestText.BeatText,
+          mindPacket: { thoughts: UiConstants.PinTestText.BeatThoughts },
+        },
+      ],
+    };
+    const harness = createBrowserHarness({
+      secondCampaign: true,
+      turnsByCampaign: {
+        [UiConstants.CampaignId.First]: [turnWithThoughts],
+      },
+    });
+    await harness.app.init();
+
+    const chatContainer = harness.shell.querySelector('#chat-view');
+    const toggleSelector = `#${UiConstants.ThoughtsText.TogglePrefix}${UiConstants.PinTestText.BeatId}`;
+    const panelSelector = `#${UiConstants.ThoughtsText.PanelPrefix}${UiConstants.PinTestText.BeatId}`;
+
+    const initialToggle = chatContainer.querySelector(toggleSelector);
+    assert.notEqual(initialToggle, null);
+    assert.equal(initialToggle.getAttribute(UiConstants.AriaAttribute.Expanded), UiConstants.AriaAttribute.False);
+
+    await initialToggle.dispatchEvent('click');
+    assert.equal(
+      chatContainer.querySelector(toggleSelector).getAttribute(UiConstants.AriaAttribute.Expanded),
+      UiConstants.AriaAttribute.True,
+    );
+    assert.equal(chatContainer.querySelector(panelSelector).textContent, UiConstants.PinTestText.BeatThoughts);
+
+    await harness.app.selectCampaign(UiConstants.CampaignId.Second);
+    assert.equal(chatContainer.querySelectorAll('.beat-thoughts').length, 0);
+
+    await harness.app.selectCampaign(UiConstants.CampaignId.First);
+    const returnedToggle = chatContainer.querySelector(toggleSelector);
+    assert.notEqual(returnedToggle, null);
+    assert.equal(returnedToggle.getAttribute(UiConstants.AriaAttribute.Expanded), UiConstants.AriaAttribute.False);
+    assert.equal(chatContainer.querySelectorAll('.beat-thoughts').length, 0);
     assert.deepEqual(harness.unexpected, []);
   });
 });

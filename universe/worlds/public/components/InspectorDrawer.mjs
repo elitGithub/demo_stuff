@@ -2,10 +2,11 @@ import { FocusKeeper } from './FocusKeeper.mjs';
 import { ModelCatalogView } from './ModelCatalogView.mjs';
 
 export class InspectorDrawer {
+  static #SceneTabId = 'scene';
   static #SettingsTabId = 'settings';
 
   static #Tabs = Object.freeze([
-    { id: 'scene', label: 'Scene' },
+    { id: InspectorDrawer.#SceneTabId, label: 'Scene' },
     { id: 'cast', label: 'Cast' },
     { id: 'memory', label: 'Memory' },
     { id: 'findings', label: 'Findings' },
@@ -22,11 +23,42 @@ export class InspectorDrawer {
 
   static #ModelSlots = Object.freeze([
     { key: 'director', label: 'Director model' },
-    { key: 'composer', label: 'Composer model' },
+    { key: 'composer', label: 'Narrator model' },
     { key: 'main', label: 'Main character model' },
     { key: 'recurring', label: 'Recurring character model' },
     { key: 'scribe', label: 'Scribe / Pedant / Muse model' },
   ]);
+
+  static #SceneStyleOptions = Object.freeze([
+    Object.freeze({ value: 'explicit', label: 'Explicit' }),
+    Object.freeze({ value: 'combat', label: 'Combat' }),
+    Object.freeze({ value: 'tension', label: 'Tension' }),
+    Object.freeze({ value: 'emotional', label: 'Emotional' }),
+    Object.freeze({ value: 'banter', label: 'Banter' }),
+    Object.freeze({ value: 'travel', label: 'Travel' }),
+    Object.freeze({ value: 'investigation', label: 'Investigation' }),
+  ]);
+
+  static #StyleNone = 'none';
+  static #StyleNoneLabel = 'None';
+  static #StyleAutomaticValue = '';
+  static #StyleAutomaticLabel = 'Automatic';
+  static #SceneStylePinId = 'scene-style-pin';
+  static #SceneStyleKey = 'style';
+  static #PinnedStyleKey = 'pinnedStyle';
+  static #MaxRepliesInputId = 'settings-max-replies';
+  static #ReplyReserveInputId = 'settings-reply-reserve';
+  static #SceneStyleTextareaIdPrefix = 'settings-scene-style-';
+  static #MaxRepliesMin = 1;
+  static #MaxRepliesMax = 5;
+  static #ReplyReserveMin = 1;
+  static #DefaultMaxReplies = 1;
+  static #DefaultReplyReserve = 3000;
+  static #IntegerPattern = /^\d+$/;
+  static #SceneStyleMetaClass = 'item-meta scene-style-meta';
+  static #SceneStyleStatusClass = 'scene-style-status';
+  static #SettingsStylesSectionClass = 'settings-styles-section';
+  static #SettingsStyleTextareaClass = 'field-control settings-style-textarea';
 
   static #FilterPlaceholder = 'Filter OpenRouter models...';
   static #RefreshButtonId = 'settings-refresh-models';
@@ -58,6 +90,8 @@ export class InspectorDrawer {
   };
   #walkOnDraft = '';
   #sceneSaving = false;
+  #sceneStyleBusy = false;
+  #sceneStyleRequestSeq = 0;
   #presenceBusyId = null;
   #walkOnBusy = false;
   #sceneError = '';
@@ -125,9 +159,14 @@ export class InspectorDrawer {
     prefilledDefaults: false,
     draft: {
       models: { director: '', composer: '', main: '', recurring: '', scribe: '' },
+      sceneStyles: Object.fromEntries(
+        InspectorDrawer.#SceneStyleOptions.map((styleOpt) => [styleOpt.value, '']),
+      ),
       publicOdds: '8',
       privateOdds: '30',
       scribeInterval: '1',
+      maxRepliesPerCharacter: String(InspectorDrawer.#DefaultMaxReplies),
+      replyReserve: String(InspectorDrawer.#DefaultReplyReserve),
       pedantEnabled: true,
       dailyWarnUsd: '',
       openRouterApiKey: '',
@@ -235,6 +274,8 @@ export class InspectorDrawer {
       this.#sceneError = '';
     }
     if (previousId !== nextId) {
+      this.#sceneStyleBusy = false;
+      this.#sceneStyleRequestSeq += 1;
       this.#walkOnDraft = '';
       this.#memoryData.tellInstruction = '';
       this.#memoryData.tellPreview = null;
@@ -247,7 +288,18 @@ export class InspectorDrawer {
       this.#findingsData.replacements = new Map();
       this.#findingsData.error = '';
     }
-    this.render();
+    if (this.#documentRef !== null) {
+      FocusKeeper.keep({
+        documentRef: this.#documentRef,
+        containerElement: this.#drawerElement,
+        scrollSelector: InspectorDrawer.#ScrollSelector,
+        renderFn: () => {
+          this.render();
+        },
+      });
+    } else {
+      this.render();
+    }
   }
 
   /**
@@ -325,6 +377,10 @@ export class InspectorDrawer {
    */
   setSettings(settings) {
     this.#settingsData.serverSettings = settings;
+    const nextSceneStyles = {};
+    for (const styleOpt of InspectorDrawer.#SceneStyleOptions) {
+      nextSceneStyles[styleOpt.value] = settings.sceneStyles[styleOpt.value];
+    }
     this.#settingsData.draft = {
       models: {
         director: settings.models.director,
@@ -333,9 +389,12 @@ export class InspectorDrawer {
         recurring: settings.models.recurring,
         scribe: settings.models.scribe,
       },
+      sceneStyles: nextSceneStyles,
       publicOdds: String(settings.publicOdds),
       privateOdds: String(settings.privateOdds),
       scribeInterval: String(settings.scribeInterval),
+      maxRepliesPerCharacter: String(settings.maxRepliesPerCharacter),
+      replyReserve: String(settings.replyReserve),
       pedantEnabled: settings.pedantEnabled,
       dailyWarnUsd: settings.dailyWarnUsd === null ? '' : String(settings.dailyWarnUsd),
       openRouterApiKey: '',
@@ -450,7 +509,7 @@ export class InspectorDrawer {
     body.className = 'drawer-body';
 
     switch (this.#activeTab) {
-      case 'scene': {
+      case InspectorDrawer.#SceneTabId: {
         if (this.#campaign === null) {
           body.append(this.#buildAlert('Select or create a campaign to manage Scene and Presence.', 'info'));
           break;
@@ -465,6 +524,8 @@ export class InspectorDrawer {
           remoteIds: [],
           offscreenNotes: {},
           activeWalkOns: [],
+          [InspectorDrawer.#SceneStyleKey]: InspectorDrawer.#StyleNone,
+          [InspectorDrawer.#PinnedStyleKey]: null,
         };
 
         const sceneSection = this.#documentRef.createElement('form');
@@ -591,6 +652,119 @@ export class InspectorDrawer {
           }
         });
         body.append(sceneSection);
+
+        const styleSection = this.#documentRef.createElement('section');
+        styleSection.className = 'inspector-section';
+
+        const styleHead = this.#documentRef.createElement('div');
+        styleHead.className = 'section-header';
+        const styleTitle = this.#documentRef.createElement('h3');
+        styleTitle.className = 'section-title';
+        styleTitle.textContent = 'Scene Style';
+        styleHead.append(styleTitle);
+        if (this.#sceneStyleBusy) {
+          const styleStatus = this.#documentRef.createElement('span');
+          styleStatus.className = InspectorDrawer.#SceneStyleStatusClass;
+          styleStatus.textContent = 'Saving...';
+          styleHead.append(styleStatus);
+        }
+        styleSection.append(styleHead);
+
+        const rawPinnedValue = typeof sceneState[InspectorDrawer.#PinnedStyleKey] === 'string'
+          ? sceneState[InspectorDrawer.#PinnedStyleKey]
+          : null;
+        const validPinnedValue = rawPinnedValue !== null &&
+          (rawPinnedValue === InspectorDrawer.#StyleNone ||
+            InspectorDrawer.#SceneStyleOptions.some((styleOpt) => styleOpt.value === rawPinnedValue))
+          ? rawPinnedValue
+          : null;
+        const rawSceneStyleValue = typeof sceneState[InspectorDrawer.#SceneStyleKey] === 'string'
+          ? sceneState[InspectorDrawer.#SceneStyleKey]
+          : InspectorDrawer.#StyleNone;
+        const activeStyleValue = validPinnedValue !== null ? validPinnedValue : rawSceneStyleValue;
+        const matchedStyleOpt = InspectorDrawer.#SceneStyleOptions.find(
+          (styleOpt) => styleOpt.value === activeStyleValue,
+        );
+        const activeStyleLabel = matchedStyleOpt !== undefined
+          ? matchedStyleOpt.label
+          : InspectorDrawer.#StyleNoneLabel;
+
+        const activeStyleMeta = this.#documentRef.createElement('div');
+        activeStyleMeta.className = InspectorDrawer.#SceneStyleMetaClass;
+        activeStyleMeta.textContent = validPinnedValue !== null
+          ? `Active style: ${activeStyleLabel} (pinned)`
+          : `Active style: ${activeStyleLabel}`;
+        styleSection.append(activeStyleMeta);
+
+        const styleSelect = this.#documentRef.createElement('select');
+        styleSelect.id = InspectorDrawer.#SceneStylePinId;
+        styleSelect.className = this.#sceneStyleBusy ? 'field-control is-loading' : 'field-control';
+        styleSelect.disabled = this.#sceneStyleBusy;
+
+        const autoOption = this.#documentRef.createElement('option');
+        autoOption.value = InspectorDrawer.#StyleAutomaticValue;
+        autoOption.textContent = InspectorDrawer.#StyleAutomaticLabel;
+        styleSelect.append(autoOption);
+
+        for (const styleOpt of InspectorDrawer.#SceneStyleOptions) {
+          const optionElement = this.#documentRef.createElement('option');
+          optionElement.value = styleOpt.value;
+          optionElement.textContent = styleOpt.label;
+          styleSelect.append(optionElement);
+        }
+
+        const selectedPinValue = InspectorDrawer.#SceneStyleOptions.some(
+          (styleOpt) => styleOpt.value === validPinnedValue,
+        )
+          ? validPinnedValue
+          : InspectorDrawer.#StyleAutomaticValue;
+        styleSelect.value = selectedPinValue;
+
+        styleSelect.addEventListener('change', async () => {
+          if (this.#sceneStyleBusy) {
+            return;
+          }
+          const nextValue = styleSelect.value;
+          const nextPinnedStyle = nextValue === InspectorDrawer.#StyleAutomaticValue ? null : nextValue;
+          this.#sceneStyleRequestSeq += 1;
+          const requestSeq = this.#sceneStyleRequestSeq;
+          this.#sceneStyleBusy = true;
+          this.#sceneError = '';
+          FocusKeeper.keep({
+            documentRef: this.#documentRef,
+            containerElement: this.#drawerElement,
+            scrollSelector: InspectorDrawer.#ScrollSelector,
+            renderFn: () => {
+              this.render();
+            },
+          });
+          try {
+            await this.#callbacks.onSetPinnedStyle(nextPinnedStyle);
+          } catch (pinError) {
+            if (this.#sceneStyleRequestSeq === requestSeq) {
+              this.#sceneError = pinError instanceof Error ? pinError.message : String(pinError);
+            }
+          } finally {
+            if (this.#sceneStyleRequestSeq !== requestSeq) {
+              return;
+            }
+            this.#sceneStyleBusy = false;
+            if (this.#activeTab === InspectorDrawer.#SceneTabId) {
+              FocusKeeper.keep({
+                documentRef: this.#documentRef,
+                containerElement: this.#drawerElement,
+                scrollSelector: InspectorDrawer.#ScrollSelector,
+                renderFn: () => {
+                  this.render();
+                },
+                returnFocusId: InspectorDrawer.#SceneStylePinId,
+              });
+            }
+          }
+        });
+
+        styleSection.append(this.#buildField('Scene style', styleSelect));
+        body.append(styleSection);
 
         const presenceSection = this.#documentRef.createElement('section');
         presenceSection.className = 'inspector-section';
@@ -1897,6 +2071,34 @@ export class InspectorDrawer {
           draft.dailyWarnUsd = warnInput.value;
         });
         oddsGrid.append(this.#buildField('Daily spend warning ($)', warnInput));
+
+        const maxRepliesInput = this.#documentRef.createElement('input');
+        maxRepliesInput.id = InspectorDrawer.#MaxRepliesInputId;
+        maxRepliesInput.type = 'number';
+        maxRepliesInput.min = String(InspectorDrawer.#MaxRepliesMin);
+        maxRepliesInput.max = String(InspectorDrawer.#MaxRepliesMax);
+        maxRepliesInput.step = '1';
+        maxRepliesInput.className = 'field-control';
+        maxRepliesInput.value = draft.maxRepliesPerCharacter;
+        maxRepliesInput.disabled = busy;
+        maxRepliesInput.addEventListener('input', () => {
+          draft.maxRepliesPerCharacter = maxRepliesInput.value;
+        });
+        oddsGrid.append(this.#buildField('Replies per character per turn', maxRepliesInput));
+
+        const replyReserveInput = this.#documentRef.createElement('input');
+        replyReserveInput.id = InspectorDrawer.#ReplyReserveInputId;
+        replyReserveInput.type = 'number';
+        replyReserveInput.min = String(InspectorDrawer.#ReplyReserveMin);
+        replyReserveInput.step = '1';
+        replyReserveInput.className = 'field-control';
+        replyReserveInput.value = draft.replyReserve;
+        replyReserveInput.disabled = busy;
+        replyReserveInput.addEventListener('input', () => {
+          draft.replyReserve = replyReserveInput.value;
+        });
+        oddsGrid.append(this.#buildField('Reply length cap (tokens)', replyReserveInput));
+
         settingsForm.append(oddsGrid);
 
         const pedantRow = this.#documentRef.createElement('label');
@@ -1913,6 +2115,27 @@ export class InspectorDrawer {
         pedantLabel.textContent = 'Enable Pedant continuity checks';
         pedantRow.append(pedantCheck, pedantLabel);
         settingsForm.append(pedantRow);
+
+        const stylesSection = this.#documentRef.createElement('div');
+        stylesSection.className = InspectorDrawer.#SettingsStylesSectionClass;
+        const stylesTitle = this.#documentRef.createElement('h4');
+        stylesTitle.className = 'section-title';
+        stylesTitle.textContent = 'Scene styles';
+        stylesSection.append(stylesTitle);
+
+        for (const styleOpt of InspectorDrawer.#SceneStyleOptions) {
+          const styleTextarea = this.#documentRef.createElement('textarea');
+          styleTextarea.id = `${InspectorDrawer.#SceneStyleTextareaIdPrefix}${styleOpt.value}`;
+          styleTextarea.rows = 3;
+          styleTextarea.className = InspectorDrawer.#SettingsStyleTextareaClass;
+          styleTextarea.value = draft.sceneStyles[styleOpt.value];
+          styleTextarea.disabled = busy;
+          styleTextarea.addEventListener('input', () => {
+            draft.sceneStyles[styleOpt.value] = styleTextarea.value;
+          });
+          stylesSection.append(this.#buildField(styleOpt.label, styleTextarea));
+        }
+        settingsForm.append(stylesSection);
 
         const keyCard = this.#documentRef.createElement('div');
         keyCard.className = 'item-card';
@@ -2026,18 +2249,41 @@ export class InspectorDrawer {
           const publicOdds = Number.parseInt(draft.publicOdds, 10);
           const privateOdds = Number.parseInt(draft.privateOdds, 10);
           const scribeInterval = Number.parseInt(draft.scribeInterval, 10);
-          if (!/^\d+$/.test(draft.publicOdds.trim()) || !Number.isSafeInteger(publicOdds) || publicOdds < 0) {
+          const trimmedMaxReplies = draft.maxRepliesPerCharacter.trim();
+          const maxRepliesPerCharacter = Number.parseInt(trimmedMaxReplies, 10);
+          const trimmedReplyReserve = draft.replyReserve.trim();
+          const replyReserve = Number.parseInt(trimmedReplyReserve, 10);
+          if (!InspectorDrawer.#IntegerPattern.test(draft.publicOdds.trim()) || !Number.isSafeInteger(publicOdds) || publicOdds < 0) {
             this.#settingsData.error = 'Default public odds must be a non-negative integer.';
             this.render();
             return;
           }
-          if (!/^\d+$/.test(draft.privateOdds.trim()) || !Number.isSafeInteger(privateOdds) || privateOdds < 0) {
+          if (!InspectorDrawer.#IntegerPattern.test(draft.privateOdds.trim()) || !Number.isSafeInteger(privateOdds) || privateOdds < 0) {
             this.#settingsData.error = 'Default private odds must be a non-negative integer.';
             this.render();
             return;
           }
-          if (!/^\d+$/.test(draft.scribeInterval.trim()) || !Number.isSafeInteger(scribeInterval) || scribeInterval < 0) {
+          if (!InspectorDrawer.#IntegerPattern.test(draft.scribeInterval.trim()) || !Number.isSafeInteger(scribeInterval) || scribeInterval < 0) {
             this.#settingsData.error = 'Default Scribe interval must be a non-negative integer.';
+            this.render();
+            return;
+          }
+          if (
+            !InspectorDrawer.#IntegerPattern.test(trimmedMaxReplies) ||
+            !Number.isSafeInteger(maxRepliesPerCharacter) ||
+            maxRepliesPerCharacter < InspectorDrawer.#MaxRepliesMin ||
+            maxRepliesPerCharacter > InspectorDrawer.#MaxRepliesMax
+          ) {
+            this.#settingsData.error = `Replies per character per turn must be an integer from ${InspectorDrawer.#MaxRepliesMin} to ${InspectorDrawer.#MaxRepliesMax}.`;
+            this.render();
+            return;
+          }
+          if (
+            !InspectorDrawer.#IntegerPattern.test(trimmedReplyReserve) ||
+            !Number.isSafeInteger(replyReserve) ||
+            replyReserve < InspectorDrawer.#ReplyReserveMin
+          ) {
+            this.#settingsData.error = `Reply length cap (tokens) must be an integer of at least ${InspectorDrawer.#ReplyReserveMin}.`;
             this.render();
             return;
           }
@@ -2056,9 +2302,12 @@ export class InspectorDrawer {
 
           const patch = {
             models: { ...draft.models },
+            sceneStyles: { ...draft.sceneStyles },
             publicOdds,
             privateOdds,
             scribeInterval,
+            maxRepliesPerCharacter,
+            replyReserve,
             pedantEnabled: draft.pedantEnabled,
             dailyWarnUsd,
           };

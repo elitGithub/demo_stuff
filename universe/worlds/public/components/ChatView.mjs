@@ -2,8 +2,16 @@ export class ChatView {
   static #NarrationTagPattern = /<narration>([\s\S]*?)<\/narration>/gi;
   static #NarrationClass = 'beat-narration';
   static #NarratorType = 'narrator';
+  static #CharacterType = 'character';
   static #NarratorName = 'Narrator';
   static #EncounterText = '*(Encounter)*';
+  static #ThoughtsToggleClass = 'beat-thoughts-toggle';
+  static #ThoughtsPanelClass = 'beat-thoughts';
+  static #ThoughtsToggleIdPrefix = 'beat-thoughts-toggle-';
+  static #ThoughtsPanelIdPrefix = 'beat-thoughts-panel-';
+  static #ThoughtsButtonText = 'Thoughts';
+  static #StreamingHeaderText = 'Replying...';
+  static #RegeneratingHeaderText = 'Regenerating reply...';
   static #ValidTokens = new Set(['sage', 'rose', 'amber', 'slate', 'plum', 'teal', 'indigo', 'coral']);
 
   #container;
@@ -20,6 +28,7 @@ export class ChatView {
   #loadingEarlier = false;
   #charactersById = new Map();
   #charactersBySlug = new Map();
+  #expandedThoughts = new Set();
 
   #streamingState = null;
   #streamingBeatElements = new Map();
@@ -79,6 +88,7 @@ export class ChatView {
       this.#nextCursor = null;
       this.#streamingState = null;
       this.#editingTurnId = null;
+      this.#expandedThoughts.clear();
     }
     this.render();
   }
@@ -118,6 +128,7 @@ export class ChatView {
     this.#loadingEarlier = false;
     this.#editingTurnId = null;
     this.#editError = '';
+    this.#expandedThoughts.clear();
     this.render();
     this.#scrollToBottom();
   }
@@ -558,12 +569,22 @@ export class ChatView {
             }];
 
         for (const beat of beats) {
+          const hasThoughts =
+            beat.speakerType === ChatView.#CharacterType &&
+            typeof beat.id === 'string' &&
+            beat.id.trim().length > 0 &&
+            beat.mindPacket !== null &&
+            typeof beat.mindPacket === 'object' &&
+            typeof beat.mindPacket.thoughts === 'string' &&
+            beat.mindPacket.thoughts.trim().length > 0;
           const renderedBeat = this.#createBeatRow({
             speakerType: beat.speakerType,
             characterId: beat.characterId ?? null,
             slug: null,
             speakerName: beat.speakerName,
             text: beat.text,
+            beatId: hasThoughts ? beat.id : null,
+            thoughtsText: hasThoughts ? beat.mindPacket.thoughts.trim() : '',
           });
           beatList.append(renderedBeat.rowElement);
         }
@@ -673,7 +694,9 @@ export class ChatView {
       const assistantHeader = this.#documentRef.createElement('div');
       assistantHeader.className = 'turn-header';
       const assistantMeta = this.#documentRef.createElement('span');
-      assistantMeta.textContent = streamState.regenerating ? 'Regenerating reply...' : 'Composing reply...';
+      assistantMeta.textContent = streamState.regenerating
+        ? ChatView.#RegeneratingHeaderText
+        : ChatView.#StreamingHeaderText;
       assistantHeader.append(assistantMeta);
       previewAssistantCard.append(assistantHeader);
 
@@ -704,10 +727,10 @@ export class ChatView {
   }
 
   /**
-   * @param {{speakerType: string, characterId: string | null, slug: string | null, speakerName: string, text: string}} beatData
+   * @param {{speakerType: string, characterId: string | null, slug: string | null, speakerName: string, text: string, beatId?: string | null, thoughtsText?: string}} beatData
    * @returns {{rowElement: HTMLElement, textElement: HTMLElement}}
    */
-  #createBeatRow({ speakerType, characterId, slug, speakerName, text }) {
+  #createBeatRow({ speakerType, characterId, slug, speakerName, text, beatId = null, thoughtsText = '' }) {
     const rowElement = this.#documentRef.createElement('div');
     rowElement.className = 'beat-row';
 
@@ -763,6 +786,42 @@ export class ChatView {
     textElement.textContent = typeof text === 'string' ? text : '';
 
     bodyElement.append(speakerElement, textElement);
+    if (beatId !== null && thoughtsText.length > 0) {
+      const toggleId = `${ChatView.#ThoughtsToggleIdPrefix}${beatId}`;
+      const panelId = `${ChatView.#ThoughtsPanelIdPrefix}${beatId}`;
+      const isExpanded = this.#expandedThoughts.has(beatId);
+
+      const toggleButton = this.#documentRef.createElement('button');
+      toggleButton.id = toggleId;
+      toggleButton.type = 'button';
+      toggleButton.className = ChatView.#ThoughtsToggleClass;
+      toggleButton.setAttribute('aria-expanded', String(isExpanded));
+      toggleButton.setAttribute('aria-controls', panelId);
+      toggleButton.textContent = ChatView.#ThoughtsButtonText;
+      toggleButton.addEventListener('click', () => {
+        if (this.#expandedThoughts.has(beatId)) {
+          this.#expandedThoughts.delete(beatId);
+        } else {
+          this.#expandedThoughts.add(beatId);
+        }
+        this.render();
+        const restoredToggle = Array.from(
+          this.#container.querySelectorAll(`.${ChatView.#ThoughtsToggleClass}`),
+        ).find((candidate) => candidate.id === toggleId);
+        if (restoredToggle !== undefined) {
+          restoredToggle.focus({ preventScroll: true });
+        }
+      });
+      bodyElement.append(toggleButton);
+
+      if (isExpanded) {
+        const thoughtsPanel = this.#documentRef.createElement('div');
+        thoughtsPanel.id = panelId;
+        thoughtsPanel.className = ChatView.#ThoughtsPanelClass;
+        thoughtsPanel.textContent = thoughtsText;
+        bodyElement.append(thoughtsPanel);
+      }
+    }
     rowElement.append(avatarElement, bodyElement);
     return { rowElement, textElement };
   }

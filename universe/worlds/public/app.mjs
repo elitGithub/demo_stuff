@@ -6,6 +6,30 @@ import { ComposerBar } from './components/ComposerBar.mjs';
 import { ConfirmModal } from './components/ConfirmModal.mjs';
 import { InspectorDrawer } from './components/InspectorDrawer.mjs';
 
+const Phase = Object.freeze({
+  Directing: 'directing',
+  DirectorDone: 'director_done',
+  Narrating: 'narrating',
+  Replying: 'replying',
+});
+
+const PhaseLabel = Object.freeze({
+  Directing: 'Directing...',
+  DirectorDone: 'Scene planned...',
+  Narrating: 'Narrating...',
+  Replying: 'Replying...',
+});
+
+const SseEvent = Object.freeze({
+  Phase: 'phase',
+  BeatDelta: 'beat_delta',
+  Committed: 'committed',
+  Findings: 'findings',
+  MemoryUpdated: 'memory_updated',
+  Warning: 'warning',
+  Done: 'done',
+});
+
 export class WorldsApp {
   #api;
   #rootElement;
@@ -312,6 +336,16 @@ export class WorldsApp {
             },
           });
           this.#applyUpdatedCampaign(updated);
+        },
+        onSetPinnedStyle: async (pinnedStyle) => {
+          const campaign = this.#getActiveCampaign();
+          if (campaign === null) {
+            return;
+          }
+          const updated = await this.#api.updateCampaign(campaign.id, {
+            sceneState: { pinnedStyle },
+          });
+          this.#applyUpdatedCampaign(updated, { resetDraft: false });
         },
         onSetPresence: async (characterId, mode) => {
           const campaign = this.#getActiveCampaign();
@@ -751,9 +785,10 @@ export class WorldsApp {
 
   /**
    * @param {object} updatedCampaign
+   * @param {{resetDraft?: boolean}} [options]
    * @returns {void}
    */
-  #applyUpdatedCampaign(updatedCampaign) {
+  #applyUpdatedCampaign(updatedCampaign, { resetDraft = true } = {}) {
     if (updatedCampaign === null || typeof updatedCampaign !== 'object') {
       return;
     }
@@ -761,7 +796,7 @@ export class WorldsApp {
       return entry.id === updatedCampaign.id ? updatedCampaign : entry;
     });
     if (this.#activeCampaignId === updatedCampaign.id) {
-      this.#inspectorDrawer.setCampaign(updatedCampaign, { resetDraft: true });
+      this.#inspectorDrawer.setCampaign(updatedCampaign, { resetDraft });
     }
     this.#renderTopBar();
   }
@@ -1063,27 +1098,28 @@ export class WorldsApp {
           return;
         }
         switch (event) {
-          case 'phase': {
-            const phaseName = data?.phase;
-            if (phaseName === 'directing') {
-              this.#composerBar.setPhase('Directing...');
-            } else if (phaseName === 'director_done') {
-              this.#composerBar.setPhase('Scene planned...');
-            } else if (phaseName === 'minds') {
-              const names = Array.isArray(data?.names) ? data.names.filter((name) => typeof name === 'string') : [];
-              this.#composerBar.setPhase(
-                names.length > 0 ? `Thinking: ${names.join(', ')}...` : 'Thinking...',
-              );
-            } else if (phaseName === 'composing') {
-              this.#composerBar.setPhase('Composing...');
+          case SseEvent.Phase: {
+            if (data !== null && typeof data === 'object') {
+              if (data.phase === Phase.Directing) {
+                this.#composerBar.setPhase(PhaseLabel.Directing);
+              } else if (data.phase === Phase.DirectorDone) {
+                this.#composerBar.setPhase(PhaseLabel.DirectorDone);
+              } else if (data.phase === Phase.Narrating) {
+                this.#composerBar.setPhase(PhaseLabel.Narrating);
+              } else if (data.phase === Phase.Replying) {
+                const speakerName = typeof data.name === 'string' ? data.name.trim() : '';
+                this.#composerBar.setPhase(
+                  speakerName.length > 0 ? `${speakerName} is replying...` : PhaseLabel.Replying,
+                );
+              }
             }
             break;
           }
-          case 'beat_delta': {
+          case SseEvent.BeatDelta: {
             this.#chatView.appendStreamDelta(data);
             break;
           }
-          case 'committed': {
+          case SseEvent.Committed: {
             turnCommitted = true;
             const currentCampaign = this.#getActiveCampaign();
             if (currentCampaign !== null && data?.sceneState) {
@@ -1103,24 +1139,24 @@ export class WorldsApp {
             }
             break;
           }
-          case 'findings': {
+          case SseEvent.Findings: {
             await this.#refreshFindings(campaignId);
             break;
           }
-          case 'memory_updated': {
+          case SseEvent.MemoryUpdated: {
             await Promise.all([
               this.#refreshMemory(campaignId),
               this.#refreshRulings(campaignId),
             ]);
             break;
           }
-          case 'warning': {
+          case SseEvent.Warning: {
             const stagePrefix = typeof data?.stage === 'string' && data.stage.length > 0 ? `[${data.stage}] ` : '';
             const warnText = `${stagePrefix}${typeof data?.message === 'string' ? data.message : 'Warning'}`;
             this.#composerBar.setAlert(warnText, { level: 'warning' });
             break;
           }
-          case 'done': {
+          case SseEvent.Done: {
             const currentCampaign = this.#getActiveCampaign();
             if (currentCampaign !== null && data?.sceneState) {
               this.#applyUpdatedCampaign({

@@ -654,6 +654,42 @@ textarea.field-control {
   color: var(--text-secondary);
 }
 
+.beat-thoughts-toggle {
+  display: inline-flex;
+  align-items: center;
+  min-height: 44px;
+  margin-top: var(--space-2);
+  padding: 0 var(--space-3);
+  border-radius: var(--radius-sm);
+  border: 1px solid var(--border-subtle);
+  background-color: var(--bg-surface-elevated);
+  color: var(--text-secondary);
+  font-size: 0.8125rem;
+  font-weight: 600;
+  cursor: pointer;
+  transition: background-color var(--transition-fast), border-color var(--transition-fast), color var(--transition-fast);
+}
+
+.beat-thoughts-toggle:hover:not(:disabled) {
+  background-color: var(--bg-surface-hover);
+  border-color: var(--border-strong);
+  color: var(--text-primary);
+}
+
+.beat-thoughts {
+  margin-top: var(--space-2);
+  padding: var(--space-2) var(--space-3);
+  border-radius: var(--radius-sm);
+  border: 1px solid var(--border-subtle);
+  border-left: 3px solid var(--border-accent);
+  background-color: var(--bg-surface);
+  color: var(--text-secondary);
+  font-size: 0.875rem;
+  line-height: 1.5;
+  white-space: pre-wrap;
+  overflow-wrap: anywhere;
+}
+
 .turn-actions {
   display: flex;
   flex-wrap: wrap;
@@ -1138,6 +1174,32 @@ textarea.field-control {
 .example-row .field-control {
   flex: 1 1 160px;
   width: auto;
+}
+
+.scene-style-meta {
+  font-size: 0.875rem;
+  color: var(--text-secondary);
+  overflow-wrap: anywhere;
+}
+
+.scene-style-status {
+  font-size: 0.8125rem;
+  font-weight: 600;
+  color: var(--status-info);
+}
+
+.settings-styles-section {
+  display: flex;
+  flex-direction: column;
+  gap: var(--space-3);
+  padding-top: var(--space-2);
+  border-top: 1px solid var(--border-subtle);
+}
+
+.settings-style-textarea {
+  min-height: 76px;
+  font-size: 0.875rem;
+  line-height: 1.45;
 }
 
 @supports (backdrop-filter: blur(12px)) {

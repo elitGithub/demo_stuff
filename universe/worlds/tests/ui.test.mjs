@@ -1108,7 +1108,7 @@ describe('WorldsApi SSE stream parser and CSRF enforcement', () => {
     const rawSsePayload = [
       ': keepalive comment',
       'event: phase',
-      'data: {"phase":"composing"}',
+      'data: {"phase":"narrating"}',
       '',
       'event: beat_delta',
       'data: {"beatIndex":0,',
@@ -1143,7 +1143,7 @@ describe('WorldsApi SSE stream parser and CSRF enforcement', () => {
     );
 
     assert.equal(receivedEvents.length, 3);
-    assert.deepEqual(receivedEvents[0], { event: 'phase', data: { phase: 'composing' } });
+    assert.deepEqual(receivedEvents[0], { event: 'phase', data: { phase: 'narrating' } });
     assert.deepEqual(receivedEvents[1], {
       event: 'beat_delta',
       data: {
@@ -1763,27 +1763,22 @@ describe('Live WorldsServer static serving and WorldsApp boot integration', () =
         }),
         { status: 200, headers: { 'content-type': 'application/json' } },
       ),
-      () => new Response(
-        JSON.stringify({
-          choices: [{
-            message: {
-              content: JSON.stringify({
-                internalThought: 'Stay alert.',
-                physicalAction: 'Lize waves.',
-                spokenLines: 'Over here, Frost.',
-                tone: 'warm',
-                knowledgeBoundaries: 'None.',
-              }),
-            },
-            finish_reason: 'stop',
-          }],
-          usage: { prompt_tokens: 30, completion_tokens: 15, cost: 0.001 },
-        }),
-        { status: 200, headers: { 'content-type': 'application/json' } },
-      ),
       () => {
         const encoder = new TextEncoder();
-        const streamText = '[[BEAT:narrator]]\nGull cries echoed.\n[[BEAT:lize]]\n*Lize waved.*\nOver here, Frost.';
+        const streamText = '<narration>Gull cries echoed.</narration>';
+        const bodyStream = new ReadableStream({
+          start(controller) {
+            controller.enqueue(encoder.encode(`data: ${JSON.stringify({ choices: [{ delta: { content: streamText } }] })}\n\n`));
+            controller.enqueue(encoder.encode(`data: ${JSON.stringify({ choices: [{ delta: {}, finish_reason: 'stop' }], usage: { prompt_tokens: 30, completion_tokens: 15, cost: 0.001 } })}\n\n`));
+            controller.enqueue(encoder.encode('data: [DONE]\n\n'));
+            controller.close();
+          },
+        });
+        return new Response(bodyStream, { status: 200, headers: { 'content-type': 'text/event-stream' } });
+      },
+      () => {
+        const encoder = new TextEncoder();
+        const streamText = '<thoughts>Stay alert.</thoughts>\n<reply>*Lize waved.*\nOver here, Frost.</reply>\n<next>none</next>';
         const bodyStream = new ReadableStream({
           start(controller) {
             controller.enqueue(encoder.encode(`data: ${JSON.stringify({ choices: [{ delta: { content: streamText } }] })}\n\n`));
@@ -1959,7 +1954,9 @@ describe('Live WorldsServer static serving and WorldsApp boot integration', () =
 
     assert.equal(sendButton.textContent, 'Send');
     assert.equal(shell.querySelector('#chat-view').querySelectorAll('.turn-card').length, 2);
+    assert.ok(shell.querySelector('#chat-view').textContent.includes('Gull cries echoed.'));
     assert.ok(shell.querySelector('#chat-view').textContent.includes('Over here, Frost.'));
+    assert.equal(shell.querySelector('#chat-view').textContent.includes('Stay alert.'), false);
     assert.notEqual(shell.querySelector('#spend-badge').textContent, '$0.00');
     assert.equal(shell.querySelector('#spend-warning-banner').classList.contains('is-hidden'), false);
 

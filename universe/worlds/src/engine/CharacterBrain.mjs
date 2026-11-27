@@ -136,11 +136,11 @@ export const CharacterBrain = Object.freeze({
   }),
 
   /**
-   * @param {{campaign: {id: string, premise?: string, styleNotes?: string}, character: {name: string}, card: CharacterCard | Record<string, unknown>, playerName?: string | null, storyState?: string, history?: string, thisTurn?: string, styleText?: string, direction: {reacting: string, length: string, beatGoal: string}, model: string, replyReserve: number, client: {stream: (requestOptions: object) => Promise<{text?: string, truncated?: boolean, spendId?: string | null}>}, signal?: AbortSignal | null, onDelta?: ((delta: string) => void | Promise<void>) | null}} [options]
-   * @returns {Promise<Readonly<{reply: string, thoughts: string, next: string | null, truncated: boolean, spendId: string | null}>>}
-   * @throws {TypeError | RangeError | Error}
+   * @param {{campaign: {id?: string, premise?: string, styleNotes?: string}, character: {name: string}, card: CharacterCard | Record<string, unknown>, playerName?: string | null, storyState?: string, history?: string, thisTurn?: string, styleText?: string, direction: {reacting: string, length: string, beatGoal: string}}} [options]
+   * @returns {readonly [Readonly<{role: string, content: string}>, Readonly<{role: string, content: string}>]}
+   * @throws {TypeError | RangeError}
    */
-  async reply(options = {}) {
+  buildMessages(options = {}) {
     if (!isPlainObject(options)) {
       throw new TypeError('CharacterBrain options must be a plain object.');
     }
@@ -156,17 +156,11 @@ export const CharacterBrain = Object.freeze({
       thisTurn = settings.EmptyText,
       styleText = settings.EmptyText,
       direction,
-      model,
-      replyReserve,
-      client,
-      signal = null,
-      onDelta = null,
     } = options;
 
     if (campaign === null || typeof campaign !== 'object' || Array.isArray(campaign)) {
       throw new TypeError('campaign must be an object.');
     }
-    const campaignId = requireNonEmptyString(campaign.id, 'campaign.id');
     if (campaign.premise !== undefined) {
       requireString(campaign.premise, 'campaign.premise');
     }
@@ -195,30 +189,6 @@ export const CharacterBrain = Object.freeze({
     const trimmedReacting = requireNonEmptyString(direction.reacting, 'direction.reacting');
     const trimmedLength = requireNonEmptyString(direction.length, 'direction.length');
     const trimmedBeatGoal = requireString(direction.beatGoal, 'direction.beatGoal').trim();
-
-    const trimmedModel = requireNonEmptyString(model, 'model');
-
-    if (typeof replyReserve !== 'number') {
-      throw new TypeError('replyReserve must be a positive integer.');
-    }
-    if (!Number.isInteger(replyReserve) || replyReserve <= 0) {
-      throw new RangeError('replyReserve must be a positive integer.');
-    }
-    if (client === null || typeof client !== 'object' || Array.isArray(client) || typeof client.stream !== 'function') {
-      throw new TypeError('client must provide a stream() method.');
-    }
-    if (signal !== null && (typeof signal !== 'object' || typeof signal.aborted !== 'boolean')) {
-      throw new TypeError('signal must be null or an AbortSignal.');
-    }
-    if (onDelta !== null && typeof onDelta !== 'function') {
-      throw new TypeError('onDelta must be null or a function.');
-    }
-
-    if (signal !== null && signal.aborted) {
-      const abortError = new Error(settings.AbortMessage);
-      abortError.name = settings.AbortName;
-      throw abortError;
-    }
 
     const systemSections = [
       `You are ${characterName} in an ongoing adult fiction roleplay. You write only ${characterName}'s own reply.`,
@@ -333,10 +303,79 @@ export const CharacterBrain = Object.freeze({
       `<${settings.Tag.Direction} ${settings.Attr.Reacting}="${trimmedReacting}" ${settings.Attr.Length}="${trimmedLength}">${trimmedBeatGoal}</${settings.Tag.Direction}>`,
     );
 
-    const messages = [
-      { role: settings.RoleSystem, content: systemSections.join(settings.SectionSeparator) },
-      { role: settings.RoleUser, content: userSections.join(settings.SectionSeparator) },
-    ];
+    return Object.freeze([
+      Object.freeze({ role: settings.RoleSystem, content: systemSections.join(settings.SectionSeparator) }),
+      Object.freeze({ role: settings.RoleUser, content: userSections.join(settings.SectionSeparator) }),
+    ]);
+  },
+
+  /**
+   * @param {{campaign: {id: string, premise?: string, styleNotes?: string}, character: {name: string}, card: CharacterCard | Record<string, unknown>, playerName?: string | null, storyState?: string, history?: string, thisTurn?: string, styleText?: string, direction: {reacting: string, length: string, beatGoal: string}, model: string, replyReserve: number, client: {stream: (requestOptions: object) => Promise<{text?: string, truncated?: boolean, spendId?: string | null}>}, signal?: AbortSignal | null, onDelta?: ((delta: string) => void | Promise<void>) | null}} [options]
+   * @returns {Promise<Readonly<{reply: string, thoughts: string, next: string | null, truncated: boolean, spendId: string | null}>>}
+   * @throws {TypeError | RangeError | Error}
+   */
+  async reply(options = {}) {
+    if (!isPlainObject(options)) {
+      throw new TypeError('CharacterBrain options must be a plain object.');
+    }
+
+    const settings = CharacterBrain.Settings;
+    const {
+      campaign,
+      character,
+      card,
+      playerName = null,
+      storyState = settings.EmptyText,
+      history = settings.EmptyText,
+      thisTurn = settings.EmptyText,
+      styleText = settings.EmptyText,
+      direction,
+      model,
+      replyReserve,
+      client,
+      signal = null,
+      onDelta = null,
+    } = options;
+
+    if (campaign === null || typeof campaign !== 'object' || Array.isArray(campaign)) {
+      throw new TypeError('campaign must be an object.');
+    }
+    const campaignId = requireNonEmptyString(campaign.id, 'campaign.id');
+    const messages = CharacterBrain.buildMessages({
+      campaign,
+      character,
+      card,
+      playerName,
+      storyState,
+      history,
+      thisTurn,
+      styleText,
+      direction,
+    });
+
+    const trimmedModel = requireNonEmptyString(model, 'model');
+
+    if (typeof replyReserve !== 'number') {
+      throw new TypeError('replyReserve must be a positive integer.');
+    }
+    if (!Number.isInteger(replyReserve) || replyReserve <= 0) {
+      throw new RangeError('replyReserve must be a positive integer.');
+    }
+    if (client === null || typeof client !== 'object' || Array.isArray(client) || typeof client.stream !== 'function') {
+      throw new TypeError('client must provide a stream() method.');
+    }
+    if (signal !== null && (typeof signal !== 'object' || typeof signal.aborted !== 'boolean')) {
+      throw new TypeError('signal must be null or an AbortSignal.');
+    }
+    if (onDelta !== null && typeof onDelta !== 'function') {
+      throw new TypeError('onDelta must be null or a function.');
+    }
+
+    if (signal !== null && signal.aborted) {
+      const abortError = new Error(settings.AbortMessage);
+      abortError.name = settings.AbortName;
+      throw abortError;
+    }
 
     const splitter = new ReplyStreamSplitter({
       visibleTag: settings.Tag.Reply,

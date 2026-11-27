@@ -1,32 +1,78 @@
-import { ScribeAnalyzer } from '../scribe/ScribeAnalyzer.mjs';
 import { ScribeIntakeAdapter } from '../scribe/ScribeIntakeAdapter.mjs';
 import { ScribeKnowledge } from '../scribe/ScribeKnowledge.mjs';
 import { ScribeLogCore } from '../scribe/ScribeLogCore.mjs';
 import { ScribeReplay } from '../scribe/ScribeReplay.mjs';
+import { ScribeText } from '../scribe/ScribeText.mjs';
 import { CharacterTier } from '../store/enums/CharacterTier.mjs';
+import { SceneStyle } from '../store/enums/SceneStyle.mjs';
 import { SpeakerType } from '../store/enums/SpeakerType.mjs';
 import { SpendStage } from '../store/enums/SpendStage.mjs';
 import { TurnMode } from '../store/enums/TurnMode.mjs';
-import { CharacterMind } from './CharacterMind.mjs';
+import { CharacterBrain } from './CharacterBrain.mjs';
 import { Director } from './Director.mjs';
 import { EncounterRoller } from './EncounterRoller.mjs';
+import { HistoryWindow } from './HistoryWindow.mjs';
 import { NarrationParts } from './NarrationParts.mjs';
-import { NarratorComposer } from './NarratorComposer.mjs';
+import { Narrator } from './Narrator.mjs';
 import { RequestBudget } from './RequestBudget.mjs';
+import { StorySlice } from './StorySlice.mjs';
 import { WitnessFilter } from './WitnessFilter.mjs';
 
 export class TurnEngine {
+  static Settings = Object.freeze({
+    Phase: Object.freeze({
+      Directing: 'directing',
+      DirectorDone: 'director_done',
+      Narrating: 'narrating',
+      Replying: 'replying',
+    }),
+    Event: Object.freeze({
+      Phase: 'phase',
+      BeatDelta: 'beat_delta',
+      Committed: 'committed',
+      Findings: 'findings',
+      Warning: 'warning',
+      MemoryUpdated: 'memory_updated',
+    }),
+    MainHistoryMaxTurns: 25,
+    RecurringHistoryMaxTurns: 12,
+    NarratorHistoryMaxTurns: 25,
+    NarratorSlug: 'narrator',
+    EmptyText: '',
+    LineSeparator: '\n',
+    ParagraphSeparator: '\n\n',
+    CommaSpace: ', ',
+    SpeakerSeparator: ': ',
+    AbortName: 'AbortError',
+    AbortMessage: 'Turn aborted',
+    ConflictName: 'ConflictError',
+    ConflictStatusCode: 409,
+    EncounterFallbackText: '*(Encounter)*',
+    DefaultArrivalDirection: 'Describe the arrival.',
+    DefaultSceneDirection: 'Describe the scene.',
+    DefaultPageLimit: 50,
+    SingleTurnWindow: 1,
+    HistoryTag: Narrator.Settings.Tag.History,
+
+    /**
+     * @returns {RegExp}
+     */
+    get NarratorPrefixPattern() {
+      return /^[\s*_]*narrator:\s*/i;
+    },
+  });
+
   #store;
   #client;
   #scribeService;
   #pedantService;
   #random;
-  #maxResponders;
+  #modelCatalog;
   #inFlight = new Set();
 
   /**
-   * @param {{store: object, client: object, scribeService: object, pedantService?: object | null, random?: () => number, maxResponders?: number | null}} options
-   * @throws {TypeError | RangeError}
+   * @param {{store: object, client: object, scribeService: object, pedantService?: object | null, random?: () => number, modelCatalog: {contextLength: (modelId: string) => number | null}}} options
+   * @throws {TypeError}
    */
   constructor(options = {}) {
     if (options === null || typeof options !== 'object' || Array.isArray(options)) {
@@ -39,7 +85,7 @@ export class TurnEngine {
       scribeService,
       pedantService = null,
       random = Math.random,
-      maxResponders = null,
+      modelCatalog,
     } = options;
 
     if (store === null || typeof store !== 'object') {
@@ -52,7 +98,6 @@ export class TurnEngine {
       scribeService === null ||
       typeof scribeService !== 'object' ||
       typeof scribeService.loadState !== 'function' ||
-      typeof scribeService.characterKnowledgePacket !== 'function' ||
       typeof scribeService.updateMemory !== 'function'
     ) {
       throw new TypeError('scribeService must be a valid ScribeService instance.');
@@ -63,8 +108,13 @@ export class TurnEngine {
     if (typeof random !== 'function') {
       throw new TypeError('random must be a function.');
     }
-    if (maxResponders !== null && (!Number.isInteger(maxResponders) || maxResponders < 1)) {
-      throw new RangeError('maxResponders must be null or a positive integer.');
+    if (
+      modelCatalog === null ||
+      typeof modelCatalog !== 'object' ||
+      Array.isArray(modelCatalog) ||
+      typeof modelCatalog.contextLength !== 'function'
+    ) {
+      throw new TypeError('modelCatalog must provide a contextLength() method.');
     }
 
     this.#store = store;
@@ -72,7 +122,7 @@ export class TurnEngine {
     this.#scribeService = scribeService;
     this.#pedantService = pedantService;
     this.#random = random;
-    this.#maxResponders = maxResponders;
+    this.#modelCatalog = modelCatalog;
   }
 
   /**
@@ -89,7 +139,7 @@ export class TurnEngine {
 
   /**
    * @param {{campaignId: string, text: string, mode?: string, narration?: string | null, oocNudge?: string | null, signal?: AbortSignal | null, emit?: ((payload: {event: string, data: unknown}) => void | Promise<void>) | null}} options
-   * @returns {Promise<Readonly<{userTurn: object, assistantTurn: object, sceneState: object, plan: object, truncated: boolean, playerBeatRemapped: boolean}>>}
+   * @returns {Promise<Readonly<{userTurn: object, assistantTurn: object, sceneState: object, plan: object, truncated: boolean}>>}
    * @throws {Error}
    */
   async runTurn(options = {}) {
@@ -152,7 +202,7 @@ export class TurnEngine {
 
   /**
    * @param {{campaignId: string, signal?: AbortSignal | null, emit?: ((payload: {event: string, data: unknown}) => void | Promise<void>) | null}} options
-   * @returns {Promise<Readonly<{userTurn: object, assistantTurn: object, sceneState: object, plan: object, truncated: boolean, playerBeatRemapped: boolean}>>}
+   * @returns {Promise<Readonly<{userTurn: object, assistantTurn: object, sceneState: object, plan: object, truncated: boolean}>>}
    * @throws {Error}
    */
   async regenerateLastTurn(options = {}) {
@@ -359,8 +409,8 @@ export class TurnEngine {
     }
     if (this.#inFlight.has(campaignId)) {
       const conflictError = new Error(`A turn operation is already in flight for campaign ${campaignId}.`);
-      conflictError.name = 'ConflictError';
-      conflictError.statusCode = 409;
+      conflictError.name = TurnEngine.Settings.ConflictName;
+      conflictError.statusCode = TurnEngine.Settings.ConflictStatusCode;
       throw conflictError;
     }
     this.#inFlight.add(campaignId);
@@ -372,11 +422,24 @@ export class TurnEngine {
    * @throws {Error}
    */
   #throwIfAborted(signal) {
-    if (signal?.aborted) {
-      const abortError = new Error('Turn aborted');
-      abortError.name = 'AbortError';
+    if (signal !== null && signal.aborted) {
+      const abortError = new Error(TurnEngine.Settings.AbortMessage);
+      abortError.name = TurnEngine.Settings.AbortName;
       throw abortError;
     }
+  }
+
+  /**
+   * @param {unknown} error
+   * @param {AbortSignal | null} signal
+   * @returns {void}
+   * @throws {Error}
+   */
+  #rethrowIfAborted(error, signal) {
+    if (error instanceof Error && error.name === TurnEngine.Settings.AbortName) {
+      throw error;
+    }
+    this.#throwIfAborted(signal);
   }
 
   /**
@@ -384,6 +447,7 @@ export class TurnEngine {
    * @param {string} event
    * @param {unknown} data
    * @returns {Promise<void>}
+   * @throws {Error}
    */
   async #emitEvent(emit, event, data) {
     if (emit !== null) {
@@ -402,13 +466,14 @@ export class TurnEngine {
       throw new RangeError(`Campaign not found: ${campaignId}`);
     }
     const settings = this.#store.getSettings();
+    const pageLimit = TurnEngine.Settings.DefaultPageLimit;
 
     const allCharacters = [];
     let charCursor = null;
     while (true) {
       const charPage = this.#store.listCharacters(campaignId, {
         includeArchived: true,
-        limit: 50,
+        limit: pageLimit,
         after: charCursor,
       });
       allCharacters.push(...charPage.items);
@@ -422,7 +487,7 @@ export class TurnEngine {
     let beforeSeq = null;
     while (true) {
       const turnPage = this.#store.listTurns(campaignId, {
-        limit: 50,
+        limit: pageLimit,
         beforeSeq,
       });
       turnPages.push(...turnPage.items);
@@ -451,12 +516,13 @@ export class TurnEngine {
    */
   #recoverMissingScenes(log, remainingTurns, allCharacters, campaign) {
     const sortedTurns = [...remainingTurns].sort((leftTurn, rightTurn) => leftTurn.seq - rightTurn.seq);
-    const playerChar = campaign.playerCharacterId
-      ? allCharacters.find((character) => character.id === campaign.playerCharacterId) ?? null
-      : null;
+    const matchedPlayer = campaign.playerCharacterId
+      ? allCharacters.find((character) => character.id === campaign.playerCharacterId)
+      : undefined;
+    const playerName = matchedPlayer === undefined ? null : matchedPlayer.name;
     const intake = ScribeIntakeAdapter.fromTurns(sortedTurns, {
       playerCharacterId: campaign.playerCharacterId,
-      playerName: playerChar?.name ?? null,
+      playerName,
     });
     const order = sortedTurns.map((turn) => ({ id: turn.id, position: turn.seq }));
     const fingerprints = new Map(intake.messages.map((message) => [message.id, message.fingerprint]));
@@ -526,8 +592,115 @@ export class TurnEngine {
   }
 
   /**
+   * @param {object} character
+   * @param {object} settings
+   * @returns {string}
+   * @throws {Error}
+   */
+  #resolveCharacterModel(character, settings) {
+    const engineSettings = TurnEngine.Settings;
+    const overrideModel = typeof character.modelOverride === 'string'
+      ? character.modelOverride.trim()
+      : engineSettings.EmptyText;
+    const tierModel = typeof settings.models[character.tier] === 'string'
+      ? settings.models[character.tier].trim()
+      : engineSettings.EmptyText;
+    const resolvedModel = overrideModel.length > 0 ? overrideModel : tierModel;
+    if (resolvedModel.length === 0) {
+      throw new Error(`Model is not configured for ${character.name} (${character.tier}).`);
+    }
+    return resolvedModel;
+  }
+
+  /**
+   * @param {readonly string[]} characterIds
+   * @param {ReadonlyMap<string, object>} nonArchivedById
+   * @returns {string[]}
+   */
+  #collectSubjectIds(characterIds, nonArchivedById) {
+    const subjectIds = [];
+    for (const characterId of characterIds) {
+      const character = nonArchivedById.get(characterId);
+      if (
+        character !== undefined &&
+        typeof character.scribeSubjectId === 'string' &&
+        character.scribeSubjectId.trim().length > 0
+      ) {
+        subjectIds.push(character.scribeSubjectId.trim());
+      }
+    }
+    return subjectIds;
+  }
+
+  /**
+   * @param {{roleLabel: string, model: string, budget: {limitTokens: number | null, estimate: (text: string) => number, fits: (usedTokens: number, text: string) => boolean}, buildMessages: (storyState: string, history: string) => readonly [Readonly<{role: string, content: string}>, Readonly<{role: string, content: string}>], scribeState: object, viewer: {subjectId: string | null, omniscient: boolean, characterId?: string | null}, scene: {location: string, day: number, timeLabel: string, sceneType: string, situation: string}, presentSubjectIds: readonly string[], remoteSubjectIds: readonly string[], namedText: string, playerName: string | null, turnsById: ReadonlyMap<string, object> | null, historyTurns: ReadonlyArray<object>, historyCharacterId: string | null, historyMaxTurns: number}} contextOptions
+   * @returns {{storyState: string, history: string}}
+   * @throws {Error}
+   */
+  #assembleBudgetedContext({
+    roleLabel,
+    model,
+    budget,
+    buildMessages,
+    scribeState,
+    viewer,
+    scene,
+    presentSubjectIds,
+    remoteSubjectIds,
+    namedText,
+    playerName,
+    turnsById,
+    historyTurns,
+    historyCharacterId,
+    historyMaxTurns,
+  }) {
+    const engineSettings = TurnEngine.Settings;
+    const mandatoryMessages = buildMessages(engineSettings.EmptyText, engineSettings.EmptyText);
+    const mandatoryTokens =
+      budget.estimate(mandatoryMessages[0].content) +
+      budget.estimate(mandatoryMessages[1].content);
+    if (budget.limitTokens !== null && mandatoryTokens > budget.limitTokens) {
+      throw new Error(`Mandatory prompt exceeds context budget for ${roleLabel} on model ${model}.`);
+    }
+
+    const sliceUsedTokens =
+      budget.estimate(mandatoryMessages[0].content) +
+      budget.estimate(`${mandatoryMessages[1].content}${engineSettings.ParagraphSeparator}`);
+    const storySlice = StorySlice.build({
+      state: scribeState,
+      viewer,
+      scene,
+      presentSubjectIds,
+      remoteSubjectIds,
+      namedText,
+      playerName,
+      budget,
+      usedTokens: sliceUsedTokens,
+      turnsById,
+    });
+
+    const withSliceMessages = buildMessages(storySlice.text, engineSettings.EmptyText);
+    const historyWrapper = `${engineSettings.ParagraphSeparator}<${engineSettings.HistoryTag}>${engineSettings.LineSeparator}${engineSettings.LineSeparator}</${engineSettings.HistoryTag}>`;
+    const historyUsedTokens =
+      budget.estimate(withSliceMessages[0].content) +
+      budget.estimate(`${withSliceMessages[1].content}${historyWrapper}`);
+    const historyWindow = HistoryWindow.build({
+      turns: historyTurns,
+      characterId: historyCharacterId,
+      maxTurns: historyMaxTurns,
+      budget,
+      usedTokens: historyUsedTokens,
+    });
+
+    return {
+      storyState: storySlice.text,
+      history: historyWindow.text,
+    };
+  }
+
+  /**
    * @param {{campaign: object, settings: object, allCharacters: Array<object>, priorTurns: Array<object>, preState: object, scribeState: object, rawText?: string, narration?: string | null, existingUserTurn?: object | null, mode: string, oocNudge: string | null, signal: AbortSignal | null, emit: ((payload: {event: string, data: unknown}) => void | Promise<void>) | null, beforeCommit?: (() => void) | null}} pipelineInput
-   * @returns {Promise<Readonly<{userTurn: object, assistantTurn: object, sceneState: object, plan: object, truncated: boolean, playerBeatRemapped: boolean}>>}
+   * @returns {Promise<Readonly<{userTurn: object, assistantTurn: object, sceneState: object, plan: object, truncated: boolean}>>}
    * @throws {Error}
    */
   async #executePipeline({
@@ -546,8 +719,9 @@ export class TurnEngine {
     emit,
     beforeCommit = null,
   }) {
-    const narratorPrefixPattern = /^[\s*_]*narrator:\s*/i;
-    let narrationText = '';
+    const engineSettings = TurnEngine.Settings;
+    const narratorPrefixPattern = engineSettings.NarratorPrefixPattern;
+    let narrationText = engineSettings.EmptyText;
     let effectiveMode = mode;
     let promptText;
     let directorUserText;
@@ -567,7 +741,9 @@ export class TurnEngine {
       narrationText = parts.narration;
       const hasNarratorPrefix = narratorPrefixPattern.test(parts.text);
       effectiveMode = hasNarratorPrefix ? TurnMode.Narrator : mode;
-      promptText = hasNarratorPrefix ? parts.text.replace(narratorPrefixPattern, '').trim() : parts.text;
+      promptText = hasNarratorPrefix
+        ? parts.text.replace(narratorPrefixPattern, engineSettings.EmptyText).trim()
+        : parts.text;
       if (
         (effectiveMode === TurnMode.Normal || effectiveMode === TurnMode.Narrator) &&
         promptText.length === 0 &&
@@ -575,14 +751,14 @@ export class TurnEngine {
       ) {
         effectiveMode = TurnMode.Narrator;
         promptText = narrationText;
-        narrationText = '';
+        narrationText = engineSettings.EmptyText;
       }
       directorUserText = promptText;
       directorNarrationText = narrationText.length > 0 ? narrationText : null;
     }
 
     if (effectiveMode === TurnMode.Encounter && promptText.length === 0) {
-      promptText = '*(Encounter)*';
+      promptText = engineSettings.EncounterFallbackText;
       if (existingUserTurn === null) {
         directorUserText = promptText;
       }
@@ -593,20 +769,26 @@ export class TurnEngine {
 
     const normalizedOocNudge = oocNudge !== null && oocNudge.trim().length > 0 ? oocNudge.trim() : null;
 
-    const directorModel = typeof settings?.models?.director === 'string' ? settings.models.director.trim() : '';
-    const composerModel = typeof settings?.models?.composer === 'string' ? settings.models.composer.trim() : '';
+    const directorModel = typeof settings.models.director === 'string'
+      ? settings.models.director.trim()
+      : engineSettings.EmptyText;
+    const composerModel = typeof settings.models.composer === 'string'
+      ? settings.models.composer.trim()
+      : engineSettings.EmptyText;
     if (directorModel.length === 0) {
       throw new Error('Director model is not configured.');
     }
     if (composerModel.length === 0) {
-      throw new Error('Composer model is not configured.');
+      throw new Error('Narrator model is not configured.');
     }
 
     const nonArchivedChars = allCharacters.filter((character) => !character.archived);
     const nonArchivedById = new Map(nonArchivedChars.map((character) => [character.id, character]));
-    const playerChar = campaign.playerCharacterId
-      ? nonArchivedById.get(campaign.playerCharacterId) ?? null
-      : null;
+    const matchedPlayer = campaign.playerCharacterId
+      ? nonArchivedById.get(campaign.playerCharacterId)
+      : undefined;
+    const playerChar = matchedPlayer === undefined ? null : matchedPlayer;
+    const playerName = playerChar === null ? null : playerChar.name;
     const preParticipantSet = new Set([...preState.presentIds, ...preState.remoteIds]);
     const absentNonPlayerCast = nonArchivedChars.filter((character) => {
       return character.id !== campaign.playerCharacterId && !preParticipantSet.has(character.id);
@@ -623,14 +805,14 @@ export class TurnEngine {
       random: this.#random,
     });
 
-    await this.#emitEvent(emit, 'phase', { phase: 'directing' });
+    await this.#emitEvent(emit, engineSettings.Event.Phase, { phase: engineSettings.Phase.Directing });
 
     const openThreadTitles = scribeState.threads
       .filter((thread) => thread.closed === null)
       .map((thread) => thread.text);
 
     const directorBudget = RequestBudget.create({
-      contextLength: null,
+      contextLength: this.#modelCatalog.contextLength(directorModel),
       replyReserve: settings.replyReserve,
       charsPerToken: RequestBudget.charsPerToken({
         store: this.#store,
@@ -653,8 +835,8 @@ export class TurnEngine {
       model: directorModel,
       client: this.#client,
       signal,
-      maxResponders: this.#maxResponders,
       budget: directorBudget,
+      replyReserve: settings.replyReserve,
     });
     for (const spendId of planResult.spendIds) {
       if (typeof spendId === 'string' && spendId.length > 0) {
@@ -662,145 +844,43 @@ export class TurnEngine {
       }
     }
 
-    const { plan, nextState } = planResult;
+    const { plan } = planResult;
     this.#throwIfAborted(signal);
 
-    await this.#emitEvent(emit, 'phase', {
-      phase: 'director_done',
+    const carriedPin = plan.sceneChanged ? null : preState.pinnedStyle;
+    const effectiveStyle = carriedPin !== null ? carriedPin : plan.style;
+    const styleText = effectiveStyle === SceneStyle.None
+      ? engineSettings.EmptyText
+      : settings.sceneStyles[effectiveStyle];
+    const nextState = Object.freeze({
+      ...planResult.nextState,
+      style: effectiveStyle,
+      pinnedStyle: carriedPin,
+    });
+
+    await this.#emitEvent(emit, engineSettings.Event.Phase, {
+      phase: engineSettings.Phase.DirectorDone,
       sceneState: nextState,
       plan,
     });
+
+    for (const responderEntry of plan.responders) {
+      const responderChar = nonArchivedById.get(responderEntry.characterId);
+      if (responderChar === undefined) {
+        throw new Error(`Responder character not found: ${responderEntry.characterId}`);
+      }
+      this.#resolveCharacterModel(responderChar, settings);
+    }
 
     const nextParticipantSet = new Set([...nextState.presentIds, ...nextState.remoteIds]);
     const arrivingSet = plan.sceneChanged
       ? new Set()
       : new Set([...nextParticipantSet].filter((characterId) => !preParticipantSet.has(characterId)));
 
-    let mindPackets = [];
-    if (plan.responders.length > 0) {
-      const responderTargets = plan.responders.map((responderEntry) => {
-        const character = nonArchivedById.get(responderEntry.characterId);
-        if (character === undefined) {
-          throw new Error(`Responder character not found: ${responderEntry.characterId}`);
-        }
-        const overrideModel = typeof character.modelOverride === 'string' ? character.modelOverride.trim() : '';
-        const tierModel = typeof settings.models?.[character.tier] === 'string' ? settings.models[character.tier].trim() : '';
-        const mindModel = overrideModel.length > 0 ? overrideModel : tierModel;
-        if (mindModel.length === 0) {
-          throw new Error(`Model is not configured for ${character.name} (${character.tier}).`);
-        }
-        return { responderEntry, character, model: mindModel };
-      });
-
-      this.#throwIfAborted(signal);
-
-      await this.#emitEvent(emit, 'phase', {
-        phase: 'minds',
-        names: responderTargets.map((target) => target.character.name),
-        slugs: responderTargets.map((target) => target.character.slug),
-      });
-
-      const presentCharacters = nonArchivedChars.filter((character) => nextParticipantSet.has(character.id));
-      const turnsById = new Map(priorTurns.map((turn) => [turn.id, turn]));
-      const subjectLabels = ScribeAnalyzer.labels(scribeState);
-
-      const mindController = new AbortController();
-      let onParentAbort = null;
-      if (signal !== null) {
-        onParentAbort = () => {
-          mindController.abort(signal.reason);
-        };
-        if (signal.aborted) {
-          mindController.abort(signal.reason);
-        } else {
-          signal.addEventListener('abort', onParentAbort, { once: true });
-        }
-      }
-
-      let firstRootError = null;
-      let settledResults;
-      try {
-        settledResults = await Promise.allSettled(
-          responderTargets.map(async ({ responderEntry, character, model }) => {
-            try {
-              const maxTurns = character.tier === CharacterTier.Main ? 25 : 12;
-              const witnessedHistory = WitnessFilter.selectWitnessedBeats({
-                turns: priorTurns,
-                characterId: character.id,
-                maxTurns,
-              });
-              const knowledgePacket = this.#scribeService.characterKnowledgePacket({
-                state: scribeState,
-                character,
-                presentCharacters,
-                turnsById,
-              });
-              const isArriving = !plan.sceneChanged && arrivingSet.has(character.id);
-              return await CharacterMind.think({
-                character,
-                campaign,
-                nextState,
-                presentCharacters,
-                witnessedHistory,
-                knowledgePacket,
-                currentInput: promptText,
-                isArriving,
-                encounterBrief: plan.encounterAccepted ? plan.encounterBrief : '',
-                beatGoal: responderEntry.beatGoal,
-                length: responderEntry.length,
-                subjectLabels,
-                model,
-                client: this.#client,
-                signal: mindController.signal,
-              });
-            } catch (mindError) {
-              if (firstRootError === null) {
-                firstRootError = mindError;
-              }
-              if (!mindController.signal.aborted) {
-                mindController.abort(mindError);
-              }
-              throw mindError;
-            }
-          }),
-        );
-      } finally {
-        if (signal !== null && onParentAbort !== null) {
-          signal.removeEventListener('abort', onParentAbort);
-        }
-      }
-
-      this.#throwIfAborted(signal);
-
-      if (firstRootError !== null) {
-        throw firstRootError;
-      }
-
-      for (const settledResult of settledResults) {
-        if (settledResult.status === 'rejected') {
-          throw settledResult.reason;
-        }
-      }
-
-      mindPackets = settledResults.map((settledResult) => {
-        const packet = settledResult.value;
-        for (const spendId of packet.spendIds) {
-          if (typeof spendId === 'string' && spendId.length > 0) {
-            collectedSpendIds.add(spendId);
-          }
-        }
-        return packet;
-      });
-    }
-
-    this.#throwIfAborted(signal);
-
-    await this.#emitEvent(emit, 'phase', { phase: 'composing' });
-
     const isNarratorUserBeat =
       effectiveMode === TurnMode.Narrator ||
       playerChar === null ||
-      (plan.userInputKind === 'narrator_direction' && !nextParticipantSet.has(playerChar.id));
+      (plan.userInputKind === Director.Settings.InputKind.NarratorDirection && !nextParticipantSet.has(playerChar.id));
 
     const userBeat = existingUserTurn === null
       ? {
@@ -809,142 +889,466 @@ export class TurnEngine {
           speakerName: isNarratorUserBeat ? SpeakerType.label(SpeakerType.Narrator) : playerChar.name,
           text: promptText,
         }
-      : {
-          speakerType: existingUserTurn.beats[0].speakerType,
-          characterId: existingUserTurn.beats[0].characterId,
-          speakerName: existingUserTurn.beats[0].speakerName,
-          text: promptText,
-        };
+      : null;
+
+    const userHasPlayerBeat = existingUserTurn === null
+      ? userBeat.speakerType === SpeakerType.Player
+      : existingUserTurn.beats.some((beat) => beat.speakerType === SpeakerType.Player);
 
     let userWitnessIds;
     if (plan.sceneChanged) {
       userWitnessIds = [...nextParticipantSet];
     } else {
       const userWitnessSet = new Set(preParticipantSet);
-      if (
-        userBeat.speakerType === SpeakerType.Player &&
-        playerChar !== null &&
-        nextParticipantSet.has(playerChar.id)
-      ) {
+      if (userHasPlayerBeat && playerChar !== null && nextParticipantSet.has(playerChar.id)) {
         userWitnessSet.add(playerChar.id);
       }
       userWitnessIds = [...userWitnessSet];
     }
 
-    const recentSceneTurns = priorTurns.filter((turn) => turn.sceneNumber === nextState.sceneNumber);
-    const composerResult = await NarratorComposer.compose({
-      campaign,
-      characters: allCharacters,
-      nextState,
-      recentSceneTurns,
-      userBeat,
-      oocNudge: normalizedOocNudge,
-      directorPlan: plan,
-      mindPackets,
-      model: composerModel,
-      client: this.#client,
-      signal,
-      onBeatDelta: emit === null
-        ? null
-        : async (parsedDelta) => {
-            await this.#emitEvent(emit, 'beat_delta', parsedDelta);
-          },
-    });
-    if (typeof composerResult.spendId === 'string' && composerResult.spendId.length > 0) {
-      collectedSpendIds.add(composerResult.spendId);
-    }
-
-    this.#throwIfAborted(signal);
-
-    const preBeatWitnessSet = new Set(preParticipantSet);
-    if (
-      userBeat.speakerType === SpeakerType.Player &&
-      playerChar !== null &&
-      nextParticipantSet.has(playerChar.id)
-    ) {
-      preBeatWitnessSet.add(playerChar.id);
-    }
+    const userTurnLines = existingUserTurn !== null
+      ? existingUserTurn.beats.map((beat) => `${beat.speakerName}${engineSettings.SpeakerSeparator}${beat.text}`)
+      : [
+          `${userBeat.speakerName}${engineSettings.SpeakerSeparator}${userBeat.text}`,
+          ...(narrationText.length > 0
+            ? [`${SpeakerType.label(SpeakerType.Narrator)}${engineSettings.SpeakerSeparator}${narrationText}`]
+            : []),
+        ];
 
     const arrivingNonPlayerSet = new Set(
       [...arrivingSet].filter((characterId) => {
-        return !(userBeat.speakerType === SpeakerType.Player && playerChar !== null && characterId === playerChar.id);
+        return !(userHasPlayerBeat && playerChar !== null && characterId === playerChar.id);
       }),
     );
 
-    let arrivalBeatIndex = 0;
-    if (!plan.sceneChanged && arrivingNonPlayerSet.size > 0) {
-      const arrivingPatterns = [];
+    const presentSubjectIds = this.#collectSubjectIds(nextState.presentIds, nonArchivedById);
+    const remoteSubjectIds = this.#collectSubjectIds(nextState.remoteIds, nonArchivedById);
+    const sliceScene = {
+      location: nextState.location,
+      day: nextState.day,
+      timeLabel: nextState.timeLabel,
+      sceneType: nextState.sceneType,
+      situation: plan.situation,
+    };
+    const turnsById = new Map(priorTurns.map((turn) => [turn.id, turn]));
+    const witnessIdsList = [...nextParticipantSet];
+
+    const assistantBeats = [];
+    const earlierBoxes = [];
+    let anyTruncated = false;
+    let nextStreamBeatIndex = 0;
+
+    const shouldRunNarrator =
+      plan.narratorDirective.length > 0 ||
+      arrivingNonPlayerSet.size > 0 ||
+      plan.pacing === Director.Settings.Pacing.NarratorOnly;
+
+    if (shouldRunNarrator) {
+      this.#throwIfAborted(signal);
+      await this.#emitEvent(emit, engineSettings.Event.Phase, { phase: engineSettings.Phase.Narrating });
+
+      const arrivingNames = [];
       for (const arrivingId of arrivingNonPlayerSet) {
         const arrivingChar = nonArchivedById.get(arrivingId);
-        if (arrivingChar === undefined) {
-          continue;
-        }
-        const rawTerms = [
-          arrivingChar.name,
-          arrivingChar.slug,
-          ...(Array.isArray(arrivingChar.aliases) ? arrivingChar.aliases : []),
-        ];
-        for (const rawTerm of rawTerms) {
-          if (typeof rawTerm !== 'string') {
-            continue;
-          }
-          const normalizedTerm = rawTerm.trim().replace(/\s+/g, ' ');
-          if (normalizedTerm.length === 0) {
-            continue;
-          }
-          const escapedTerm = normalizedTerm.replace(/[.*+?^${}()|[\]\\]/g, '\\$&');
-          arrivingPatterns.push(
-            new RegExp(`(?<![\\p{L}\\p{N}_])${escapedTerm}(?![\\p{L}\\p{N}_])`, 'iu'),
-          );
+        if (arrivingChar !== undefined) {
+          arrivingNames.push(arrivingChar.name);
         }
       }
 
-      arrivalBeatIndex = composerResult.beats.findIndex((beat) => {
-        if (beat.characterId !== null && arrivingNonPlayerSet.has(beat.characterId)) {
-          return true;
-        }
-        if (beat.speakerType === SpeakerType.Narrator && arrivingPatterns.length > 0) {
-          const normalizedText = beat.text.replace(/\s+/g, ' ');
-          return arrivingPatterns.some((pattern) => pattern.test(normalizedText));
-        }
-        return false;
+      const directionParts = [];
+      if (plan.narratorDirective.length > 0) {
+        directionParts.push(plan.narratorDirective);
+      } else if (arrivingNonPlayerSet.size > 0) {
+        directionParts.push(
+          arrivingNames.length > 0
+            ? `Describe the arrival of ${arrivingNames.join(engineSettings.CommaSpace)}.`
+            : engineSettings.DefaultArrivalDirection,
+        );
+      } else {
+        directionParts.push(engineSettings.DefaultSceneDirection);
+      }
+      if (plan.encounterAccepted && plan.encounterBrief.length > 0) {
+        directionParts.push(`Encounter: ${plan.encounterBrief}`);
+      }
+      if (plan.walkOnsEnter.length > 0) {
+        directionParts.push(`Walk-ons entering: ${plan.walkOnsEnter.join(engineSettings.CommaSpace)}`);
+      }
+      if (plan.walkOnsLeave.length > 0) {
+        directionParts.push(`Walk-ons leaving: ${plan.walkOnsLeave.join(engineSettings.CommaSpace)}`);
+      }
+      if (normalizedOocNudge !== null) {
+        directionParts.push(`OOC nudge: ${normalizedOocNudge}`);
+      }
+      const narratorDirection = directionParts.join(engineSettings.LineSeparator);
+      const userTurnText = userTurnLines.join(engineSettings.LineSeparator);
+
+      const currentSceneTurns = priorTurns.filter((turn) => turn.sceneNumber === nextState.sceneNumber);
+      const lastSceneTurn = currentSceneTurns.length > 0
+        ? currentSceneTurns[currentSceneTurns.length - 1]
+        : null;
+      const lastSceneTurnLines = lastSceneTurn !== null && Array.isArray(lastSceneTurn.beats)
+        ? lastSceneTurn.beats.map((beat) => `${beat.speakerName}${engineSettings.SpeakerSeparator}${beat.text}`)
+        : [];
+      const narratorNamedText = [...userTurnLines, ...lastSceneTurnLines].join(engineSettings.LineSeparator);
+
+      const narratorBudget = RequestBudget.create({
+        contextLength: this.#modelCatalog.contextLength(composerModel),
+        replyReserve: settings.replyReserve,
+        charsPerToken: RequestBudget.charsPerToken({
+          store: this.#store,
+          model: composerModel,
+        }),
       });
-      if (arrivalBeatIndex === -1) {
-        arrivalBeatIndex = composerResult.beats.length;
+
+      const narratorContext = this.#assembleBudgetedContext({
+        roleLabel: SpeakerType.label(SpeakerType.Narrator),
+        model: composerModel,
+        budget: narratorBudget,
+        buildMessages: (storyStateText, historyText) => {
+          return Narrator.buildMessages({
+            campaign,
+            storyState: storyStateText,
+            history: historyText,
+            thisTurn: userTurnText,
+            styleText,
+            direction: narratorDirection,
+          });
+        },
+        scribeState,
+        viewer: { subjectId: null, omniscient: true },
+        scene: sliceScene,
+        presentSubjectIds,
+        remoteSubjectIds,
+        namedText: narratorNamedText,
+        playerName,
+        turnsById: null,
+        historyTurns: currentSceneTurns,
+        historyCharacterId: null,
+        historyMaxTurns: engineSettings.NarratorHistoryMaxTurns,
+      });
+
+      const narratorStreamIndex = nextStreamBeatIndex;
+      let narratorEmittedDelta = false;
+      let narratorResult = null;
+      try {
+        narratorResult = await Narrator.narrate({
+          campaign,
+          storyState: narratorContext.storyState,
+          history: narratorContext.history,
+          thisTurn: userTurnText,
+          styleText,
+          direction: narratorDirection,
+          model: composerModel,
+          replyReserve: settings.replyReserve,
+          client: this.#client,
+          signal,
+          onDelta: emit === null
+            ? null
+            : async (delta) => {
+                narratorEmittedDelta = true;
+                await this.#emitEvent(emit, engineSettings.Event.BeatDelta, {
+                  beatIndex: narratorStreamIndex,
+                  speakerType: SpeakerType.Narrator,
+                  slug: engineSettings.NarratorSlug,
+                  speakerName: SpeakerType.label(SpeakerType.Narrator),
+                  delta,
+                });
+              },
+        });
+      } catch (narratorError) {
+        this.#rethrowIfAborted(narratorError, signal);
+        if (narratorEmittedDelta) {
+          nextStreamBeatIndex += 1;
+        }
+        const errorMessage = narratorError instanceof Error ? narratorError.message : String(narratorError);
+        await this.#emitEvent(emit, engineSettings.Event.Warning, {
+          stage: SpendStage.Composer,
+          message: `Narrator failed: ${errorMessage}`,
+        });
+      }
+
+      if (narratorResult !== null) {
+        if (typeof narratorResult.spendId === 'string' && narratorResult.spendId.length > 0) {
+          collectedSpendIds.add(narratorResult.spendId);
+        }
+        if (narratorResult.narration.length === 0) {
+          if (narratorEmittedDelta) {
+            nextStreamBeatIndex += 1;
+          }
+          await this.#emitEvent(emit, engineSettings.Event.Warning, {
+            stage: SpendStage.Composer,
+            message: 'Narrator returned an empty narration.',
+          });
+        } else {
+          nextStreamBeatIndex += 1;
+          if (narratorResult.truncated) {
+            anyTruncated = true;
+          }
+          const narratorSpeakerName = SpeakerType.label(SpeakerType.Narrator);
+          assistantBeats.push({
+            speakerType: SpeakerType.Narrator,
+            characterId: null,
+            speakerName: narratorSpeakerName,
+            text: narratorResult.narration,
+            witnessIds: witnessIdsList,
+            mindPacket: null,
+          });
+          earlierBoxes.push(`${narratorSpeakerName}${engineSettings.SpeakerSeparator}${narratorResult.narration}`);
+        }
       }
     }
 
-    const assistantTurnWitnessSet = new Set();
-    const assistantBeats = composerResult.beats.map((beat, beatIndex) => {
-      let beatWitnessIds;
-      if (plan.sceneChanged || arrivingNonPlayerSet.size === 0 || beatIndex >= arrivalBeatIndex) {
-        beatWitnessIds = [...nextParticipantSet];
-      } else {
-        beatWitnessIds = [...preBeatWitnessSet];
+    const queue = plan.responders.map((entry) => ({ ...entry }));
+    const queuedIds = new Set(queue.map((entry) => entry.characterId));
+    const replyCounts = new Map();
+
+    while (queue.length > 0) {
+      const entry = queue.shift();
+      queuedIds.delete(entry.characterId);
+
+      const character = nonArchivedById.get(entry.characterId);
+      if (character === undefined) {
+        throw new Error(`Responder character not found: ${entry.characterId}`);
       }
-      for (const witnessId of beatWitnessIds) {
-        assistantTurnWitnessSet.add(witnessId);
-      }
-      return {
-        speakerType: beat.speakerType,
-        characterId: beat.characterId,
-        speakerName: beat.speakerName,
-        text: beat.text,
-        witnessIds: beatWitnessIds,
-        mindPacket: beat.mindPacket,
+      const brainModel = this.#resolveCharacterModel(character, settings);
+
+      this.#throwIfAborted(signal);
+      await this.#emitEvent(emit, engineSettings.Event.Phase, {
+        phase: engineSettings.Phase.Replying,
+        name: character.name,
+        slug: character.slug,
+      });
+
+      const characterThisTurnLines = arrivingNonPlayerSet.has(character.id)
+        ? earlierBoxes
+        : [...userTurnLines, ...earlierBoxes];
+      const characterThisTurn = characterThisTurnLines.join(engineSettings.LineSeparator);
+
+      const latestWitnessed = WitnessFilter.selectWitnessedBeats({
+        turns: priorTurns,
+        characterId: character.id,
+        maxTurns: engineSettings.SingleTurnWindow,
+      });
+      const latestWitnessedLines = latestWitnessed.length > 0
+        ? latestWitnessed[0].beats.map((beat) => `${beat.speakerName}${engineSettings.SpeakerSeparator}${beat.text}`)
+        : [];
+      const characterNamedText = [...characterThisTurnLines, ...latestWitnessedLines].join(engineSettings.LineSeparator);
+
+      const brainBudget = RequestBudget.create({
+        contextLength: this.#modelCatalog.contextLength(brainModel),
+        replyReserve: settings.replyReserve,
+        charsPerToken: RequestBudget.charsPerToken({
+          store: this.#store,
+          model: brainModel,
+        }),
+      });
+
+      const brainDirection = {
+        reacting: entry.reacting,
+        length: entry.length,
+        beatGoal: entry.beatGoal,
       };
-    });
+      const viewerSubjectId = typeof character.scribeSubjectId === 'string' && character.scribeSubjectId.trim().length > 0
+        ? character.scribeSubjectId.trim()
+        : null;
+      const historyMaxTurns = character.tier === CharacterTier.Main
+        ? engineSettings.MainHistoryMaxTurns
+        : engineSettings.RecurringHistoryMaxTurns;
+
+      const brainContext = this.#assembleBudgetedContext({
+        roleLabel: character.name,
+        model: brainModel,
+        budget: brainBudget,
+        buildMessages: (storyStateText, historyText) => {
+          return CharacterBrain.buildMessages({
+            campaign,
+            character,
+            card: character.card,
+            playerName,
+            storyState: storyStateText,
+            history: historyText,
+            thisTurn: characterThisTurn,
+            styleText,
+            direction: brainDirection,
+          });
+        },
+        scribeState,
+        viewer: {
+          subjectId: viewerSubjectId,
+          omniscient: false,
+          characterId: character.id,
+        },
+        scene: sliceScene,
+        presentSubjectIds,
+        remoteSubjectIds,
+        namedText: characterNamedText,
+        playerName,
+        turnsById,
+        historyTurns: priorTurns,
+        historyCharacterId: character.id,
+        historyMaxTurns,
+      });
+
+      const brainStreamIndex = nextStreamBeatIndex;
+      let brainEmittedDelta = false;
+      let brainResult = null;
+      try {
+        brainResult = await CharacterBrain.reply({
+          campaign,
+          character,
+          card: character.card,
+          playerName,
+          storyState: brainContext.storyState,
+          history: brainContext.history,
+          thisTurn: characterThisTurn,
+          styleText,
+          direction: brainDirection,
+          model: brainModel,
+          replyReserve: settings.replyReserve,
+          client: this.#client,
+          signal,
+          onDelta: emit === null
+            ? null
+            : async (delta) => {
+                brainEmittedDelta = true;
+                await this.#emitEvent(emit, engineSettings.Event.BeatDelta, {
+                  beatIndex: brainStreamIndex,
+                  speakerType: SpeakerType.Character,
+                  slug: character.slug,
+                  speakerName: character.name,
+                  delta,
+                });
+              },
+        });
+      } catch (brainError) {
+        this.#rethrowIfAborted(brainError, signal);
+        if (brainEmittedDelta) {
+          nextStreamBeatIndex += 1;
+        }
+        const errorMessage = brainError instanceof Error ? brainError.message : String(brainError);
+        await this.#emitEvent(emit, engineSettings.Event.Warning, {
+          stage: SpendStage.Mind,
+          message: `${character.name} failed: ${errorMessage}`,
+        });
+        continue;
+      }
+
+      if (typeof brainResult.spendId === 'string' && brainResult.spendId.length > 0) {
+        collectedSpendIds.add(brainResult.spendId);
+      }
+      if (brainResult.reply.length === 0) {
+        if (brainEmittedDelta) {
+          nextStreamBeatIndex += 1;
+        }
+        await this.#emitEvent(emit, engineSettings.Event.Warning, {
+          stage: SpendStage.Mind,
+          message: `${character.name} returned an empty reply.`,
+        });
+        continue;
+      }
+
+      nextStreamBeatIndex += 1;
+      if (brainResult.truncated) {
+        anyTruncated = true;
+      }
+
+      const previousReplyCount = replyCounts.get(character.id);
+      replyCounts.set(character.id, (previousReplyCount === undefined ? 0 : previousReplyCount) + 1);
+
+      assistantBeats.push({
+        speakerType: SpeakerType.Character,
+        characterId: character.id,
+        speakerName: character.name,
+        text: brainResult.reply,
+        witnessIds: witnessIdsList,
+        mindPacket: {
+          thoughts: brainResult.thoughts,
+          next: brainResult.next,
+          direction: brainDirection,
+        },
+      });
+      earlierBoxes.push(`${character.name}${engineSettings.SpeakerSeparator}${brainResult.reply}`);
+
+      if (brainResult.next !== null) {
+        const rawNext = brainResult.next.trim();
+        const lowerNext = rawNext.toLowerCase();
+        const normalizedNext = ScribeText.normaliseName(rawNext);
+        let handoffTarget = null;
+        const slugMatch = nonArchivedChars.find((candidate) => candidate.slug.toLowerCase() === lowerNext);
+        if (slugMatch !== undefined) {
+          handoffTarget = slugMatch;
+        }
+        if (handoffTarget === null && normalizedNext.length > 0) {
+          const nameMatches = nonArchivedChars.filter((candidate) => {
+            return ScribeText.normaliseName(candidate.name) === normalizedNext;
+          });
+          if (nameMatches.length === 1) {
+            handoffTarget = nameMatches[0];
+          } else if (nameMatches.length > 1) {
+            const presentNameMatches = nameMatches.filter((candidate) => nextParticipantSet.has(candidate.id));
+            if (presentNameMatches.length === 1) {
+              handoffTarget = presentNameMatches[0];
+            }
+          }
+        }
+        if (handoffTarget === null && normalizedNext.length > 0) {
+          const aliasMatches = nonArchivedChars.filter((candidate) => {
+            return Array.isArray(candidate.aliases) && candidate.aliases.some((alias) => {
+              return ScribeText.normaliseName(alias) === normalizedNext;
+            });
+          });
+          if (aliasMatches.length === 1) {
+            handoffTarget = aliasMatches[0];
+          } else if (aliasMatches.length > 1) {
+            const presentAliasMatches = aliasMatches.filter((candidate) => nextParticipantSet.has(candidate.id));
+            if (presentAliasMatches.length === 1) {
+              handoffTarget = presentAliasMatches[0];
+            }
+          }
+        }
+
+        if (handoffTarget !== null) {
+          const targetReplyCount = replyCounts.get(handoffTarget.id);
+          const countForTarget = targetReplyCount === undefined ? 0 : targetReplyCount;
+          if (
+            nextParticipantSet.has(handoffTarget.id) &&
+            handoffTarget.id !== campaign.playerCharacterId &&
+            handoffTarget.isPlayer !== true &&
+            handoffTarget.id !== character.id &&
+            !queuedIds.has(handoffTarget.id) &&
+            countForTarget < settings.maxRepliesPerCharacter
+          ) {
+            queue.push({
+              characterId: handoffTarget.id,
+              slug: handoffTarget.slug,
+              name: handoffTarget.name,
+              beatGoal: engineSettings.EmptyText,
+              length: Director.Settings.Length.Medium,
+              reacting: character.slug,
+            });
+            queuedIds.add(handoffTarget.id);
+          }
+        }
+      }
+    }
+
+    this.#throwIfAborted(signal);
+    if (assistantBeats.length === 0) {
+      throw new Error('Turn produced zero non-empty boxes.');
+    }
+
+    const assistantRawText = assistantBeats
+      .map((beat) => `${beat.speakerName}${engineSettings.SpeakerSeparator}${beat.text}`)
+      .join(engineSettings.ParagraphSeparator);
 
     const assistantPayload = {
       mode: effectiveMode,
-      rawText: composerResult.rawText,
+      rawText: assistantRawText,
       sceneNumber: nextState.sceneNumber,
-      witnessIds: [...assistantTurnWitnessSet],
+      witnessIds: witnessIdsList,
       directorPlan: plan,
-      truncated: composerResult.truncated,
+      truncated: anyTruncated,
     };
-
-    this.#throwIfAborted(signal);
 
     const committed = this.#store.runTransaction(() => {
       if (beforeCommit !== null) {
@@ -991,13 +1395,13 @@ export class TurnEngine {
       });
     });
 
-    await this.#emitEvent(emit, 'committed', {
+    await this.#emitEvent(emit, engineSettings.Event.Committed, {
       userTurn: committed.userTurn,
       assistantTurn: committed.assistantTurn,
       sceneState: nextState,
     });
 
-    if (!signal?.aborted && this.#pedantService !== null && settings.pedantEnabled) {
+    if ((signal === null || !signal.aborted) && this.#pedantService !== null && settings.pedantEnabled) {
       if (scribeState.facts.length > 0 || scribeState.subjects.length > 0) {
         try {
           const findings = await this.#pedantService.checkTurn({
@@ -1007,10 +1411,10 @@ export class TurnEngine {
             signal,
           });
           if (Array.isArray(findings) && findings.length > 0) {
-            await this.#emitEvent(emit, 'findings', findings);
+            await this.#emitEvent(emit, engineSettings.Event.Findings, findings);
           }
         } catch (pedantError) {
-          await this.#emitEvent(emit, 'warning', {
+          await this.#emitEvent(emit, engineSettings.Event.Warning, {
             stage: SpendStage.Pedant,
             message: pedantError instanceof Error ? pedantError.message : String(pedantError),
           });
@@ -1018,7 +1422,7 @@ export class TurnEngine {
       }
     }
 
-    if (!signal?.aborted) {
+    if (signal === null || !signal.aborted) {
       try {
         let memoryResult = null;
         if (plan.sceneChanged) {
@@ -1042,10 +1446,10 @@ export class TurnEngine {
           });
         }
         if (memoryResult !== null && memoryResult.updated === true) {
-          await this.#emitEvent(emit, 'memory_updated', memoryResult);
+          await this.#emitEvent(emit, engineSettings.Event.MemoryUpdated, memoryResult);
         }
       } catch (scribeError) {
-        await this.#emitEvent(emit, 'warning', {
+        await this.#emitEvent(emit, engineSettings.Event.Warning, {
           stage: SpendStage.Scribe,
           message: scribeError instanceof Error ? scribeError.message : String(scribeError),
         });
@@ -1057,8 +1461,7 @@ export class TurnEngine {
       assistantTurn: committed.assistantTurn,
       sceneState: nextState,
       plan,
-      truncated: composerResult.truncated,
-      playerBeatRemapped: composerResult.playerBeatRemapped,
+      truncated: anyTruncated,
     });
   }
 }

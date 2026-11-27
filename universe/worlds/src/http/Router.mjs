@@ -560,6 +560,22 @@ export class Router {
               if (body.sceneState === null || typeof body.sceneState !== 'object' || Array.isArray(body.sceneState)) {
                 throw this.#createHttpError(400, 'sceneState must be a plain object.');
               }
+              if (body.sceneState.pinnedStyle !== undefined && body.sceneState.pinnedStyle !== null) {
+                if (
+                  typeof body.sceneState.pinnedStyle !== 'string' ||
+                  !SceneStyle.AllValues.includes(body.sceneState.pinnedStyle)
+                ) {
+                  throw this.#createHttpError(400, 'sceneState.pinnedStyle must be null or a valid SceneStyle.');
+                }
+              }
+              if (body.sceneState.style !== undefined) {
+                if (
+                  typeof body.sceneState.style !== 'string' ||
+                  !SceneStyle.AllValues.includes(body.sceneState.style)
+                ) {
+                  throw this.#createHttpError(400, 'sceneState.style must be a valid SceneStyle.');
+                }
+              }
               const idsToCheck = [];
               if (Array.isArray(body.sceneState.presentIds)) {
                 idsToCheck.push(...body.sceneState.presentIds);

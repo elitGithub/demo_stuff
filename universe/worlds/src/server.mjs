@@ -169,6 +169,7 @@ export class WorldsServer {
         client: activeClient,
         scribeService,
         pedantService,
+        modelCatalog: activeModelCatalog,
       });
 
       const activeControllers = new Set();

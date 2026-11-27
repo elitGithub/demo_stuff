@@ -1,14 +1,15 @@
 import assert from 'node:assert/strict';
+import fs from 'node:fs';
+import os from 'node:os';
+import path from 'node:path';
+import { DatabaseSync } from 'node:sqlite';
 import { describe, it } from 'node:test';
-import { BeatParser } from '../src/engine/BeatParser.mjs';
 import { CharacterBrain } from '../src/engine/CharacterBrain.mjs';
-import { CharacterMind } from '../src/engine/CharacterMind.mjs';
 import { Director } from '../src/engine/Director.mjs';
 import { EncounterRoller } from '../src/engine/EncounterRoller.mjs';
 import { HistoryWindow } from '../src/engine/HistoryWindow.mjs';
 import { NarrationParts } from '../src/engine/NarrationParts.mjs';
 import { Narrator } from '../src/engine/Narrator.mjs';
-import { NarratorComposer } from '../src/engine/NarratorComposer.mjs';
 import { ReplyStreamSplitter } from '../src/engine/ReplyStreamSplitter.mjs';
 import { RequestBudget } from '../src/engine/RequestBudget.mjs';
 import { StorySlice } from '../src/engine/StorySlice.mjs';
@@ -35,6 +36,63 @@ import { SpendStage } from '../src/store/enums/SpendStage.mjs';
 import { TurnMode } from '../src/store/enums/TurnMode.mjs';
 import { TurnRole } from '../src/store/enums/TurnRole.mjs';
 import { SqliteStore } from '../src/store/SqliteStore.mjs';
+import { createFakeModelCatalog } from './support/createFakeModelCatalog.mjs';
+
+const CLIENT_STREAM_ENTRY = 'stream';
+const CLIENT_ERROR_ENTRY = 'error';
+const CLIENT_FINISH_LENGTH = 'length';
+const DEFAULT_REPLY_RESERVE = 3000;
+
+/**
+ * @param {Record<string, number | null>} [contextLengths]
+ * @returns {{contextLength: (modelId: string) => number | null}}
+ */
+function createContextCatalog(contextLengths = {}) {
+  return {
+    /**
+     * @param {string} modelId
+     * @returns {number | null}
+     */
+    contextLength(modelId) {
+      return Object.hasOwn(contextLengths, modelId) ? contextLengths[modelId] : null;
+    },
+  };
+}
+
+/**
+ * @param {string} narrationText
+ * @param {{finishReason?: string, midStreamError?: string | null, usage?: object}} [options]
+ * @returns {{type: string, text: string, finishReason?: string, midStreamError?: string | null, usage?: object}}
+ */
+function buildNarratorStreamEntry(narrationText, options = {}) {
+  const narrationTag = Narrator.Settings.Tag.Narration;
+  return {
+    type: CLIENT_STREAM_ENTRY,
+    text: `<${narrationTag}>${narrationText}</${narrationTag}>`,
+    ...options,
+  };
+}
+
+/**
+ * @param {{thoughts?: string, reply: string, next?: string | null, finishReason?: string, midStreamError?: string | null, usage?: object}} options
+ * @returns {{type: string, text: string, finishReason?: string, midStreamError?: string | null, usage?: object}}
+ */
+function buildBrainStreamEntry({ thoughts = '', reply, next = CharacterBrain.Settings.NextNone, ...extra }) {
+  const tagSettings = CharacterBrain.Settings.Tag;
+  const parts = [];
+  if (thoughts.length > 0) {
+    parts.push(`<${tagSettings.Thoughts}>${thoughts}</${tagSettings.Thoughts}>`);
+  }
+  parts.push(`<${tagSettings.Reply}>${reply}</${tagSettings.Reply}>`);
+  if (next !== null) {
+    parts.push(`<${tagSettings.Next}>${next}</${tagSettings.Next}>`);
+  }
+  return {
+    type: CLIENT_STREAM_ENTRY,
+    text: parts.join('\n'),
+    ...extra,
+  };
+}
 
 /**
  * @param {string} text
@@ -532,88 +590,6 @@ describe('WitnessFilter', () => {
   });
 });
 
-describe('BeatParser', () => {
-  it('parses 1-char-per-chunk streams identically, handles brackets, remaps player tags, strips post-tag newline, and flushes unclosed tags', () => {
-    const sample = [
-      'The rain drums on the roof [sighs].\n',
-      '[[BEAT:lize]]\r\n',
-      '*She glances up [[other]] calmly.*\n',
-      'We wait until dawn.\n',
-      '[[BEAT:frost]]\n',
-      '*Frost checks his blade.*\n',
-      '[[BEAT:Lady Lize]]\n',
-      'Still listening.\n',
-      '[[BEAT:unknown_guard]]\n',
-      'Boots crunch outside.',
-    ].join('');
-
-    const parserConfig = {
-      validSlugs: ['lize', 'collette', 'frost'],
-      nameToSlug: {
-        Lize: 'lize',
-        'Lady Lize': 'lize',
-        Frost: 'frost',
-      },
-      slugToName: {
-        lize: 'Lize',
-        collette: 'Collette',
-      },
-      playerSlug: 'frost',
-    };
-
-    const singleParser = new BeatParser(parserConfig);
-    const singleDeltas = [...singleParser.push(sample), ...singleParser.flush()];
-
-    const charParser = new BeatParser(parserConfig);
-    const charDeltas = [];
-    for (let charIndex = 0; charIndex < sample.length; charIndex += 1) {
-      charDeltas.push(...charParser.push(sample[charIndex]));
-    }
-    charDeltas.push(...charParser.flush());
-
-    assert.deepEqual(charParser.getBeats(), singleParser.getBeats());
-    assert.equal(charParser.wasPlayerBeatRemapped(), true);
-    assert.equal(singleParser.wasPlayerBeatRemapped(), true);
-
-    const reconstructedSingle = singleDeltas.map((item) => item.delta).join('');
-    const reconstructedChar = charDeltas.map((item) => item.delta).join('');
-    assert.equal(reconstructedChar, reconstructedSingle);
-    assert.equal(reconstructedChar.includes('[[BEAT:'), false);
-    assert.equal(reconstructedChar.includes('[sighs]'), true);
-    assert.equal(reconstructedChar.includes('[[other]]'), true);
-
-    const beats = charParser.getBeats();
-    assert.equal(beats[0].speakerType, SpeakerType.Narrator);
-    assert.equal(beats[0].text, 'The rain drums on the roof [sighs].');
-    assert.equal(beats[1].speakerType, SpeakerType.Character);
-    assert.equal(beats[1].slug, 'lize');
-    assert.equal(beats[1].speakerName, 'Lize');
-    assert.equal(beats[1].text, '*She glances up [[other]] calmly.*\nWe wait until dawn.');
-    assert.equal(beats[2].speakerType, SpeakerType.Narrator);
-    assert.equal(beats[2].text, '*Frost checks his blade.*');
-    assert.equal(beats[3].speakerType, SpeakerType.Character);
-    assert.equal(beats[3].slug, 'lize');
-    assert.equal(beats[3].text, 'Still listening.');
-    assert.equal(beats[4].speakerType, SpeakerType.Narrator);
-    assert.equal(beats[4].text, 'Boots crunch outside.');
-
-    const stallParser = new BeatParser(parserConfig);
-    const longUnclosed = `[[BEAT:${'x'.repeat(130)}`;
-    const emittedBeforeFlush = stallParser.push(longUnclosed);
-    assert.ok(emittedBeforeFlush.length > 0);
-    const tailFlush = stallParser.flush();
-    assert.equal(
-      [...emittedBeforeFlush, ...tailFlush].map((item) => item.delta).join(''),
-      longUnclosed,
-    );
-
-    const eofParser = new BeatParser(parserConfig);
-    assert.deepEqual(eofParser.push('[[BEAT:partial'), []);
-    const eofFlushed = eofParser.flush();
-    assert.equal(eofFlushed.map((item) => item.delta).join(''), '[[BEAT:partial');
-  });
-});
-
 describe('Director tagged invariants and full-miss fallback', () => {
   it('enforces disjoint slugs, player/absent responder exclusion, walk-on resets, offscreen rules, single call, and no targetChars', async () => {
     const fixture = createWorldFixture();
@@ -780,7 +756,7 @@ describe('Director tagged invariants and full-miss fallback', () => {
 });
 
 describe('TurnEngine end-to-end regressions and adversarial invariants', () => {
-  it('keeps Viola absent on mention ("I need to get vegetables to Viola") and never invokes Viola Mind', async () => {
+  it('keeps Viola absent on mention ("I need to get vegetables to Viola") and never invokes Viola Brain', async () => {
     const fixture = createWorldFixture();
     const { store, campaign, frost, lize, viola } = fixture;
     const scribeService = new ScribeService({ store });
@@ -795,22 +771,14 @@ describe('TurnEngine end-to-end regressions and adversarial invariants', () => {
           narratorDirective: 'Keep Viola offscreen.',
         }),
       },
-      {
-        json: {
-          internalThought: 'Frost is thinking of Viola again.',
-          physicalAction: 'Lize ties her apron strings.',
-          spokenLines: 'There are turnips in the cellar crate if you hurry.',
-          tone: 'practical',
-          knowledgeBoundaries: ['Does not know what Viola is doing right now'],
-        },
-      },
-      {
-        type: 'stream',
-        text: '[[BEAT:lize]]\n*Lize ties her apron strings.*\nThere are turnips in the cellar crate if you hurry.',
-      },
+      buildNarratorStreamEntry('A cellar draft cools the floorboards.'),
+      buildBrainStreamEntry({
+        thoughts: 'Frost is thinking of Viola again.',
+        reply: '*Lize ties her apron strings.*\n"There are turnips in the cellar crate if you hurry."',
+      }),
     ], { store });
 
-    const engine = new TurnEngine({ store, client, scribeService });
+    const engine = new TurnEngine({ store, client, scribeService, modelCatalog: createContextCatalog() });
     const result = await engine.runTurn({
       campaignId: campaign.id,
       text: 'I need to get vegetables to Viola.',
@@ -821,13 +789,13 @@ describe('TurnEngine end-to-end regressions and adversarial invariants', () => {
     assert.deepEqual(result.sceneState.presentIds, [frost.id, lize.id]);
     assert.equal(result.sceneState.presentIds.includes(viola.id), false);
     assert.equal(result.assistantTurn.beats.some((beat) => beat.characterId === viola.id), false);
-    assert.equal(calls[1].payload.messages[0].content.includes('Lize'), true);
-    assert.equal(calls[1].payload.messages[0].content.includes('Viola'), false);
+    assert.equal(calls[2].payload.messages[0].content.includes('Lize'), true);
+    assert.equal(calls[2].payload.messages[0].content.includes('Viola'), false);
   });
 
-  it('isolates absent Collette from private bedroom scene facts and sibling internalThought', async () => {
+  it('isolates absent Collette from private bedroom scene facts and sibling thoughts', async () => {
     const fixture = createWorldFixture({ scribeInterval: 1, pedantEnabled: false });
-    const { store, campaign, frost, lize, collette } = fixture;
+    const { store, campaign } = fixture;
 
     const { client, calls } = createScriptedClient([
       {
@@ -836,22 +804,13 @@ describe('TurnEngine end-to-end regressions and adversarial invariants', () => {
           offscreenNotes: { collette: 'In the tavern kitchen' },
           pacing: Director.Settings.Pacing.IntimateDeep,
           responders: [{ slug: 'lize', beatGoal: 'Confess the cipher location', length: Director.Settings.Length.Medium }],
-          narratorDirective: 'Keep it quiet.',
+          narratorDirective: Director.Settings.EmptyText,
         }),
       },
-      {
-        json: {
-          internalThought: 'SECRET_LIZE_THOUGHT_999',
-          physicalAction: 'Lize leans close to the hearth.',
-          spokenLines: 'I hid the silver cipher key inside the ash drawer.',
-          tone: 'hushed',
-          knowledgeBoundaries: ['Only Frost heard this'],
-        },
-      },
-      {
-        type: 'stream',
-        text: '[[BEAT:lize]]\n*Lize leans close to the hearth.*\nI hid the silver cipher key inside the ash drawer.',
-      },
+      buildBrainStreamEntry({
+        thoughts: 'SECRET_LIZE_THOUGHT_999',
+        reply: '*Lize leans close to the hearth.*\n"I hid the silver cipher key inside the ash drawer."',
+      }),
       {
         text: [
           '=== FACTS',
@@ -872,23 +831,15 @@ describe('TurnEngine end-to-end regressions and adversarial invariants', () => {
           narratorDirective: 'Show Collette alone.',
         }),
       },
-      {
-        json: {
-          internalThought: 'Needs more salt.',
-          physicalAction: 'Collette stirs the kettle.',
-          spokenLines: 'Almost ready for supper.',
-          tone: 'cheerful',
-          knowledgeBoundaries: ['Knows nothing from upstairs'],
-        },
-      },
-      {
-        type: 'stream',
-        text: '[[BEAT:collette]]\n*Collette stirs the kettle.*\nAlmost ready for supper.',
-      },
+      buildNarratorStreamEntry('Steam rises over the cast-iron kettle.'),
+      buildBrainStreamEntry({
+        thoughts: 'Needs more salt.',
+        reply: '*Collette stirs the kettle.*\n"Almost ready for supper."',
+      }),
     ], { store });
 
     const scribeService = new ScribeService({ store, client });
-    const engine = new TurnEngine({ store, client, scribeService });
+    const engine = new TurnEngine({ store, client, scribeService, modelCatalog: createContextCatalog() });
 
     await engine.runTurn({
       campaignId: campaign.id,
@@ -902,8 +853,8 @@ describe('TurnEngine end-to-end regressions and adversarial invariants', () => {
       mode: TurnMode.Normal,
     });
 
-    const colletteMindCall = calls[5];
-    const collettePrompt = JSON.stringify(colletteMindCall.payload.messages);
+    const colletteBrainCall = calls[5];
+    const collettePrompt = JSON.stringify(colletteBrainCall.payload.messages);
     assert.equal(collettePrompt.includes('Collette'), true);
     assert.equal(collettePrompt.includes('SECRET_LIZE_THOUGHT_999'), false);
     assert.equal(collettePrompt.includes('ash drawer'), false);
@@ -930,10 +881,7 @@ describe('TurnEngine end-to-end regressions and adversarial invariants', () => {
           narratorDirective: 'Set the wagon scene without Frost.',
         }),
       },
-      {
-        type: 'stream',
-        text: '[[BEAT:narrator]]\nMaya raps sharply on the wagon door while Mirra and Kira trade glances.',
-      },
+      buildNarratorStreamEntry('Maya raps sharply on the wagon door while Mirra and Kira trade glances.'),
       {
         text: buildTaggedDirectorPlan({
           location: 'Party Wagon',
@@ -943,22 +891,13 @@ describe('TurnEngine end-to-end regressions and adversarial invariants', () => {
           offscreenNotes: { frost: 'doing his rounds' },
           pacing: Director.Settings.Pacing.FocusedOne,
           responders: [{ slug: 'mirra', beatGoal: 'Greet Frost', length: Director.Settings.Length.Short }],
-          narratorDirective: 'Mirra answers Frost.',
+          narratorDirective: Director.Settings.EmptyText,
         }),
       },
-      {
-        json: {
-          internalThought: 'Back already.',
-          physicalAction: 'Mirra unlatches the shutter.',
-          spokenLines: 'Quiet rounds tonight, Frost?',
-          tone: 'curious',
-          knowledgeBoundaries: [],
-        },
-      },
-      {
-        type: 'stream',
-        text: '[[BEAT:mirra]]\n*Mirra unlatches the shutter.*\nQuiet rounds tonight, Frost?',
-      },
+      buildBrainStreamEntry({
+        thoughts: 'Back already.',
+        reply: '*Mirra unlatches the shutter.*\n"Quiet rounds tonight, Frost?"',
+      }),
       {
         text: buildTaggedDirectorPlan({
           sceneChanged: true,
@@ -973,13 +912,10 @@ describe('TurnEngine end-to-end regressions and adversarial invariants', () => {
           narratorDirective: 'Cut back.',
         }),
       },
-      {
-        type: 'stream',
-        text: '[[BEAT:narrator]]\nFrost stands alone beneath the watchtower lantern.',
-      },
+      buildNarratorStreamEntry('Frost stands alone beneath the watchtower lantern.'),
     ], { store });
 
-    const engine = new TurnEngine({ store, client, scribeService });
+    const engine = new TurnEngine({ store, client, scribeService, modelCatalog: createContextCatalog() });
 
     const cutAwayResult = await engine.runTurn({
       campaignId: campaign.id,
@@ -1021,7 +957,7 @@ describe('TurnEngine end-to-end regressions and adversarial invariants', () => {
     assert.deepEqual(cutBackResult.plan.responders, []);
   });
 
-  it('isolates mid-turn encounter arrival from private pre-arrival user dialogue and witness_ids', async () => {
+  it('isolates mid-turn encounter arrival from private pre-arrival user dialogue and witnessIds', async () => {
     const fixture = createWorldFixture({ publicOdds: 1, privateOdds: 1, pedantEnabled: false });
     const { store, campaign, frost, lize, collette } = fixture;
     store.updateCampaign(campaign.id, {
@@ -1041,37 +977,21 @@ describe('TurnEngine end-to-end regressions and adversarial invariants', () => {
           encounterBrief: 'Collette knocks and steps inside carrying fresh bread.',
           pacing: Director.Settings.Pacing.GroupBanter,
           responders: [
-            { slug: 'lize', beatGoal: 'Respond to Frost then pause', length: Director.Settings.Length.Short },
+            { slug: 'lize', beatGoal: 'Respond to Frost', length: Director.Settings.Length.Short },
             { slug: 'collette', beatGoal: 'Offer the bread upon entering', length: Director.Settings.Length.Short },
           ],
-          narratorDirective: 'Lize replies before Collette enters.',
+          narratorDirective: Director.Settings.EmptyText,
         }),
       },
-      {
-        json: {
-          internalThought: 'Keep Ember secret.',
-          physicalAction: 'Lize whispers quickly.',
-          spokenLines: 'Got it, Ember.',
-          tone: 'guarded',
-          knowledgeBoundaries: [],
-        },
-      },
-      {
-        json: {
-          internalThought: 'Smells warm in here.',
-          physicalAction: 'Collette holds out the loaf.',
-          spokenLines: 'Brought fresh bread for you two.',
-          tone: 'bright',
-          knowledgeBoundaries: ['Missed what was said before knocking'],
-        },
-      },
-      {
-        type: 'stream',
-        text: [
-          '[[BEAT:lize]]\n*Lize whispers quickly.*\nGot it, Ember.\n',
-          '[[BEAT:collette]]\n*Collette holds out the loaf.*\nBrought fresh bread for you two.',
-        ].join(''),
-      },
+      buildNarratorStreamEntry('Collette knocks and steps inside carrying fresh bread.'),
+      buildBrainStreamEntry({
+        thoughts: 'Keep Ember secret.',
+        reply: '*Lize whispers quickly.*\n"Got it."',
+      }),
+      buildBrainStreamEntry({
+        thoughts: 'Smells warm in here.',
+        reply: '*Collette holds out the loaf.*\n"Brought fresh bread for you two."',
+      }),
     ], { store });
 
     const engine = new TurnEngine({
@@ -1079,6 +999,7 @@ describe('TurnEngine end-to-end regressions and adversarial invariants', () => {
       client,
       scribeService,
       random: () => 0.1,
+      modelCatalog: createContextCatalog(),
     });
 
     const result = await engine.runTurn({
@@ -1087,71 +1008,76 @@ describe('TurnEngine end-to-end regressions and adversarial invariants', () => {
       mode: TurnMode.Normal,
     });
 
-    const lizeMindPrompt = JSON.stringify(calls[1].payload.messages);
-    const colletteMindPrompt = JSON.stringify(calls[2].payload.messages);
-    assert.equal(lizeMindPrompt.includes('Ember'), true);
-    assert.equal(colletteMindPrompt.includes('Collette knocks and steps inside carrying fresh bread.'), true);
-    assert.equal(colletteMindPrompt.includes('Ember'), false);
+    const lizeBrainPrompt = JSON.stringify(calls[2].payload.messages);
+    const colletteBrainPrompt = JSON.stringify(calls[3].payload.messages);
+    assert.equal(lizeBrainPrompt.includes('Ember'), true);
+    assert.equal(colletteBrainPrompt.includes('Collette knocks and steps inside carrying fresh bread.'), true);
+    assert.equal(colletteBrainPrompt.includes('Ember'), false);
 
     assert.equal(result.userTurn.witnessIds.includes(collette.id), false);
     assert.deepEqual(result.userTurn.witnessIds.sort(), [frost.id, lize.id].sort());
-    assert.equal(result.assistantTurn.beats[0].witnessIds.includes(collette.id), false);
-    assert.equal(result.assistantTurn.beats[1].witnessIds.includes(collette.id), true);
+    assert.equal(result.assistantTurn.beats.length, 3);
+    for (const beat of result.assistantTurn.beats) {
+      assert.equal(beat.witnessIds.includes(collette.id), true);
+    }
   });
 
-  it('aborts sibling Minds immediately on failure, leaves zero orphan turns on Mind or Composer failure, and preserves intermediate spend_log', async () => {
+  it('continues on first brain failure with warning, fails with zero DB mutations on zero boxes, and keeps spend_log unlinked', async () => {
     const fixture = createWorldFixture({ pedantEnabled: false });
-    const { store, campaign, lize, collette } = fixture;
+    const { store, campaign, frost, lize, collette } = fixture;
     store.updateCampaign(campaign.id, {
       sceneState: {
         ...campaign.sceneState,
-        presentIds: [fixture.frost.id, lize.id, collette.id],
+        presentIds: [frost.id, lize.id, collette.id],
         offscreenNotes: {},
       },
     });
     const scribeService = new ScribeService({ store });
 
-    let siblingAborted = false;
-    const { client: mindFailClient } = createScriptedClient([
+    const { client: partialFailClient } = createScriptedClient([
       {
         text: buildTaggedDirectorPlan({
           presentSlugs: ['frost', 'lize', 'collette'],
           pacing: Director.Settings.Pacing.GroupBanter,
           responders: [
             { slug: 'lize', beatGoal: 'Fail quickly', length: Director.Settings.Length.Short },
-            { slug: 'collette', beatGoal: 'Wait on sibling', length: Director.Settings.Length.Short },
+            { slug: 'collette', beatGoal: 'Pick up the slack', length: Director.Settings.Length.Short },
           ],
-          narratorDirective: 'Test abort.',
+          narratorDirective: Director.Settings.EmptyText,
         }),
       },
-      { type: 'error', status: 401, message: 'Bad key' },
-      ({ init }) => new Promise((resolve, reject) => {
-        if (init.signal?.aborted) {
-          siblingAborted = true;
-          const abortErr = new Error('Aborted');
-          abortErr.name = 'AbortError';
-          reject(abortErr);
-          return;
-        }
-        init.signal?.addEventListener('abort', () => {
-          siblingAborted = true;
-          const abortErr = new Error('Aborted');
-          abortErr.name = 'AbortError';
-          reject(abortErr);
-        }, { once: true });
+      { type: CLIENT_ERROR_ENTRY, status: 401, message: 'Bad key' },
+      buildBrainStreamEntry({
+        thoughts: 'My turn then.',
+        reply: '*Collette steps forward.*\n"Everyone still awake?"',
       }),
     ], { store });
 
-    const engine = new TurnEngine({ store, client: mindFailClient, scribeService });
-    await assert.rejects(
-      () => engine.runTurn({ campaignId: campaign.id, text: 'Everyone ready?' }),
-      /401/,
-    );
-    assert.equal(siblingAborted, true);
-    assert.equal(store.listTurns(campaign.id).total, 0);
-    assert.deepEqual(store.getCampaign(campaign.id).sceneState.presentIds, [fixture.frost.id, lize.id, collette.id]);
+    const partialEvents = [];
+    const partialEngine = new TurnEngine({
+      store,
+      client: partialFailClient,
+      scribeService,
+      modelCatalog: createContextCatalog(),
+    });
+    const partialResult = await partialEngine.runTurn({
+      campaignId: campaign.id,
+      text: 'Everyone ready?',
+      emit: (eventItem) => {
+        partialEvents.push(eventItem);
+      },
+    });
+    const partialWarnings = partialEvents.filter((item) => item.event === TurnEngine.Settings.Event.Warning);
+    assert.equal(partialWarnings.length, 1);
+    assert.equal(partialWarnings[0].data.stage, SpendStage.Mind);
+    assert.equal(partialWarnings[0].data.message.includes('Lize'), true);
+    assert.equal(partialResult.assistantTurn.beats.length, 1);
+    assert.equal(partialResult.assistantTurn.beats[0].speakerName, 'Collette');
+    assert.equal(store.listTurns(campaign.id).total, 2);
+
+    partialEngine.deleteLastTurnPair({ campaignId: campaign.id });
     const utcDay = new Date().toISOString().slice(0, 10);
-    assert.equal(store.getDailySpend(utcDay).callCount, 1);
+    const callsBeforeZero = store.getDailySpend(utcDay).callCount;
 
     const { client: streamFailClient } = createScriptedClient([
       {
@@ -1159,35 +1085,38 @@ describe('TurnEngine end-to-end regressions and adversarial invariants', () => {
           location: 'Tavern',
           sceneType: SceneType.Public,
           presentSlugs: ['frost', 'lize'],
-          pacing: Director.Settings.Pacing.FocusedOne,
-          responders: [{ slug: 'lize', beatGoal: 'Speak', length: Director.Settings.Length.Short }],
+          pacing: Director.Settings.Pacing.NarratorOnly,
           narratorDirective: 'Stream fails mid-flight.',
         }),
       },
       {
-        json: {
-          internalThought: 'Fine.',
-          physicalAction: 'Nods.',
-          spokenLines: 'Wait.',
-          tone: 'calm',
-          knowledgeBoundaries: [],
-        },
-      },
-      {
-        type: 'stream',
-        text: '[[BEAT:lize]]\nPartial line before crash',
+        type: CLIENT_STREAM_ENTRY,
+        text: buildNarratorStreamEntry('Partial line before crash').text,
         midStreamError: 'Upstream dropped',
       },
     ], { store });
 
-    const engineTwo = new TurnEngine({ store, client: streamFailClient, scribeService });
+    const zeroEvents = [];
+    const engineTwo = new TurnEngine({
+      store,
+      client: streamFailClient,
+      scribeService,
+      modelCatalog: createContextCatalog(),
+    });
     await assert.rejects(
-      () => engineTwo.runTurn({ campaignId: campaign.id, text: 'Let us go.' }),
-      /Upstream dropped/,
+      () => engineTwo.runTurn({
+        campaignId: campaign.id,
+        text: 'Let us go.',
+        emit: (eventItem) => {
+          zeroEvents.push(eventItem);
+        },
+      }),
+      /zero non-empty boxes/,
     );
+    assert.equal(zeroEvents.some((item) => item.event === TurnEngine.Settings.Event.Warning), true);
     assert.equal(store.listTurns(campaign.id).total, 0);
     assert.equal(store.getCampaign(campaign.id).sceneState.location, 'Oak Bedroom');
-    assert.equal(store.getDailySpend(utcDay).callCount, 3);
+    assert.equal(store.getDailySpend(utcDay).callCount, callsBeforeZero + 1);
   });
 
   it('rejects overlapping campaign mutations with ConflictError (409) and always releases mutex in finally', async () => {
@@ -1220,22 +1149,19 @@ describe('TurnEngine end-to-end regressions and adversarial invariants', () => {
           { status: 200, headers: { 'content-type': 'application/json' } },
         );
       },
-      {
-        type: 'stream',
-        text: '[[BEAT:narrator]]\nQuiet settles.',
-      },
+      buildNarratorStreamEntry('Quiet settles.'),
     ], { store });
 
-    const engine = new TurnEngine({ store, client, scribeService });
+    const engine = new TurnEngine({ store, client, scribeService, modelCatalog: createContextCatalog() });
     const firstTurnPromise = engine.runTurn({ campaignId: campaign.id, text: 'Wait here.' });
 
     await assert.rejects(
       () => engine.runTurn({ campaignId: campaign.id, text: 'Overlapping call.' }),
-      (error) => error.name === 'ConflictError' && error.statusCode === 409,
+      (error) => error.name === TurnEngine.Settings.ConflictName && error.statusCode === 409,
     );
     assert.throws(
       () => engine.deleteLastTurnPair({ campaignId: campaign.id }),
-      (error) => error.name === 'ConflictError' && error.statusCode === 409,
+      (error) => error.name === TurnEngine.Settings.ConflictName && error.statusCode === 409,
     );
 
     releaseDirector();
@@ -1245,9 +1171,9 @@ describe('TurnEngine end-to-end regressions and adversarial invariants', () => {
     assert.deepEqual(deleted.deletedSeqs, [1, 2]);
   });
 
-  it('withdraws discarded Scribe facts before Mind calls during regenerateLastTurn and preserves prior pair on regenerate abort', async () => {
+  it('withdraws discarded Scribe facts before Brain calls during regenerateLastTurn and preserves prior pair on regenerate failure', async () => {
     const fixture = createWorldFixture({ scribeInterval: 1, pedantEnabled: false });
-    const { store, campaign, frost, lize } = fixture;
+    const { store, campaign } = fixture;
 
     const { client, calls } = createScriptedClient([
       {
@@ -1255,22 +1181,13 @@ describe('TurnEngine end-to-end regressions and adversarial invariants', () => {
           presentSlugs: ['frost', 'lize'],
           pacing: Director.Settings.Pacing.FocusedOne,
           responders: [{ slug: 'lize', beatGoal: 'Answer', length: Director.Settings.Length.Short }],
-          narratorDirective: 'Keep short.',
+          narratorDirective: Director.Settings.EmptyText,
         }),
       },
-      {
-        json: {
-          internalThought: 'First attempt.',
-          physicalAction: 'Taps table.',
-          spokenLines: 'My brother went to Redwall.',
-          tone: 'flat',
-          knowledgeBoundaries: [],
-        },
-      },
-      {
-        type: 'stream',
-        text: '[[BEAT:lize]]\nMy brother went to Redwall.',
-      },
+      buildBrainStreamEntry({
+        thoughts: 'First attempt.',
+        reply: '"My brother went to Redwall."',
+      }),
       {
         text: '=== FACTS\nLize | trait | DISCARDED_SECRET_FACT_42 | #2',
       },
@@ -1279,21 +1196,12 @@ describe('TurnEngine end-to-end regressions and adversarial invariants', () => {
           presentSlugs: ['frost', 'lize'],
           pacing: Director.Settings.Pacing.FocusedOne,
           responders: [{ slug: 'lize', beatGoal: 'Answer differently', length: Director.Settings.Length.Short }],
-          narratorDirective: 'Regenerate.',
+          narratorDirective: Director.Settings.EmptyText,
         }),
       },
       {
-        json: {
-          internalThought: 'Fresh take.',
-          physicalAction: 'Sighs.',
-          spokenLines: 'Wait.',
-          tone: 'calm',
-          knowledgeBoundaries: [],
-        },
-      },
-      {
-        type: 'stream',
-        text: '[[BEAT:lize]]\nPartial fail',
+        type: CLIENT_STREAM_ENTRY,
+        text: buildBrainStreamEntry({ thoughts: 'Fresh take.', reply: 'Partial fail' }).text,
         midStreamError: 'Dropped mid regen',
       },
       {
@@ -1301,29 +1209,20 @@ describe('TurnEngine end-to-end regressions and adversarial invariants', () => {
           presentSlugs: ['frost', 'lize'],
           pacing: Director.Settings.Pacing.FocusedOne,
           responders: [{ slug: 'lize', beatGoal: 'Answer differently', length: Director.Settings.Length.Short }],
-          narratorDirective: 'Second regen succeeds.',
+          narratorDirective: Director.Settings.EmptyText,
         }),
       },
-      {
-        json: {
-          internalThought: 'Clean state.',
-          physicalAction: 'Smiles.',
-          spokenLines: 'He took the northern road.',
-          tone: 'steady',
-          knowledgeBoundaries: [],
-        },
-      },
-      {
-        type: 'stream',
-        text: '[[BEAT:lize]]\nHe took the northern road.',
-      },
+      buildBrainStreamEntry({
+        thoughts: 'Clean state.',
+        reply: '"He took the northern road."',
+      }),
       {
         text: '=== FACTS\nLize | trait | CLEAN_REGEN_FACT_88 | #2',
       },
     ], { store });
 
     const scribeService = new ScribeService({ store, client });
-    const engine = new TurnEngine({ store, client, scribeService });
+    const engine = new TurnEngine({ store, client, scribeService, modelCatalog: createContextCatalog() });
 
     const initialTurn = await engine.runTurn({
       campaignId: campaign.id,
@@ -1334,18 +1233,18 @@ describe('TurnEngine end-to-end regressions and adversarial invariants', () => {
 
     await assert.rejects(
       () => engine.regenerateLastTurn({ campaignId: campaign.id }),
-      /Dropped mid regen/,
+      /zero non-empty boxes/,
     );
     const afterFailedRegen = store.getLatestTurnPair(campaign.id);
     assert.equal(afterFailedRegen.assistantTurn.id, initialTurn.assistantTurn.id);
-    assert.equal(afterFailedRegen.assistantTurn.beats[0].text, 'My brother went to Redwall.');
+    assert.equal(afterFailedRegen.assistantTurn.beats[0].text, '"My brother went to Redwall."');
 
     const regenResult = await engine.regenerateLastTurn({ campaignId: campaign.id });
-    assert.equal(regenResult.assistantTurn.beats[0].text, 'He took the northern road.');
+    assert.equal(regenResult.assistantTurn.beats[0].text, '"He took the northern road."');
 
-    const secondRegenMindPrompt = JSON.stringify(calls[8].payload.messages);
-    assert.equal(secondRegenMindPrompt.includes('DISCARDED_SECRET_FACT_42'), false);
-    assert.equal(secondRegenMindPrompt.includes('Redwall'), false);
+    const secondRegenBrainPrompt = JSON.stringify(calls[6].payload.messages);
+    assert.equal(secondRegenBrainPrompt.includes('DISCARDED_SECRET_FACT_42'), false);
+    assert.equal(secondRegenBrainPrompt.includes('Redwall'), false);
 
     const finalState = scribeService.loadState(campaign.id).state;
     const activeTexts = finalState.facts
@@ -1357,7 +1256,7 @@ describe('TurnEngine end-to-end regressions and adversarial invariants', () => {
 
   it('handles deleteLastTurnPair rollback, editTurn dirty marking, sceneChanged prior-scene-only Scribe trigger, and Step 4 warning isolation', async () => {
     const fixture = createWorldFixture({ scribeInterval: 10, pedantEnabled: true });
-    const { store, campaign, frost, lize } = fixture;
+    const { store, campaign } = fixture;
 
     const { client, calls } = createScriptedClient([
       {
@@ -1367,10 +1266,7 @@ describe('TurnEngine end-to-end regressions and adversarial invariants', () => {
           narratorDirective: 'Scene 1 turn.',
         }),
       },
-      {
-        type: 'stream',
-        text: '[[BEAT:narrator]]\nScene 1 candle flickers.',
-      },
+      buildNarratorStreamEntry('Scene 1 candle flickers.'),
       {
         text: buildTaggedDirectorPlan({
           sceneChanged: true,
@@ -1383,10 +1279,7 @@ describe('TurnEngine end-to-end regressions and adversarial invariants', () => {
           narratorDirective: 'Scene 2 courtyard.',
         }),
       },
-      {
-        type: 'stream',
-        text: '[[BEAT:narrator]]\nScene 2 cold mist drifts across the courtyard.',
-      },
+      buildNarratorStreamEntry('Scene 2 cold mist drifts across the courtyard.'),
       {
         text: '=== FACTS\nFrost | condition | Scene 1 candle noted | #2',
       },
@@ -1394,7 +1287,13 @@ describe('TurnEngine end-to-end regressions and adversarial invariants', () => {
 
     const scribeService = new ScribeService({ store, client });
     const pedantService = new PedantService({ store, client, scribeService });
-    const engine = new TurnEngine({ store, client, scribeService, pedantService });
+    const engine = new TurnEngine({
+      store,
+      client,
+      scribeService,
+      pedantService,
+      modelCatalog: createContextCatalog(),
+    });
 
     await engine.runTurn({ campaignId: campaign.id, text: 'Frost lights the candle.' });
     await engine.runTurn({ campaignId: campaign.id, text: 'We step out into the courtyard.' });
@@ -1428,11 +1327,10 @@ describe('TurnEngine end-to-end regressions and adversarial invariants', () => {
             narratorDirective: 'Check Step 4 resilience.',
           }),
         },
-        { type: 'stream', text: '[[BEAT:narrator]]\nCommitted despite Step 4 error.' },
+        buildNarratorStreamEntry('Committed despite Step 4 error.'),
       ], { store }).client,
       scribeService: {
         loadState: () => scribeService.loadState(campaign.id),
-        characterKnowledgePacket: (args) => scribeService.characterKnowledgePacket(args),
         updateMemory: async () => {
           throw new Error('Scribe offline');
         },
@@ -1442,6 +1340,7 @@ describe('TurnEngine end-to-end regressions and adversarial invariants', () => {
           throw new Error('Pedant offline');
         },
       },
+      modelCatalog: createContextCatalog(),
     });
 
     const events = [];
@@ -1454,8 +1353,8 @@ describe('TurnEngine end-to-end regressions and adversarial invariants', () => {
     });
     assert.equal(committedTurn.userTurn.mode, TurnMode.Narrator);
     assert.equal(committedTurn.userTurn.rawText, '*The wind rattles the shutter.*');
-    assert.equal(events.some((item) => item.event === 'committed'), true);
-    const warnings = events.filter((item) => item.event === 'warning');
+    assert.equal(events.some((item) => item.event === TurnEngine.Settings.Event.Committed), true);
+    const warnings = events.filter((item) => item.event === TurnEngine.Settings.Event.Warning);
     assert.equal(warnings.length, 1);
     assert.equal(warnings[0].data.stage, SpendStage.Pedant);
 
@@ -1469,121 +1368,9 @@ describe('TurnEngine end-to-end regressions and adversarial invariants', () => {
     );
   });
 
-  it('covers CharacterMind repair retry, NarratorComposer zero-beat guard and truncation, Director mode overrides, BeatParser split CRLF, parent abort cleanup, multi-beat editTurn, and deleteLastTurnPair Scribe withdrawal', async () => {
-    const crlfParser = new BeatParser({
-      validSlugs: ['lize'],
-      slugToName: { lize: 'Lize' },
-      playerSlug: 'frost',
-    });
-    const partA = crlfParser.push('[[BEAT:lize]]\r');
-    const partB = crlfParser.push('\nHello there');
-    const partC = crlfParser.flush();
-    assert.equal(partA.length, 0);
-    assert.equal([...partB, ...partC].map((entry) => entry.delta).join(''), 'Hello there');
-
+  it('covers Director Encounter override, parent abort cleanup during brain stream, multi-beat editTurn, and deleteLastTurnPair Scribe withdrawal', async () => {
     const fixture = createWorldFixture({ scribeInterval: 1, pedantEnabled: false });
-    const { store, campaign, frost, lize, collette } = fixture;
-
-    const { client: mindRetryClient } = createScriptedClient([
-      { text: 'not json' },
-      {
-        json: {
-          internalThought: 'Guarded.',
-          physicalAction: 'Steps back.',
-          spokenLines: 'Who goes there?',
-          tone: 'wary',
-          knowledgeBoundaries: 'Unknown visitor',
-        },
-      },
-    ], { store });
-
-    const mindPacket = await CharacterMind.think({
-      character: lize,
-      campaign,
-      nextState: campaign.sceneState,
-      presentCharacters: [frost, lize],
-      witnessedHistory: [],
-      knowledgePacket: {
-        knownFacts: [],
-        relationships: [],
-        visibleThreads: [{ id: 'T1', text: 'Missing ledger' }],
-        rulings: [],
-      },
-      currentInput: 'PRIVATE_PRE_ARRIVAL_SECRET',
-      isArriving: true,
-      encounterBrief: 'A lantern flickers in the doorway.',
-      model: 'openai/gpt-4.1',
-      client: mindRetryClient,
-    });
-    assert.equal(mindPacket.spendIds.length, 2);
-    assert.deepEqual(mindPacket.knowledgeBoundaries, ['Unknown visitor']);
-
-    const { client: emptyComposerClient } = createScriptedClient([
-      { type: 'stream', text: '[[BEAT:lize]]   \n   ' },
-    ], { store });
-    await assert.rejects(
-      () => NarratorComposer.compose({
-        campaign,
-        characters: [frost, lize],
-        nextState: campaign.sceneState,
-        recentSceneTurns: [
-          {
-            id: 'other-scene',
-            seq: 1,
-            sceneNumber: 99,
-            beats: [{ speakerName: 'Viola', text: 'OTHER_SCENE_LEAK' }],
-          },
-        ],
-        userBeat: { speakerType: SpeakerType.Player, speakerName: 'Frost', text: 'Hello.' },
-        directorPlan: {
-          pacing: Director.Settings.Pacing.NarratorOnly,
-          narratorDirective: '',
-          encounterAccepted: false,
-          encounterBrief: '',
-        },
-        mindPackets: [],
-        model: 'openai/gpt-4.1',
-        client: emptyComposerClient,
-      }),
-      /zero non-empty beats/,
-    );
-
-    const { client: truncClient, calls: truncCalls } = createScriptedClient([
-      {
-        type: 'stream',
-        text: '[[BEAT:narrator]]\nA cold gust.\n[[BEAT:lize]]\nWait—',
-        finishReason: 'length',
-      },
-    ], { store });
-    const composedTrunc = await NarratorComposer.compose({
-      campaign,
-      characters: [frost, lize],
-      nextState: campaign.sceneState,
-      recentSceneTurns: [
-        {
-          id: 'wrong-scene',
-          seq: 1,
-          sceneNumber: 99,
-          beats: [{ speakerName: 'Viola', text: 'WRONG_SCENE_TEXT' }],
-        },
-      ],
-      userBeat: { speakerType: SpeakerType.Player, speakerName: 'Frost', text: 'Look.' },
-      directorPlan: {
-        pacing: Director.Settings.Pacing.FocusedOne,
-        narratorDirective: 'Brief.',
-        encounterAccepted: false,
-        encounterBrief: '',
-      },
-      mindPackets: [mindPacket],
-      model: 'openai/gpt-4.1',
-      client: truncClient,
-    });
-    assert.equal(composedTrunc.truncated, true);
-    assert.equal(JSON.stringify(truncCalls[0].payload.messages).includes('WRONG_SCENE_TEXT'), false);
-    assert.equal(JSON.stringify(truncCalls[0].payload.messages).includes('Target length:'), false);
-    assert.equal(composedTrunc.beats[0].mindPacket, null);
-    assert.equal(composedTrunc.beats[1].mindPacket.internalThought, 'Guarded.');
-    assert.equal(Object.hasOwn(composedTrunc.beats[1].mindPacket, 'spendIds'), false);
+    const { store, campaign, frost, lize } = fixture;
 
     const { client: encDirClient } = createScriptedClient([
       {
@@ -1600,7 +1387,7 @@ describe('TurnEngine end-to-end regressions and adversarial invariants', () => {
       campaign,
       characters: [frost, lize],
       preState: campaign.sceneState,
-      userText: '*(Encounter)*',
+      userText: TurnEngine.Settings.EncounterFallbackText,
       mode: TurnMode.Encounter,
       encounterRoll: {
         triggered: true,
@@ -1617,19 +1404,19 @@ describe('TurnEngine end-to-end regressions and adversarial invariants', () => {
     assert.deepEqual(forcedEncPlan.plan.responders, []);
 
     const parentController = new AbortController();
-    const { client: abortMindClient } = createScriptedClient([
+    const { client: abortBrainClient } = createScriptedClient([
       {
         text: buildTaggedDirectorPlan({
           presentSlugs: ['frost', 'lize'],
           pacing: Director.Settings.Pacing.FocusedOne,
           responders: [{ slug: 'lize', beatGoal: 'Wait for abort', length: Director.Settings.Length.Short }],
-          narratorDirective: 'Abort test.',
+          narratorDirective: Director.Settings.EmptyText,
         }),
       },
       ({ init }) => new Promise((resolve, reject) => {
-        init.signal?.addEventListener('abort', () => {
+        init.signal.addEventListener('abort', () => {
           const abortErr = new Error('Aborted');
-          abortErr.name = 'AbortError';
+          abortErr.name = TurnEngine.Settings.AbortName;
           reject(abortErr);
         }, { once: true });
         parentController.abort('user_cancelled');
@@ -1637,8 +1424,9 @@ describe('TurnEngine end-to-end regressions and adversarial invariants', () => {
     ], { store });
     const abortEngine = new TurnEngine({
       store,
-      client: abortMindClient,
+      client: abortBrainClient,
       scribeService: new ScribeService({ store }),
+      modelCatalog: createContextCatalog(),
     });
     await assert.rejects(
       () => abortEngine.runTurn({
@@ -1646,7 +1434,7 @@ describe('TurnEngine end-to-end regressions and adversarial invariants', () => {
         text: 'Wait.',
         signal: parentController.signal,
       }),
-      (error) => error.name === 'AbortError',
+      (error) => error.name === TurnEngine.Settings.AbortName,
     );
 
     const { client: fullCycleClient } = createScriptedClient([
@@ -1663,28 +1451,9 @@ describe('TurnEngine end-to-end regressions and adversarial invariants', () => {
           narratorDirective: 'Narrator introduces encounter first.',
         }),
       },
-      {
-        json: {
-          internalThought: 'Fine.',
-          physicalAction: 'Looks up.',
-          spokenLines: 'Come in.',
-          tone: 'calm',
-          knowledgeBoundaries: [],
-        },
-      },
-      {
-        json: {
-          internalThought: 'Phew.',
-          physicalAction: 'Steps in.',
-          spokenLines: 'Dinner is hot.',
-          tone: 'warm',
-          knowledgeBoundaries: [],
-        },
-      },
-      {
-        type: 'stream',
-        text: '[[BEAT:narrator]]\nA knock breaks the silence.\n[[BEAT:lize]]\nCome in.\n[[BEAT:collette]]\nDinner is hot.',
-      },
+      buildNarratorStreamEntry('A knock breaks the silence.'),
+      buildBrainStreamEntry({ thoughts: 'Fine.', reply: 'Come in.' }),
+      buildBrainStreamEntry({ thoughts: 'Phew.', reply: 'Dinner is hot.' }),
       {
         text: '=== FACTS\nCollette | trait | TEMP_BOOK_FACT_TO_WITHDRAW | #2',
       },
@@ -1701,44 +1470,30 @@ describe('TurnEngine end-to-end regressions and adversarial invariants', () => {
           narratorDirective: 'Narrator introduces encounter first.',
         }),
       },
-      {
-        json: {
-          internalThought: 'Fine.',
-          physicalAction: 'Looks up.',
-          spokenLines: 'Come in.',
-          tone: 'calm',
-          knowledgeBoundaries: [],
-        },
-      },
-      {
-        json: {
-          internalThought: 'Phew.',
-          physicalAction: 'Steps in.',
-          spokenLines: 'Dinner is hot.',
-          tone: 'warm',
-          knowledgeBoundaries: [],
-        },
-      },
-      {
-        type: 'stream',
-        text: '[[BEAT:narrator]]\nA knock breaks the silence.\n[[BEAT:lize]]\nCome in.\n[[BEAT:collette]]\nDinner is hot.',
-      },
+      buildNarratorStreamEntry('A knock breaks the silence.'),
+      buildBrainStreamEntry({ thoughts: 'Fine.', reply: 'Come in.' }),
+      buildBrainStreamEntry({ thoughts: 'Phew.', reply: 'Dinner is hot.' }),
       {
         text: '=== FACTS\nCollette | trait | EDIT_TURN_FACT_TO_WITHDRAW | #2',
       },
     ], { store });
     const scribeForCycle = new ScribeService({ store, client: fullCycleClient });
-    const cycleEngine = new TurnEngine({ store, client: fullCycleClient, scribeService: scribeForCycle });
+    const cycleEngine = new TurnEngine({
+      store,
+      client: fullCycleClient,
+      scribeService: scribeForCycle,
+      modelCatalog: createContextCatalog(),
+    });
 
     const firstMultiBeatTurn = await cycleEngine.runTurn({
       campaignId: campaign.id,
       text: 'Hold on, Lize.',
       mode: TurnMode.Encounter,
     });
-    assert.equal(firstMultiBeatTurn.userTurn.witnessIds.includes(collette.id), false);
-    assert.equal(firstMultiBeatTurn.assistantTurn.beats[0].witnessIds.includes(collette.id), false);
-    assert.equal(firstMultiBeatTurn.assistantTurn.beats[1].witnessIds.includes(collette.id), false);
-    assert.equal(firstMultiBeatTurn.assistantTurn.beats[2].witnessIds.includes(collette.id), true);
+    assert.equal(firstMultiBeatTurn.userTurn.witnessIds.includes(fixture.collette.id), false);
+    assert.equal(firstMultiBeatTurn.assistantTurn.beats[0].witnessIds.includes(fixture.collette.id), true);
+    assert.equal(firstMultiBeatTurn.assistantTurn.beats[1].witnessIds.includes(fixture.collette.id), true);
+    assert.equal(firstMultiBeatTurn.assistantTurn.beats[2].witnessIds.includes(fixture.collette.id), true);
 
     cycleEngine.deleteLastTurnPair({ campaignId: campaign.id });
     const afterDeleteState = scribeForCycle.loadState(campaign.id);
@@ -1776,13 +1531,33 @@ describe('TurnEngine end-to-end regressions and adversarial invariants', () => {
     );
   });
 
-  it('validates models before OpenRouter and handles Encounter blank text fallback', async () => {
+  it('validates constructor modelCatalog, checks models before OpenRouter, and handles Encounter blank text fallback', async () => {
     const noDirectorFixture = createWorldFixture({ models: { director: '' } });
     const { client: unusedClient, calls: unusedCalls } = createScriptedClient([], { store: noDirectorFixture.store });
+    assert.throws(
+      () => new TurnEngine({
+        store: noDirectorFixture.store,
+        client: unusedClient,
+        scribeService: new ScribeService({ store: noDirectorFixture.store }),
+        modelCatalog: null,
+      }),
+      TypeError,
+    );
+    assert.throws(
+      () => new TurnEngine({
+        store: noDirectorFixture.store,
+        client: unusedClient,
+        scribeService: new ScribeService({ store: noDirectorFixture.store }),
+        modelCatalog: {},
+      }),
+      TypeError,
+    );
+
     const noDirectorEngine = new TurnEngine({
       store: noDirectorFixture.store,
       client: unusedClient,
       scribeService: new ScribeService({ store: noDirectorFixture.store }),
+      modelCatalog: createContextCatalog(),
     });
     await assert.rejects(
       () => noDirectorEngine.runTurn({ campaignId: noDirectorFixture.campaign.id, text: 'Hello' }),
@@ -1808,6 +1583,7 @@ describe('TurnEngine end-to-end regressions and adversarial invariants', () => {
       client: step2FailClient,
       scribeService: new ScribeService({ store: noMainFixture.store }),
       random: () => 0.5,
+      modelCatalog: createContextCatalog(),
     });
     await assert.rejects(
       () => noMainEngine.runTurn({
@@ -1818,7 +1594,7 @@ describe('TurnEngine end-to-end regressions and adversarial invariants', () => {
       /Model is not configured for Lize/,
     );
     assert.equal(step2Calls.length, 1);
-    assert.equal(step2Calls[0].payload.messages[1].content.includes('*(Encounter)*'), true);
+    assert.equal(step2Calls[0].payload.messages[1].content.includes(TurnEngine.Settings.EncounterFallbackText), true);
     assert.equal(noMainFixture.store.listTurns(noMainFixture.campaign.id).total, 0);
   });
 
@@ -1833,7 +1609,7 @@ describe('TurnEngine end-to-end regressions and adversarial invariants', () => {
           narratorDirective: 'Turn 1.',
         }),
       },
-      { type: 'stream', text: '[[BEAT:narrator]]\nOriginal candle glow.' },
+      buildNarratorStreamEntry('Original candle glow.'),
       { text: '=== FACTS\nLize | condition | holding brass key | #2' },
       {
         text: buildTaggedDirectorPlan({
@@ -1842,11 +1618,11 @@ describe('TurnEngine end-to-end regressions and adversarial invariants', () => {
           narratorDirective: 'Regenerate.',
         }),
       },
-      { type: 'stream', text: '[[BEAT:narrator]]\nRegenerated reply.' },
+      buildNarratorStreamEntry('Regenerated reply.'),
     ], { store });
 
     const scribeService = new ScribeService({ store, client });
-    const engine = new TurnEngine({ store, client, scribeService });
+    const engine = new TurnEngine({ store, client, scribeService, modelCatalog: createContextCatalog() });
     const initial = await engine.runTurn({ campaignId: campaign.id, text: 'Look at the candle.' });
     store.insertFindings(campaign.id, initial.assistantTurn.id, [
       { kind: FindingKind.Contradiction, summary: 'Key check' },
@@ -1905,19 +1681,10 @@ describe('TurnEngine end-to-end regressions and adversarial invariants', () => {
           offscreenNotes: { collette: 'In kitchen' },
           pacing: Director.Settings.Pacing.FocusedOne,
           responders: [{ slug: 'lize', beatGoal: 'Hide cipher', length: Director.Settings.Length.Short }],
-          narratorDirective: 'Turn 1.',
+          narratorDirective: Director.Settings.EmptyText,
         }),
       },
-      {
-        json: {
-          internalThought: 'Safe here.',
-          physicalAction: 'Lifts floorboard.',
-          spokenLines: 'The cipher sits under the loose oak plank.',
-          tone: 'quiet',
-          knowledgeBoundaries: [],
-        },
-      },
-      { type: 'stream', text: '[[BEAT:lize]]\nThe cipher sits under the loose oak plank.' },
+      buildBrainStreamEntry({ thoughts: 'Safe here.', reply: 'The cipher sits under the loose oak plank.' }),
       { text: '=== FACTS\nLize | belonging | PRIVATE_CIPHER_IN_FLOOR | #2' },
       {
         text: buildTaggedDirectorPlan({
@@ -1925,19 +1692,10 @@ describe('TurnEngine end-to-end regressions and adversarial invariants', () => {
           offscreenNotes: { collette: 'In kitchen' },
           pacing: Director.Settings.Pacing.FocusedOne,
           responders: [{ slug: 'lize', beatGoal: 'React', length: Director.Settings.Length.Short }],
-          narratorDirective: 'Turn 2.',
+          narratorDirective: Director.Settings.EmptyText,
         }),
       },
-      {
-        json: {
-          internalThought: 'Wait.',
-          physicalAction: 'Listens.',
-          spokenLines: 'Someone is outside.',
-          tone: 'tense',
-          knowledgeBoundaries: [],
-        },
-      },
-      { type: 'stream', text: '[[BEAT:lize]]\nSomeone is outside.' },
+      buildBrainStreamEntry({ thoughts: 'Wait.', reply: 'Someone is outside.' }),
       { text: '=== FACTS\nLize | condition | DISCARDED_TURN2_FACT | #4' },
       {
         text: buildTaggedDirectorPlan({
@@ -1945,34 +1703,25 @@ describe('TurnEngine end-to-end regressions and adversarial invariants', () => {
           offscreenNotes: { collette: 'In kitchen' },
           pacing: Director.Settings.Pacing.FocusedOne,
           responders: [{ slug: 'lize', beatGoal: 'React again', length: Director.Settings.Length.Short }],
-          narratorDirective: 'Regenerate turn 2.',
+          narratorDirective: Director.Settings.EmptyText,
         }),
       },
-      {
-        json: {
-          internalThought: 'Still safe.',
-          physicalAction: 'Nods.',
-          spokenLines: 'All quiet in the hall.',
-          tone: 'calm',
-          knowledgeBoundaries: [],
-        },
-      },
-      { type: 'stream', text: '[[BEAT:lize]]\nAll quiet in the hall.' },
+      buildBrainStreamEntry({ thoughts: 'Still safe.', reply: 'All quiet in the hall.' }),
       { text: '=== FACTS\nLize | condition | REGENERATED_TURN2_FACT | #4' },
     ], { store });
 
     const scribeService = new ScribeService({ store, client });
-    const engine = new TurnEngine({ store, client, scribeService });
+    const engine = new TurnEngine({ store, client, scribeService, modelCatalog: createContextCatalog() });
 
     await engine.runTurn({ campaignId: campaign.id, text: 'Where is the cipher?' });
     await engine.runTurn({ campaignId: campaign.id, text: 'Did you hear footsteps?' });
 
     await engine.regenerateLastTurn({ campaignId: campaign.id });
 
-    const regenMindCall = calls[9];
-    const regenMindPrompt = JSON.stringify(regenMindCall.payload.messages);
-    assert.equal(regenMindPrompt.includes('PRIVATE_CIPHER_IN_FLOOR'), true);
-    assert.equal(regenMindPrompt.includes('DISCARDED_TURN2_FACT'), false);
+    const regenBrainCall = calls[7];
+    const regenBrainPrompt = JSON.stringify(regenBrainCall.payload.messages);
+    assert.equal(regenBrainPrompt.includes('PRIVATE_CIPHER_IN_FLOOR'), true);
+    assert.equal(regenBrainPrompt.includes('DISCARDED_TURN2_FACT'), false);
 
     engine.deleteLastTurnPair({ campaignId: campaign.id });
     const afterDelete = scribeService.loadState(campaign.id);
@@ -1988,7 +1737,7 @@ describe('TurnEngine end-to-end regressions and adversarial invariants', () => {
     assert.equal(ScribeKnowledge.knows(afterDelete.state, collette.scribeSubjectId, survivingFact), false);
   });
 
-  it('enforces Case A and Case B mid-turn arrival witnessIds isolation', async () => {
+  it('enforces Case A and Case B mid-turn arrival witnessIds and this_turn isolation', async () => {
     const fixture = createWorldFixture({ publicOdds: 1, privateOdds: 1, pedantEnabled: false });
     const { store, campaign, frost, lize, collette, mirra, maya } = fixture;
     store.updateCampaign(campaign.id, {
@@ -1999,7 +1748,7 @@ describe('TurnEngine end-to-end regressions and adversarial invariants', () => {
     });
     const scribeService = new ScribeService({ store });
 
-    const { client } = createScriptedClient([
+    const { client, calls } = createScriptedClient([
       {
         text: buildTaggedDirectorPlan({
           sceneType: SceneType.Public,
@@ -2007,47 +1756,28 @@ describe('TurnEngine end-to-end regressions and adversarial invariants', () => {
           encounterAccepted: true,
           encounterBrief: 'Collette walks up to the door.',
           pacing: Director.Settings.Pacing.FocusedOne,
-          responders: [{ slug: 'lize', beatGoal: 'Hide Ember', length: Director.Settings.Length.Short }],
-          narratorDirective: 'Lize speaks first, then Narrator describes Collette.',
+          responders: [
+            { slug: 'lize', beatGoal: 'Hide Ember', length: Director.Settings.Length.Short },
+            { slug: 'collette', beatGoal: 'Step in', length: Director.Settings.Length.Short },
+          ],
+          narratorDirective: Director.Settings.EmptyText,
         }),
       },
-      {
-        json: {
-          internalThought: 'Close.',
-          physicalAction: 'Nods.',
-          spokenLines: 'Got it, Ember is safe.',
-          tone: 'hushed',
-          knowledgeBoundaries: [],
-        },
-      },
-      {
-        type: 'stream',
-        text: '[[BEAT:lize]]\nGot it, Ember is safe.\n[[BEAT:narrator]]\nCollette shuts the door.',
-      },
+      buildNarratorStreamEntry('Collette shuts the door behind her.'),
+      buildBrainStreamEntry({ thoughts: 'Close.', reply: 'Got it, Ember is safe.' }),
+      buildBrainStreamEntry({ thoughts: 'Cold outside.', reply: 'Evening, you two.' }),
       {
         text: buildTaggedDirectorPlan({
           sceneType: SceneType.Public,
-          presentSlugs: ['frost', 'lize', 'collette'],
-          encounterAccepted: true,
-          encounterBrief: 'Collette approaches outside.',
+          presentSlugs: ['frost', 'lize'],
+          offscreenNotes: { collette: 'Downstairs' },
           pacing: Director.Settings.Pacing.FocusedOne,
           responders: [{ slug: 'lize', beatGoal: 'Whisper', length: Director.Settings.Length.Short }],
-          narratorDirective: 'Collette never enters in beats.',
+          narratorDirective: 'Rain taps the glass.',
         }),
       },
-      {
-        json: {
-          internalThought: 'Safe.',
-          physicalAction: 'Glances at window.',
-          spokenLines: 'Still secret.',
-          tone: 'low',
-          knowledgeBoundaries: [],
-        },
-      },
-      {
-        type: 'stream',
-        text: '[[BEAT:lize]]\nStill secret.\n[[BEAT:narrator]]\nRain taps the glass.',
-      },
+      buildNarratorStreamEntry('Rain taps the glass.'),
+      buildBrainStreamEntry({ thoughts: 'Safe.', reply: 'Still secret.' }),
       {
         text: buildTaggedDirectorPlan({
           location: 'Party Wagon',
@@ -2061,34 +1791,21 @@ describe('TurnEngine end-to-end regressions and adversarial invariants', () => {
             { slug: 'mirra', beatGoal: 'Welcome Frost', length: Director.Settings.Length.Short },
             { slug: 'maya', beatGoal: 'Deliver message', length: Director.Settings.Length.Short },
           ],
-          narratorDirective: 'Mirra greets Frost before Maya arrives.',
+          narratorDirective: Director.Settings.EmptyText,
         }),
       },
-      {
-        json: {
-          internalThought: 'Glad Frost is here.',
-          physicalAction: 'Waves Frost in.',
-          spokenLines: 'Glad you are back, Frost.',
-          tone: 'relieved',
-          knowledgeBoundaries: [],
-        },
-      },
-      {
-        json: {
-          internalThought: 'Out of breath.',
-          physicalAction: 'Holds up scroll.',
-          spokenLines: 'Message!',
-          tone: 'urgent',
-          knowledgeBoundaries: [],
-        },
-      },
-      {
-        type: 'stream',
-        text: '[[BEAT:mirra]]\nGlad you are back, Frost.\n[[BEAT:maya]]\nMessage!',
-      },
+      buildNarratorStreamEntry('Maya dashes up to the wagon door.'),
+      buildBrainStreamEntry({ thoughts: 'Glad Frost is here.', reply: 'Glad you are back, Frost.' }),
+      buildBrainStreamEntry({ thoughts: 'Out of breath.', reply: 'Message!' }),
     ], { store });
 
-    const engine = new TurnEngine({ store, client, scribeService, random: () => 0.1 });
+    const engine = new TurnEngine({
+      store,
+      client,
+      scribeService,
+      random: () => 0.1,
+      modelCatalog: createContextCatalog(),
+    });
 
     const caseA1 = await engine.runTurn({
       campaignId: campaign.id,
@@ -2096,8 +1813,11 @@ describe('TurnEngine end-to-end regressions and adversarial invariants', () => {
       mode: TurnMode.Normal,
     });
     assert.equal(caseA1.userTurn.witnessIds.includes(collette.id), false);
-    assert.equal(caseA1.assistantTurn.beats[0].witnessIds.includes(collette.id), false);
-    assert.equal(caseA1.assistantTurn.beats[1].witnessIds.includes(collette.id), true);
+    assert.equal(calls[3].payload.messages[1].content.includes('Keep Ember secret.'), false);
+    assert.equal(calls[3].payload.messages[1].content.includes('Collette shuts the door behind her.'), true);
+    for (const beat of caseA1.assistantTurn.beats) {
+      assert.equal(beat.witnessIds.includes(collette.id), true);
+    }
 
     store.updateCampaign(campaign.id, {
       sceneState: {
@@ -2125,6 +1845,8 @@ describe('TurnEngine end-to-end regressions and adversarial invariants', () => {
         remoteIds: [],
         offscreenNotes: { frost: 'Rounding the camp', maya: 'At the gate' },
         activeWalkOns: [],
+        style: SceneStyle.None,
+        pinnedStyle: null,
       },
     });
     const caseB = await engine.runTurn({
@@ -2133,103 +1855,12 @@ describe('TurnEngine end-to-end regressions and adversarial invariants', () => {
       mode: TurnMode.Normal,
     });
     assert.deepEqual(caseB.userTurn.witnessIds.sort(), [frost.id, mirra.id].sort());
-    assert.deepEqual(caseB.assistantTurn.beats[0].witnessIds.sort(), [frost.id, mirra.id].sort());
-    assert.deepEqual(caseB.assistantTurn.beats[1].witnessIds.sort(), [frost.id, maya.id, mirra.id].sort());
-  });
-
-  it('maintains strict 1:1 beatIndex parity in BeatParser across leading whitespace, whitespace-only beats, consecutive aliases, and player remapping', () => {
-    const parser = new BeatParser({
-      validSlugs: ['lize', 'collette'],
-      nameToSlug: {
-        Lize: 'lize',
-        'Lady Lize': 'lize',
-        Frost: 'frost',
-      },
-      slugToName: {
-        lize: 'Lize',
-        collette: 'Collette',
-      },
-      playerSlug: 'frost',
-    });
-
-    const rawOutput = [
-      '  \n  ',
-      '[[BEAT:lize]]\n   \n',
-      '[[BEAT:Lady Lize]]\nFirst line.\n',
-      '[[BEAT:lize]]\nSecond line.\n',
-      '[[BEAT:collette]]\n   \n',
-      '[[BEAT:frost]]\nFrost whispers.\n',
-      '[[BEAT:narrator]]\nWind howls.',
-    ].join('');
-
-    const deltas = [];
-    for (let charIndex = 0; charIndex < rawOutput.length; charIndex += 1) {
-      deltas.push(...parser.push(rawOutput[charIndex]));
+    assert.equal(calls[9].payload.messages[1].content.includes('I climb back into the wagon.'), true);
+    assert.equal(calls[10].payload.messages[1].content.includes('I climb back into the wagon.'), false);
+    assert.equal(calls[10].payload.messages[1].content.includes('Maya dashes up to the wagon door.'), true);
+    for (const beat of caseB.assistantTurn.beats) {
+      assert.deepEqual(beat.witnessIds.sort(), [frost.id, maya.id, mirra.id].sort());
     }
-    deltas.push(...parser.flush());
-
-    const beats = parser.getBeats();
-    assert.equal(beats.length, 2);
-    assert.equal(beats[0].slug, 'lize');
-    assert.equal(beats[0].text, 'First line.\n\nSecond line.');
-    assert.equal(beats[1].speakerType, SpeakerType.Narrator);
-    assert.equal(beats[1].text, 'Frost whispers.\n\nWind howls.');
-    assert.equal(parser.wasPlayerBeatRemapped(), true);
-
-    const emittedIndices = [...new Set(deltas.map((item) => item.beatIndex))];
-    assert.deepEqual(emittedIndices, [0, 1]);
-    for (let index = 0; index < beats.length; index += 1) {
-      const streamedForBeat = deltas
-        .filter((item) => item.beatIndex === index)
-        .map((item) => item.delta)
-        .join('')
-        .trim();
-      assert.equal(streamedForBeat, beats[index].text);
-    }
-  });
-
-  it('preserves root-cause error from second Mind responder instead of sibling AbortError', async () => {
-    const fixture = createWorldFixture({ pedantEnabled: false });
-    const { store, campaign, frost, lize, collette } = fixture;
-    store.updateCampaign(campaign.id, {
-      sceneState: {
-        ...campaign.sceneState,
-        presentIds: [frost.id, lize.id, collette.id],
-        offscreenNotes: {},
-      },
-    });
-    const scribeService = new ScribeService({ store });
-
-    let responderZeroAborted = false;
-    const { client } = createScriptedClient([
-      {
-        text: buildTaggedDirectorPlan({
-          presentSlugs: ['frost', 'lize', 'collette'],
-          pacing: Director.Settings.Pacing.GroupBanter,
-          responders: [
-            { slug: 'lize', beatGoal: 'Slow mind', length: Director.Settings.Length.Short },
-            { slug: 'collette', beatGoal: 'Fails with 401', length: Director.Settings.Length.Short },
-          ],
-          narratorDirective: 'Check root cause.',
-        }),
-      },
-      ({ init }) => new Promise((resolve, reject) => {
-        init.signal?.addEventListener('abort', () => {
-          responderZeroAborted = true;
-          const abortErr = new Error('Aborted');
-          abortErr.name = 'AbortError';
-          reject(abortErr);
-        }, { once: true });
-      }),
-      { type: 'error', status: 401, message: 'Unauthorized responder key' },
-    ], { store });
-
-    const engine = new TurnEngine({ store, client, scribeService });
-    await assert.rejects(
-      () => engine.runTurn({ campaignId: campaign.id, text: 'Both speak.' }),
-      (error) => error.name !== 'AbortError' && /401/.test(error.message),
-    );
-    assert.equal(responderZeroAborted, true);
   });
 
   it('parses Director boolean flags strictly and runs unlimited responders in ensemble turns', async () => {
@@ -2296,31 +1927,27 @@ describe('TurnEngine end-to-end regressions and adversarial invariants', () => {
             { slug: 'viola', beatGoal: '3', length: Director.Settings.Length.Short },
             { slug: 'mirra', beatGoal: '4', length: Director.Settings.Length.Short },
           ],
-          narratorDirective: 'All four reply.',
+          narratorDirective: Director.Settings.EmptyText,
         }),
       },
-      { json: { internalThought: 'T1', physicalAction: 'A1', spokenLines: 'Lize here.', tone: 'calm', knowledgeBoundaries: [] } },
-      { json: { internalThought: 'T2', physicalAction: 'A2', spokenLines: 'Collette here.', tone: 'warm', knowledgeBoundaries: [] } },
-      { json: { internalThought: 'T3', physicalAction: 'A3', spokenLines: 'Viola here.', tone: 'cool', knowledgeBoundaries: [] } },
-      { json: { internalThought: 'T4', physicalAction: 'A4', spokenLines: 'Mirra here.', tone: 'steady', knowledgeBoundaries: [] } },
-      {
-        type: 'stream',
-        text: [
-          '[[BEAT:lize]]\nLize here.\n',
-          '[[BEAT:collette]]\nCollette here.\n',
-          '[[BEAT:viola]]\nViola here.\n',
-          '[[BEAT:mirra]]\nMirra here.',
-        ].join(''),
-      },
+      buildBrainStreamEntry({ thoughts: 'T1', reply: 'Lize here.' }),
+      buildBrainStreamEntry({ thoughts: 'T2', reply: 'Collette here.' }),
+      buildBrainStreamEntry({ thoughts: 'T3', reply: 'Viola here.' }),
+      buildBrainStreamEntry({ thoughts: 'T4', reply: 'Mirra here.' }),
     ], { store });
 
-    const ensembleEngine = new TurnEngine({ store, client: ensembleClient, scribeService });
+    const ensembleEngine = new TurnEngine({
+      store,
+      client: ensembleClient,
+      scribeService,
+      modelCatalog: createContextCatalog(),
+    });
     const ensembleTurn = await ensembleEngine.runTurn({
       campaignId: campaign.id,
       text: 'All four of you, sound off.',
       mode: TurnMode.Normal,
     });
-    assert.equal(ensembleCalls.length, 6);
+    assert.equal(ensembleCalls.length, 5);
     assert.equal(ensembleTurn.plan.responders.length, 4);
     assert.equal(ensembleTurn.assistantTurn.beats.length, 4);
   });
@@ -2372,73 +1999,125 @@ describe('Unknown card values reach requests as unknown', () => {
     assert.doesNotMatch(text, /summary: \?/);
   });
 
-  it('shows the CharacterMind identity and known facts as unknown', async () => {
+  /**
+   * @param {{campaign: object, frost: object, lize: object}} fixture
+   * @param {boolean} omniscient
+   * @returns {string}
+   * @throws {TypeError | RangeError | Error}
+   */
+  const buildUnknownStoryState = (fixture, omniscient) => {
+    const log = ScribeLogCore.create();
+    let state = ScribeReplay.run(log, []);
+    for (const character of [fixture.frost, fixture.lize]) {
+      ScribeLogCore.syncCharacterSubject(log, state, {
+        subjectId: null,
+        name: character.name,
+        aliases: [],
+      });
+      state = ScribeReplay.run(log, []);
+    }
+    const lizeSubject = state.subjects.find((subject) => subject.name === fixture.lize.name);
+    const frostSubject = state.subjects.find((subject) => subject.name === fixture.frost.name);
+    for (const category of [ScribeCategory.Names.Age, ScribeCategory.Names.Hair]) {
+      ScribeLogCore.rule(log, state, {
+        type: ScribeLogCore.Ruling.AddFact,
+        subject: lizeSubject.id,
+        category,
+        target: null,
+        text: CharacterCard.Unknown,
+        hidden: false,
+        cite: null,
+        position: 0,
+        decided: true,
+      });
+      state = ScribeReplay.run(log, []);
+    }
+    const budget = RequestBudget.create({
+      contextLength: null,
+      replyReserve: DEFAULT_REPLY_RESERVE,
+      charsPerToken: RequestBudget.StartingCharsPerToken,
+    });
+    const slice = StorySlice.build({
+      state,
+      viewer: omniscient
+        ? { omniscient: true, subjectId: null }
+        : { omniscient: false, subjectId: lizeSubject.id, characterId: fixture.lize.id },
+      scene: {
+        location: fixture.campaign.sceneState.location,
+        day: fixture.campaign.sceneState.day,
+        timeLabel: fixture.campaign.sceneState.timeLabel,
+        sceneType: fixture.campaign.sceneState.sceneType,
+        situation: 'Calm.',
+      },
+      presentSubjectIds: [frostSubject.id, lizeSubject.id],
+      budget,
+    });
+    return slice.text;
+  };
+
+  it('shows the CharacterBrain identity and StorySlice facts as unknown', async () => {
     const fixture = createWorldFixture();
     const lize = unknownLize(fixture);
+    const settings = fixture.store.getSettings();
+    const storyState = buildUnknownStoryState({ ...fixture, lize }, false);
     const { client, calls } = createScriptedClient([
-      {
-        json: {
-          internalThought: 'Hm.',
-          physicalAction: 'Waits.',
-          spokenLines: 'Well.',
-          tone: 'dry',
-          knowledgeBoundaries: ['none'],
-        },
-      },
+      buildBrainStreamEntry({ thoughts: 'Hm.', reply: '*Waits.* Well.' }),
     ], { store: fixture.store });
 
-    await CharacterMind.think({
-      character: lize,
+    await CharacterBrain.reply({
       campaign: fixture.campaign,
-      nextState: fixture.campaign.sceneState,
-      presentCharacters: [fixture.frost, lize],
-      witnessedHistory: [],
-      knowledgePacket: {
-        knownFacts: [{ subject: 'S2', category: 'age', target: null, targetText: null, text: '?' }],
-        relationships: [],
-        visibleThreads: [],
-        rulings: [{ subject: 'S2', category: 'hair', target: null, targetText: null, text: '?' }],
+      character: lize,
+      card: lize.card,
+      playerName: fixture.frost.name,
+      storyState,
+      history: '',
+      thisTurn: `${fixture.frost.name}: Hello.`,
+      styleText: '',
+      direction: {
+        reacting: fixture.frost.name,
+        length: Director.Settings.Length.Short,
+        beatGoal: 'Respond.',
       },
-      currentInput: 'Hello.',
-      model: 'openai/gpt-4.1',
+      model: settings.models.main,
+      replyReserve: DEFAULT_REPLY_RESERVE,
       client,
     });
 
     const text = requestText(calls);
-    assert.match(text, /Persona: unknown/);
-    assert.match(text, /Voice notes: unknown/);
-    assert.match(text, /\| age: unknown/);
-    assert.match(text, /\| hair: unknown/);
-    assert.doesNotMatch(text, /: \?(\n|$)/);
+    assert.match(text, new RegExp(`Personality: ${CharacterCard.UnknownLabel}`));
+    assert.match(text, new RegExp(`Speaking style: ${CharacterCard.UnknownLabel}`));
+    assert.match(text, new RegExp(`${ScribeCategory.Names.Age}:${CharacterCard.UnknownLabel}|${ScribeCategory.Names.Age}: ${CharacterCard.UnknownLabel}`));
+    assert.match(text, new RegExp(`${ScribeCategory.Names.Hair}: ${CharacterCard.UnknownLabel}`));
+    assert.doesNotMatch(text, /: \?(?=[\n|;]|$)/);
+    fixture.store.close();
   });
 
-  it('shows the NarratorComposer cast voice as unknown', async () => {
+  it('shows Narrator StorySlice facts as unknown', async () => {
     const fixture = createWorldFixture();
     const lize = unknownLize(fixture);
+    const settings = fixture.store.getSettings();
+    const storyState = buildUnknownStoryState({ ...fixture, lize }, true);
     const { client, calls } = createScriptedClient([
-      { type: 'stream', text: '[[BEAT:narrator]]\nA cold gust.' },
+      buildNarratorStreamEntry('A cold gust.'),
     ], { store: fixture.store });
 
-    await NarratorComposer.compose({
+    await Narrator.narrate({
       campaign: fixture.campaign,
-      characters: [fixture.frost, lize],
-      nextState: { ...fixture.campaign.sceneState, presentIds: [fixture.frost.id, lize.id] },
-      recentSceneTurns: [],
-      userBeat: { speakerType: SpeakerType.Player, speakerName: 'Frost', text: 'Look.' },
-      directorPlan: {
-        pacing: Director.Settings.Pacing.NarratorOnly,
-        narratorDirective: 'Brief.',
-        encounterAccepted: false,
-        encounterBrief: '',
-      },
-      mindPackets: [],
-      model: 'openai/gpt-4.1',
+      storyState,
+      history: '',
+      thisTurn: `${fixture.frost.name}: Look.`,
+      styleText: '',
+      direction: 'Brief.',
+      model: settings.models.composer,
+      replyReserve: DEFAULT_REPLY_RESERVE,
       client,
     });
 
     const text = requestText(calls);
-    assert.match(text, /voice: unknown/);
-    assert.doesNotMatch(text, /voice: \?/);
+    assert.match(text, new RegExp(`${ScribeCategory.Names.Age}: ${CharacterCard.UnknownLabel}`));
+    assert.match(text, new RegExp(`${ScribeCategory.Names.Hair}: ${CharacterCard.UnknownLabel}`));
+    assert.doesNotMatch(text, /: \?(?=[\n|;]|$)/);
+    fixture.store.close();
   });
 });
 
@@ -2449,29 +2128,22 @@ describe('Player narration beat in the player turn', () => {
     responders: [{ slug: 'lize', beatGoal: 'React', length: Director.Settings.Length.Short }],
     narratorDirective: 'Keep it close.',
   });
-  const mindReply = Object.freeze({
-    internalThought: 'Thinking.',
-    physicalAction: 'Lize looks up.',
-    spokenLines: 'Hm.',
-    tone: 'dry',
-    knowledgeBoundaries: [],
-  });
 
   /**
    * @param {{text: string, narration?: string | null, mode?: string, scribeText?: string | null, prepare?: ((fixture: object) => void) | null}} options
    * @returns {Promise<{fixture: object, result: object, calls: Array<object>, events: Array<{event: string, data: unknown}>}>}
-   * @throws {Error}
+   * @throws {TypeError | RangeError | Error}
    */
   const runTurn = async ({ text, narration = null, mode = TurnMode.Normal, scribeText = null, prepare = null }) => {
     const fixture = createWorldFixture({ scribeInterval: scribeText === null ? 10 : 1, pedantEnabled: false });
     if (prepare !== null) {
       prepare(fixture);
     }
-    /** @type {Array<{json?: object, type?: string, text?: string}>} */
+    /** @type {Array<{type?: string, text: string}>} */
     const script = [
       { text: directorReply },
-      { json: mindReply },
-      { type: 'stream', text: '[[BEAT:lize]]\n*Lize looks up.*\nHm.' },
+      buildNarratorStreamEntry('The rain settles against the glass.'),
+      buildBrainStreamEntry({ thoughts: 'Thinking.', reply: '*Lize looks up.*\nHm.' }),
     ];
     if (scribeText !== null) {
       script.push({ text: scribeText });
@@ -2481,6 +2153,7 @@ describe('Player narration beat in the player turn', () => {
       store: fixture.store,
       client,
       scribeService: new ScribeService({ store: fixture.store, client }),
+      modelCatalog: createContextCatalog(),
     });
     const events = [];
     const result = await engine.runTurn({
@@ -2572,15 +2245,20 @@ describe('Player narration beat in the player turn', () => {
   /**
    * @param {object} fixture
    * @returns {{engine: TurnEngine, calls: Array<{payload: {messages: Array<{content: string}>}}>}}
-   * @throws {Error}
+   * @throws {TypeError | RangeError | Error}
    */
   const regenerationEngine = (fixture) => {
     const { client, calls } = createScriptedClient([
       { text: directorReply },
-      { json: mindReply },
-      { type: 'stream', text: '[[BEAT:lize]]\n*Lize nods.*\nYes.' },
+      buildNarratorStreamEntry('Steady firelight fills the room.'),
+      buildBrainStreamEntry({ thoughts: 'Ready.', reply: '*Lize nods.*\nYes.' }),
     ], { store: fixture.store });
-    const engine = new TurnEngine({ store: fixture.store, client, scribeService: new ScribeService({ store: fixture.store }) });
+    const engine = new TurnEngine({
+      store: fixture.store,
+      client,
+      scribeService: new ScribeService({ store: fixture.store }),
+      modelCatalog: createContextCatalog(),
+    });
     return { engine, calls };
   };
 
@@ -2588,17 +2266,17 @@ describe('Player narration beat in the player turn', () => {
    * @param {Array<{payload: {messages: Array<{content: string}>}}>} calls
    * @param {string} directorUserText
    * @param {string} directorNarrationText
-   * @param {string} wholeMessage
+   * @param {string} expectedThisTurn
    * @returns {void}
    * @throws {Error}
    */
-  const assertEveryModelGotThe = (calls, directorUserText, directorNarrationText, wholeMessage) => {
+  const assertEveryModelGotThe = (calls, directorUserText, directorNarrationText, expectedThisTurn) => {
     assert.equal(calls.length, 3);
     const directorUserContent = calls[0].payload.messages[1].content;
     assert.equal(directorUserContent.includes(`userText: ${directorUserText}`), true);
     assert.equal(directorUserContent.includes(`narration: ${directorNarrationText}`), true);
     for (const downstreamCall of calls.slice(1)) {
-      assert.equal(downstreamCall.payload.messages.map((message) => message.content).join('\n').includes(wholeMessage), true);
+      assert.equal(downstreamCall.payload.messages.map((message) => message.content).join('\n').includes(expectedThisTurn), true);
     }
   };
 
@@ -2626,7 +2304,7 @@ describe('Player narration beat in the player turn', () => {
         calls,
         'I look at her again.',
         'Her hair is dyed black.',
-        'I look at her again.\n\nHer hair is dyed black.',
+        'Frost: I look at her again.\nNarrator: Her hair is dyed black.',
       );
       assert.deepEqual(fixture.store.getTurn(fixture.campaign.id, result.userTurn.id), savedPlayerTurn);
       assert.deepEqual(regenerated.userTurn, savedPlayerTurn);
@@ -2678,7 +2356,7 @@ describe('Player narration beat in the player turn', () => {
       calls,
       'She looks up.\n\nShe waits.',
       'Rain falls.',
-      'She looks up.\n\nRain falls.\n\nShe waits.',
+      'Frost: She looks up.\nNarrator: Rain falls.\nFrost: She waits.',
     );
     assert.deepEqual(store.getTurn(campaign.id, imported[0].id), saved);
     assert.equal(saved.beats.length, 3);
@@ -2721,7 +2399,7 @@ describe('Player narration beat in the player turn', () => {
         ScribeLogCore.rule(log, state, {
           type: ScribeLogCore.Ruling.AddFact,
           subject: lize.scribeSubjectId,
-          category: 'hair',
+          category: ScribeCategory.Names.Hair,
           target: null,
           text: 'red',
           hidden: false,
@@ -2732,13 +2410,13 @@ describe('Player narration beat in the player turn', () => {
         store.saveScribeBook(campaign.id, { bookJson: JSON.stringify(log), lastTurnSeq: 0, dirty: false });
       },
     });
-    assert.deepEqual(events.filter((entry) => entry.event === 'warning'), []);
+    assert.deepEqual(events.filter((entry) => entry.event === TurnEngine.Settings.Event.Warning), []);
     const loaded = new ScribeService({ store: fixture.store }).loadState(fixture.campaign.id);
     const hair = Object.fromEntries(
-      loaded.state.facts.filter((fact) => fact.category === 'hair').map((fact) => [fact.text, fact.status]),
+      loaded.state.facts.filter((fact) => fact.category === ScribeCategory.Names.Hair).map((fact) => [fact.text, fact.status]),
     );
 
-    assert.deepEqual(hair, { red: 'Reported', 'black, freshly dyed': 'InForce' });
+    assert.deepEqual(hair, { red: ScribeReplay.Status.Reported, 'black, freshly dyed': ScribeReplay.Status.InForce });
     const narrationMessage = loaded.messages.find((message) => message.position === 1);
     assert.deepEqual(narrationMessage.blocks.map((block) => block.role), ['Player', 'Narrator']);
   });
@@ -5110,7 +4788,7 @@ describe('Director tagged parsing, styles, modes, and budgeted recent turns', ()
     }
   });
 
-  it('passes player narrationText cleanly from TurnEngine to Director on both Send and Regenerate', async () => {
+  it('passes player narrationText cleanly from TurnEngine to Director, Narrator, and CharacterBrain on both Send and Regenerate', async () => {
     const fixture = createWorldFixture({ scribeInterval: 10, pedantEnabled: false });
     const { store, campaign } = fixture;
     const directorResponse = buildTaggedDirectorPlan({
@@ -5119,23 +4797,21 @@ describe('Director tagged parsing, styles, modes, and budgeted recent turns', ()
       responders: [{ slug: 'lize', beatGoal: 'React', length: Director.Settings.Length.Short }],
       narratorDirective: 'Keep steady.',
     });
-    const mindJson = {
-      internalThought: 'Okay.',
-      physicalAction: 'Nods.',
-      spokenLines: 'Understood.',
-      tone: 'calm',
-      knowledgeBoundaries: [],
-    };
     const { client, calls } = createScriptedClient([
       { text: directorResponse },
-      { json: mindJson },
-      { type: 'stream', text: '[[BEAT:lize]]\nUnderstood.' },
+      buildNarratorStreamEntry('The room goes dark.'),
+      buildBrainStreamEntry({ thoughts: 'Okay.', reply: 'Understood.' }),
       { text: directorResponse },
-      { json: mindJson },
-      { type: 'stream', text: '[[BEAT:lize]]\nUnderstood again.' },
+      buildNarratorStreamEntry('The room darkens once more.'),
+      buildBrainStreamEntry({ thoughts: 'Ready.', reply: 'Understood again.' }),
     ], { store });
 
-    const engine = new TurnEngine({ store, client, scribeService: new ScribeService({ store }) });
+    const engine = new TurnEngine({
+      store,
+      client,
+      scribeService: new ScribeService({ store }),
+      modelCatalog: createContextCatalog(),
+    });
     await engine.runTurn({
       campaignId: campaign.id,
       text: 'I step forward.',
@@ -5148,6 +4824,10 @@ describe('Director tagged parsing, styles, modes, and budgeted recent turns', ()
     const regenDirectorPrompt = calls[3].payload.messages[1].content;
     assert.equal(sendDirectorPrompt.includes('userText: I step forward.\nnarration: The lantern goes out.'), true);
     assert.equal(regenDirectorPrompt.includes('userText: I step forward.\nnarration: The lantern goes out.'), true);
+    const expectedThisTurn = 'Frost: I step forward.\nNarrator: The lantern goes out.';
+    for (const downstreamIndex of [1, 2, 4, 5]) {
+      assert.equal(calls[downstreamIndex].payload.messages[1].content.includes(expectedThisTurn), true);
+    }
     store.close();
   });
 });
@@ -6336,6 +6016,1174 @@ describe('Narrator', () => {
       await assert.rejects(() => Narrator.narrate({ campaign: { id: 'c1' }, model: TEST_MODEL, replyReserve: TEST_RESERVE, client: fakeClient, onDelta: 'bad' }), TypeError);
     } finally {
       store.close();
+    }
+  });
+});
+
+describe('TurnEngine sequential turn pipeline, budgets, handoffs, styles, and failures', () => {
+  const HTTP_UNAUTHORIZED = 401;
+  const CONTEXT_128K = 131072;
+  const CONTEXT_TIGHT = 12000;
+  const CONTEXT_TINY = 3010;
+  const CONTEXT_DIRECTOR_OVERFLOW = 4000;
+  const MODEL_MINI = 'openai/gpt-4.1-mini';
+  const MODEL_MAIN = 'openai/gpt-4.1';
+  const MODEL_RECURRING_TINY = 'openai/gpt-recurring-tiny';
+  const EMPTY_TEXT = TurnEngine.Settings.EmptyText;
+
+  /**
+   * @param {Record<string, number>} contextByModel
+   * @returns {Promise<import('../src/openrouter/ModelCatalog.mjs').ModelCatalog>}
+   * @throws {TypeError | RangeError | Error}
+   */
+  async function createCatalogForModels(contextByModel) {
+    const entries = Object.entries(contextByModel).map(([modelId, lengthValue]) => ({
+      id: modelId,
+      name: `Model ${modelId}`,
+      context_length: lengthValue,
+      pricing: { prompt: '0.0000003', completion: '0.0000005' },
+      top_provider: { max_completion_tokens: DEFAULT_REPLY_RESERVE },
+      supported_parameters: ['temperature', 'max_tokens'],
+    }));
+    const fakeCatalog = createFakeModelCatalog({
+      modelIds: Object.keys(contextByModel),
+      answerList: () => new Response(JSON.stringify({ data: entries }), {
+        status: 200,
+        headers: { 'content-type': 'application/json' },
+      }),
+    });
+    await fakeCatalog.catalog.listModels();
+    return fakeCatalog.catalog;
+  }
+
+  /**
+   * @param {{payload: {messages: ReadonlyArray<{content: string}>}}} callRecord
+   * @returns {string}
+   */
+  function combinedPromptText(callRecord) {
+    return callRecord.payload.messages.map((message) => message.content).join('\n');
+  }
+
+  /**
+   * @param {{store: SqliteStore, campaign: object, frost: object, lize: object, extraWitnessIds?: readonly string[], turnCount: number, bodyChars: number, markerPrefix: string}} options
+   * @returns {void}
+   * @throws {TypeError | RangeError | Error}
+   */
+  function importScaledHistory({ store, campaign, frost, lize, extraWitnessIds = [], turnCount, bodyChars, markerPrefix }) {
+    const witnessIds = [frost.id, lize.id, ...extraWitnessIds];
+    const sceneState = { ...campaign.sceneState, presentIds: witnessIds };
+    const rows = Array.from({ length: turnCount }, (unusedSlot, index) => {
+      const turnNumber = index + 1;
+      const isPlayerTurn = turnNumber % 2 === 1;
+      const marker = `${markerPrefix}_${String(turnNumber).padStart(3, '0')}: `;
+      const body = `${marker}${'x'.repeat(Math.max(0, bodyChars - marker.length))}`;
+      return {
+        role: isPlayerTurn ? TurnRole.User : TurnRole.Assistant,
+        mode: TurnMode.Normal,
+        rawText: body,
+        sceneNumber: 1,
+        witnessIds,
+        sceneStateBefore: sceneState,
+        sceneStateAfter: sceneState,
+        beats: [
+          {
+            speakerType: isPlayerTurn ? SpeakerType.Player : SpeakerType.Character,
+            characterId: isPlayerTurn ? frost.id : lize.id,
+            speakerName: isPlayerTurn ? frost.name : lize.name,
+            text: body,
+            witnessIds,
+          },
+        ],
+      };
+    });
+    store.importTurns(campaign.id, rows);
+  }
+
+  it('bounds Hero-Gone-scale 300-turn history under ModelCatalog 131072 and trims actively under tight 12000', async () => {
+    const largeFixture = createWorldFixture({ pedantEnabled: false });
+    try {
+      const { store, campaign, frost, lize, collette } = largeFixture;
+      store.updateCampaign(campaign.id, {
+        sceneState: {
+          ...campaign.sceneState,
+          presentIds: [frost.id, lize.id, collette.id],
+        },
+      });
+      importScaledHistory({
+        store,
+        campaign,
+        frost,
+        lize,
+        extraWitnessIds: [collette.id],
+        turnCount: 300,
+        bodyChars: 900,
+        markerPrefix: 'HG_TURN',
+      });
+
+      const log = ScribeLogCore.create();
+      let scribeState = ScribeReplay.run(log, []);
+      for (const character of [frost, lize, collette]) {
+        ScribeLogCore.syncCharacterSubject(log, scribeState, {
+          subjectId: character.scribeSubjectId,
+          name: character.name,
+          aliases: character.aliases,
+        });
+        scribeState = ScribeReplay.run(log, []);
+      }
+      ScribeLogCore.rule(log, scribeState, {
+        type: ScribeLogCore.Ruling.AddFact,
+        subject: lize.scribeSubjectId,
+        category: ScribeCategory.Names.Hair,
+        target: null,
+        text: 'chestnut braided',
+        hidden: false,
+        cite: null,
+        position: 0,
+        decided: true,
+      });
+      store.saveScribeBook(campaign.id, { bookJson: JSON.stringify(log), lastTurnSeq: 0, dirty: false });
+
+      const largeCatalog = await createCatalogForModels({
+        [MODEL_MINI]: CONTEXT_128K,
+        [MODEL_MAIN]: CONTEXT_128K,
+      });
+      const { client: largeClient, calls: largeCalls } = createScriptedClient([
+        {
+          text: buildTaggedDirectorPlan({
+            presentSlugs: ['frost', 'lize', 'collette'],
+            pacing: Director.Settings.Pacing.GroupBanter,
+            responders: [
+              { slug: 'lize', beatGoal: 'Answer', length: Director.Settings.Length.Short },
+              { slug: 'collette', beatGoal: 'Answer', length: Director.Settings.Length.Short },
+            ],
+            narratorDirective: 'Settle into evening.',
+          }),
+        },
+        buildNarratorStreamEntry('Lampposts flicker down the cobbles.'),
+        buildBrainStreamEntry({ thoughts: 'Quiet.', reply: '*Lize warms her hands.*' }),
+        buildBrainStreamEntry({ thoughts: 'Ready.', reply: '*Collette leans near.*' }),
+      ], { store });
+
+      const largeEngine = new TurnEngine({
+        store,
+        client: largeClient,
+        scribeService: new ScribeService({ store }),
+        modelCatalog: largeCatalog,
+      });
+      await largeEngine.runTurn({
+        campaignId: campaign.id,
+        text: 'Evening settles.',
+      });
+
+      const largeBudget = RequestBudget.create({
+        contextLength: CONTEXT_128K,
+        replyReserve: DEFAULT_REPLY_RESERVE,
+        charsPerToken: RequestBudget.StartingCharsPerToken,
+      });
+      assert.equal(largeCalls.length, 4);
+      for (const callItem of largeCalls) {
+        const promptTokens =
+          largeBudget.estimate(callItem.payload.messages[0].content) +
+          largeBudget.estimate(callItem.payload.messages[1].content);
+        assert.equal(promptTokens <= largeBudget.limitTokens, true);
+      }
+
+      const lizePrompt = combinedPromptText(largeCalls[2]);
+      const collettePrompt = combinedPromptText(largeCalls[3]);
+      assert.equal(lizePrompt.includes('HG_TURN_300'), true);
+      assert.equal(lizePrompt.includes('HG_TURN_275'), false);
+      assert.equal(collettePrompt.includes('HG_TURN_300'), true);
+      assert.equal(collettePrompt.includes('HG_TURN_288'), false);
+    } finally {
+      largeFixture.store.close();
+    }
+
+    const tightFixture = createWorldFixture({ pedantEnabled: false });
+    try {
+      const { store, campaign, frost, lize } = tightFixture;
+      store.updateCampaign(campaign.id, {
+        sceneState: {
+          ...campaign.sceneState,
+          presentIds: [frost.id, lize.id],
+        },
+      });
+      importScaledHistory({
+        store,
+        campaign,
+        frost,
+        lize,
+        turnCount: 30,
+        bodyChars: 3000,
+        markerPrefix: 'TIGHT_TURN',
+      });
+
+      const tightCatalog = await createCatalogForModels({
+        [MODEL_MINI]: CONTEXT_TIGHT,
+        [MODEL_MAIN]: CONTEXT_TIGHT,
+      });
+      const tightUsage = { prompt_tokens: 9000, completion_tokens: 40, cost: 0.0011 };
+      const { client: tightClient, calls: tightCalls } = createScriptedClient([
+        {
+          text: buildTaggedDirectorPlan({
+            presentSlugs: ['frost', 'lize'],
+            pacing: Director.Settings.Pacing.FocusedOne,
+            responders: [{ slug: 'lize', beatGoal: 'Answer', length: Director.Settings.Length.Short }],
+            narratorDirective: 'Check tight window.',
+          }),
+          usage: tightUsage,
+        },
+        buildNarratorStreamEntry('Cold wind crosses the threshold.', { usage: tightUsage }),
+        buildBrainStreamEntry({ thoughts: 'Tight.', reply: '*Lize nods once.*', usage: tightUsage }),
+      ], { store });
+
+      const tightEngine = new TurnEngine({
+        store,
+        client: tightClient,
+        scribeService: new ScribeService({ store }),
+        modelCatalog: tightCatalog,
+      });
+      await tightEngine.runTurn({
+        campaignId: campaign.id,
+        text: 'Watch closely.',
+      });
+
+      const tightBudget = RequestBudget.create({
+        contextLength: CONTEXT_TIGHT,
+        replyReserve: DEFAULT_REPLY_RESERVE,
+        charsPerToken: RequestBudget.StartingCharsPerToken,
+      });
+      assert.equal(tightCalls.length, 3);
+      for (const callItem of tightCalls) {
+        const promptTokens =
+          tightBudget.estimate(callItem.payload.messages[0].content) +
+          tightBudget.estimate(callItem.payload.messages[1].content);
+        assert.equal(promptTokens <= tightBudget.limitTokens, true);
+      }
+      for (const callItem of tightCalls) {
+        const prompt = combinedPromptText(callItem);
+        assert.equal(prompt.includes('TIGHT_TURN_001'), false);
+        assert.equal(prompt.includes('TIGHT_TURN_030'), true);
+      }
+    } finally {
+      tightFixture.store.close();
+    }
+  });
+
+  it('stacks sequential boxes in <this_turn> and never leaks thoughts across consecutive turns', async () => {
+    const fixture = createWorldFixture({ pedantEnabled: false });
+    try {
+      const { store, campaign, frost, lize, collette } = fixture;
+      store.updateCampaign(campaign.id, {
+        sceneState: {
+          ...campaign.sceneState,
+          presentIds: [frost.id, lize.id, collette.id],
+        },
+      });
+      const catalog = await createCatalogForModels({ [MODEL_MINI]: CONTEXT_128K, [MODEL_MAIN]: CONTEXT_128K });
+      const { client, calls } = createScriptedClient([
+        {
+          text: buildTaggedDirectorPlan({
+            presentSlugs: ['frost', 'lize', 'collette'],
+            pacing: Director.Settings.Pacing.GroupBanter,
+            responders: [
+              { slug: 'lize', beatGoal: 'Answer first', length: Director.Settings.Length.Short },
+              { slug: 'collette', beatGoal: 'Answer second', length: Director.Settings.Length.Short },
+            ],
+            narratorDirective: 'Rain patters at the window.',
+          }),
+        },
+        buildNarratorStreamEntry('Mist curls against the sill.'),
+        buildBrainStreamEntry({ thoughts: 'LIZE_SECRET_THOUGHT_T1', reply: '*Lize warms the kettle.*' }),
+        buildBrainStreamEntry({ thoughts: 'COLLETTE_SECRET_THOUGHT_T1', reply: '"Pour me half a cup."' }),
+        {
+          text: buildTaggedDirectorPlan({
+            presentSlugs: ['frost', 'lize', 'collette'],
+            pacing: Director.Settings.Pacing.GroupBanter,
+            responders: [
+              { slug: 'lize', beatGoal: 'Continue', length: Director.Settings.Length.Short },
+              { slug: 'collette', beatGoal: 'Continue', length: Director.Settings.Length.Short },
+            ],
+            narratorDirective: EMPTY_TEXT,
+          }),
+        },
+        buildBrainStreamEntry({ thoughts: 'LIZE_SECRET_THOUGHT_T2', reply: '*Lize pours two mugs.*' }),
+        buildBrainStreamEntry({ thoughts: 'COLLETTE_SECRET_THOUGHT_T2', reply: '"Thank you."' }),
+      ], { store });
+
+      const engine = new TurnEngine({
+        store,
+        client,
+        scribeService: new ScribeService({ store }),
+        modelCatalog: catalog,
+      });
+
+      const eventsTurnOne = [];
+      await engine.runTurn({
+        campaignId: campaign.id,
+        text: 'Tea is cold.',
+        emit: (eventItem) => {
+          eventsTurnOne.push(eventItem);
+        },
+      });
+
+      const phaseSequence = eventsTurnOne
+        .filter((item) => item.event === TurnEngine.Settings.Event.Phase)
+        .map((item) => (item.data.slug ? `${item.data.phase}:${item.data.slug}` : item.data.phase));
+      assert.deepEqual(phaseSequence, [
+        TurnEngine.Settings.Phase.Directing,
+        TurnEngine.Settings.Phase.DirectorDone,
+        TurnEngine.Settings.Phase.Narrating,
+        `${TurnEngine.Settings.Phase.Replying}:${lize.slug}`,
+        `${TurnEngine.Settings.Phase.Replying}:${collette.slug}`,
+      ]);
+
+      const collettePromptTurnOne = combinedPromptText(calls[3]);
+      assert.equal(collettePromptTurnOne.includes('Frost: Tea is cold.'), true);
+      assert.equal(collettePromptTurnOne.includes('Narrator: Mist curls against the sill.'), true);
+      assert.equal(collettePromptTurnOne.includes('Lize: *Lize warms the kettle.*'), true);
+      assert.equal(collettePromptTurnOne.includes('LIZE_SECRET_THOUGHT_T1'), false);
+
+      await engine.runTurn({
+        campaignId: campaign.id,
+        text: 'Another round?',
+      });
+
+      for (const turnTwoCall of calls.slice(4)) {
+        const prompt = combinedPromptText(turnTwoCall);
+        assert.equal(prompt.includes('LIZE_SECRET_THOUGHT_T1'), false);
+        assert.equal(prompt.includes('COLLETTE_SECRET_THOUGHT_T1'), false);
+        assert.equal(prompt.includes('*Lize warms the kettle.*'), true);
+      }
+    } finally {
+      fixture.store.close();
+    }
+  });
+
+  it('forces Narrator on mid-turn arrival with empty directive and uses DefaultSceneDirection on silent NarratorOnly', async () => {
+    const fixture = createWorldFixture({ pedantEnabled: false });
+    try {
+      const { store, campaign, frost, lize, maya } = fixture;
+      store.updateCampaign(campaign.id, {
+        sceneState: {
+          ...campaign.sceneState,
+          sceneType: SceneType.Public,
+          presentIds: [frost.id, lize.id],
+        },
+      });
+      const catalog = await createCatalogForModels({ [MODEL_MINI]: CONTEXT_128K, [MODEL_MAIN]: CONTEXT_128K });
+      const { client, calls } = createScriptedClient([
+        {
+          text: buildTaggedDirectorPlan({
+            sceneType: SceneType.Public,
+            sceneChanged: false,
+            presentSlugs: ['frost', 'lize', 'maya'],
+            pacing: Director.Settings.Pacing.GroupBanter,
+            responders: [
+              { slug: 'lize', beatGoal: 'Answer Frost', length: Director.Settings.Length.Short },
+              { slug: 'maya', beatGoal: 'Enter and greet', length: Director.Settings.Length.Short },
+            ],
+            narratorDirective: EMPTY_TEXT,
+          }),
+        },
+        buildNarratorStreamEntry('Maya unlatches the tavern door.'),
+        buildBrainStreamEntry({ thoughts: 'Be brief.', reply: '*Lize taps her sleeve.*' }),
+        buildBrainStreamEntry({ thoughts: 'Just got here.', reply: '"Am I interrupting?"' }),
+        {
+          text: buildTaggedDirectorPlan({
+            sceneType: SceneType.Public,
+            sceneChanged: false,
+            presentSlugs: ['frost', 'lize', 'maya'],
+            pacing: Director.Settings.Pacing.NarratorOnly,
+            responders: [],
+            narratorDirective: EMPTY_TEXT,
+          }),
+        },
+        buildNarratorStreamEntry('Hearth embers settle cleanly.'),
+      ], { store });
+
+      const engine = new TurnEngine({
+        store,
+        client,
+        scribeService: new ScribeService({ store }),
+        modelCatalog: catalog,
+      });
+
+      const arrivalResult = await engine.runTurn({
+        campaignId: campaign.id,
+        text: 'Secret pre-arrival message.',
+      });
+
+      const narratorDirectionPrompt = combinedPromptText(calls[1]);
+      assert.equal(narratorDirectionPrompt.includes(maya.name), true);
+      const lizePrompt = combinedPromptText(calls[2]);
+      assert.equal(lizePrompt.includes('Frost: Secret pre-arrival message.'), true);
+      const mayaPrompt = combinedPromptText(calls[3]);
+      assert.equal(mayaPrompt.includes('Secret pre-arrival message.'), false);
+      assert.equal(mayaPrompt.includes('<this_turn>\nNarrator: Maya unlatches the tavern door.\nLize: *Lize taps her sleeve.*\n</this_turn>'), true);
+      assert.equal(arrivalResult.userTurn.witnessIds.includes(maya.id), false);
+      for (const assistantBeat of arrivalResult.assistantTurn.beats) {
+        assert.equal(assistantBeat.witnessIds.includes(maya.id), true);
+      }
+
+      const narratorOnlyResult = await engine.runTurn({
+        campaignId: campaign.id,
+        text: 'We listen to the quiet.',
+      });
+      const silentDirectionPrompt = combinedPromptText(calls[5]);
+      assert.equal(silentDirectionPrompt.includes(TurnEngine.Settings.DefaultSceneDirection), true);
+      assert.equal(narratorOnlyResult.assistantTurn.beats.length, 1);
+      assert.equal(narratorOnlyResult.assistantTurn.beats[0].speakerType, SpeakerType.Narrator);
+    } finally {
+      fixture.store.close();
+    }
+  });
+
+  it('filters <next> handoffs across exclusions, aliases, remote speakers, reacting slug, and maxRepliesPerCharacter', async () => {
+    const fixture = createWorldFixture({ pedantEnabled: false });
+    try {
+      const { store, campaign, frost, lize, collette, viola, mirra, kira } = fixture;
+      store.updateSettings({ maxRepliesPerCharacter: 2 });
+      store.updateCharacter(campaign.id, frost.id, { aliases: ['Captain'] });
+      store.updateCharacter(campaign.id, collette.id, { aliases: ['Cookie'] });
+      store.updateCampaign(campaign.id, {
+        sceneState: {
+          ...campaign.sceneState,
+          sceneType: SceneType.Public,
+          presentIds: [frost.id, lize.id, collette.id, mirra.id, kira.id],
+          remoteIds: [viola.id],
+        },
+      });
+      const catalog = await createCatalogForModels({ [MODEL_MINI]: CONTEXT_128K, [MODEL_MAIN]: CONTEXT_128K });
+
+      const { client, calls } = createScriptedClient([
+        {
+          text: buildTaggedDirectorPlan({
+            sceneType: SceneType.Public,
+            presentSlugs: ['frost', 'lize', 'collette', 'mirra', 'kira'],
+            remoteSlugs: ['viola'],
+            pacing: Director.Settings.Pacing.GroupBanter,
+            responders: [
+              { slug: 'lize', beatGoal: 'Check absent', length: Director.Settings.Length.Short },
+              { slug: 'collette', beatGoal: 'Check player name', length: Director.Settings.Length.Short },
+              { slug: 'mirra', beatGoal: 'Check player alias', length: Director.Settings.Length.Short },
+              { slug: 'kira', beatGoal: 'Check self', length: Director.Settings.Length.Short },
+            ],
+            narratorDirective: EMPTY_TEXT,
+          }),
+        },
+        buildBrainStreamEntry({ thoughts: 'One', reply: 'Maya?', next: 'maya' }),
+        buildBrainStreamEntry({ thoughts: 'Two', reply: 'Frost?', next: 'Frost' }),
+        buildBrainStreamEntry({ thoughts: 'Three', reply: 'Captain?', next: 'Captain' }),
+        buildBrainStreamEntry({ thoughts: 'Four', reply: 'Myself?', next: 'kira' }),
+
+        {
+          text: buildTaggedDirectorPlan({
+            sceneType: SceneType.Public,
+            presentSlugs: ['frost', 'lize', 'collette', 'mirra', 'kira'],
+            remoteSlugs: ['viola'],
+            pacing: Director.Settings.Pacing.GroupBanter,
+            responders: [
+              { slug: 'lize', beatGoal: 'Point to Collette', length: Director.Settings.Length.Short },
+              { slug: 'collette', beatGoal: 'Call Viola', length: Director.Settings.Length.Short },
+            ],
+            narratorDirective: EMPTY_TEXT,
+          }),
+        },
+        buildBrainStreamEntry({ thoughts: 'Already queued', reply: 'Collette!', next: 'collette' }),
+        buildBrainStreamEntry({ thoughts: 'Call remote', reply: 'Viola on wire!', next: 'viola' }),
+        buildBrainStreamEntry({ thoughts: 'Reply by alias', reply: 'Cookie, clarify.', next: 'Cookie' }),
+        buildBrainStreamEntry({ thoughts: 'Stop', reply: 'Clear.', next: CharacterBrain.Settings.NextNone }),
+
+        {
+          text: buildTaggedDirectorPlan({
+            sceneType: SceneType.Public,
+            presentSlugs: ['frost', 'lize', 'collette', 'mirra', 'kira'],
+            remoteSlugs: ['viola'],
+            pacing: Director.Settings.Pacing.FocusedOne,
+            responders: [{ slug: 'lize', beatGoal: 'Open cap loop', length: Director.Settings.Length.Short }],
+            narratorDirective: EMPTY_TEXT,
+          }),
+        },
+        buildBrainStreamEntry({ thoughts: 'L1', reply: 'Lize turn 1.', next: 'collette' }),
+        buildBrainStreamEntry({ thoughts: 'C1', reply: 'Collette turn 1.', next: 'lize' }),
+        buildBrainStreamEntry({ thoughts: 'L2', reply: 'Lize turn 2.', next: 'collette' }),
+        buildBrainStreamEntry({ thoughts: 'C2', reply: 'Collette turn 2.', next: 'lize' }),
+      ], { store });
+
+      const engine = new TurnEngine({
+        store,
+        client,
+        scribeService: new ScribeService({ store }),
+        modelCatalog: catalog,
+      });
+
+      const exclusionTurn = await engine.runTurn({ campaignId: campaign.id, text: 'Test exclusions.' });
+      assert.equal(exclusionTurn.assistantTurn.beats.length, 4);
+      assert.equal(calls.length, 5);
+
+      const remoteAndAliasTurn = await engine.runTurn({ campaignId: campaign.id, text: 'Relay check.' });
+      assert.deepEqual(
+        remoteAndAliasTurn.assistantTurn.beats.map((beat) => beat.speakerName),
+        [lize.name, collette.name, viola.name, collette.name],
+      );
+      assert.equal(calls.length, 10);
+      assert.equal(
+        combinedPromptText(calls[8]).includes(`<${CharacterBrain.Settings.Tag.Direction} ${CharacterBrain.Settings.Attr.Reacting}="${collette.slug}" ${CharacterBrain.Settings.Attr.Length}="${Director.Settings.Length.Medium}"></${CharacterBrain.Settings.Tag.Direction}>`),
+        true,
+      );
+      assert.equal(
+        combinedPromptText(calls[9]).includes(`<${CharacterBrain.Settings.Tag.Direction} ${CharacterBrain.Settings.Attr.Reacting}="${viola.slug}" ${CharacterBrain.Settings.Attr.Length}="${Director.Settings.Length.Medium}"></${CharacterBrain.Settings.Tag.Direction}>`),
+        true,
+      );
+
+      const capTurn = await engine.runTurn({ campaignId: campaign.id, text: 'Bounce back and forth.' });
+      assert.deepEqual(
+        capTurn.assistantTurn.beats.map((beat) => beat.speakerName),
+        [lize.name, collette.name, lize.name, collette.name],
+      );
+      assert.equal(calls.length, 15);
+    } finally {
+      fixture.store.close();
+    }
+  });
+
+  it('rejects before DB mutation when Narrator or mid-turn CharacterBrain mandatory prompt exceeds budget', async () => {
+    const narratorFixture = createWorldFixture({ pedantEnabled: false });
+    try {
+      const { store, campaign, frost, lize } = narratorFixture;
+      store.updateCampaign(campaign.id, {
+        sceneState: { ...campaign.sceneState, presentIds: [frost.id, lize.id] },
+      });
+      const narratorTightCatalog = await createCatalogForModels({
+        [MODEL_MINI]: CONTEXT_128K,
+        [MODEL_MAIN]: CONTEXT_TINY,
+      });
+      const { client } = createScriptedClient([
+        {
+          text: buildTaggedDirectorPlan({
+            presentSlugs: ['frost', 'lize'],
+            pacing: Director.Settings.Pacing.NarratorOnly,
+            narratorDirective: 'Narrator mandatory check.',
+          }),
+        },
+      ], { store });
+      const engine = new TurnEngine({
+        store,
+        client,
+        scribeService: new ScribeService({ store }),
+        modelCatalog: narratorTightCatalog,
+      });
+
+      await assert.rejects(
+        () => engine.runTurn({ campaignId: campaign.id, text: 'Test Narrator overflow.' }),
+        (error) => error instanceof Error && error.message.includes(SpeakerType.label(SpeakerType.Narrator)) && error.message.includes(MODEL_MAIN),
+      );
+      assert.equal(store.listTurns(campaign.id).total, 0);
+      assert.deepEqual(store.getCampaign(campaign.id).sceneState.presentIds, [frost.id, lize.id]);
+    } finally {
+      narratorFixture.store.close();
+    }
+
+    const brainFixture = createWorldFixture({
+      pedantEnabled: false,
+      models: { composer: MODEL_MAIN, main: MODEL_MAIN, recurring: MODEL_RECURRING_TINY },
+    });
+    try {
+      const { store, campaign, frost, lize, collette } = brainFixture;
+      store.updateCampaign(campaign.id, {
+        sceneState: { ...campaign.sceneState, presentIds: [frost.id, lize.id, collette.id] },
+      });
+      const brainTightCatalog = await createCatalogForModels({
+        [MODEL_MINI]: CONTEXT_128K,
+        [MODEL_MAIN]: CONTEXT_128K,
+        [MODEL_RECURRING_TINY]: CONTEXT_TINY,
+      });
+      const utcDay = new Date().toISOString().slice(0, 10);
+      const spendBefore = store.getDailySpend(utcDay).callCount;
+      const { client } = createScriptedClient([
+        {
+          text: buildTaggedDirectorPlan({
+            presentSlugs: ['frost', 'lize', 'collette'],
+            pacing: Director.Settings.Pacing.GroupBanter,
+            responders: [
+              { slug: 'lize', beatGoal: 'Answer first', length: Director.Settings.Length.Short },
+              { slug: 'collette', beatGoal: 'Overflow mandatory', length: Director.Settings.Length.Short },
+            ],
+            narratorDirective: EMPTY_TEXT,
+          }),
+        },
+        buildBrainStreamEntry({ thoughts: 'Ok.', reply: '*Lize answers calmly.*' }),
+      ], { store });
+      const engine = new TurnEngine({
+        store,
+        client,
+        scribeService: new ScribeService({ store }),
+        modelCatalog: brainTightCatalog,
+      });
+
+      await assert.rejects(
+        () => engine.runTurn({ campaignId: campaign.id, text: 'Test Brain overflow.' }),
+        (error) => error instanceof Error && error.message.includes(collette.name) && error.message.includes(MODEL_RECURRING_TINY),
+      );
+      assert.equal(store.listTurns(campaign.id).total, 0);
+      assert.equal(store.getDailySpend(utcDay).callCount, spendBefore + 2);
+    } finally {
+      brainFixture.store.close();
+    }
+  });
+
+  it('handles Narrator/Brain API and empty failures, Director failure, 2nd-brain abort, editTurn by beatId, and delete/regenerate state restore', async () => {
+    const failureFixture = createWorldFixture({ pedantEnabled: false, scribeInterval: 1 });
+    try {
+      const { store, campaign, frost, lize, collette } = failureFixture;
+      store.updateCampaign(campaign.id, {
+        sceneState: {
+          ...campaign.sceneState,
+          presentIds: [frost.id, lize.id, collette.id],
+          style: SceneStyle.Banter,
+          pinnedStyle: SceneStyle.Banter,
+        },
+      });
+      const catalog = await createCatalogForModels({ [MODEL_MINI]: CONTEXT_128K, [MODEL_MAIN]: CONTEXT_128K });
+
+      const { client: directorErrClient, calls: directorErrCalls } = createScriptedClient([
+        { type: CLIENT_ERROR_ENTRY, status: HTTP_UNAUTHORIZED, message: 'Director unauthorized' },
+      ], { store });
+      const directorErrEngine = new TurnEngine({
+        store,
+        client: directorErrClient,
+        scribeService: new ScribeService({ store }),
+        modelCatalog: catalog,
+      });
+      await assert.rejects(() => directorErrEngine.runTurn({ campaignId: campaign.id, text: 'Knock.' }));
+      assert.equal(directorErrCalls.length, 1);
+      assert.equal(store.listTurns(campaign.id).total, 0);
+
+      const { client: narratorErrClient } = createScriptedClient([
+        {
+          text: buildTaggedDirectorPlan({
+            presentSlugs: ['frost', 'lize', 'collette'],
+            pacing: Director.Settings.Pacing.FocusedOne,
+            responders: [{ slug: 'lize', beatGoal: 'Continue anyway', length: Director.Settings.Length.Short }],
+            narratorDirective: 'Should fail safely.',
+          }),
+        },
+        { type: CLIENT_ERROR_ENTRY, status: HTTP_UNAUTHORIZED, message: 'Narrator down' },
+        buildBrainStreamEntry({ thoughts: 'Still here.', reply: '*Lize carries on.*' }),
+      ], { store });
+      const narratorErrEvents = [];
+      const narratorErrEngine = new TurnEngine({
+        store,
+        client: narratorErrClient,
+        scribeService: new ScribeService({ store }),
+        modelCatalog: catalog,
+      });
+      const narratorErrResult = await narratorErrEngine.runTurn({
+        campaignId: campaign.id,
+        text: 'Keep going.',
+        emit: (eventItem) => {
+          narratorErrEvents.push(eventItem);
+        },
+      });
+      assert.equal(
+        narratorErrEvents.some((item) => item.event === TurnEngine.Settings.Event.Warning && item.data.stage === SpendStage.Composer),
+        true,
+      );
+      const lizeDeltas = narratorErrEvents.filter((item) => item.event === TurnEngine.Settings.Event.BeatDelta);
+      assert.equal(lizeDeltas.every((item) => item.data.beatIndex === 0), true);
+      assert.equal(narratorErrResult.assistantTurn.beats.length, 1);
+      narratorErrEngine.deleteLastTurnPair({ campaignId: campaign.id });
+
+      const { client: emptyMixClient, calls: emptyMixCalls } = createScriptedClient([
+        {
+          text: buildTaggedDirectorPlan({
+            presentSlugs: ['frost', 'lize', 'collette'],
+            pacing: Director.Settings.Pacing.GroupBanter,
+            responders: [
+              { slug: 'lize', beatGoal: 'Return empty', length: Director.Settings.Length.Short },
+              { slug: 'collette', beatGoal: 'Cover empty', length: Director.Settings.Length.Short },
+            ],
+            narratorDirective: 'Return empty narration.',
+          }),
+        },
+        buildNarratorStreamEntry(EMPTY_TEXT),
+        buildBrainStreamEntry({ thoughts: 'HIDDEN_EMPTY_THOUGHT', reply: EMPTY_TEXT }),
+        buildBrainStreamEntry({ thoughts: 'Fallback.', reply: '*Collette steps in.*' }),
+      ], { store });
+      const emptyEvents = [];
+      const emptyEngine = new TurnEngine({
+        store,
+        client: emptyMixClient,
+        scribeService: new ScribeService({ store }),
+        modelCatalog: catalog,
+      });
+      const emptyResult = await emptyEngine.runTurn({
+        campaignId: campaign.id,
+        text: 'Try empty replies.',
+        emit: (eventItem) => {
+          emptyEvents.push(eventItem);
+        },
+      });
+      const warnings = emptyEvents.filter((item) => item.event === TurnEngine.Settings.Event.Warning);
+      assert.equal(warnings.some((item) => item.data.stage === SpendStage.Composer), true);
+      assert.equal(warnings.some((item) => item.data.stage === SpendStage.Mind && item.data.message.includes(lize.name)), true);
+      assert.equal(emptyResult.assistantTurn.beats.length, 1);
+      assert.equal(emptyResult.assistantTurn.beats[0].speakerName, collette.name);
+      assert.equal(combinedPromptText(emptyMixCalls[3]).includes('HIDDEN_EMPTY_THOUGHT'), false);
+      emptyEngine.deleteLastTurnPair({ campaignId: campaign.id });
+
+      const utcDay = new Date().toISOString().slice(0, 10);
+      const spendBeforeAbort = store.getDailySpend(utcDay).callCount;
+      const abortController = new AbortController();
+      const { client: abortClient } = createScriptedClient([
+        {
+          text: buildTaggedDirectorPlan({
+            presentSlugs: ['frost', 'lize', 'collette'],
+            pacing: Director.Settings.Pacing.GroupBanter,
+            responders: [
+              { slug: 'lize', beatGoal: 'Speak before abort', length: Director.Settings.Length.Short },
+              { slug: 'collette', beatGoal: 'Abort here', length: Director.Settings.Length.Short },
+            ],
+            narratorDirective: 'Warm fire.',
+          }),
+        },
+        buildNarratorStreamEntry('Logs crackle.'),
+        buildBrainStreamEntry({ thoughts: 'First.', reply: '*Lize nods.*' }),
+        ({ init }) => new Promise((resolve, reject) => {
+          init.signal.addEventListener('abort', () => {
+            const abortError = new Error(TurnEngine.Settings.AbortMessage);
+            abortError.name = TurnEngine.Settings.AbortName;
+            reject(abortError);
+          }, { once: true });
+          abortController.abort('cancelled');
+        }),
+      ], { store });
+      const abortEngine = new TurnEngine({
+        store,
+        client: abortClient,
+        scribeService: new ScribeService({ store }),
+        modelCatalog: catalog,
+      });
+      await assert.rejects(
+        () => abortEngine.runTurn({ campaignId: campaign.id, text: 'Abort on 2nd.', signal: abortController.signal }),
+        (error) => error.name === TurnEngine.Settings.AbortName,
+      );
+      assert.equal(store.listTurns(campaign.id).total, 0);
+      assert.equal(store.getDailySpend(utcDay).callCount, spendBeforeAbort + 3);
+      assert.equal(store.getCampaign(campaign.id).sceneState.pinnedStyle, SceneStyle.Banter);
+
+      const { client: lifecycleClient, calls: lifecycleCalls } = createScriptedClient([
+        {
+          text: buildTaggedDirectorPlan({
+            sceneChanged: false,
+            location: 'Oak Bedroom',
+            sceneType: SceneType.Private,
+            presentSlugs: ['frost', 'lize', 'collette'],
+            pacing: Director.Settings.Pacing.GroupBanter,
+            responders: [
+              { slug: 'lize', beatGoal: 'React first', length: Director.Settings.Length.Short },
+              { slug: 'collette', beatGoal: 'React second', length: Director.Settings.Length.Short },
+            ],
+            style: SceneStyle.Combat,
+            narratorDirective: 'Steel rings out.',
+          }),
+        },
+        buildNarratorStreamEntry('Sparks fly across the yard.'),
+        buildBrainStreamEntry({ thoughts: 'Move.', reply: '*Lize draws her blade.*' }),
+        buildBrainStreamEntry({ thoughts: 'Duck.', reply: '*Collette vaults the barrel.*' }),
+        { text: '=== FACTS\nLize | weapon | steel blade | #2' },
+        {
+          text: buildTaggedDirectorPlan({
+            sceneChanged: true,
+            location: 'Courtyard',
+            sceneType: SceneType.Public,
+            presentSlugs: ['frost', 'lize', 'collette'],
+            pacing: Director.Settings.Pacing.GroupBanter,
+            responders: [
+              { slug: 'lize', beatGoal: 'React first', length: Director.Settings.Length.Short },
+              { slug: 'collette', beatGoal: 'React second', length: Director.Settings.Length.Short },
+            ],
+            style: SceneStyle.Combat,
+            narratorDirective: 'Rain sweeps the yard.',
+          }),
+        },
+        buildNarratorStreamEntry('Rain patters on the flagstones.'),
+        buildBrainStreamEntry({ thoughts: 'Move.', reply: '*Lize watches the gate.*' }),
+        buildBrainStreamEntry({ thoughts: 'Wait.', reply: '*Collette holds the lantern.*' }),
+        {
+          text: buildTaggedDirectorPlan({
+            sceneChanged: true,
+            location: 'Courtyard',
+            sceneType: SceneType.Public,
+            presentSlugs: ['frost', 'lize', 'collette'],
+            pacing: Director.Settings.Pacing.GroupBanter,
+            responders: [
+              { slug: 'lize', beatGoal: 'React first', length: Director.Settings.Length.Short },
+              { slug: 'collette', beatGoal: 'React second', length: Director.Settings.Length.Short },
+            ],
+            style: SceneStyle.Combat,
+            narratorDirective: 'Rain sweeps the yard.',
+          }),
+        },
+        buildNarratorStreamEntry('Rain patters on the flagstones.'),
+        buildBrainStreamEntry({ thoughts: 'Move.', reply: '*Lize watches the gate.*' }),
+        buildBrainStreamEntry({ thoughts: 'Wait.', reply: '*Collette holds the lantern.*' }),
+        {
+          text: buildTaggedDirectorPlan({
+            sceneChanged: false,
+            location: 'Oak Bedroom',
+            sceneType: SceneType.Private,
+            presentSlugs: ['frost', 'lize', 'collette'],
+            pacing: Director.Settings.Pacing.FocusedOne,
+            responders: [{ slug: 'lize', beatGoal: 'Quiet inquiry', length: Director.Settings.Length.Short }],
+            style: SceneStyle.Investigation,
+            narratorDirective: 'Candlelight sways.',
+          }),
+        },
+        buildNarratorStreamEntry('Shadows stretch over the hearth.'),
+        buildBrainStreamEntry({ thoughts: 'Search.', reply: '*Lize checks the lock.*' }),
+      ], { store });
+
+      const lifecycleEngine = new TurnEngine({
+        store,
+        client: lifecycleClient,
+        scribeService: new ScribeService({ store, client: lifecycleClient }),
+        modelCatalog: catalog,
+      });
+
+      const firstRun = await lifecycleEngine.runTurn({ campaignId: campaign.id, text: 'Draw steel!' });
+      assert.equal(firstRun.sceneState.style, SceneStyle.Banter);
+      assert.equal(firstRun.sceneState.pinnedStyle, SceneStyle.Banter);
+      assert.equal(store.getScribeBook(campaign.id).lastTurnSeq, 2);
+
+      const editedAssistant = lifecycleEngine.editTurn({
+        campaignId: campaign.id,
+        turnId: firstRun.assistantTurn.id,
+        beatId: firstRun.assistantTurn.beats[1].id,
+        text: '*Lize raises twin daggers.*',
+      });
+      assert.equal(editedAssistant.beats[0].text, 'Sparks fly across the yard.');
+      assert.equal(editedAssistant.beats[1].text, '*Lize raises twin daggers.*');
+      assert.equal(editedAssistant.beats[2].text, '*Collette vaults the barrel.*');
+      assert.equal(
+        editedAssistant.rawText,
+        'Sparks fly across the yard.\n\n*Lize raises twin daggers.*\n\n*Collette vaults the barrel.*',
+      );
+      assert.equal(store.getScribeBook(campaign.id).dirty, true);
+
+      lifecycleEngine.deleteLastTurnPair({ campaignId: campaign.id });
+      assert.equal(store.listTurns(campaign.id).total, 0);
+      assert.equal(store.getCampaign(campaign.id).sceneState.style, SceneStyle.Banter);
+      assert.equal(store.getCampaign(campaign.id).sceneState.pinnedStyle, SceneStyle.Banter);
+      assert.equal(store.getScribeBook(campaign.id).lastTurnSeq, 0);
+
+      const sceneShiftRun = await lifecycleEngine.runTurn({ campaignId: campaign.id, text: 'Step outside!' });
+      assert.equal(sceneShiftRun.sceneState.style, SceneStyle.Combat);
+      assert.equal(sceneShiftRun.sceneState.pinnedStyle, null);
+      lifecycleEngine.deleteLastTurnPair({ campaignId: campaign.id });
+      assert.equal(store.getCampaign(campaign.id).sceneState.style, SceneStyle.Banter);
+      assert.equal(store.getCampaign(campaign.id).sceneState.pinnedStyle, SceneStyle.Banter);
+
+      const secondShiftRun = await lifecycleEngine.runTurn({ campaignId: campaign.id, text: 'Step outside!' });
+      assert.equal(secondShiftRun.sceneState.style, SceneStyle.Combat);
+      assert.equal(secondShiftRun.sceneState.pinnedStyle, null);
+      const regenerated = await lifecycleEngine.regenerateLastTurn({ campaignId: campaign.id });
+      assert.equal(regenerated.sceneState.style, SceneStyle.Banter);
+      assert.equal(regenerated.sceneState.pinnedStyle, SceneStyle.Banter);
+      assert.equal(combinedPromptText(lifecycleCalls[14]).includes(store.getSettings().sceneStyles[SceneStyle.Banter]), true);
+      assert.equal(combinedPromptText(lifecycleCalls[15]).includes(store.getSettings().sceneStyles[SceneStyle.Banter]), true);
+    } finally {
+      failureFixture.store.close();
+    }
+  });
+
+  it('applies scene styles, pinnedStyle overrides, sceneChanged pin clearing, none omission, and edited settings.sceneStyles', async () => {
+    const fixture = createWorldFixture({ pedantEnabled: false });
+    try {
+      const { store, campaign, frost, lize, collette } = fixture;
+      store.updateCampaign(campaign.id, {
+        sceneState: {
+          ...campaign.sceneState,
+          presentIds: [frost.id, lize.id, collette.id],
+          style: SceneStyle.None,
+          pinnedStyle: null,
+        },
+      });
+      const defaultStyles = store.getSettings().sceneStyles;
+      const catalog = await createCatalogForModels({ [MODEL_MINI]: CONTEXT_128K, [MODEL_MAIN]: CONTEXT_128K });
+      const { client, calls } = createScriptedClient([
+        {
+          text: buildTaggedDirectorPlan({
+            presentSlugs: ['frost', 'lize', 'collette'],
+            pacing: Director.Settings.Pacing.GroupBanter,
+            responders: [{ slug: 'lize', beatGoal: 'Fight', length: Director.Settings.Length.Short }],
+            style: SceneStyle.Combat,
+            narratorDirective: 'Clashes begin.',
+          }),
+        },
+        buildNarratorStreamEntry('Blades meet.'),
+        buildBrainStreamEntry({ thoughts: 'Guard up.', reply: '*Lize parries.*' }),
+
+        {
+          text: buildTaggedDirectorPlan({
+            sceneChanged: false,
+            presentSlugs: ['frost', 'lize', 'collette'],
+            pacing: Director.Settings.Pacing.GroupBanter,
+            responders: [{ slug: 'lize', beatGoal: 'Answer', length: Director.Settings.Length.Short }],
+            style: SceneStyle.Banter,
+            narratorDirective: 'Close tension.',
+          }),
+        },
+        buildNarratorStreamEntry('Breath slows.'),
+        buildBrainStreamEntry({ thoughts: 'Close.', reply: '*Lize leans in.*' }),
+
+        {
+          text: buildTaggedDirectorPlan({
+            sceneChanged: true,
+            location: 'Balcony',
+            presentSlugs: ['frost', 'lize', 'collette'],
+            pacing: Director.Settings.Pacing.FocusedOne,
+            responders: [{ slug: 'lize', beatGoal: 'Quiet moment', length: Director.Settings.Length.Short }],
+            style: SceneStyle.Emotional,
+            narratorDirective: 'Moonlight falls.',
+          }),
+        },
+        buildNarratorStreamEntry('Silver light covers the rail.'),
+        buildBrainStreamEntry({ thoughts: 'Warm.', reply: '*Lize takes your hand.*' }),
+
+        {
+          text: buildTaggedDirectorPlan({
+            sceneChanged: false,
+            presentSlugs: ['frost', 'lize', 'collette'],
+            pacing: Director.Settings.Pacing.FocusedOne,
+            responders: [{ slug: 'lize', beatGoal: 'Plain exchange', length: Director.Settings.Length.Short }],
+            style: SceneStyle.None,
+            narratorDirective: 'Plain morning.',
+          }),
+        },
+        buildNarratorStreamEntry('Dawn breaks quietly.'),
+        buildBrainStreamEntry({ thoughts: 'Awake.', reply: '*Lize stretches.*' }),
+
+        {
+          text: buildTaggedDirectorPlan({
+            sceneChanged: false,
+            presentSlugs: ['frost', 'lize', 'collette'],
+            pacing: Director.Settings.Pacing.FocusedOne,
+            responders: [{ slug: 'lize', beatGoal: 'Custom style fight', length: Director.Settings.Length.Short }],
+            style: SceneStyle.Combat,
+            narratorDirective: 'Ambush.',
+          }),
+        },
+        buildNarratorStreamEntry('Arrows splinter the rail.'),
+        buildBrainStreamEntry({ thoughts: 'Cover.', reply: '*Lize drops low.*' }),
+      ], { store });
+
+      const engine = new TurnEngine({
+        store,
+        client,
+        scribeService: new ScribeService({ store }),
+        modelCatalog: catalog,
+      });
+
+      const turnOne = await engine.runTurn({ campaignId: campaign.id, text: 'Engage!' });
+      assert.equal(turnOne.sceneState.style, SceneStyle.Combat);
+      assert.equal(turnOne.sceneState.pinnedStyle, null);
+      assert.equal(combinedPromptText(calls[1]).includes(`<${Narrator.Settings.Tag.Style}>\n${defaultStyles[SceneStyle.Combat]}\n</${Narrator.Settings.Tag.Style}>`), true);
+      assert.equal(combinedPromptText(calls[2]).includes(`<${CharacterBrain.Settings.Tag.Style}>\n${defaultStyles[SceneStyle.Combat]}\n</${CharacterBrain.Settings.Tag.Style}>`), true);
+
+      store.updateCampaign(campaign.id, {
+        sceneState: { ...turnOne.sceneState, pinnedStyle: SceneStyle.Explicit },
+      });
+      const turnTwo = await engine.runTurn({ campaignId: campaign.id, text: 'Stay close.' });
+      assert.equal(turnTwo.sceneState.style, SceneStyle.Explicit);
+      assert.equal(turnTwo.sceneState.pinnedStyle, SceneStyle.Explicit);
+      assert.equal(combinedPromptText(calls[4]).includes(defaultStyles[SceneStyle.Explicit]), true);
+      assert.equal(combinedPromptText(calls[5]).includes(defaultStyles[SceneStyle.Explicit]), true);
+
+      const turnThree = await engine.runTurn({ campaignId: campaign.id, text: 'Step outside.' });
+      assert.equal(turnThree.sceneState.style, SceneStyle.Emotional);
+      assert.equal(turnThree.sceneState.pinnedStyle, null);
+      assert.equal(combinedPromptText(calls[7]).includes(defaultStyles[SceneStyle.Emotional]), true);
+      assert.equal(combinedPromptText(calls[8]).includes(defaultStyles[SceneStyle.Emotional]), true);
+
+      const turnFour = await engine.runTurn({ campaignId: campaign.id, text: 'Morning.' });
+      assert.equal(turnFour.sceneState.style, SceneStyle.None);
+      assert.equal(combinedPromptText(calls[10]).includes(`<${Narrator.Settings.Tag.Style}>`), false);
+      assert.equal(combinedPromptText(calls[11]).includes(`<${CharacterBrain.Settings.Tag.Style}>`), false);
+
+      const customCombatStyle = 'CUSTOM_IRON_BLADE_STYLE_TEXT';
+      store.updateSettings({
+        sceneStyles: { [SceneStyle.Combat]: customCombatStyle },
+      });
+      const turnFive = await engine.runTurn({ campaignId: campaign.id, text: 'Ambush!' });
+      assert.equal(turnFive.sceneState.style, SceneStyle.Combat);
+      assert.equal(combinedPromptText(calls[13]).includes(customCombatStyle), true);
+      assert.equal(combinedPromptText(calls[14]).includes(customCombatStyle), true);
+    } finally {
+      fixture.store.close();
+    }
+  });
+
+  it('rejects before OpenRouter call or DB mutation when Director mandatory prompt exceeds context budget', async () => {
+    const directorFixture = createWorldFixture({ pedantEnabled: false });
+    try {
+      const { store, campaign, frost, lize } = directorFixture;
+      store.updateCampaign(campaign.id, {
+        sceneState: { ...campaign.sceneState, presentIds: [frost.id, lize.id] },
+      });
+      const tightDirectorCatalog = await createCatalogForModels({
+        [MODEL_MINI]: CONTEXT_DIRECTOR_OVERFLOW,
+        [MODEL_MAIN]: CONTEXT_128K,
+      });
+      const { client, calls } = createScriptedClient([], { store });
+      const engine = new TurnEngine({
+        store,
+        client,
+        scribeService: new ScribeService({ store }),
+        modelCatalog: tightDirectorCatalog,
+      });
+
+      await assert.rejects(
+        () => engine.runTurn({ campaignId: campaign.id, text: 'Test Director mandatory overflow.' }),
+        (error) => error instanceof Error && /Director/.test(error.message) && error.message.includes(MODEL_MINI),
+      );
+      assert.equal(calls.length, 0);
+      assert.equal(store.listTurns(campaign.id).total, 0);
+    } finally {
+      directorFixture.store.close();
+    }
+  });
+
+  it('links spend_log rows for empty-reply Narrator and thoughts-only CharacterBrain calls when the turn commits', async () => {
+    const tempDir = fs.mkdtempSync(path.join(os.tmpdir(), 'worlds-engine-spend-link-'));
+    const dbPath = path.join(tempDir, 'worlds.sqlite');
+    const store = new SqliteStore(dbPath);
+    let rawDb = null;
+    try {
+      store.updateSettings({
+        pedantEnabled: false,
+        models: {
+          director: MODEL_MINI,
+          composer: MODEL_MAIN,
+          main: MODEL_MAIN,
+          recurring: MODEL_MINI,
+          scribe: MODEL_MINI,
+        },
+      });
+      const campaign = store.createCampaign({
+        title: 'Spend Link Vale',
+        premise: 'Caravan spend linking check.',
+        styleNotes: 'Concise grounded prose.',
+        encounterPublicOdds: 0,
+        encounterPrivateOdds: 0,
+        scribeInterval: 10,
+        sceneState: {
+          sceneNumber: 1,
+          day: 1,
+          timeLabel: 'Evening',
+          location: 'Oak Bedroom',
+          sceneType: SceneType.Private,
+          presentIds: [],
+          remoteIds: [],
+          offscreenNotes: {},
+          activeWalkOns: [],
+        },
+      });
+      const frost = store.createCharacter(campaign.id, {
+        slug: 'frost',
+        scribeSubjectId: 'S1',
+        name: 'Frost',
+        aliases: [],
+        isPlayer: true,
+        tier: CharacterTier.Main,
+        card: { personalitySummary: 'Caravan scout.', speakingStyle: 'Terse.' },
+        avatarToken: AvatarToken.Slate,
+      });
+      const lize = store.createCharacter(campaign.id, {
+        slug: 'lize',
+        scribeSubjectId: 'S2',
+        name: 'Lize',
+        aliases: [],
+        isPlayer: false,
+        tier: CharacterTier.Main,
+        card: { personalitySummary: 'Quartermaster.', speakingStyle: 'Measured.' },
+        avatarToken: AvatarToken.Rose,
+      });
+      const yumi = store.createCharacter(campaign.id, {
+        slug: 'yumi',
+        scribeSubjectId: 'S3',
+        name: 'Yumi',
+        aliases: [],
+        isPlayer: false,
+        tier: CharacterTier.Main,
+        card: { personalitySummary: 'Archivist.', speakingStyle: 'Crisp.' },
+        avatarToken: AvatarToken.Teal,
+      });
+      store.updateCampaign(campaign.id, {
+        playerCharacterId: frost.id,
+        sceneState: {
+          ...campaign.sceneState,
+          presentIds: [frost.id, lize.id, yumi.id],
+        },
+      });
+
+      const catalog = await createCatalogForModels({ [MODEL_MINI]: CONTEXT_128K, [MODEL_MAIN]: CONTEXT_128K });
+      const { client } = createScriptedClient([
+        {
+          text: buildTaggedDirectorPlan({
+            presentSlugs: ['frost', 'lize', 'yumi'],
+            pacing: Director.Settings.Pacing.GroupBanter,
+            responders: [
+              { slug: 'lize', beatGoal: 'Thoughts only', length: Director.Settings.Length.Short },
+              { slug: 'yumi', beatGoal: 'Commit turn', length: Director.Settings.Length.Short },
+            ],
+            narratorDirective: 'Empty narration check.',
+          }),
+        },
+        buildNarratorStreamEntry(EMPTY_TEXT),
+        buildBrainStreamEntry({ thoughts: 'Silent internal thought.', reply: EMPTY_TEXT }),
+        buildBrainStreamEntry({ thoughts: 'Answer cleanly.', reply: '*Yumi nods.*\nAll accounted for.' }),
+      ], { store });
+
+      const events = [];
+      const engine = new TurnEngine({
+        store,
+        client,
+        scribeService: new ScribeService({ store }),
+        modelCatalog: catalog,
+      });
+
+      const committed = await engine.runTurn({
+        campaignId: campaign.id,
+        text: 'Status check.',
+        emit: (eventItem) => {
+          events.push(eventItem);
+        },
+      });
+
+      const warnings = events.filter((item) => item.event === TurnEngine.Settings.Event.Warning);
+      assert.equal(warnings.some((item) => item.data.stage === SpendStage.Composer), true);
+      assert.equal(warnings.some((item) => item.data.stage === SpendStage.Mind && item.data.message.includes(lize.name)), true);
+      assert.equal(committed.assistantTurn.beats.length, 1);
+      assert.equal(committed.assistantTurn.beats[0].speakerName, yumi.name);
+
+      store.close();
+      rawDb = new DatabaseSync(dbPath);
+      const spendRows = rawDb.prepare('SELECT id, stage, turn_id FROM spend_log ORDER BY rowid ASC').all();
+      assert.deepEqual(
+        spendRows.map((row) => row.stage),
+        [SpendStage.Director, SpendStage.Composer, SpendStage.Mind, SpendStage.Mind],
+      );
+      for (const spendRow of spendRows) {
+        assert.notEqual(spendRow.turn_id, null);
+        assert.equal(spendRow.turn_id, committed.assistantTurn.id);
+      }
+    } finally {
+      if (rawDb !== null) {
+        rawDb.close();
+      }
+      store.close();
+      fs.rmSync(tempDir, { recursive: true, force: true });
     }
   });
 });

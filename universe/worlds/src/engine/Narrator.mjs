@@ -68,11 +68,11 @@ export const Narrator = Object.freeze({
   }),
 
   /**
-   * @param {{campaign: {id: string, premise?: string, styleNotes?: string}, storyState?: string, history?: string, thisTurn?: string, styleText?: string, direction?: string, model: string, replyReserve: number, client: {stream: (requestOptions: object) => Promise<{text?: string, truncated?: boolean, spendId?: string | null}>}, signal?: AbortSignal | null, onDelta?: ((delta: string) => void | Promise<void>) | null}} [options]
-   * @returns {Promise<Readonly<{narration: string, truncated: boolean, spendId: string | null}>>}
-   * @throws {TypeError | RangeError | Error}
+   * @param {{campaign: {id?: string, premise?: string, styleNotes?: string}, storyState?: string, history?: string, thisTurn?: string, styleText?: string, direction?: string}} [options]
+   * @returns {readonly [Readonly<{role: string, content: string}>, Readonly<{role: string, content: string}>]}
+   * @throws {TypeError}
    */
-  async narrate(options = {}) {
+  buildMessages(options = {}) {
     if (
       options === null ||
       typeof options !== 'object' ||
@@ -90,17 +90,11 @@ export const Narrator = Object.freeze({
       thisTurn = settings.EmptyText,
       styleText = settings.EmptyText,
       direction = settings.EmptyText,
-      model,
-      replyReserve,
-      client,
-      signal = null,
-      onDelta = null,
     } = options;
 
     if (campaign === null || typeof campaign !== 'object' || Array.isArray(campaign)) {
       throw new TypeError('campaign must be an object.');
     }
-    const campaignId = requireNonEmptyString(campaign.id, 'campaign.id');
     if (campaign.premise !== undefined) {
       requireString(campaign.premise, 'campaign.premise');
     }
@@ -113,30 +107,6 @@ export const Narrator = Object.freeze({
     const trimmedThisTurn = requireString(thisTurn, 'thisTurn').trim();
     const trimmedStyleText = requireString(styleText, 'styleText').trim();
     const trimmedDirection = requireString(direction, 'direction').trim();
-
-    const trimmedModel = requireNonEmptyString(model, 'model');
-
-    if (typeof replyReserve !== 'number') {
-      throw new TypeError('replyReserve must be a positive integer.');
-    }
-    if (!Number.isInteger(replyReserve) || replyReserve <= 0) {
-      throw new RangeError('replyReserve must be a positive integer.');
-    }
-    if (client === null || typeof client !== 'object' || Array.isArray(client) || typeof client.stream !== 'function') {
-      throw new TypeError('client must provide a stream() method.');
-    }
-    if (signal !== null && (typeof signal !== 'object' || typeof signal.aborted !== 'boolean')) {
-      throw new TypeError('signal must be null or an AbortSignal.');
-    }
-    if (onDelta !== null && typeof onDelta !== 'function') {
-      throw new TypeError('onDelta must be null or a function.');
-    }
-
-    if (signal !== null && signal.aborted) {
-      const abortError = new Error(settings.AbortMessage);
-      abortError.name = settings.AbortName;
-      throw abortError;
-    }
 
     const systemSections = [
       'You are the Narrator in an ongoing adult fiction roleplay. You open the turn by grounding the scene in concrete prose.',
@@ -186,10 +156,78 @@ export const Narrator = Object.freeze({
     }
     userSections.push(`<${settings.Tag.Direction}>${trimmedDirection}</${settings.Tag.Direction}>`);
 
-    const messages = [
-      { role: settings.RoleSystem, content: systemSections.join(settings.SectionSeparator) },
-      { role: settings.RoleUser, content: userSections.join(settings.SectionSeparator) },
-    ];
+    return Object.freeze([
+      Object.freeze({ role: settings.RoleSystem, content: systemSections.join(settings.SectionSeparator) }),
+      Object.freeze({ role: settings.RoleUser, content: userSections.join(settings.SectionSeparator) }),
+    ]);
+  },
+
+  /**
+   * @param {{campaign: {id: string, premise?: string, styleNotes?: string}, storyState?: string, history?: string, thisTurn?: string, styleText?: string, direction?: string, model: string, replyReserve: number, client: {stream: (requestOptions: object) => Promise<{text?: string, truncated?: boolean, spendId?: string | null}>}, signal?: AbortSignal | null, onDelta?: ((delta: string) => void | Promise<void>) | null}} [options]
+   * @returns {Promise<Readonly<{narration: string, truncated: boolean, spendId: string | null}>>}
+   * @throws {TypeError | RangeError | Error}
+   */
+  async narrate(options = {}) {
+    if (
+      options === null ||
+      typeof options !== 'object' ||
+      Array.isArray(options) ||
+      (Object.getPrototypeOf(options) !== Object.prototype && Object.getPrototypeOf(options) !== null)
+    ) {
+      throw new TypeError('Narrator options must be a plain object.');
+    }
+
+    const settings = Narrator.Settings;
+    const {
+      campaign,
+      storyState = settings.EmptyText,
+      history = settings.EmptyText,
+      thisTurn = settings.EmptyText,
+      styleText = settings.EmptyText,
+      direction = settings.EmptyText,
+      model,
+      replyReserve,
+      client,
+      signal = null,
+      onDelta = null,
+    } = options;
+
+    if (campaign === null || typeof campaign !== 'object' || Array.isArray(campaign)) {
+      throw new TypeError('campaign must be an object.');
+    }
+    const campaignId = requireNonEmptyString(campaign.id, 'campaign.id');
+    const messages = Narrator.buildMessages({
+      campaign,
+      storyState,
+      history,
+      thisTurn,
+      styleText,
+      direction,
+    });
+
+    const trimmedModel = requireNonEmptyString(model, 'model');
+
+    if (typeof replyReserve !== 'number') {
+      throw new TypeError('replyReserve must be a positive integer.');
+    }
+    if (!Number.isInteger(replyReserve) || replyReserve <= 0) {
+      throw new RangeError('replyReserve must be a positive integer.');
+    }
+    if (client === null || typeof client !== 'object' || Array.isArray(client) || typeof client.stream !== 'function') {
+      throw new TypeError('client must provide a stream() method.');
+    }
+    if (signal !== null && (typeof signal !== 'object' || typeof signal.aborted !== 'boolean')) {
+      throw new TypeError('signal must be null or an AbortSignal.');
+    }
+    if (onDelta !== null && typeof onDelta !== 'function') {
+      throw new TypeError('onDelta must be null or a function.');
+    }
+
+    if (signal !== null && signal.aborted) {
+      const abortError = new Error(settings.AbortMessage);
+      abortError.name = settings.AbortName;
+      throw abortError;
+    }
 
     const splitter = new ReplyStreamSplitter({
       visibleTag: settings.Tag.Narration,

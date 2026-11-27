@@ -169,7 +169,7 @@ export const Director = Object.freeze({
   },
 
   /**
-   * @param {{campaign: object, characters: ReadonlyArray<object>, preState: object, recentTurns?: ReadonlyArray<object>, userText: string, narrationText?: string | null, mode: string, oocNudge?: string | null, encounterRoll: object, openThreadTitles?: ReadonlyArray<string>, model: string, client: object, signal?: AbortSignal | null, maxResponders?: number | null, budget?: {limitTokens: number | null, estimate: (text: string) => number, fits: (usedTokens: number, text: string) => boolean} | null}} options
+   * @param {{campaign: object, characters: ReadonlyArray<object>, preState: object, recentTurns?: ReadonlyArray<object>, userText: string, narrationText?: string | null, mode: string, oocNudge?: string | null, encounterRoll: object, openThreadTitles?: ReadonlyArray<string>, model: string, client: object, signal?: AbortSignal | null, maxResponders?: number | null, replyReserve?: number | null, budget?: {limitTokens: number | null, estimate: (text: string) => number, fits: (usedTokens: number, text: string) => boolean} | null}} options
    * @returns {Promise<Readonly<{plan: object, nextState: object, spendIds: readonly string[]}>>}
    * @throws {Error}
    */
@@ -193,6 +193,7 @@ export const Director = Object.freeze({
       client,
       signal = null,
       maxResponders = null,
+      replyReserve = null,
       budget = null,
     } = options;
 
@@ -257,6 +258,14 @@ export const Director = Object.freeze({
     }
     if (maxResponders !== null && (!Number.isInteger(maxResponders) || maxResponders < 1)) {
       throw new RangeError('maxResponders must be null or a positive integer.');
+    }
+    if (replyReserve !== null) {
+      if (typeof replyReserve !== 'number') {
+        throw new TypeError('replyReserve must be null or a positive integer.');
+      }
+      if (!Number.isInteger(replyReserve) || replyReserve < 1) {
+        throw new RangeError('replyReserve must be null or a positive integer.');
+      }
     }
     if (budget !== null) {
       if (
@@ -434,13 +443,23 @@ export const Director = Object.freeze({
       `CURRENT TURN INPUT:\n${inputLines.join(settings.LineSeparator)}`,
     ];
 
+    const normalizedModel = model.trim();
     const effectiveBudget = budget !== null
       ? budget
       : RequestBudget.create({
           contextLength: null,
-          replyReserve: settings.DefaultReplyReserve,
+          replyReserve: replyReserve === null ? settings.DefaultReplyReserve : replyReserve,
           charsPerToken: RequestBudget.StartingCharsPerToken,
         });
+    const fixedUserTextWithNone = [
+      ...fixedBeforeHistory,
+      `RECENT TURNS:\n${settings.NoneLabel}`,
+      ...fixedAfterHistory,
+    ].join(settings.SectionSeparator);
+    const mandatoryTokens = effectiveBudget.estimate(systemPrompt) + effectiveBudget.estimate(fixedUserTextWithNone);
+    if (effectiveBudget.limitTokens !== null && mandatoryTokens > effectiveBudget.limitTokens) {
+      throw new Error(`Mandatory prompt exceeds context budget for Director on model ${normalizedModel}.`);
+    }
     const fixedUserText = [
       ...fixedBeforeHistory,
       'RECENT TURNS:\n',
@@ -467,11 +486,11 @@ export const Director = Object.freeze({
       { role: 'user', content: userPromptSections.join(settings.SectionSeparator) },
     ];
 
-    const normalizedModel = model.trim();
     const spendIds = [];
     const completion = await client.complete({
       model: normalizedModel,
       messages,
+      ...(replyReserve === null ? {} : { maxTokens: replyReserve }),
       stage: SpendStage.Director,
       campaignId: campaign.id,
       signal,

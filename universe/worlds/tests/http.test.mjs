@@ -5,7 +5,10 @@ import os from 'node:os';
 import path from 'node:path';
 import { after, describe, it } from 'node:test';
 import { WorldsConfig } from '../src/config.mjs';
+import { CharacterBrain } from '../src/engine/CharacterBrain.mjs';
 import { Director } from '../src/engine/Director.mjs';
+import { Narrator } from '../src/engine/Narrator.mjs';
+import { TurnEngine } from '../src/engine/TurnEngine.mjs';
 import { RateLimiter } from '../src/http/RateLimiter.mjs';
 import { Security } from '../src/http/Security.mjs';
 import { SseStream } from '../src/http/SseStream.mjs';
@@ -19,9 +22,40 @@ import { CharacterTier } from '../src/store/enums/CharacterTier.mjs';
 import { FindingStatus } from '../src/store/enums/FindingStatus.mjs';
 import { SceneStyle } from '../src/store/enums/SceneStyle.mjs';
 import { SceneType } from '../src/store/enums/SceneType.mjs';
+import { SpeakerType } from '../src/store/enums/SpeakerType.mjs';
+import { SpendStage } from '../src/store/enums/SpendStage.mjs';
 import { TurnMode } from '../src/store/enums/TurnMode.mjs';
 import { SqliteStore } from '../src/store/SqliteStore.mjs';
 import { createFakeModelCatalog } from './support/createFakeModelCatalog.mjs';
+
+const STREAM_HANDLER_TYPE = 'stream';
+const ERROR_HANDLER_TYPE = 'error';
+
+/**
+ * @param {string} narrationText
+ * @returns {string}
+ */
+function buildNarratorTaggedText(narrationText) {
+  const narratorTag = Narrator.Settings.Tag.Narration;
+  return `<${narratorTag}>${narrationText}</${narratorTag}>`;
+}
+
+/**
+ * @param {{thoughts?: string, reply: string, next?: string | null}} options
+ * @returns {string}
+ */
+function buildBrainTaggedText({ thoughts = '', reply, next = CharacterBrain.Settings.NextNone }) {
+  const tagSettings = CharacterBrain.Settings.Tag;
+  const parts = [];
+  if (thoughts.length > 0) {
+    parts.push(`<${tagSettings.Thoughts}>${thoughts}</${tagSettings.Thoughts}>`);
+  }
+  parts.push(`<${tagSettings.Reply}>${reply}</${tagSettings.Reply}>`);
+  if (next !== null) {
+    parts.push(`<${tagSettings.Next}>${next}</${tagSettings.Next}>`);
+  }
+  return parts.join('\n');
+}
 
 /**
  * @param {{sceneChanged?: boolean, location: string, day: number, timeLabel: string, sceneType: string, presentSlugs: readonly string[], offscreenNotes?: Record<string, string>, pacing?: string, responders?: ReadonlyArray<{slug: string, beatGoal: string, length: string, reacting?: string}>, narratorDirective?: string, style?: string}} options
@@ -763,17 +797,16 @@ describe('Full REST & SSE lifecycle, concurrency, Scribe sync, and client discon
         );
       },
       {
-        json: {
-          internalThought: 'Keep the key secret.',
-          physicalAction: 'Lize leans over the table.',
-          spokenLines: 'I kept the cellar key safe.',
-          tone: 'guarded',
-          knowledgeBoundaries: 'Only Frost knows.',
-        },
+        type: STREAM_HANDLER_TYPE,
+        text: buildNarratorTaggedText('Lantern light flickered.'),
       },
       {
-        type: 'stream',
-        text: '[[BEAT:narrator]]\nLantern light flickered.\n[[BEAT:lize]]\n*Lize leaned over the table.*\nI kept the cellar key safe.',
+        type: STREAM_HANDLER_TYPE,
+        text: buildBrainTaggedText({
+          thoughts: 'Keep the key secret.',
+          reply: '*Lize leaned over the table.*\nI kept the cellar key safe.',
+          next: CharacterBrain.Settings.NextNone,
+        }),
       },
       {
         text: buildTaggedDirectorReply({
@@ -785,21 +818,16 @@ describe('Full REST & SSE lifecycle, concurrency, Scribe sync, and client discon
           offscreenNotes: { collette: 'in the library' },
           pacing: Director.Settings.Pacing.FocusedOne,
           responders: [{ slug: 'lize', beatGoal: 'Speak softly.', length: Director.Settings.Length.Short }],
-          narratorDirective: 'Regenerated beat.',
+          narratorDirective: Director.Settings.EmptyText,
         }),
       },
       {
-        json: {
-          internalThought: 'Still careful.',
-          physicalAction: 'Lize taps the table.',
-          spokenLines: 'Nobody else saw the silver lock.',
-          tone: 'calm',
-          knowledgeBoundaries: 'Private scene.',
-        },
-      },
-      {
-        type: 'stream',
-        text: '[[BEAT:lize]]\n*Lize tapped the table.*\nNobody else saw the silver lock.',
+        type: STREAM_HANDLER_TYPE,
+        text: buildBrainTaggedText({
+          thoughts: 'Still careful.',
+          reply: '*Lize tapped the table.*\nNobody else saw the silver lock.',
+          next: CharacterBrain.Settings.NextNone,
+        }),
       },
       {
         text: [
@@ -1039,12 +1067,25 @@ describe('Full REST & SSE lifecycle, concurrency, Scribe sync, and client discon
     assert.ok(turnRes.headers.get('content-type').includes('text/event-stream'));
     const turnEvents = await readAllSseEvents(turnRes);
     const turnEventNames = turnEvents.map((item) => item.event);
-    assert.ok(turnEventNames.includes('phase'));
-    assert.ok(turnEventNames.includes('beat_delta'));
-    assert.ok(turnEventNames.includes('committed'));
+    assert.ok(turnEventNames.includes(TurnEngine.Settings.Event.Phase));
+    assert.ok(turnEventNames.includes(TurnEngine.Settings.Event.BeatDelta));
+    assert.ok(turnEventNames.includes(TurnEngine.Settings.Event.Committed));
+    const phaseNames = turnEvents
+      .filter((item) => item.event === TurnEngine.Settings.Event.Phase)
+      .map((item) => item.data.phase);
+    assert.deepEqual(phaseNames, [
+      TurnEngine.Settings.Phase.Directing,
+      TurnEngine.Settings.Phase.DirectorDone,
+      TurnEngine.Settings.Phase.Narrating,
+      TurnEngine.Settings.Phase.Replying,
+    ]);
     const doneTurnEvent = turnEvents.find((item) => item.event === 'done');
     assert.ok(doneTurnEvent !== undefined);
     assert.equal(doneTurnEvent.data.assistantTurn.seq, 2);
+    assert.equal(doneTurnEvent.data.assistantTurn.beats.length, 2);
+    assert.equal(doneTurnEvent.data.assistantTurn.beats[0].speakerType, SpeakerType.Narrator);
+    assert.equal(doneTurnEvent.data.assistantTurn.beats[0].mindPacket, null);
+    assert.equal(doneTurnEvent.data.assistantTurn.beats[1].mindPacket.thoughts, 'Keep the key secret.');
 
     const deleteRefCharRes = await fetch(`${started.url}/api/campaigns/${campaign1.id}/characters/${lize.id}`, {
       method: 'DELETE',
@@ -1313,13 +1354,8 @@ describe('Full REST & SSE lifecycle, concurrency, Scribe sync, and client discon
         }),
       },
       {
-        json: {
-          internalThought: 'Wait.',
-          physicalAction: 'Looks up.',
-          spokenLines: 'Hang on.',
-          tone: 'calm',
-          knowledgeBoundaries: 'None.',
-        },
+        type: STREAM_HANDLER_TYPE,
+        text: buildNarratorTaggedText('Keep steady in the study.'),
       },
       ({ init }) => {
         signalComposerStarted();
@@ -1327,7 +1363,7 @@ describe('Full REST & SSE lifecycle, concurrency, Scribe sync, and client discon
           init.signal.addEventListener('abort', () => {
             observedAbortInClient = true;
             const abortError = new Error('Aborted');
-            abortError.name = 'AbortError';
+            abortError.name = TurnEngine.Settings.AbortName;
             reject(abortError);
           }, { once: true });
         });
@@ -1622,21 +1658,16 @@ describe('Task 6 adversarial review regressions', () => {
           presentSlugs: ['frost', 'lize'],
           pacing: Director.Settings.Pacing.FocusedOne,
           responders: [{ slug: 'lize', beatGoal: 'Reply.', length: Director.Settings.Length.Short }],
-          narratorDirective: 'Keep brisk.',
+          narratorDirective: Director.Settings.EmptyText,
         }),
       },
       {
-        json: {
-          internalThought: 'Careful.',
-          physicalAction: 'Nods.',
-          spokenLines: 'Let us check the ledger.',
-          tone: 'calm',
-          knowledgeBoundaries: 'None.',
-        },
-      },
-      {
-        type: 'stream',
-        text: '[[BEAT:lize]]\n*Lize nodded.*\nLet us check the ledger.',
+        type: STREAM_HANDLER_TYPE,
+        text: buildBrainTaggedText({
+          thoughts: 'Careful.',
+          reply: '*Lize nodded.*\nLet us check the ledger.',
+          next: CharacterBrain.Settings.NextNone,
+        }),
       },
       async () => {
         signalScribeWaiting();
@@ -1882,8 +1913,8 @@ describe('Task 6 adversarial review regressions', () => {
         }),
       },
       {
-        type: 'stream',
-        text: '[[BEAT:narrator]]\nMorning mist rolled over the dock.',
+        type: STREAM_HANDLER_TYPE,
+        text: buildNarratorTaggedText('Morning mist rolled over the dock.'),
       },
       {
         text: [
@@ -3486,11 +3517,18 @@ describe('Player narration over HTTP', () => {
     for (let turn = 0; turn < turnCount; turn += 1) {
       script.push(
         { text: directorReply },
-        { json: { internalThought: 'x', physicalAction: 'Lize nods.', spokenLines: 'Yes.', tone: 'dry', knowledgeBoundaries: [] } },
-        { type: 'stream', text: '[[BEAT:lize]]\n*Lize nods.*\nYes.' },
+        { type: STREAM_HANDLER_TYPE, text: buildNarratorTaggedText('Lanterns swing.') },
+        {
+          type: STREAM_HANDLER_TYPE,
+          text: buildBrainTaggedText({
+            thoughts: 'x',
+            reply: '*Lize nods.*\nYes.',
+            next: CharacterBrain.Settings.NextNone,
+          }),
+        },
       );
     }
-    const { client } = createScriptedOpenRouterClient(script, { store });
+    const { client, calls } = createScriptedOpenRouterClient(script, { store });
     const server = await WorldsServer.create({
       config: env.config,
       store,
@@ -3508,7 +3546,7 @@ describe('Player narration over HTTP', () => {
       'x-worlds-csrf': started.csrfToken,
       'content-type': 'application/json',
     };
-    return { started, headers, campaign };
+    return { started, headers, campaign, calls };
   };
 
   /**
@@ -3533,16 +3571,18 @@ describe('Player narration over HTTP', () => {
     const fieldEvents = await readAllSseEvents(fieldRes);
     const committed = fieldEvents.find((item) => item.event === 'committed');
     assert.deepEqual(committed.data.userTurn.beats.map((beat) => [beat.seq, beat.speakerType, beat.text]), [
-      [1, 'player', 'I look at her.'],
-      [2, 'narrator', 'Her hair is dyed black.'],
+      [1, SpeakerType.Player, 'I look at her.'],
+      [2, SpeakerType.Narrator, 'Her hair is dyed black.'],
     ]);
+    assert.equal(context.calls[1].payload.messages[1].content.includes('Narrator: Her hair is dyed black.'), true);
+    assert.equal(context.calls[2].payload.messages[1].content.includes('Narrator: Her hair is dyed black.'), true);
 
     const tagRes = await post(context, { text: 'Again. <narration>Her eyes are green.</narration>' });
     assert.equal(tagRes.status, 200);
     const tagCommitted = (await readAllSseEvents(tagRes)).find((item) => item.event === 'committed');
     assert.deepEqual(tagCommitted.data.userTurn.beats.map((beat) => [beat.speakerType, beat.text]), [
-      ['player', 'Again.'],
-      ['narrator', 'Her eyes are green.'],
+      [SpeakerType.Player, 'Again.'],
+      [SpeakerType.Narrator, 'Her eyes are green.'],
     ]);
   });
 
@@ -3573,6 +3613,340 @@ describe('Player narration over HTTP', () => {
     assert.equal((await post(context, { text: 'Hi', narrations: 'x' })).status, 400);
     assert.equal((await post(context, { text: '   ', narration: '   ' })).status, 400);
     assert.equal((await post(context, { text: '<narration> </narration>' })).status, 400);
+  });
+});
+
+describe('Scene style pin, sequential SSE lifecycle, warning continuation, and disconnect over HTTP', () => {
+  const cleanups = [];
+  const INVALID_STYLE_NAME = 'dance';
+  const BAD_STYLE_NUMBER = 5;
+  const FIRST_BRAIN_ERROR_STATUS = 401;
+  const SSE_DONE_EVENT = 'done';
+
+  after(async () => {
+    for (const cleanupFn of cleanups) {
+      await cleanupFn();
+    }
+  });
+
+  /**
+   * @param {Array<object | ((context: {payload: object, url: string, init: object, callIndex: number}) => Promise<Response> | Response)>} handlers
+   * @returns {Promise<{store: SqliteStore, started: {url: string, port: number, csrfToken: string}, headers: Record<string, string>, campaign: object, frost: object, lize: object, collette: object, calls: Array<{payload: object}>}>}
+   * @throws {Error}
+   */
+  async function bootStyleServer(handlers) {
+    const env = createTempEnvironment({ envApiKey: 'sk-style-http-key' });
+    const store = new SqliteStore(env.config.dbPath);
+    const { client, calls } = createScriptedOpenRouterClient(handlers, { store });
+    const server = await WorldsServer.create({
+      config: env.config,
+      store,
+      client,
+      publicDir: env.publicDir,
+      modelCatalog: createFakeModelCatalog({
+        modelIds: ['openrouter/dir', 'openrouter/comp', 'openrouter/main', 'openrouter/rec', 'openrouter/scribe'],
+      }).catalog,
+    });
+    const started = await server.start();
+    cleanups.push(async () => {
+      await server.stop();
+      store.close();
+      fs.rmSync(env.tempRoot, { recursive: true, force: true });
+    });
+    const headers = {
+      origin: started.url,
+      'x-worlds-csrf': started.csrfToken,
+      'content-type': 'application/json',
+    };
+    await fetch(`${started.url}/api/settings`, {
+      method: 'PUT',
+      headers,
+      body: JSON.stringify({
+        models: {
+          director: 'openrouter/dir',
+          composer: 'openrouter/comp',
+          main: 'openrouter/main',
+          recurring: 'openrouter/rec',
+          scribe: 'openrouter/scribe',
+        },
+        publicOdds: 0,
+        privateOdds: 0,
+        scribeInterval: 0,
+        pedantEnabled: false,
+      }),
+    });
+    const campaign = await (await fetch(`${started.url}/api/campaigns`, {
+      method: 'POST',
+      headers,
+      body: JSON.stringify({ title: 'Style & Sequence HTTP' }),
+    })).json();
+    const frost = await (await fetch(`${started.url}/api/campaigns/${campaign.id}/characters`, {
+      method: 'POST',
+      headers,
+      body: JSON.stringify({
+        slug: 'frost',
+        name: 'Frost',
+        isPlayer: true,
+        tier: CharacterTier.Main,
+        avatarToken: AvatarToken.Slate,
+      }),
+    })).json();
+    const lize = await (await fetch(`${started.url}/api/campaigns/${campaign.id}/characters`, {
+      method: 'POST',
+      headers,
+      body: JSON.stringify({
+        slug: 'lize',
+        name: 'Lize',
+        tier: CharacterTier.Main,
+        avatarToken: AvatarToken.Rose,
+      }),
+    })).json();
+    const collette = await (await fetch(`${started.url}/api/campaigns/${campaign.id}/characters`, {
+      method: 'POST',
+      headers,
+      body: JSON.stringify({
+        slug: 'collette',
+        name: 'Collette',
+        tier: CharacterTier.Recurring,
+        avatarToken: AvatarToken.Amber,
+      }),
+    })).json();
+    const patched = await (await fetch(`${started.url}/api/campaigns/${campaign.id}`, {
+      method: 'PATCH',
+      headers,
+      body: JSON.stringify({
+        sceneState: {
+          ...campaign.sceneState,
+          location: 'Oak Study',
+          presentIds: [frost.id, lize.id, collette.id],
+        },
+      }),
+    })).json();
+    return { store, started, headers, campaign: patched, frost, lize, collette, calls };
+  }
+
+  it('validates PATCH sceneState pinnedStyle/style, overrides Director style when pinned, clears pin on scene change, and continues SSE turn after 1st brain error', async () => {
+    const context = await bootStyleServer([
+      {
+        text: buildTaggedDirectorReply({
+          location: 'Oak Study',
+          day: 1,
+          timeLabel: 'Evening',
+          sceneType: SceneType.Private,
+          presentSlugs: ['frost', 'lize', 'collette'],
+          pacing: Director.Settings.Pacing.GroupBanter,
+          responders: [
+            { slug: 'lize', beatGoal: 'Answer first.', length: Director.Settings.Length.Short },
+            { slug: 'collette', beatGoal: 'Follow up.', length: Director.Settings.Length.Short },
+          ],
+          narratorDirective: 'Set the mood.',
+          style: SceneStyle.Banter,
+        }),
+      },
+      { type: STREAM_HANDLER_TYPE, text: buildNarratorTaggedText('Rain lashes the glass.') },
+      { type: ERROR_HANDLER_TYPE, status: FIRST_BRAIN_ERROR_STATUS, message: 'Lize upstream down' },
+      {
+        type: STREAM_HANDLER_TYPE,
+        text: buildBrainTaggedText({
+          thoughts: 'Stay composed.',
+          reply: '*Collette lights the taper.*\nQuiet tonight.',
+          next: CharacterBrain.Settings.NextNone,
+        }),
+      },
+      {
+        text: buildTaggedDirectorReply({
+          sceneChanged: true,
+          location: 'Harbor Pier',
+          day: 1,
+          timeLabel: 'Night',
+          sceneType: SceneType.Public,
+          presentSlugs: ['frost', 'lize'],
+          pacing: Director.Settings.Pacing.FocusedOne,
+          responders: [{ slug: 'lize', beatGoal: 'Watch the dock.', length: Director.Settings.Length.Short }],
+          narratorDirective: 'Step outside.',
+          style: SceneStyle.Combat,
+        }),
+      },
+      { type: STREAM_HANDLER_TYPE, text: buildNarratorTaggedText('Cold wind whips across the planks.') },
+      {
+        type: STREAM_HANDLER_TYPE,
+        text: buildBrainTaggedText({
+          thoughts: 'Draw the blade.',
+          reply: '*Lize shifts her stance.*\nEyes on the pier.',
+          next: CharacterBrain.Settings.NextNone,
+        }),
+      },
+    ]);
+
+    const invalidPinRes = await fetch(`${context.started.url}/api/campaigns/${context.campaign.id}`, {
+      method: 'PATCH',
+      headers: context.headers,
+      body: JSON.stringify({ sceneState: { pinnedStyle: INVALID_STYLE_NAME } }),
+    });
+    assert.equal(invalidPinRes.status, 400);
+
+    const invalidTypePinRes = await fetch(`${context.started.url}/api/campaigns/${context.campaign.id}`, {
+      method: 'PATCH',
+      headers: context.headers,
+      body: JSON.stringify({ sceneState: { pinnedStyle: BAD_STYLE_NUMBER } }),
+    });
+    assert.equal(invalidTypePinRes.status, 400);
+
+    const invalidStyleRes = await fetch(`${context.started.url}/api/campaigns/${context.campaign.id}`, {
+      method: 'PATCH',
+      headers: context.headers,
+      body: JSON.stringify({ sceneState: { style: INVALID_STYLE_NAME } }),
+    });
+    assert.equal(invalidStyleRes.status, 400);
+
+    const pinRes = await fetch(`${context.started.url}/api/campaigns/${context.campaign.id}`, {
+      method: 'PATCH',
+      headers: context.headers,
+      body: JSON.stringify({ sceneState: { pinnedStyle: SceneStyle.Explicit } }),
+    });
+    assert.equal(pinRes.status, 200);
+    const pinnedCampaign = await pinRes.json();
+    assert.equal(pinnedCampaign.sceneState.pinnedStyle, SceneStyle.Explicit);
+
+    const unpinRes = await fetch(`${context.started.url}/api/campaigns/${context.campaign.id}`, {
+      method: 'PATCH',
+      headers: context.headers,
+      body: JSON.stringify({ sceneState: { pinnedStyle: null } }),
+    });
+    assert.equal(unpinRes.status, 200);
+    assert.equal((await unpinRes.json()).sceneState.pinnedStyle, null);
+
+    await fetch(`${context.started.url}/api/campaigns/${context.campaign.id}`, {
+      method: 'PATCH',
+      headers: context.headers,
+      body: JSON.stringify({ sceneState: { pinnedStyle: SceneStyle.Explicit } }),
+    });
+
+    const firstTurnRes = await fetch(`${context.started.url}/api/campaigns/${context.campaign.id}/turns`, {
+      method: 'POST',
+      headers: context.headers,
+      body: JSON.stringify({ text: 'Pour the wine.', mode: TurnMode.Normal }),
+    });
+    assert.equal(firstTurnRes.status, 200);
+    const firstEvents = await readAllSseEvents(firstTurnRes);
+    const firstPhases = firstEvents
+      .filter((item) => item.event === TurnEngine.Settings.Event.Phase)
+      .map((item) => item.data.phase);
+    assert.deepEqual(firstPhases, [
+      TurnEngine.Settings.Phase.Directing,
+      TurnEngine.Settings.Phase.DirectorDone,
+      TurnEngine.Settings.Phase.Narrating,
+      TurnEngine.Settings.Phase.Replying,
+      TurnEngine.Settings.Phase.Replying,
+    ]);
+    const warningEvent = firstEvents.find((item) => item.event === TurnEngine.Settings.Event.Warning);
+    assert.ok(warningEvent !== undefined);
+    assert.equal(warningEvent.data.stage, SpendStage.Mind);
+    assert.equal(warningEvent.data.message.includes('Lize'), true);
+    const firstDone = firstEvents.find((item) => item.event === SSE_DONE_EVENT);
+    assert.equal(firstDone.data.sceneState.style, SceneStyle.Explicit);
+    assert.equal(firstDone.data.sceneState.pinnedStyle, SceneStyle.Explicit);
+    assert.equal(firstDone.data.assistantTurn.beats.length, 2);
+    assert.equal(firstDone.data.assistantTurn.beats[0].speakerType, SpeakerType.Narrator);
+    assert.equal(firstDone.data.assistantTurn.beats[1].speakerName, 'Collette');
+
+    const settings = context.store.getSettings();
+    assert.equal(
+      context.calls[1].payload.messages[1].content.includes(settings.sceneStyles[SceneStyle.Explicit]),
+      true,
+    );
+    assert.equal(
+      context.calls[2].payload.messages[1].content.includes(settings.sceneStyles[SceneStyle.Explicit]),
+      true,
+    );
+    assert.equal(
+      context.calls[3].payload.messages[1].content.includes(settings.sceneStyles[SceneStyle.Explicit]),
+      true,
+    );
+
+    const secondTurnRes = await fetch(`${context.started.url}/api/campaigns/${context.campaign.id}/turns`, {
+      method: 'POST',
+      headers: context.headers,
+      body: JSON.stringify({ text: 'We step out onto the pier.', mode: TurnMode.Normal }),
+    });
+    assert.equal(secondTurnRes.status, 200);
+    const secondEvents = await readAllSseEvents(secondTurnRes);
+    const secondDone = secondEvents.find((item) => item.event === SSE_DONE_EVENT);
+    assert.equal(secondDone.data.sceneState.pinnedStyle, null);
+    assert.equal(secondDone.data.sceneState.style, SceneStyle.Combat);
+    assert.equal(
+      context.calls[5].payload.messages[1].content.includes(settings.sceneStyles[SceneStyle.Combat]),
+      true,
+    );
+    assert.equal(
+      context.calls[6].payload.messages[1].content.includes(settings.sceneStyles[SceneStyle.Combat]),
+      true,
+    );
+  });
+
+  it('aborts during second sequential brain on client disconnect and leaves zero committed turns', async () => {
+    const secondBrainGate = createGate();
+    let secondBrainAborted = false;
+
+    const context = await bootStyleServer([
+      {
+        text: buildTaggedDirectorReply({
+          location: 'Oak Study',
+          day: 1,
+          timeLabel: 'Evening',
+          sceneType: SceneType.Private,
+          presentSlugs: ['frost', 'lize', 'collette'],
+          pacing: Director.Settings.Pacing.GroupBanter,
+          responders: [
+            { slug: 'lize', beatGoal: 'Answer.', length: Director.Settings.Length.Short },
+            { slug: 'collette', beatGoal: 'Wait for abort.', length: Director.Settings.Length.Short },
+          ],
+          narratorDirective: 'Rain falls.',
+          style: SceneStyle.Tension,
+        }),
+      },
+      { type: STREAM_HANDLER_TYPE, text: buildNarratorTaggedText('Rain taps the sill.') },
+      {
+        type: STREAM_HANDLER_TYPE,
+        text: buildBrainTaggedText({
+          thoughts: 'First done.',
+          reply: 'Ready.',
+          next: CharacterBrain.Settings.NextNone,
+        }),
+      },
+      ({ init }) => {
+        secondBrainGate.open();
+        return new Promise((resolve, reject) => {
+          init.signal.addEventListener('abort', () => {
+            secondBrainAborted = true;
+            const abortError = new Error('Client disconnected');
+            abortError.name = TurnEngine.Settings.AbortName;
+            reject(abortError);
+          }, { once: true });
+        });
+      },
+    ]);
+
+    const abortController = new AbortController();
+    const response = await fetch(`${context.started.url}/api/campaigns/${context.campaign.id}/turns`, {
+      method: 'POST',
+      headers: context.headers,
+      signal: abortController.signal,
+      body: JSON.stringify({ text: 'Hold still.', mode: TurnMode.Normal }),
+    });
+    assert.equal(response.status, 200);
+    const bodyPromise = response.text();
+
+    await secondBrainGate.promise;
+    abortController.abort();
+
+    await assert.rejects(bodyPromise, (error) => error.name === TurnEngine.Settings.AbortName);
+    await waitUntil(() => secondBrainAborted);
+
+    assert.equal(context.store.listTurns(context.campaign.id).total, 0);
+    assert.equal(context.store.getCampaign(context.campaign.id).sceneState.style, SceneStyle.None);
+    const todayUtc = new Date().toISOString().slice(0, 10);
+    assert.equal(context.store.getDailySpend(todayUtc).callCount, 3);
   });
 });
 

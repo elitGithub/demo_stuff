@@ -374,6 +374,8 @@ export class SqliteStore {
       remoteIds: [],
       offscreenNotes: {},
       activeWalkOns: [],
+      style: SceneStyle.None,
+      pinnedStyle: null,
     };
     const sceneState = dto.sceneState === undefined
       ? defaultSceneState
@@ -1658,6 +1660,7 @@ export class SqliteStore {
       }
 
       const now = new Date().toISOString();
+      const restoredSceneState = this.#parseSceneState(restoreStateJson);
       this.#db.prepare('DELETE FROM turns WHERE id = ?').run(latestRow.id);
       this.#db.prepare(
         `UPDATE scribe_books
@@ -1670,12 +1673,12 @@ export class SqliteStore {
       ).run(campaignId, now, campaignId);
       this.#db.prepare(
         'UPDATE campaigns SET scene_state_json = ?, updated_at = ? WHERE id = ?',
-      ).run(restoreStateJson, now, campaignId);
+      ).run(JSON.stringify(restoredSceneState), now, campaignId);
       this.#bumpChangeSeq();
       return {
         deletedTurnId: latestRow.id,
         deletedSeq: Number(latestRow.seq),
-        restoredSceneState: JSON.parse(restoreStateJson),
+        restoredSceneState,
       };
     });
   }
@@ -1707,6 +1710,7 @@ export class SqliteStore {
       }
 
       const now = new Date().toISOString();
+      const restoredSceneState = this.#parseSceneState(restoreStateJson);
       this.#db.prepare('DELETE FROM turns WHERE id IN (?, ?)').run(assistantRow.id, userRow.id);
       this.#db.prepare(
         `UPDATE scribe_books
@@ -1719,13 +1723,13 @@ export class SqliteStore {
       ).run(campaignId, now, campaignId);
       this.#db.prepare(
         'UPDATE campaigns SET scene_state_json = ?, updated_at = ? WHERE id = ?',
-      ).run(restoreStateJson, now, campaignId);
+      ).run(JSON.stringify(restoredSceneState), now, campaignId);
       this.#bumpChangeSeq();
       return {
         deletedUserTurnId: userRow.id,
         deletedAssistantTurnId: assistantRow.id,
         deletedSeqs: [Number(userRow.seq), Number(assistantRow.seq)],
-        restoredSceneState: JSON.parse(restoreStateJson),
+        restoredSceneState,
       };
     });
   }
@@ -2373,7 +2377,7 @@ export class SqliteStore {
   /**
    * @param {unknown} input
    * @param {Record<string, unknown> | null} baseState
-   * @returns {{sceneNumber: number, day: number, timeLabel: string, location: string, sceneType: string, presentIds: Array<string>, remoteIds: Array<string>, offscreenNotes: Record<string, string>, activeWalkOns: Array<string>}}
+   * @returns {{sceneNumber: number, day: number, timeLabel: string, location: string, sceneType: string, presentIds: Array<string>, remoteIds: Array<string>, offscreenNotes: Record<string, string>, activeWalkOns: Array<string>, style: string, pinnedStyle: string | null}}
    * @throws {Error}
    */
   #normalizeSceneState(input, baseState) {
@@ -2394,6 +2398,24 @@ export class SqliteStore {
       throw new TypeError('sceneState.location must be a string.');
     }
     SceneType.label(merged.sceneType);
+
+    let style = SceneStyle.None;
+    if (merged.style !== undefined) {
+      if (typeof merged.style !== 'string') {
+        throw new TypeError('sceneState.style must be a string.');
+      }
+      SceneStyle.label(merged.style);
+      style = merged.style;
+    }
+
+    let pinnedStyle = null;
+    if (merged.pinnedStyle !== undefined && merged.pinnedStyle !== null) {
+      if (typeof merged.pinnedStyle !== 'string') {
+        throw new TypeError('sceneState.pinnedStyle must be null or a string.');
+      }
+      SceneStyle.label(merged.pinnedStyle);
+      pinnedStyle = merged.pinnedStyle;
+    }
 
     const presentIds = this.#validateStringArray(merged.presentIds, 'sceneState.presentIds');
     const remoteIds = this.#validateStringArray(merged.remoteIds, 'sceneState.remoteIds');
@@ -2445,6 +2467,22 @@ export class SqliteStore {
       remoteIds,
       offscreenNotes,
       activeWalkOns,
+      style,
+      pinnedStyle,
+    };
+  }
+
+  /**
+   * @param {string} rawJson
+   * @returns {{sceneNumber: number, day: number, timeLabel: string, location: string, sceneType: string, presentIds: Array<string>, remoteIds: Array<string>, offscreenNotes: Record<string, string>, activeWalkOns: Array<string>, style: string, pinnedStyle: string | null}}
+   * @throws {SyntaxError}
+   */
+  #parseSceneState(rawJson) {
+    const parsed = JSON.parse(rawJson);
+    return {
+      ...parsed,
+      style: parsed.style === undefined ? SceneStyle.None : parsed.style,
+      pinnedStyle: parsed.pinnedStyle === undefined ? null : parsed.pinnedStyle,
     };
   }
 
@@ -2484,6 +2522,7 @@ export class SqliteStore {
   /**
    * @param {Record<string, unknown>} row
    * @returns {object}
+   * @throws {SyntaxError}
    */
   #mapCampaign(row) {
     return {
@@ -2492,7 +2531,7 @@ export class SqliteStore {
       premise: row.premise,
       styleNotes: row.style_notes,
       playerCharacterId: row.player_character_id,
-      sceneState: JSON.parse(row.scene_state_json),
+      sceneState: this.#parseSceneState(row.scene_state_json),
       encounterPublicOdds: Number(row.encounter_public_odds),
       encounterPrivateOdds: Number(row.encounter_private_odds),
       scribeInterval: Number(row.scribe_interval),
@@ -2530,6 +2569,7 @@ export class SqliteStore {
    * @param {Record<string, unknown>} row
    * @param {Array<object>} beats
    * @returns {object}
+   * @throws {SyntaxError}
    */
   #mapTurn(row, beats) {
     return {
@@ -2542,8 +2582,8 @@ export class SqliteStore {
       oocNudge: row.ooc_nudge,
       sceneNumber: Number(row.scene_number),
       witnessIds: JSON.parse(row.witness_ids_json),
-      sceneStateBefore: row.scene_state_before_json === null ? null : JSON.parse(row.scene_state_before_json),
-      sceneStateAfter: row.scene_state_after_json === null ? null : JSON.parse(row.scene_state_after_json),
+      sceneStateBefore: row.scene_state_before_json === null ? null : this.#parseSceneState(row.scene_state_before_json),
+      sceneStateAfter: row.scene_state_after_json === null ? null : this.#parseSceneState(row.scene_state_after_json),
       directorPlan: row.director_plan_json === null ? null : JSON.parse(row.director_plan_json),
       truncated: row.truncated === 1,
       createdAt: row.created_at,

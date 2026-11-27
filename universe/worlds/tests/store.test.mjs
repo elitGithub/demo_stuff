@@ -38,6 +38,8 @@ function buildSceneState(location, sceneNumber, presentIds, remoteIds = []) {
     remoteIds,
     offscreenNotes: {},
     activeWalkOns: [],
+    style: SceneStyle.None,
+    pinnedStyle: null,
   };
 }
 
@@ -1924,7 +1926,9 @@ describe('SceneStyle enum and SqliteStore sceneStyles settings', () => {
     [SceneStyle.None]: 'None',
   });
 
-  const INVALID_STYLE_KEYS = Object.freeze(['dance', SceneStyle.None, '__proto__', 'constructor', '']);
+  const UNKNOWN_STYLE_KEY = 'dance';
+  const EMPTY_STYLE_KEY = '';
+  const INVALID_STYLE_KEYS = Object.freeze([UNKNOWN_STYLE_KEY, SceneStyle.None, '__proto__', 'constructor', EMPTY_STYLE_KEY]);
 
   it('freezes SceneStyle, validates EditableValues/AllValues, matches exact spec defaults, and labels every case', () => {
     assert.equal(Object.isFrozen(SceneStyle), true);
@@ -1942,8 +1946,8 @@ describe('SceneStyle enum and SqliteStore sceneStyles settings', () => {
     for (const styleKey of SceneStyle.AllValues) {
       assert.equal(SceneStyle.label(styleKey), EXPECTED_LABELS[styleKey]);
     }
-    assert.throws(() => SceneStyle.label('dance'), RangeError);
-    assert.throws(() => SceneStyle.label(''), RangeError);
+    assert.throws(() => SceneStyle.label(UNKNOWN_STYLE_KEY), RangeError);
+    assert.throws(() => SceneStyle.label(EMPTY_STYLE_KEY), RangeError);
   });
 
   it('merges partial sceneStyles updates, preserves untouched defaults, and rejects invalid keys or values', () => {
@@ -2011,6 +2015,112 @@ describe('SceneStyle enum and SqliteStore sceneStyles settings', () => {
       assert.equal(recovered.sceneStyles[SceneStyle.Combat], EXPECTED_SPEC_DEFAULTS[SceneStyle.Combat]);
       assert.equal(recovered.sceneStyles[SceneStyle.Banter], 'Kept string');
       assert.equal(Object.hasOwn(recovered.sceneStyles, SceneStyle.None), false);
+    } finally {
+      reopened.close();
+    }
+  });
+
+  it('defaults sceneState.style and pinnedStyle, validates updates, and backfills legacy JSON rows on read', () => {
+    const tempDir = fs.mkdtempSync(path.join(os.tmpdir(), 'worlds-store-scene-style-'));
+    tempDirs.push(tempDir);
+    const dbPath = path.join(tempDir, 'scene-style.sqlite');
+    const store = new SqliteStore(dbPath);
+    let campaignId;
+    try {
+      const campaign = store.createCampaign({ title: 'Scene Style Store Check' });
+      campaignId = campaign.id;
+      assert.equal(campaign.sceneState.style, SceneStyle.None);
+      assert.equal(campaign.sceneState.pinnedStyle, null);
+
+      const pinned = store.updateCampaign(campaignId, {
+        sceneState: { pinnedStyle: SceneStyle.Explicit, style: SceneStyle.Combat },
+      });
+      assert.equal(pinned.sceneState.pinnedStyle, SceneStyle.Explicit);
+      assert.equal(pinned.sceneState.style, SceneStyle.Combat);
+
+      const clearedPin = store.updateCampaign(campaignId, {
+        sceneState: { pinnedStyle: null },
+      });
+      assert.equal(clearedPin.sceneState.pinnedStyle, null);
+      assert.equal(clearedPin.sceneState.style, SceneStyle.Combat);
+
+      for (const badType of [42, true, {}]) {
+        assert.throws(
+          () => store.updateCampaign(campaignId, { sceneState: { style: badType } }),
+          TypeError,
+        );
+        assert.throws(
+          () => store.updateCampaign(campaignId, { sceneState: { pinnedStyle: badType } }),
+          TypeError,
+        );
+      }
+      assert.throws(
+        () => store.updateCampaign(campaignId, { sceneState: { style: UNKNOWN_STYLE_KEY } }),
+        RangeError,
+      );
+      assert.throws(
+        () => store.updateCampaign(campaignId, { sceneState: { pinnedStyle: UNKNOWN_STYLE_KEY } }),
+        RangeError,
+      );
+      assert.throws(
+        () => store.updateCampaign(campaignId, { sceneState: { pinnedStyle: EMPTY_STYLE_KEY } }),
+        RangeError,
+      );
+
+      store.commitTurnPair({
+        campaignId,
+        userTurn: { mode: TurnMode.Normal, rawText: 'Step inside.' },
+        userBeat: { speakerType: SpeakerType.Narrator, characterId: null, speakerName: SpeakerType.label(SpeakerType.Narrator), text: 'Step inside.' },
+        assistantTurn: { mode: TurnMode.Normal, rawText: 'Lantern light.' },
+        assistantBeats: [{ speakerType: SpeakerType.Narrator, characterId: null, speakerName: SpeakerType.label(SpeakerType.Narrator), text: 'Lantern light.' }],
+        nextSceneState: buildSceneState('Inn', 1, []),
+      });
+    } finally {
+      store.close();
+    }
+
+    const legacySceneJson = JSON.stringify({
+      sceneNumber: 1,
+      day: 1,
+      timeLabel: 'Morning',
+      location: 'Legacy Pier',
+      sceneType: SceneType.Public,
+      presentIds: [],
+      remoteIds: [],
+      offscreenNotes: {},
+      activeWalkOns: [],
+    });
+    const rawDb = new DatabaseSync(dbPath);
+    try {
+      rawDb.prepare('UPDATE campaigns SET scene_state_json = ? WHERE id = ?').run(legacySceneJson, campaignId);
+      rawDb.prepare(
+        'UPDATE turns SET scene_state_before_json = ?, scene_state_after_json = ? WHERE campaign_id = ?',
+      ).run(legacySceneJson, legacySceneJson, campaignId);
+    } finally {
+      rawDb.close();
+    }
+
+    const reopened = new SqliteStore(dbPath);
+    try {
+      const mappedCampaign = reopened.getCampaign(campaignId);
+      assert.equal(mappedCampaign.sceneState.style, SceneStyle.None);
+      assert.equal(mappedCampaign.sceneState.pinnedStyle, null);
+      assert.equal(reopened.listCampaigns().items[0].sceneState.style, SceneStyle.None);
+      assert.equal(reopened.listCampaigns().items[0].sceneState.pinnedStyle, null);
+
+      const turnsPage = reopened.listTurns(campaignId);
+      for (const turn of turnsPage.items) {
+        assert.equal(turn.sceneStateBefore.style, SceneStyle.None);
+        assert.equal(turn.sceneStateBefore.pinnedStyle, null);
+        assert.equal(turn.sceneStateAfter.style, SceneStyle.None);
+        assert.equal(turn.sceneStateAfter.pinnedStyle, null);
+      }
+
+      const deletedAssistant = reopened.deleteLastAssistantTurn(campaignId);
+      assert.equal(deletedAssistant.restoredSceneState.style, SceneStyle.None);
+      assert.equal(deletedAssistant.restoredSceneState.pinnedStyle, null);
+      assert.equal(reopened.getCampaign(campaignId).sceneState.style, SceneStyle.None);
+      assert.equal(reopened.getCampaign(campaignId).sceneState.pinnedStyle, null);
     } finally {
       reopened.close();
     }

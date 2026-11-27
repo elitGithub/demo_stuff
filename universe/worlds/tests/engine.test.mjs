@@ -1,12 +1,15 @@
 import assert from 'node:assert/strict';
 import { describe, it } from 'node:test';
 import { BeatParser } from '../src/engine/BeatParser.mjs';
+import { CharacterBrain } from '../src/engine/CharacterBrain.mjs';
 import { CharacterMind } from '../src/engine/CharacterMind.mjs';
 import { Director } from '../src/engine/Director.mjs';
 import { EncounterRoller } from '../src/engine/EncounterRoller.mjs';
 import { HistoryWindow } from '../src/engine/HistoryWindow.mjs';
 import { NarrationParts } from '../src/engine/NarrationParts.mjs';
+import { Narrator } from '../src/engine/Narrator.mjs';
 import { NarratorComposer } from '../src/engine/NarratorComposer.mjs';
+import { ReplyStreamSplitter } from '../src/engine/ReplyStreamSplitter.mjs';
 import { RequestBudget } from '../src/engine/RequestBudget.mjs';
 import { StorySlice } from '../src/engine/StorySlice.mjs';
 import { TagReader } from '../src/engine/TagReader.mjs';
@@ -21,6 +24,7 @@ import { ScribeKnowledge } from '../src/scribe/ScribeKnowledge.mjs';
 import { ScribeLogCore } from '../src/scribe/ScribeLogCore.mjs';
 import { ScribeReplay } from '../src/scribe/ScribeReplay.mjs';
 import { ScribeService } from '../src/scribe/ScribeService.mjs';
+import { CharacterCard } from '../src/store/CharacterCard.mjs';
 import { AvatarToken } from '../src/store/enums/AvatarToken.mjs';
 import { CharacterTier } from '../src/store/enums/CharacterTier.mjs';
 import { FindingKind } from '../src/store/enums/FindingKind.mjs';
@@ -5145,5 +5149,1193 @@ describe('Director tagged parsing, styles, modes, and budgeted recent turns', ()
     assert.equal(sendDirectorPrompt.includes('userText: I step forward.\nnarration: The lantern goes out.'), true);
     assert.equal(regenDirectorPrompt.includes('userText: I step forward.\nnarration: The lantern goes out.'), true);
     store.close();
+  });
+});
+
+describe('ReplyStreamSplitter', () => {
+  const TAG_REPLY = CharacterBrain.Settings.Tag.Reply;
+  const TAG_THOUGHTS = CharacterBrain.Settings.Tag.Thoughts;
+  const TAG_NEXT = CharacterBrain.Settings.Tag.Next;
+  const EMPTY_TEXT = ReplyStreamSplitter.Settings.EmptyText;
+
+  /**
+   * @param {string} rawText
+   * @param {string} visibleTag
+   * @param {readonly string[]} hiddenTags
+   * @returns {{deltas: string[], result: Readonly<{visible: string, raw: string}>}}
+   * @throws {TypeError | RangeError}
+   */
+  function splitOneCharAtATime(rawText, visibleTag, hiddenTags) {
+    const splitter = new ReplyStreamSplitter({ visibleTag, hiddenTags });
+    const deltas = [];
+    for (let charIndex = 0; charIndex < rawText.length; charIndex += 1) {
+      const emitted = splitter.push(rawText[charIndex]);
+      if (emitted.length > 0) {
+        deltas.push(emitted);
+      }
+    }
+    return { deltas, result: splitter.finish() };
+  }
+
+  it('extracts visible tag across split tag chunks and 1-char-at-a-time streaming', () => {
+    const chunkedSplitter = new ReplyStreamSplitter({ visibleTag: TAG_REPLY, hiddenTags: [TAG_THOUGHTS] });
+    const emittedChunks = [
+      chunkedSplitter.push('<rep'),
+      chunkedSplitter.push('ly>Hi'),
+      chunkedSplitter.push(' there</rep'),
+      chunkedSplitter.push('ly>'),
+    ];
+    assert.deepEqual(emittedChunks, ['', 'Hi', ' there', '']);
+    const chunkedDone = chunkedSplitter.finish();
+    assert.equal(Object.isFrozen(chunkedDone), true);
+    assert.deepEqual(chunkedDone, {
+      visible: 'Hi there',
+      raw: '<reply>Hi there</reply>',
+    });
+
+    const complexStream = [
+      '<thoughts>Think carefully.</thoughts>',
+      '<replying>Wrong tag</replying>',
+      '<reply/>',
+      '<reply note="a > b">Actual <i>streamed</i> reply.</reply>',
+      '<thoughts>Trailing private thought</thoughts>',
+    ].join(EMPTY_TEXT);
+    const charByChar = splitOneCharAtATime(complexStream, TAG_REPLY, [TAG_THOUGHTS]);
+    assert.equal(charByChar.deltas.join(EMPTY_TEXT), 'Actual <i>streamed</i> reply.');
+    assert.equal(charByChar.result.visible, 'Actual <i>streamed</i> reply.');
+    assert.equal(charByChar.result.raw, complexStream);
+  });
+
+  it('never leaks thoughts before, between, after, nested, or containing fake reply tags', () => {
+    const hostileInput = [
+      '<thoughts>Before thoughts with </reply> and <reply>fake</reply> and ',
+      '<thoughts>nested </reply> <reply>nested fake</reply></thoughts> still hidden</thoughts>',
+      '<reply>Real visible text.</reply>',
+      '<thoughts>Between thoughts</thoughts>',
+      '<reply>Second visible part.</reply>',
+      '<thoughts>After thoughts</thoughts>',
+    ].join(EMPTY_TEXT);
+
+    const singleChunkSplitter = new ReplyStreamSplitter({
+      visibleTag: TAG_REPLY,
+      hiddenTags: [TAG_THOUGHTS, TAG_NEXT],
+    });
+    const wholeEmitted = singleChunkSplitter.push(hostileInput);
+    const wholeDone = singleChunkSplitter.finish();
+    assert.equal(wholeEmitted, 'Real visible text.Second visible part.');
+    assert.equal(wholeDone.visible, 'Real visible text.Second visible part.');
+    assert.equal(wholeDone.visible.includes('fake'), false);
+    assert.equal(wholeDone.visible.includes('Before thoughts'), false);
+    assert.equal(wholeDone.visible.includes('still hidden'), false);
+    assert.equal(wholeDone.visible.includes('Between thoughts'), false);
+    assert.equal(wholeDone.visible.includes('After thoughts'), false);
+
+    const perChar = splitOneCharAtATime(hostileInput, TAG_REPLY, [TAG_THOUGHTS, TAG_NEXT]);
+    assert.equal(perChar.deltas.join(EMPTY_TEXT), 'Real visible text.Second visible part.');
+    assert.equal(perChar.result.visible, 'Real visible text.Second visible part.');
+  });
+
+  it('recovers visible tags after empty closed tags and suppresses hidden tags nested inside visible text', () => {
+    const emptyThenTruncated = new ReplyStreamSplitter({
+      visibleTag: TAG_REPLY,
+      hiddenTags: [TAG_THOUGHTS, TAG_NEXT],
+    });
+    assert.equal(emptyThenTruncated.push('<reply></reply><reply>Cut off'), 'Cut off');
+    assert.equal(emptyThenTruncated.finish().visible, 'Cut off');
+
+    const nestedHiddenStream = [
+      '<reply>"Hello." ',
+      '<thoughts attr=">">SECRET_NESTED<thoughts>DEEPER</thoughts><thoughts/>',
+      '</thoughts>',
+      '<next>Collette</next>',
+      '<thoughts/>',
+      'world!</reply>',
+      '<thoughts>TRAILING_SECRET</thoughts>',
+    ].join(EMPTY_TEXT);
+    const nestedPerChar = splitOneCharAtATime(nestedHiddenStream, TAG_REPLY, [TAG_THOUGHTS, TAG_NEXT]);
+    assert.equal(nestedPerChar.deltas.join(EMPTY_TEXT), '"Hello." world!');
+    assert.equal(nestedPerChar.result.visible, '"Hello." world!');
+
+    const truncatedHiddenPrefix = new ReplyStreamSplitter({
+      visibleTag: TAG_REPLY,
+      hiddenTags: [TAG_THOUGHTS, TAG_NEXT],
+    });
+    assert.equal(truncatedHiddenPrefix.push('<reply>Hi <thou'), 'Hi ');
+    assert.equal(truncatedHiddenPrefix.finish().visible, 'Hi ');
+
+    const truncatedNextPrefix = new ReplyStreamSplitter({
+      visibleTag: TAG_REPLY,
+      hiddenTags: [TAG_THOUGHTS, TAG_NEXT],
+    });
+    assert.equal(truncatedNextPrefix.push('<reply>Hi <nex'), 'Hi ');
+    assert.equal(truncatedNextPrefix.finish().visible, 'Hi ');
+
+    const trailingProseAngle = new ReplyStreamSplitter({
+      visibleTag: TAG_REPLY,
+      hiddenTags: [TAG_THOUGHTS, TAG_NEXT],
+    });
+    assert.equal(trailingProseAngle.push('<reply>a <'), 'a ');
+    assert.equal(trailingProseAngle.finish().visible, 'a <');
+  });
+
+  it('enforces tag-name boundaries, self-closing tags, quotes, and case-insensitive tags', () => {
+    const splitter = new ReplyStreamSplitter({ visibleTag: TAG_REPLY, hiddenTags: [TAG_THOUGHTS] });
+    const pieces = [
+      splitter.push('<reply'),
+      splitter.push('ing>nope</replying>'),
+      splitter.push('<reply_alt>nope</reply_alt>'),
+      splitter.push('<reply /><reply a="1" />'),
+      splitter.push('<THOUGHTS attr=">" nested=\'x/>\'>Secret<thoughts/> still secret</tHoUgHtS>'),
+      splitter.push('<REPLY attr="x>y">'),
+      splitter.push('Hi'),
+      splitter.push('</rEpLy   '),
+      splitter.push('>'),
+    ];
+    assert.equal(pieces.join(EMPTY_TEXT), 'Hi');
+    assert.equal(splitter.finish().visible, 'Hi');
+  });
+
+  it('streams prose less-than and non-matching tags immediately without stalling inside visible text', () => {
+    const splitter = new ReplyStreamSplitter({ visibleTag: TAG_REPLY, hiddenTags: [TAG_THOUGHTS] });
+    assert.equal(splitter.push('<reply>a < b and '), 'a < b and ');
+    assert.equal(splitter.push('<i>hi</i> and '), '<i>hi</i> and ');
+    assert.equal(splitter.push('</rep'), '');
+    assert.equal(splitter.push('lying>ok</reply>'), '</replying>ok');
+    assert.equal(splitter.push(' trailing'), '');
+    assert.equal(splitter.finish().visible, 'a < b and <i>hi</i> and </replying>ok');
+  });
+
+  it('flushes trailing visible text on truncation while discarding partial closing tag fragments', () => {
+    const plainTruncated = new ReplyStreamSplitter({ visibleTag: TAG_REPLY });
+    plainTruncated.push('<reply>Cut off mid');
+    assert.equal(plainTruncated.finish().visible, 'Cut off mid');
+
+    const partialClose = new ReplyStreamSplitter({ visibleTag: TAG_REPLY });
+    partialClose.push('<reply>Cut off</rep');
+    assert.equal(partialClose.finish().visible, 'Cut off');
+
+    const slashClose = new ReplyStreamSplitter({ visibleTag: TAG_REPLY });
+    slashClose.push('<reply>Cut off</');
+    assert.equal(slashClose.finish().visible, 'Cut off');
+
+    const whitespaceClose = new ReplyStreamSplitter({ visibleTag: TAG_REPLY });
+    whitespaceClose.push('<reply>Cut off</REPLY   ');
+    assert.equal(whitespaceClose.finish().visible, 'Cut off');
+
+    const trailingAngle = new ReplyStreamSplitter({ visibleTag: TAG_REPLY });
+    trailingAngle.push('<reply>a <');
+    assert.equal(trailingAngle.finish().visible, 'a <');
+  });
+
+  it('emits nothing while streaming untagged output and returns raw in finish()', () => {
+    const untagged = 'No tags anywhere in this response.';
+    const splitter = new ReplyStreamSplitter({ visibleTag: TAG_REPLY, hiddenTags: [TAG_THOUGHTS, TAG_NEXT] });
+    assert.equal(splitter.push('No tags '), '');
+    assert.equal(splitter.push('anywhere in this response.'), '');
+    assert.deepEqual(splitter.finish(), { visible: '', raw: untagged });
+  });
+
+  it('scans pathological unclosed tags and quotes in linear time', () => {
+    const repeatCount = 6000;
+    const maxLinearMs = 150;
+    const unclosedStarts = '<reply '.repeat(repeatCount);
+    const unclosedQuotes = '<reply attr="'.repeat(repeatCount);
+    const openVisibleWithSpaces = `<reply>${'</reply '.repeat(repeatCount)}`;
+
+    const startsStartMs = performance.now();
+    const startsSplitter = new ReplyStreamSplitter({ visibleTag: TAG_REPLY, hiddenTags: [TAG_THOUGHTS] });
+    for (let offset = 0; offset < unclosedStarts.length; offset += 7) {
+      assert.equal(startsSplitter.push(unclosedStarts.slice(offset, offset + 7)), '');
+    }
+    assert.equal(startsSplitter.finish().visible, '');
+    assert.ok(performance.now() - startsStartMs < maxLinearMs);
+
+    const quotesStartMs = performance.now();
+    const quotesSplitter = new ReplyStreamSplitter({ visibleTag: TAG_REPLY, hiddenTags: [TAG_THOUGHTS] });
+    for (let offset = 0; offset < unclosedQuotes.length; offset += 5) {
+      assert.equal(quotesSplitter.push(unclosedQuotes.slice(offset, offset + 5)), '');
+    }
+    assert.equal(quotesSplitter.finish().visible, '');
+    assert.ok(performance.now() - quotesStartMs < maxLinearMs);
+
+    const visibleSpacesStartMs = performance.now();
+    const spacesSplitter = new ReplyStreamSplitter({ visibleTag: TAG_REPLY });
+    spacesSplitter.push(openVisibleWithSpaces);
+    const spacesResult = spacesSplitter.finish();
+    assert.equal(spacesResult.visible.length, '</reply '.length * (repeatCount - 1));
+    assert.ok(performance.now() - visibleSpacesStartMs < maxLinearMs);
+  });
+
+  it('excludes visibleTag from hiddenTags case-insensitively and rejects invalid inputs', () => {
+    const upperReplyTag = TAG_REPLY.toUpperCase();
+    const overlapSplitter = new ReplyStreamSplitter({
+      visibleTag: TAG_REPLY,
+      hiddenTags: [upperReplyTag, TAG_THOUGHTS],
+    });
+    assert.equal(overlapSplitter.push('<thoughts>h</thoughts><reply>v</reply>'), 'v');
+
+    assert.throws(() => new ReplyStreamSplitter(null), TypeError);
+    assert.throws(() => new ReplyStreamSplitter([]), TypeError);
+    assert.throws(() => new ReplyStreamSplitter({ visibleTag: 42 }), TypeError);
+    assert.throws(() => new ReplyStreamSplitter({ visibleTag: '' }), RangeError);
+    assert.throws(() => new ReplyStreamSplitter({ visibleTag: '1bad' }), RangeError);
+    assert.throws(() => new ReplyStreamSplitter({ visibleTag: TAG_REPLY, hiddenTags: 'thoughts' }), TypeError);
+    assert.throws(() => new ReplyStreamSplitter({ visibleTag: TAG_REPLY, hiddenTags: [123] }), TypeError);
+    assert.throws(() => new ReplyStreamSplitter({ visibleTag: TAG_REPLY, hiddenTags: ['bad tag'] }), RangeError);
+
+    const validSplitter = new ReplyStreamSplitter({ visibleTag: TAG_REPLY });
+    assert.throws(() => validSplitter.push(null), TypeError);
+    assert.throws(() => validSplitter.push(42), TypeError);
+  });
+});
+
+describe('CharacterBrain', () => {
+  const TEST_MODEL = 'openai/gpt-4.1';
+  const TEST_RESERVE = 3000;
+  const CLIENT_ENTRY_STREAM = 'stream';
+  const FINISH_REASON_LENGTH = 'length';
+  const TAG_SETTINGS = CharacterBrain.Settings.Tag;
+
+  it('builds full card prompt with unknown-value mapping for card fields while keeping speechExamples verbatim', async () => {
+    const fixture = createWorldFixture();
+    const { store, campaign, frost, lize } = fixture;
+    try {
+      const log = ScribeLogCore.create();
+      let state = ScribeReplay.run(log, []);
+      for (const participant of [frost, lize]) {
+        ScribeLogCore.syncCharacterSubject(log, state, {
+          subjectId: participant.scribeSubjectId,
+          name: participant.name,
+          aliases: participant.aliases,
+        });
+        state = ScribeReplay.run(log, []);
+      }
+      ScribeLogCore.rule(log, state, {
+        type: ScribeLogCore.Ruling.AddFact,
+        subject: lize.scribeSubjectId,
+        category: ScribeCategory.Names.Hair,
+        target: null,
+        text: CharacterCard.Unknown,
+        hidden: false,
+        cite: null,
+        position: 0,
+        decided: true,
+      });
+      state = ScribeReplay.run(log, []);
+
+      const budget = RequestBudget.create({ contextLength: null, replyReserve: TEST_RESERVE, charsPerToken: 3 });
+      const slice = StorySlice.build({
+        state,
+        viewer: { omniscient: false, subjectId: lize.scribeSubjectId, characterId: lize.id },
+        scene: {
+          location: 'Oak Bedroom',
+          day: 1,
+          timeLabel: 'Evening',
+          sceneType: SceneType.Private,
+          situation: 'Quiet check-in.',
+        },
+        presentSubjectIds: [frost.scribeSubjectId, lize.scribeSubjectId],
+        budget,
+      });
+
+      const fullCard = CharacterCard.fromObject({
+        hair: CharacterCard.Unknown,
+        traits: CharacterCard.Unknown,
+        habits: 'Checks door latches twice',
+        behavior: 'Guarded until trust is earned',
+        likes: 'Strong tea',
+        dislikes: 'Loud bragging',
+        sexualityOrientation: 'Bisexual',
+        sexualityKinks: 'Teasing control',
+        sexualityLikes: 'Whispered praise',
+        sexualityDislikes: 'Rushing',
+        speakingStyle: 'Measured and wry',
+        speakingQuirks: 'Pauses before answering',
+        personalitySummary: 'Sharp-eyed quartermaster.',
+        scenario: 'Keeps the caravan ledger balanced.',
+        characterNote: CharacterCard.Unknown,
+        speechExamples: [CharacterCard.Unknown, '"Count the coin before the gate closes."'],
+      });
+
+      const recordedSpends = [];
+      const spyStore = {
+        /**
+         * @param {object} spendDto
+         * @returns {object}
+         * @throws {Error}
+         */
+        recordSpend(spendDto) {
+          recordedSpends.push(spendDto);
+          return store.recordSpend(spendDto);
+        },
+      };
+
+      const { client, calls } = createScriptedClient([
+        {
+          type: CLIENT_ENTRY_STREAM,
+          chunkSize: 4,
+          text: [
+            `<${TAG_SETTINGS.Thoughts}>She notices the question.</${TAG_SETTINGS.Thoughts}>`,
+            `<${TAG_SETTINGS.Reply}>"Watch the ledger." *She slides the slate across.*</${TAG_SETTINGS.Reply}>`,
+            `<${TAG_SETTINGS.Next}>Collette</${TAG_SETTINGS.Next}>`,
+          ].join('\n'),
+        },
+      ], { store: spyStore });
+
+      const deltas = [];
+      const result = await CharacterBrain.reply({
+        campaign,
+        character: lize,
+        card: fullCard,
+        playerName: frost.name,
+        storyState: slice.text,
+        history: 'Frost: Good evening.',
+        thisTurn: 'Frost: What did the gatekeeper say?\nNarrator: A cold draft rattles the shutter.',
+        styleText: 'Hold back resolution and watch closely.',
+        direction: {
+          reacting: frost.slug,
+          length: Director.Settings.Length.Medium,
+          beatGoal: 'Test Frost without revealing the ledger.',
+        },
+        model: TEST_MODEL,
+        replyReserve: TEST_RESERVE,
+        client,
+        onDelta: async (deltaChunk) => {
+          deltas.push(deltaChunk);
+        },
+      });
+
+      assert.equal(Object.isFrozen(result), true);
+      assert.equal(result.reply, '"Watch the ledger." *She slides the slate across.*');
+      assert.equal(result.thoughts, 'She notices the question.');
+      assert.equal(result.next, 'Collette');
+      assert.equal(result.truncated, false);
+      assert.equal(typeof result.spendId, 'string');
+      assert.equal(deltas.join(''), '"Watch the ledger." *She slides the slate across.*');
+
+      assert.equal(calls.length, 1);
+      const sentPayload = calls[0].payload;
+      assert.equal(sentPayload.max_tokens, TEST_RESERVE);
+      assert.equal(recordedSpends.length, 1);
+      assert.equal(recordedSpends[0].stage, SpendStage.Mind);
+      assert.equal(recordedSpends[0].campaignId, campaign.id);
+
+      const systemContent = sentPayload.messages[0].content;
+      const userContent = sentPayload.messages[1].content;
+      assert.equal(sentPayload.messages[0].role, CharacterBrain.Settings.RoleSystem);
+      assert.equal(sentPayload.messages[1].role, CharacterBrain.Settings.RoleUser);
+
+      assert.equal(
+        systemContent.includes(`Traits: ${CharacterCard.UnknownLabel} | Habits: Checks door latches twice | Behaviour: Guarded until trust is earned`),
+        true,
+      );
+      assert.equal(
+        systemContent.includes('Sexuality: Bisexual | Kinks: Teasing control | Likes: Whispered praise | Dislikes: Rushing'),
+        true,
+      );
+      assert.equal(systemContent.includes(`<${TAG_SETTINGS.VoiceExamples}>\n${CharacterCard.Unknown}\n"Count the coin before the gate closes."\n</${TAG_SETTINGS.VoiceExamples}>`), true);
+      assert.equal(systemContent.includes(`Never speak, act or decide for ${frost.name} or for anyone else.`), true);
+      assert.equal(systemContent.includes(`<${TAG_SETTINGS.Next}>the name of who should answer you, or ${frost.name}, or ${CharacterBrain.Settings.NextNone}</${TAG_SETTINGS.Next}>`), true);
+
+      const campaignPos = systemContent.indexOf(`<${TAG_SETTINGS.Campaign}>`);
+      const identityPos = systemContent.indexOf(`<${TAG_SETTINGS.Identity}>`);
+      const voicePos = systemContent.indexOf(`<${TAG_SETTINGS.VoiceExamples}>`);
+      const rulesPos = systemContent.indexOf(`<${TAG_SETTINGS.Rules}>`);
+      assert.ok(campaignPos > 0 && identityPos > campaignPos && voicePos > identityPos && rulesPos > voicePos);
+
+      assert.equal(userContent.includes(`hair: ${CharacterCard.UnknownLabel}`), true);
+      assert.equal(userContent.includes(`<${TAG_SETTINGS.Portrayal}>\n${CharacterCard.UnknownLabel}\n</${TAG_SETTINGS.Portrayal}>`), true);
+      assert.equal(userContent.includes('Narrator: A cold draft rattles the shutter.'), true);
+      assert.equal(userContent.split(`<${TAG_SETTINGS.StoryState}>`).length, 2);
+
+      const storyPos = userContent.indexOf(`<${TAG_SETTINGS.StoryState}>`);
+      const historyPos = userContent.indexOf(`<${TAG_SETTINGS.History}>`);
+      const thisTurnPos = userContent.indexOf(`<${TAG_SETTINGS.ThisTurn}>`);
+      const portrayalPos = userContent.indexOf(`<${TAG_SETTINGS.Portrayal}>`);
+      const stylePos = userContent.indexOf(`<${TAG_SETTINGS.Style}>`);
+      const directionPos = userContent.indexOf(`<${TAG_SETTINGS.Direction}`);
+      assert.ok(
+        storyPos === 0 &&
+          historyPos > storyPos &&
+          thisTurnPos > historyPos &&
+          portrayalPos > thisTurnPos &&
+          stylePos > portrayalPos &&
+          directionPos > stylePos,
+      );
+      const betweenStyleAndDirection = userContent.slice(
+        userContent.indexOf(`</${TAG_SETTINGS.Style}>`) + `</${TAG_SETTINGS.Style}>`.length,
+        directionPos,
+      );
+      assert.equal(betweenStyleAndDirection, CharacterBrain.Settings.SectionSeparator);
+    } finally {
+      store.close();
+    }
+  });
+
+  it('omits empty card blocks, empty optional sections, and peer thoughts from HistoryWindow', async () => {
+    const budget = RequestBudget.create({ contextLength: null, replyReserve: TEST_RESERVE, charsPerToken: 3 });
+    const historyWindow = HistoryWindow.build({
+      turns: [
+        {
+          id: 't1',
+          seq: 1,
+          beats: [
+            {
+              id: 'b1',
+              seq: 1,
+              speakerType: SpeakerType.Character,
+              characterId: 'c-viola',
+              speakerName: 'Viola',
+              text: 'I locked the cabinet.',
+              witnessIds: ['c-lize', 'c-viola'],
+              mindPacket: { thoughts: 'PEER_SECRET_THOUGHT_LEAK', next: 'lize' },
+            },
+          ],
+        },
+      ],
+      characterId: 'c-lize',
+      maxTurns: 25,
+      budget,
+    });
+
+    const capturedRequests = [];
+    const fakeClient = {
+      /**
+       * @param {object} requestOptions
+       * @returns {Promise<{text: string, truncated: boolean, spendId: string | null}>}
+       * @throws {Error}
+       */
+      async stream(requestOptions) {
+        capturedRequests.push(requestOptions);
+        await requestOptions.onDelta(`<${TAG_SETTINGS.Reply}>Understood.</${TAG_SETTINGS.Reply}>`);
+        return {
+          text: `<${TAG_SETTINGS.Reply}>Understood.</${TAG_SETTINGS.Reply}>`,
+          truncated: false,
+          spendId: null,
+        };
+      },
+    };
+
+    await CharacterBrain.reply({
+      campaign: { id: 'camp-1', premise: '', styleNotes: '   ' },
+      character: { name: 'Lize' },
+      card: CharacterCard.empty(),
+      playerName: null,
+      storyState: 'Location: Hall',
+      history: historyWindow.text,
+      thisTurn: '',
+      styleText: '',
+      direction: {
+        reacting: Director.Settings.ReactingPlayer,
+        length: Director.Settings.Length.Short,
+        beatGoal: '',
+      },
+      model: TEST_MODEL,
+      replyReserve: TEST_RESERVE,
+      client: fakeClient,
+    });
+
+    assert.equal(capturedRequests.length, 1);
+    const systemContent = capturedRequests[0].messages[0].content;
+    const userContent = capturedRequests[0].messages[1].content;
+
+    assert.equal(systemContent.includes(`<${TAG_SETTINGS.Campaign}>`), false);
+    assert.equal(systemContent.includes(`<${TAG_SETTINGS.Identity}>`), false);
+    assert.equal(systemContent.includes(`<${TAG_SETTINGS.VoiceExamples}>`), false);
+    assert.equal(systemContent.includes('Personality:'), false);
+    assert.equal(systemContent.includes('Traits:'), false);
+    assert.equal(systemContent.includes('Never speak, act or decide for anyone else.'), true);
+    assert.equal(systemContent.includes(`<${TAG_SETTINGS.Next}>the name of who should answer you, or ${CharacterBrain.Settings.NextNone}</${TAG_SETTINGS.Next}>`), true);
+
+    assert.equal(userContent.includes(`<${TAG_SETTINGS.StoryState}>\nLocation: Hall\n</${TAG_SETTINGS.StoryState}>`), true);
+    assert.equal(userContent.includes('PEER_SECRET_THOUGHT_LEAK'), false);
+    assert.equal(userContent.includes(`<${TAG_SETTINGS.ThisTurn}>`), false);
+    assert.equal(userContent.includes(`<${TAG_SETTINGS.Portrayal}>`), false);
+    assert.equal(userContent.includes(`<${TAG_SETTINGS.Style}>`), false);
+    assert.equal(userContent.includes(`<${TAG_SETTINGS.Direction} ${CharacterBrain.Settings.Attr.Reacting}="${Director.Settings.ReactingPlayer}" ${CharacterBrain.Settings.Attr.Length}="${Director.Settings.Length.Short}"></${TAG_SETTINGS.Direction}>`), true);
+  });
+
+  it('streams only reply deltas and handles next variants and format misses without throwing', async () => {
+    const fixture = createWorldFixture();
+    const { store, campaign, frost, lize } = fixture;
+    try {
+      const { client } = createScriptedClient([
+        {
+          type: CLIENT_ENTRY_STREAM,
+          chunkSize: 3,
+          text: [
+            `<${TAG_SETTINGS.Thoughts}>Private plan </${TAG_SETTINGS.Reply}> <${TAG_SETTINGS.Reply}>fake</${TAG_SETTINGS.Reply}></${TAG_SETTINGS.Thoughts}>`,
+            `<${TAG_SETTINGS.Reply}>Only real reply.</${TAG_SETTINGS.Reply}>`,
+            `<${TAG_SETTINGS.Next}>  NONE  </${TAG_SETTINGS.Next}>`,
+          ].join(''),
+          finishReason: FINISH_REASON_LENGTH,
+        },
+        {
+          type: CLIENT_ENTRY_STREAM,
+          chunkSize: 5,
+          text: `<${TAG_SETTINGS.Thoughts}>Quiet check.</${TAG_SETTINGS.Thoughts}>\nShe pours another cup.\n<${TAG_SETTINGS.Next}>   </${TAG_SETTINGS.Next}>`,
+        },
+        {
+          type: CLIENT_ENTRY_STREAM,
+          chunkSize: 4,
+          text: `<${TAG_SETTINGS.Thoughts}>Running short.</${TAG_SETTINGS.Thoughts}><${TAG_SETTINGS.Reply}>Cut off mid-sen`,
+          finishReason: FINISH_REASON_LENGTH,
+        },
+        {
+          type: CLIENT_ENTRY_STREAM,
+          chunkSize: 4,
+          text: `<${TAG_SETTINGS.Thoughts}>Thinking only.</${TAG_SETTINGS.Thoughts}>`,
+        },
+        {
+          type: CLIENT_ENTRY_STREAM,
+          chunkSize: 4,
+          text: `<${TAG_SETTINGS.Thoughts}>Truncated inside thoughts <${TAG_SETTINGS.Reply}>fake</${TAG_SETTINGS.Reply}><${TAG_SETTINGS.Next}>collette</${TAG_SETTINGS.Next}>`,
+          finishReason: FINISH_REASON_LENGTH,
+        },
+        {
+          type: CLIENT_ENTRY_STREAM,
+          chunkSize: 4,
+          text: `<${TAG_SETTINGS.Thoughts}>Empty reply tag.</${TAG_SETTINGS.Thoughts}><${TAG_SETTINGS.Reply}></${TAG_SETTINGS.Reply}>`,
+        },
+        {
+          type: CLIENT_ENTRY_STREAM,
+          chunkSize: 3,
+          text: `<${TAG_SETTINGS.Reply}>"Hello."\n<${TAG_SETTINGS.Thoughts}>SECRET_LEAK</${TAG_SETTINGS.Thoughts}>`,
+          finishReason: FINISH_REASON_LENGTH,
+        },
+        {
+          type: CLIENT_ENTRY_STREAM,
+          chunkSize: 3,
+          text: `<${TAG_SETTINGS.Reply}>"Hello."\n<${TAG_SETTINGS.Next}>Collette</${TAG_SETTINGS.Next}>`,
+          finishReason: FINISH_REASON_LENGTH,
+        },
+        {
+          type: CLIENT_ENTRY_STREAM,
+          chunkSize: 3,
+          text: `<${TAG_SETTINGS.Reply}>"Hello." <${TAG_SETTINGS.Thoughts}>SECRET_NESTED</${TAG_SETTINGS.Thoughts}></${TAG_SETTINGS.Reply}>`,
+        },
+        {
+          type: CLIENT_ENTRY_STREAM,
+          chunkSize: 3,
+          text: `<${TAG_SETTINGS.Thoughts}>Check.</${TAG_SETTINGS.Thoughts}>\n<${TAG_SETTINGS.Reply}>`,
+          finishReason: FINISH_REASON_LENGTH,
+        },
+        {
+          type: CLIENT_ENTRY_STREAM,
+          chunkSize: 3,
+          text: `<${TAG_SETTINGS.Reply}>   \n  `,
+          finishReason: FINISH_REASON_LENGTH,
+        },
+        {
+          type: CLIENT_ENTRY_STREAM,
+          chunkSize: 3,
+          text: `<${TAG_SETTINGS.Thoughts}>Check.</${TAG_SETTINGS.Thoughts}>\n<${TAG_SETTINGS.Next}>Collette`,
+          finishReason: FINISH_REASON_LENGTH,
+        },
+        {
+          type: CLIENT_ENTRY_STREAM,
+          chunkSize: 3,
+          text: `<${TAG_SETTINGS.Thoughts}>Check.</${TAG_SETTINGS.Thoughts}><${TAG_SETTINGS.Reply}></${TAG_SETTINGS.Reply}><${TAG_SETTINGS.Reply}>Cut off`,
+          finishReason: FINISH_REASON_LENGTH,
+        },
+      ], { store });
+
+      const baseCall = {
+        campaign,
+        character: lize,
+        card: lize.card,
+        playerName: frost.name,
+        direction: {
+          reacting: frost.slug,
+          length: Director.Settings.Length.Short,
+          beatGoal: 'Answer.',
+        },
+        model: TEST_MODEL,
+        replyReserve: TEST_RESERVE,
+        client,
+      };
+
+      const streamedChunks = [];
+      const normalResult = await CharacterBrain.reply({
+        ...baseCall,
+        onDelta: (deltaChunk) => {
+          streamedChunks.push(deltaChunk);
+        },
+      });
+      assert.equal(streamedChunks.join(''), 'Only real reply.');
+      assert.equal(normalResult.reply, 'Only real reply.');
+      assert.equal(normalResult.next, null);
+      assert.equal(normalResult.truncated, true);
+
+      const untaggedChunks = [];
+      const untaggedResult = await CharacterBrain.reply({
+        ...baseCall,
+        onDelta: (deltaChunk) => {
+          untaggedChunks.push(deltaChunk);
+        },
+      });
+      assert.deepEqual(untaggedChunks, []);
+      assert.equal(untaggedResult.thoughts, 'Quiet check.');
+      assert.equal(untaggedResult.reply, 'She pours another cup.');
+      assert.equal(untaggedResult.next, null);
+
+      const truncatedChunks = [];
+      const truncatedResult = await CharacterBrain.reply({
+        ...baseCall,
+        onDelta: (deltaChunk) => {
+          truncatedChunks.push(deltaChunk);
+        },
+      });
+      assert.equal(truncatedChunks.join(''), 'Cut off mid-sen');
+      assert.equal(truncatedResult.reply, 'Cut off mid-sen');
+      assert.equal(truncatedResult.reply.includes(`<${TAG_SETTINGS.Reply}>`), false);
+      assert.equal(truncatedResult.thoughts, 'Running short.');
+      assert.equal(truncatedResult.truncated, true);
+
+      const thoughtsOnlyResult = await CharacterBrain.reply(baseCall);
+      assert.equal(thoughtsOnlyResult.reply, '');
+      assert.equal(thoughtsOnlyResult.thoughts, 'Thinking only.');
+
+      const truncatedThoughtsResult = await CharacterBrain.reply(baseCall);
+      assert.equal(truncatedThoughtsResult.reply, '');
+      assert.equal(truncatedThoughtsResult.next, null);
+      assert.equal(truncatedThoughtsResult.truncated, true);
+
+      const emptyReplyTagResult = await CharacterBrain.reply(baseCall);
+      assert.equal(emptyReplyTagResult.reply, '');
+      assert.equal(emptyReplyTagResult.thoughts, 'Empty reply tag.');
+
+      const unclosedReplyThoughtsDeltas = [];
+      const unclosedReplyThoughtsResult = await CharacterBrain.reply({
+        ...baseCall,
+        onDelta: (deltaChunk) => {
+          unclosedReplyThoughtsDeltas.push(deltaChunk);
+        },
+      });
+      assert.equal(unclosedReplyThoughtsDeltas.join('').includes('SECRET_LEAK'), false);
+      assert.equal(unclosedReplyThoughtsDeltas.join('').trim(), '"Hello."');
+      assert.equal(unclosedReplyThoughtsResult.reply, '"Hello."');
+      assert.equal(unclosedReplyThoughtsResult.thoughts, 'SECRET_LEAK');
+
+      const unclosedReplyNextDeltas = [];
+      const unclosedReplyNextResult = await CharacterBrain.reply({
+        ...baseCall,
+        onDelta: (deltaChunk) => {
+          unclosedReplyNextDeltas.push(deltaChunk);
+        },
+      });
+      assert.equal(unclosedReplyNextDeltas.join('').includes('Collette'), false);
+      assert.equal(unclosedReplyNextDeltas.join('').trim(), '"Hello."');
+      assert.equal(unclosedReplyNextResult.reply, '"Hello."');
+      assert.equal(unclosedReplyNextResult.next, 'Collette');
+
+      const nestedThoughtsDeltas = [];
+      const nestedThoughtsResult = await CharacterBrain.reply({
+        ...baseCall,
+        onDelta: (deltaChunk) => {
+          nestedThoughtsDeltas.push(deltaChunk);
+        },
+      });
+      assert.equal(nestedThoughtsDeltas.join('').includes('SECRET_NESTED'), false);
+      assert.equal(nestedThoughtsResult.reply, '"Hello."');
+      assert.equal(nestedThoughtsResult.thoughts, 'SECRET_NESTED');
+
+      const truncatedBareReplyResult = await CharacterBrain.reply(baseCall);
+      assert.equal(truncatedBareReplyResult.reply, '');
+      assert.equal(truncatedBareReplyResult.thoughts, 'Check.');
+
+      const truncatedWhitespaceReplyResult = await CharacterBrain.reply(baseCall);
+      assert.equal(truncatedWhitespaceReplyResult.reply, '');
+
+      const truncatedUnclosedNextResult = await CharacterBrain.reply(baseCall);
+      assert.equal(truncatedUnclosedNextResult.reply, '');
+      assert.equal(truncatedUnclosedNextResult.thoughts, 'Check.');
+
+      const emptyFirstThenTruncatedSecondDeltas = [];
+      const emptyFirstThenTruncatedSecondResult = await CharacterBrain.reply({
+        ...baseCall,
+        onDelta: (deltaChunk) => {
+          emptyFirstThenTruncatedSecondDeltas.push(deltaChunk);
+        },
+      });
+      assert.equal(emptyFirstThenTruncatedSecondDeltas.join(''), 'Cut off');
+      assert.equal(emptyFirstThenTruncatedSecondResult.reply, 'Cut off');
+      assert.equal(emptyFirstThenTruncatedSecondResult.thoughts, 'Check.');
+
+      const nonStreamingFakeClient = {
+        /**
+         * @returns {Promise<{text: string, truncated: boolean, spendId: null}>}
+         */
+        async stream() {
+          return {
+            text: `<${TAG_SETTINGS.Reply}>Fallback truncated without delta`,
+            truncated: true,
+            spendId: null,
+          };
+        },
+      };
+      const nonStreamingResult = await CharacterBrain.reply({
+        ...baseCall,
+        client: nonStreamingFakeClient,
+      });
+      assert.equal(nonStreamingResult.reply, 'Fallback truncated without delta');
+      assert.equal(nonStreamingResult.truncated, true);
+
+      const partialCardClient = {
+        /**
+         * @param {{messages: Array<{content: string}>}} requestOptions
+         * @returns {Promise<{text: string, truncated: boolean, spendId: null}>}
+         * @throws {Error}
+         */
+        async stream(requestOptions) {
+          const systemText = requestOptions.messages[0].content;
+          assert.equal(systemText.includes('Habits: Taps ring'), true);
+          assert.equal(systemText.includes('Traits:'), false);
+          assert.equal(systemText.includes('Behaviour:'), false);
+          assert.equal(systemText.includes('Likes: Teasing'), true);
+          assert.equal(systemText.includes('Sexuality:'), false);
+          assert.equal(systemText.includes(' | '), false);
+          return {
+            text: `<${TAG_SETTINGS.Next}>Collette</${TAG_SETTINGS.Next}><${TAG_SETTINGS.Reply}>Reordered.</${TAG_SETTINGS.Reply}><${TAG_SETTINGS.Thoughts}>Private.</${TAG_SETTINGS.Thoughts}>`,
+            truncated: false,
+            spendId: null,
+          };
+        },
+      };
+      const partialResult = await CharacterBrain.reply({
+        ...baseCall,
+        card: { habits: 'Taps ring', sexualityLikes: 'Teasing' },
+        client: partialCardClient,
+      });
+      assert.equal(partialResult.reply, 'Reordered.');
+      assert.equal(partialResult.thoughts, 'Private.');
+      assert.equal(partialResult.next, 'Collette');
+    } finally {
+      store.close();
+    }
+  });
+
+  it('strips nested next and self-closing next tags inside reply while preserving captured next', async () => {
+    const fixture = createWorldFixture();
+    const { store, campaign, frost, lize } = fixture;
+    try {
+      const helloDialogue = '"Hello."';
+      const nextTargetName = 'Collette';
+      const continuationText = 'More.';
+      const selfClosingNextTag = `<${TAG_SETTINGS.Next}/>`;
+      const beatGoalText = 'Answer.';
+      const { client } = createScriptedClient([
+        {
+          type: CLIENT_ENTRY_STREAM,
+          chunkSize: 3,
+          text: `<${TAG_SETTINGS.Reply}>${helloDialogue} <${TAG_SETTINGS.Next}>${nextTargetName}</${TAG_SETTINGS.Next}></${TAG_SETTINGS.Reply}>`,
+        },
+        {
+          type: CLIENT_ENTRY_STREAM,
+          chunkSize: 3,
+          text: `<${TAG_SETTINGS.Reply}>${helloDialogue} ${selfClosingNextTag} ${continuationText}</${TAG_SETTINGS.Reply}>`,
+        },
+      ], { store });
+
+      const baseCall = {
+        campaign,
+        character: lize,
+        card: lize.card,
+        playerName: frost.name,
+        direction: {
+          reacting: frost.slug,
+          length: Director.Settings.Length.Short,
+          beatGoal: beatGoalText,
+        },
+        model: TEST_MODEL,
+        replyReserve: TEST_RESERVE,
+        client,
+      };
+
+      const nestedNextDeltas = [];
+      const nestedNextResult = await CharacterBrain.reply({
+        ...baseCall,
+        onDelta: (deltaChunk) => {
+          nestedNextDeltas.push(deltaChunk);
+        },
+      });
+      assert.equal(nestedNextDeltas.join('').includes(`<${TAG_SETTINGS.Next}>`), false);
+      assert.equal(nestedNextDeltas.join('').includes(nextTargetName), false);
+      assert.equal(nestedNextResult.reply, helloDialogue);
+      assert.equal(nestedNextResult.next, nextTargetName);
+
+      const selfClosingNextDeltas = [];
+      const selfClosingNextResult = await CharacterBrain.reply({
+        ...baseCall,
+        onDelta: (deltaChunk) => {
+          selfClosingNextDeltas.push(deltaChunk);
+        },
+      });
+      assert.equal(selfClosingNextDeltas.join('').includes(selfClosingNextTag), false);
+      assert.equal(selfClosingNextResult.reply, `${helloDialogue}  ${continuationText}`);
+      assert.equal(selfClosingNextResult.next, null);
+    } finally {
+      store.close();
+    }
+  });
+
+  it('aborts before calling client.stream and validates all parameters strictly', async () => {
+    let streamCalled = false;
+    const fakeClient = {
+      /**
+       * @returns {Promise<{text: string, truncated: boolean, spendId: null}>}
+       */
+      async stream() {
+        streamCalled = true;
+        return { text: '', truncated: false, spendId: null };
+      },
+    };
+    const abortController = new AbortController();
+    abortController.abort();
+
+    const validOptions = {
+      campaign: { id: 'camp-1' },
+      character: { name: 'Lize' },
+      card: CharacterCard.empty(),
+      direction: {
+        reacting: Director.Settings.ReactingPlayer,
+        length: Director.Settings.Length.Medium,
+        beatGoal: 'Respond.',
+      },
+      model: TEST_MODEL,
+      replyReserve: TEST_RESERVE,
+      client: fakeClient,
+    };
+
+    await assert.rejects(
+      () => CharacterBrain.reply({ ...validOptions, signal: abortController.signal }),
+      (caughtError) => caughtError.name === CharacterBrain.Settings.AbortName,
+    );
+    assert.equal(streamCalled, false);
+
+    await assert.rejects(() => CharacterBrain.reply(null), TypeError);
+    await assert.rejects(() => CharacterBrain.reply({ ...validOptions, campaign: null }), TypeError);
+    await assert.rejects(() => CharacterBrain.reply({ ...validOptions, campaign: { id: '  ' } }), RangeError);
+    await assert.rejects(() => CharacterBrain.reply({ ...validOptions, campaign: { id: 'camp-1', premise: 5 } }), TypeError);
+    await assert.rejects(() => CharacterBrain.reply({ ...validOptions, character: null }), TypeError);
+    await assert.rejects(() => CharacterBrain.reply({ ...validOptions, character: { name: '' } }), RangeError);
+    await assert.rejects(() => CharacterBrain.reply({ ...validOptions, card: { hair: 5 } }), TypeError);
+    await assert.rejects(() => CharacterBrain.reply({ ...validOptions, playerName: 5 }), TypeError);
+    await assert.rejects(() => CharacterBrain.reply({ ...validOptions, storyState: 5 }), TypeError);
+    await assert.rejects(() => CharacterBrain.reply({ ...validOptions, direction: [] }), TypeError);
+    await assert.rejects(
+      () => CharacterBrain.reply({
+        ...validOptions,
+        direction: { reacting: '', length: Director.Settings.Length.Medium, beatGoal: '' },
+      }),
+      RangeError,
+    );
+    await assert.rejects(() => CharacterBrain.reply({ ...validOptions, model: '' }), RangeError);
+    await assert.rejects(() => CharacterBrain.reply({ ...validOptions, replyReserve: 0 }), RangeError);
+    await assert.rejects(() => CharacterBrain.reply({ ...validOptions, replyReserve: 1.5 }), RangeError);
+    await assert.rejects(() => CharacterBrain.reply({ ...validOptions, client: {} }), TypeError);
+    await assert.rejects(() => CharacterBrain.reply({ ...validOptions, signal: {} }), TypeError);
+    await assert.rejects(() => CharacterBrain.reply({ ...validOptions, onDelta: 'nope' }), TypeError);
+  });
+});
+
+describe('Narrator', () => {
+  const TEST_MODEL = 'openai/gpt-4.1';
+  const TEST_RESERVE = 3000;
+  const CLIENT_ENTRY_STREAM = 'stream';
+  const FINISH_REASON_LENGTH = 'length';
+  const CATEGORY_ROLE = 'role';
+  const CATEGORY_CONDITION = 'condition';
+  const TAG_SETTINGS = Narrator.Settings.Tag;
+
+  it('streams narration deltas, excludes hidden StorySlice facts, and places style above direction', async () => {
+    const fixture = createWorldFixture();
+    const { store, campaign, frost, lize } = fixture;
+    try {
+      const log = ScribeLogCore.create();
+      let state = ScribeReplay.run(log, []);
+      for (const participant of [frost, lize]) {
+        ScribeLogCore.syncCharacterSubject(log, state, {
+          subjectId: participant.scribeSubjectId,
+          name: participant.name,
+          aliases: participant.aliases,
+        });
+        state = ScribeReplay.run(log, []);
+      }
+      ScribeLogCore.rule(log, state, {
+        type: ScribeLogCore.Ruling.AddFact,
+        subject: lize.scribeSubjectId,
+        category: CATEGORY_ROLE,
+        target: null,
+        text: 'quartermaster',
+        hidden: false,
+        cite: null,
+        position: 0,
+      });
+      state = ScribeReplay.run(log, []);
+      ScribeLogCore.rule(log, state, {
+        type: ScribeLogCore.Ruling.AddFact,
+        subject: lize.scribeSubjectId,
+        category: CATEGORY_CONDITION,
+        target: null,
+        text: 'SECRET_DAGGER_HIDDEN',
+        hidden: true,
+        cite: null,
+        position: 0,
+      });
+      state = ScribeReplay.run(log, []);
+
+      const budget = RequestBudget.create({ contextLength: null, replyReserve: TEST_RESERVE, charsPerToken: 3 });
+      const narratorSlice = StorySlice.build({
+        state,
+        viewer: { omniscient: true, subjectId: null },
+        scene: {
+          location: 'Oak Bedroom',
+          day: 1,
+          timeLabel: 'Evening',
+          sceneType: SceneType.Private,
+          situation: 'Rain hits the roof.',
+        },
+        presentSubjectIds: [frost.scribeSubjectId, lize.scribeSubjectId],
+        budget,
+      });
+
+      const recordedSpends = [];
+      const spyStore = {
+        /**
+         * @param {object} spendDto
+         * @returns {object}
+         * @throws {Error}
+         */
+        recordSpend(spendDto) {
+          recordedSpends.push(spendDto);
+          return store.recordSpend(spendDto);
+        },
+      };
+
+      const { client, calls } = createScriptedClient([
+        {
+          type: CLIENT_ENTRY_STREAM,
+          chunkSize: 4,
+          text: `<${TAG_SETTINGS.Narration}>Rain ticks against the glass while a guard shifts outside.</${TAG_SETTINGS.Narration}>`,
+          finishReason: FINISH_REASON_LENGTH,
+        },
+      ], { store: spyStore });
+
+      const streamedDeltas = [];
+      const result = await Narrator.narrate({
+        campaign,
+        storyState: narratorSlice.text,
+        history: 'Frost: Good evening.',
+        thisTurn: 'Narrator: Wind pushes open the latch.',
+        styleText: 'Keep the pace tense and sensory.',
+        direction: 'Describe the weather and walk-on guard.',
+        model: TEST_MODEL,
+        replyReserve: TEST_RESERVE,
+        client,
+        onDelta: (deltaChunk) => {
+          streamedDeltas.push(deltaChunk);
+        },
+      });
+
+      assert.equal(Object.isFrozen(result), true);
+      assert.equal(result.narration, 'Rain ticks against the glass while a guard shifts outside.');
+      assert.equal(streamedDeltas.join(''), 'Rain ticks against the glass while a guard shifts outside.');
+      assert.equal(result.truncated, true);
+      assert.equal(typeof result.spendId, 'string');
+
+      assert.equal(calls.length, 1);
+      assert.equal(calls[0].payload.max_tokens, TEST_RESERVE);
+      assert.equal(recordedSpends.length, 1);
+      assert.equal(recordedSpends[0].stage, SpendStage.Composer);
+      assert.equal(recordedSpends[0].campaignId, campaign.id);
+
+      const systemContent = calls[0].payload.messages[0].content;
+      const userContent = calls[0].payload.messages[1].content;
+      assert.equal(systemContent.includes(`<${TAG_SETTINGS.Campaign}>`), true);
+      assert.equal(systemContent.includes(`<${TAG_SETTINGS.Rules}>`), true);
+      assert.equal(systemContent.includes('Narrator:'), true);
+
+      assert.equal(userContent.includes('quartermaster'), true);
+      assert.equal(userContent.includes('SECRET_DAGGER_HIDDEN'), false);
+      assert.equal(userContent.split(`<${TAG_SETTINGS.StoryState}>`).length, 2);
+      assert.equal(userContent.includes('Narrator: Wind pushes open the latch.'), true);
+
+      const thisTurnPos = userContent.indexOf(`<${TAG_SETTINGS.ThisTurn}>`);
+      const stylePos = userContent.indexOf(`<${TAG_SETTINGS.Style}>`);
+      const directionPos = userContent.indexOf(`<${TAG_SETTINGS.Direction}>`);
+      assert.ok(thisTurnPos > 0 && stylePos > thisTurnPos && directionPos > stylePos);
+      assert.equal(
+        userContent.slice(userContent.indexOf(`</${TAG_SETTINGS.Style}>`) + `</${TAG_SETTINGS.Style}>`.length, directionPos),
+        Narrator.Settings.SectionSeparator,
+      );
+    } finally {
+      store.close();
+    }
+  });
+
+  it('handles untagged narration, truncated narration, omitted style/campaign, abort, and bad args', async () => {
+    const fixture = createWorldFixture();
+    const { store } = fixture;
+    try {
+      const plainCampaign = store.createCampaign({
+        title: 'Plain Campaign',
+        premise: '',
+        styleNotes: '',
+        sceneState: {
+          sceneNumber: 1,
+          day: 1,
+          timeLabel: 'Dawn',
+          location: 'Yard',
+          sceneType: SceneType.Public,
+          presentIds: [],
+          remoteIds: [],
+          offscreenNotes: {},
+          activeWalkOns: [],
+        },
+      });
+      const { client, calls } = createScriptedClient([
+        {
+          type: CLIENT_ENTRY_STREAM,
+          chunkSize: 5,
+          text: 'Lantern light pools over wet cobbles.',
+        },
+        {
+          type: CLIENT_ENTRY_STREAM,
+          chunkSize: 5,
+          text: `<${TAG_SETTINGS.Narration}>Mist creeps under the sill`,
+          finishReason: FINISH_REASON_LENGTH,
+        },
+        {
+          type: CLIENT_ENTRY_STREAM,
+          chunkSize: 4,
+          text: `<${TAG_SETTINGS.Narration}></${TAG_SETTINGS.Narration}><${TAG_SETTINGS.Narration}>Mist rolls in`,
+          finishReason: FINISH_REASON_LENGTH,
+        },
+      ], { store });
+
+      const untaggedChunks = [];
+      const untaggedResult = await Narrator.narrate({
+        campaign: plainCampaign,
+        styleText: '',
+        direction: 'Open the scene.',
+        model: TEST_MODEL,
+        replyReserve: TEST_RESERVE,
+        client,
+        onDelta: (deltaChunk) => {
+          untaggedChunks.push(deltaChunk);
+        },
+      });
+      assert.deepEqual(untaggedChunks, []);
+      assert.equal(untaggedResult.narration, 'Lantern light pools over wet cobbles.');
+      assert.equal(calls[0].payload.messages[0].content.includes(`<${TAG_SETTINGS.Campaign}>`), false);
+      assert.equal(calls[0].payload.messages[1].content.includes(`<${TAG_SETTINGS.Style}>`), false);
+
+      const truncatedChunks = [];
+      const truncatedResult = await Narrator.narrate({
+        campaign: plainCampaign,
+        direction: 'Open the scene.',
+        model: TEST_MODEL,
+        replyReserve: TEST_RESERVE,
+        client,
+        onDelta: (deltaChunk) => {
+          truncatedChunks.push(deltaChunk);
+        },
+      });
+      assert.equal(truncatedChunks.join(''), 'Mist creeps under the sill');
+      assert.equal(truncatedResult.narration, 'Mist creeps under the sill');
+      assert.equal(truncatedResult.narration.includes(`<${TAG_SETTINGS.Narration}>`), false);
+      assert.equal(truncatedResult.truncated, true);
+
+      const emptyFirstNarrationDeltas = [];
+      const emptyFirstNarrationResult = await Narrator.narrate({
+        campaign: plainCampaign,
+        direction: 'Open the scene.',
+        model: TEST_MODEL,
+        replyReserve: TEST_RESERVE,
+        client,
+        onDelta: (deltaChunk) => {
+          emptyFirstNarrationDeltas.push(deltaChunk);
+        },
+      });
+      assert.equal(emptyFirstNarrationDeltas.join(''), 'Mist rolls in');
+      assert.equal(emptyFirstNarrationResult.narration, 'Mist rolls in');
+      assert.equal(emptyFirstNarrationResult.truncated, true);
+
+      const nonStreamingNarratorClient = {
+        /**
+         * @returns {Promise<{text: string, truncated: boolean, spendId: null}>}
+         */
+        async stream() {
+          return {
+            text: `<${TAG_SETTINGS.Narration}>Fallback narration cut off`,
+            truncated: true,
+            spendId: null,
+          };
+        },
+      };
+      const fallbackNarratorResult = await Narrator.narrate({
+        campaign: plainCampaign,
+        model: TEST_MODEL,
+        replyReserve: TEST_RESERVE,
+        client: nonStreamingNarratorClient,
+      });
+      assert.equal(fallbackNarratorResult.narration, 'Fallback narration cut off');
+
+      const emptyTagNarratorClient = {
+        /**
+         * @returns {Promise<{text: string, truncated: boolean, spendId: null}>}
+         */
+        async stream() {
+          return {
+            text: `<${TAG_SETTINGS.Narration}></${TAG_SETTINGS.Narration}>`,
+            truncated: false,
+            spendId: null,
+          };
+        },
+      };
+      const emptyTagNarratorResult = await Narrator.narrate({
+        campaign: plainCampaign,
+        model: TEST_MODEL,
+        replyReserve: TEST_RESERVE,
+        client: emptyTagNarratorClient,
+      });
+      assert.equal(emptyTagNarratorResult.narration, '');
+
+      let abortCalled = false;
+      const fakeClient = {
+        /**
+         * @returns {Promise<{text: string, truncated: boolean, spendId: null}>}
+         */
+        async stream() {
+          abortCalled = true;
+          return { text: '', truncated: false, spendId: null };
+        },
+      };
+      const abortController = new AbortController();
+      abortController.abort();
+      await assert.rejects(
+        () => Narrator.narrate({
+          campaign: { id: 'camp-plain' },
+          model: TEST_MODEL,
+          replyReserve: TEST_RESERVE,
+          client: fakeClient,
+          signal: abortController.signal,
+        }),
+        (caughtError) => caughtError.name === Narrator.Settings.AbortName,
+      );
+      assert.equal(abortCalled, false);
+
+      await assert.rejects(() => Narrator.narrate(null), TypeError);
+      await assert.rejects(() => Narrator.narrate({ campaign: null, model: TEST_MODEL, replyReserve: TEST_RESERVE, client: fakeClient }), TypeError);
+      await assert.rejects(() => Narrator.narrate({ campaign: { id: '' }, model: TEST_MODEL, replyReserve: TEST_RESERVE, client: fakeClient }), RangeError);
+      await assert.rejects(() => Narrator.narrate({ campaign: { id: 'c1' }, styleText: 9, model: TEST_MODEL, replyReserve: TEST_RESERVE, client: fakeClient }), TypeError);
+      await assert.rejects(() => Narrator.narrate({ campaign: { id: 'c1' }, model: '', replyReserve: TEST_RESERVE, client: fakeClient }), RangeError);
+      await assert.rejects(() => Narrator.narrate({ campaign: { id: 'c1' }, model: TEST_MODEL, replyReserve: 0, client: fakeClient }), RangeError);
+      await assert.rejects(() => Narrator.narrate({ campaign: { id: 'c1' }, model: TEST_MODEL, replyReserve: TEST_RESERVE, client: {} }), TypeError);
+      await assert.rejects(() => Narrator.narrate({ campaign: { id: 'c1' }, model: TEST_MODEL, replyReserve: TEST_RESERVE, client: fakeClient, onDelta: 'bad' }), TypeError);
+    } finally {
+      store.close();
+    }
   });
 });

@@ -148,6 +148,7 @@ export class WorldsServer {
       const scribeService = new ScribeService({
         store: activeStore,
         client: activeClient,
+        modelCatalog: activeModelCatalog,
       });
       const modelAvailability = new ModelAvailabilityService({
         modelCatalog: activeModelCatalog,
@@ -158,6 +159,7 @@ export class WorldsServer {
         store: activeStore,
         client: activeClient,
         scribeService,
+        modelCatalog: activeModelCatalog,
       });
       const museService = new MuseService({
         store: activeStore,

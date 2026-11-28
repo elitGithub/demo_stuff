@@ -1,3 +1,4 @@
+import { RequestBudget } from '../engine/RequestBudget.mjs';
 import { CharacterCard } from '../store/CharacterCard.mjs';
 import { SceneType } from '../store/enums/SceneType.mjs';
 import { SpendStage } from '../store/enums/SpendStage.mjs';
@@ -13,15 +14,31 @@ import { ScribeReplay } from './ScribeReplay.mjs';
 import { ScribeText } from './ScribeText.mjs';
 
 export class ScribeService {
+  static Settings = Object.freeze({
+    MaxBatchTurns: 20,
+    AbortName: 'AbortError',
+    AbortMessage: 'Scribe update aborted.',
+    ReadResultStatus: 'read',
+    RepairLines: Object.freeze([
+      'Your previous response did not follow the required pipe-delimited block format.',
+      'Re-output strictly using === SUBJECTS, === NAMES, === FACTS, === CHANGES, === TOLD, === NIGHTS, === THREADS blocks.',
+      'If there are no entries for a section, omit it or write (none). Do not include prose explanations.',
+    ]),
+    PreviousOutputHeading: 'Previous invalid output:',
+    OriginalInputHeading: 'Original input:',
+    TrailingLeadSurrogatePattern: /[\uD800-\uDBFF]$/u,
+  });
+
   #store;
   #client;
   #modelProvider;
+  #modelCatalog;
 
   /**
-   * @param {{store: object, client?: object | null, modelProvider?: ((context: {stage: string, campaignId: string}) => string | Promise<string>) | null}} options
+   * @param {{store: object, client?: object | null, modelProvider?: ((context: {stage: string, campaignId: string}) => string | Promise<string>) | null, modelCatalog?: {contextLength: (modelId: string) => number | null} | null}} options
    * @throws {TypeError}
    */
-  constructor({ store, client = null, modelProvider = null } = {}) {
+  constructor({ store, client = null, modelProvider = null, modelCatalog = null } = {}) {
     if (store === null || typeof store !== 'object') {
       throw new TypeError('store must be a valid StoryStore instance.');
     }
@@ -31,9 +48,13 @@ export class ScribeService {
     if (modelProvider !== null && typeof modelProvider !== 'function') {
       throw new TypeError('modelProvider must be null or a function.');
     }
+    if (modelCatalog !== null && (typeof modelCatalog !== 'object' || typeof modelCatalog.contextLength !== 'function')) {
+      throw new TypeError('modelCatalog must be null or an object with contextLength().');
+    }
     this.#store = store;
     this.#client = client;
     this.#modelProvider = modelProvider;
+    this.#modelCatalog = modelCatalog;
   }
 
   /**
@@ -735,95 +756,186 @@ export class ScribeService {
     }
 
     const model = await this.#resolveModel(campaignId);
-    const unreadIds = new Set(unreadTurns.map((turn) => turn.id));
-    const unreadMessages = messages.filter((message) => unreadIds.has(message.id));
-    const sceneTurnMap = new Map();
-    for (const turn of [...missingSceneTurns, ...unreadTurns]) {
-      sceneTurnMap.set(turn.id, turn);
-    }
-    const sceneTurns = [...sceneTurnMap.values()].sort((left, right) => left.seq - right.seq);
-    const sceneOps = this.synthesizeSceneOperations(sceneTurns, charactersById);
+    const replyReserve = this.#store.getSettings().replyReserve;
+    const settings = ScribeService.Settings;
+    const analyzerSettings = ScribeAnalyzer.Settings;
 
-    const userPrompt = ScribeAnalyzer.input(state, player, unreadMessages, profile);
-    const completion = await this.#client.complete({
-      model,
-      messages: [
-        { role: 'system', content: ScribeAnalyzer.StoryPrompt },
-        { role: 'user', content: userPrompt },
-      ],
-      stage: SpendStage.Scribe,
-      campaignId,
-      signal,
-    });
+    /**
+     * @param {string} batchPrompt
+     * @param {string} previousOutput
+     * @returns {string}
+     */
+    const buildRepairPrompt = (batchPrompt, previousOutput) => [
+      ...settings.RepairLines,
+      analyzerSettings.Nothing,
+      settings.PreviousOutputHeading,
+      previousOutput,
+      analyzerSettings.Nothing,
+      settings.OriginalInputHeading,
+      batchPrompt,
+    ].join(analyzerSettings.Newline);
+    let remainingMissingSceneTurns = [...missingSceneTurns];
+    let unpersistedSubjectUpdates = pendingSubjectUpdates;
+    let cursor = 0;
+    let batchCeiling = ScribeService.Settings.MaxBatchTurns;
+    let lastTurnSeq = 0;
+    let totalScenesAdded = 0;
+    let totalOperationsAdded = 0;
+    const allRefused = [];
 
-    let parsed = ScribeAnswer.parseStory(completion.text);
-    if (completion.text.trim().length > 0 && parsed.rows.size === 0 && parsed.refused.length > 0) {
-      const repairPrompt = [
-        'Your previous response did not follow the required pipe-delimited block format.',
-        'Re-output strictly using === SUBJECTS, === NAMES, === FACTS, === CHANGES, === TOLD, === NIGHTS, === THREADS blocks.',
-        'If there are no entries for a section, omit it or write (none). Do not include prose explanations.',
-        '',
-        'Previous invalid output:',
-        completion.text,
-        '',
-        'Original input:',
-        userPrompt,
-      ].join('\n');
+    while (cursor < unreadTurns.length) {
+      if (signal !== null && signal.aborted) {
+        const abortError = new Error(ScribeService.Settings.AbortMessage);
+        abortError.name = ScribeService.Settings.AbortName;
+        throw abortError;
+      }
 
-      const repairedCompletion = await this.#client.complete({
+      const charsPerToken = RequestBudget.charsPerToken({ store: this.#store, model });
+      const contextLength = this.#modelCatalog === null ? null : this.#modelCatalog.contextLength(model);
+      const budget = RequestBudget.create({ contextLength, replyReserve, charsPerToken });
+      const systemTokens = budget.estimate(ScribeAnalyzer.StoryPrompt);
+
+      const batchEnd = Math.min(unreadTurns.length, cursor + batchCeiling);
+      let batchTurns = [];
+      let batchMessages = [];
+      let batchPrompt = '';
+      for (let batchEdge = cursor + 1; batchEdge <= batchEnd; batchEdge += 1) {
+        const candidateTurns = unreadTurns.slice(cursor, batchEdge);
+        const candidateIds = new Set(candidateTurns.map((turn) => turn.id));
+        const candidateMessages = messages.filter((message) => candidateIds.has(message.id));
+        const candidatePrompt = ScribeAnalyzer.input(state, player, candidateMessages, profile);
+        const candidateRepairPrompt = buildRepairPrompt(candidatePrompt, analyzerSettings.Nothing);
+        if (!budget.fits(systemTokens, candidateRepairPrompt)) {
+          if (candidateTurns.length === 1) {
+            const usedTokens = systemTokens + budget.estimate(candidateRepairPrompt);
+            throw new RangeError(
+              `Scribe prompt for turn #${candidateTurns[0].seq} exceeds ${model} context limit (${usedTokens} estimated tokens > ${budget.limitTokens} input budget). Switch to a larger-context Scribe model or lower reply length cap.`,
+            );
+          }
+          break;
+        }
+        batchTurns = candidateTurns;
+        batchMessages = candidateMessages;
+        batchPrompt = candidatePrompt;
+      }
+
+      const completion = await this.#client.complete({
         model,
         messages: [
           { role: 'system', content: ScribeAnalyzer.StoryPrompt },
-          { role: 'user', content: repairPrompt },
+          { role: 'user', content: batchPrompt },
         ],
+        maxTokens: replyReserve,
         stage: SpendStage.Scribe,
         campaignId,
         signal,
       });
-      parsed = ScribeAnswer.parseStory(repairedCompletion.text);
-      if (repairedCompletion.text.trim().length > 0 && parsed.rows.size === 0 && parsed.refused.length > 0) {
-        throw new Error('Scribe returned unparseable output after repair retry.');
+
+      let answer = completion;
+      let parsed = null;
+      if (completion.truncated !== true) {
+        parsed = ScribeAnswer.parseStory(completion.text);
+        if (completion.text.trim().length > 0 && parsed.rows.size === 0 && parsed.refused.length > 0) {
+          let repairOutput = completion.text;
+          if (!budget.fits(systemTokens, buildRepairPrompt(batchPrompt, repairOutput))) {
+            const baseTokens = budget.estimate(buildRepairPrompt(batchPrompt, analyzerSettings.Nothing));
+            const maxReplyChars = Math.max(0, Math.floor((budget.limitTokens - systemTokens - baseTokens) * charsPerToken));
+            repairOutput = completion.text.slice(0, maxReplyChars);
+            while (!budget.fits(systemTokens, buildRepairPrompt(batchPrompt, repairOutput))) {
+              if (repairOutput.length === 0) {
+                throw new Error('Scribe returned unparseable output and repair prompt exceeds model context budget.');
+              }
+              repairOutput = repairOutput.slice(0, repairOutput.length - 1);
+            }
+            repairOutput = repairOutput.replace(settings.TrailingLeadSurrogatePattern, analyzerSettings.Nothing);
+          }
+
+          answer = await this.#client.complete({
+            model,
+            messages: [
+              { role: 'system', content: ScribeAnalyzer.StoryPrompt },
+              { role: 'user', content: buildRepairPrompt(batchPrompt, repairOutput) },
+            ],
+            maxTokens: replyReserve,
+            stage: SpendStage.Scribe,
+            campaignId,
+            signal,
+          });
+          if (answer.truncated !== true) {
+            parsed = ScribeAnswer.parseStory(answer.text);
+            if (answer.text.trim().length > 0 && parsed.rows.size === 0 && parsed.refused.length > 0) {
+              throw new Error('Scribe returned unparseable output after repair retry.');
+            }
+          }
+        }
       }
+
+      if (answer.truncated === true) {
+        if (batchTurns.length === 1) {
+          throw new RangeError(
+            `Scribe answer for turn #${batchTurns[0].seq} was cut off at the reply length cap (${replyReserve} tokens) on ${model}. Raise the reply length cap.`,
+          );
+        }
+        batchCeiling = Math.floor(batchTurns.length / 2);
+        continue;
+      }
+
+      const nextBatchIndex = cursor + batchTurns.length;
+      const nextBatchFirstSeq = nextBatchIndex < unreadTurns.length ? unreadTurns[nextBatchIndex].seq : null;
+      const batchMissingScenes = remainingMissingSceneTurns.filter((turn) => {
+        return nextBatchFirstSeq === null || turn.seq < nextBatchFirstSeq;
+      });
+      remainingMissingSceneTurns = remainingMissingSceneTurns.filter((turn) => !batchMissingScenes.includes(turn));
+      const sceneTurnMap = new Map();
+      for (const turn of [...batchMissingScenes, ...batchTurns]) {
+        sceneTurnMap.set(turn.id, turn);
+      }
+      const sceneTurns = [...sceneTurnMap.values()].sort((left, right) => left.seq - right.seq);
+      const sceneOps = this.synthesizeSceneOperations(sceneTurns, charactersById);
+
+      const llmOps = [...parsed.rows.values()].filter((operation) => operation.type !== ScribeAnswer.Type.Scene);
+      const appendResult = ScribeLogCore.append(log, state, [...sceneOps, ...llmOps], {
+        messages: batchMessages,
+        origin: ScribeLogCore.Origin.Story,
+        sources: sourcesByPosition,
+        results: new Map(
+          batchMessages.map((message) => [message.position, ScribeService.Settings.ReadResultStatus]),
+        ),
+      });
+
+      state = ScribeReplay.run(log, order, null, fingerprints, null, null, messages);
+      const readSeqs = turns
+        .filter((turn) => Object.hasOwn(log.read, turn.id))
+        .map((turn) => turn.seq);
+      lastTurnSeq = readSeqs.length > 0 ? Math.max(...readSeqs) : 0;
+
+      this.#persistBookAndCharacters(
+        campaignId,
+        {
+          bookJson: JSON.stringify(log),
+          lastTurnSeq,
+          dirty: nextBatchIndex < unreadTurns.length,
+        },
+        unpersistedSubjectUpdates,
+      );
+      unpersistedSubjectUpdates = [];
+
+      totalScenesAdded += appendResult.entry.operations.filter(
+        (operation) => operation.type === ScribeAnswer.Type.Scene,
+      ).length;
+      totalOperationsAdded += appendResult.entry.operations.length;
+      allRefused.push(...appendResult.refused);
+      cursor = nextBatchIndex;
     }
-
-    const llmOps = [...parsed.rows.values()].filter((operation) => operation.type !== ScribeAnswer.Type.Scene);
-    const combinedOps = [...sceneOps, ...llmOps];
-    const resultsByPosition = new Map(unreadMessages.map((message) => [message.position, 'read']));
-
-    const appendResult = ScribeLogCore.append(log, state, combinedOps, {
-      messages: unreadMessages,
-      origin: ScribeLogCore.Origin.Story,
-      sources: sourcesByPosition,
-      results: resultsByPosition,
-    });
-
-    const nextState = ScribeReplay.run(log, order, null, fingerprints, null, null, messages);
-    const readSeqs = turns
-      .filter((turn) => Object.hasOwn(log.read, turn.id))
-      .map((turn) => turn.seq);
-    const lastTurnSeq = readSeqs.length > 0 ? Math.max(...readSeqs) : 0;
-    const scenesAdded = appendResult.entry.operations.filter(
-      (operation) => operation.type === ScribeAnswer.Type.Scene,
-    ).length;
-
-    this.#persistBookAndCharacters(
-      campaignId,
-      {
-        bookJson: JSON.stringify(log),
-        lastTurnSeq,
-        dirty: false,
-      },
-      pendingSubjectUpdates,
-    );
 
     return Object.freeze({
       log,
-      state: nextState,
+      state,
       lastTurnSeq,
       updated: true,
-      scenesAdded,
-      operationsAdded: appendResult.entry.operations.length,
-      refused: appendResult.refused,
+      scenesAdded: totalScenesAdded,
+      operationsAdded: totalOperationsAdded,
+      refused: Object.freeze(allRefused),
     });
   }
 

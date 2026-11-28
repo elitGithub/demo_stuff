@@ -270,7 +270,7 @@ export const CharacterBrain = Object.freeze({
       'Never write first-person narration of your own actions.',
       boundaryLine,
       'Know only what is in your story state and what you witnessed.',
-      'Answer in exactly this shape and nothing else:',
+      `Start directly with <${settings.Tag.Thoughts}>. Write nothing before <${settings.Tag.Thoughts}> or after </${settings.Tag.Next}>. Answer in exactly this shape:`,
       `<${settings.Tag.Thoughts}>what ${characterName} privately thinks and feels now</${settings.Tag.Thoughts}>`,
       `<${settings.Tag.Reply}>the visible reply</${settings.Tag.Reply}>`,
       nextShapeLine,

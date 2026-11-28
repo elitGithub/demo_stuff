@@ -42,6 +42,9 @@ const CLIENT_STREAM_ENTRY = 'stream';
 const CLIENT_ERROR_ENTRY = 'error';
 const CLIENT_FINISH_LENGTH = 'length';
 const DEFAULT_REPLY_RESERVE = 3000;
+const PEDANT_FIXTURE_MODEL = 'openai/gpt-4.1-mini';
+const PEDANT_TINY_INPUT_TOKENS = 50;
+const PEDANT_OVERFLOW_PATTERN = /Pedant mandatory prompt exceeds/;
 
 /**
  * @param {Record<string, number | null>} [contextLengths]
@@ -1366,6 +1369,70 @@ describe('TurnEngine end-to-end regressions and adversarial invariants', () => {
       () => engine.runTurn({ campaignId: campaign.id, text: 'Narrator:   ', mode: TurnMode.Normal }),
       RangeError,
     );
+  });
+
+  it('commits the turn and warns on [pedant] when the Pedant mandatory prompt overflows the context, without calling the model', async () => {
+    const fixture = createWorldFixture({ scribeInterval: 10, pedantEnabled: true });
+    const { store, campaign, frost, lize } = fixture;
+    try {
+      const log = ScribeLogCore.create();
+      let state = ScribeReplay.run(log, []);
+      for (const participant of [frost, lize]) {
+        ScribeLogCore.syncCharacterSubject(log, state, {
+          subjectId: participant.scribeSubjectId,
+          name: participant.name,
+          aliases: participant.aliases,
+        });
+        state = ScribeReplay.run(log, []);
+      }
+      store.saveScribeBook(campaign.id, { bookJson: JSON.stringify(log), lastTurnSeq: 0, dirty: false });
+
+      const { client, calls } = createScriptedClient([
+        {
+          text: buildTaggedDirectorPlan({
+            presentSlugs: ['frost', 'lize'],
+            pacing: Director.Settings.Pacing.NarratorOnly,
+            narratorDirective: 'Pedant overflow check.',
+          }),
+        },
+        buildNarratorStreamEntry('Committed despite the Pedant overflow.'),
+      ], { store });
+
+      const scribeService = new ScribeService({ store, client });
+      const pedantService = new PedantService({
+        store,
+        client,
+        scribeService,
+        modelCatalog: createContextCatalog({ [PEDANT_FIXTURE_MODEL]: DEFAULT_REPLY_RESERVE + PEDANT_TINY_INPUT_TOKENS }),
+      });
+      const engine = new TurnEngine({
+        store,
+        client,
+        scribeService,
+        pedantService,
+        modelCatalog: createContextCatalog(),
+      });
+
+      const events = [];
+      const committedTurn = await engine.runTurn({
+        campaignId: campaign.id,
+        text: 'Narrator: *The wind rattles the shutter.*',
+        emit: (eventItem) => {
+          events.push(eventItem);
+        },
+      });
+
+      assert.equal(store.listTurns(campaign.id).total, 2);
+      assert.equal(committedTurn.userTurn.mode, TurnMode.Narrator);
+      assert.equal(events.some((item) => item.event === TurnEngine.Settings.Event.Committed), true);
+      assert.equal(calls.length, 2);
+      const warnings = events.filter((item) => item.event === TurnEngine.Settings.Event.Warning);
+      assert.equal(warnings.length, 1);
+      assert.equal(warnings[0].data.stage, SpendStage.Pedant);
+      assert.match(warnings[0].data.message, PEDANT_OVERFLOW_PATTERN);
+    } finally {
+      store.close();
+    }
   });
 
   it('covers Director Encounter override, parent abort cleanup during brain stream, multi-beat editTurn, and deleteLastTurnPair Scribe withdrawal', async () => {
@@ -5075,6 +5142,8 @@ describe('CharacterBrain', () => {
   const CLIENT_ENTRY_STREAM = 'stream';
   const FINISH_REASON_LENGTH = 'length';
   const TAG_SETTINGS = CharacterBrain.Settings.Tag;
+  const SHAPE_RULE_LINE = 'Start directly with <thoughts>. Write nothing before <thoughts> or after </next>. Answer in exactly this shape:';
+  const OLD_SHAPE_RULE_LINE = 'Answer in exactly this shape and nothing else:';
 
   it('builds full card prompt with unknown-value mapping for card fields while keeping speechExamples verbatim', async () => {
     const fixture = createWorldFixture();
@@ -5213,6 +5282,8 @@ describe('CharacterBrain', () => {
         systemContent.includes('Sexuality: Bisexual | Kinks: Teasing control | Likes: Whispered praise | Dislikes: Rushing'),
         true,
       );
+      assert.equal(systemContent.includes(`\n${SHAPE_RULE_LINE}\n`), true);
+      assert.equal(systemContent.includes(OLD_SHAPE_RULE_LINE), false);
       assert.equal(systemContent.includes(`<${TAG_SETTINGS.VoiceExamples}>\n${CharacterCard.Unknown}\n"Count the coin before the gate closes."\n</${TAG_SETTINGS.VoiceExamples}>`), true);
       assert.equal(systemContent.includes(`Never speak, act or decide for ${frost.name} or for anyone else.`), true);
       assert.equal(systemContent.includes(`<${TAG_SETTINGS.Next}>the name of who should answer you, or ${frost.name}, or ${CharacterBrain.Settings.NextNone}</${TAG_SETTINGS.Next}>`), true);

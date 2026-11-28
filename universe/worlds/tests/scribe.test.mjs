@@ -2,6 +2,7 @@ import assert from 'node:assert/strict';
 import fs from 'node:fs';
 import path from 'node:path';
 import { describe, it } from 'node:test';
+import { RequestBudget } from '../src/engine/RequestBudget.mjs';
 import { OpenRouterClient } from '../src/openrouter/OpenRouterClient.mjs';
 import { CardFiling } from '../src/scribe/CardFiling.mjs';
 import { MuseService } from '../src/scribe/MuseService.mjs';
@@ -27,8 +28,10 @@ import { TurnMode } from '../src/store/enums/TurnMode.mjs';
 import { TurnRole } from '../src/store/enums/TurnRole.mjs';
 import { SqliteStore } from '../src/store/SqliteStore.mjs';
 
+const FinishReason = Object.freeze({ Stop: 'stop', Length: 'length' });
+
 /**
- * @param {Array<string | ((payload: object) => string)>} responses
+ * @param {Array<string | {text: string, finishReason: string} | ((payload: object) => string | {text: string, finishReason: string})>} responses
  * @param {{store?: SqliteStore | null}} [options]
  * @returns {{client: OpenRouterClient, calls: Array<object>}}
  * @throws {TypeError | RangeError}
@@ -62,10 +65,12 @@ function createFakeClient(responses, { store = null } = {}) {
       if (responder === undefined) {
         throw new Error('Unexpected OpenRouter call with empty scripted queue.');
       }
-      const text = typeof responder === 'function' ? responder(parsedBody) : responder;
+      const reply = typeof responder === 'function' ? responder(parsedBody) : responder;
+      const text = typeof reply === 'string' ? reply : reply.text;
+      const finishReason = typeof reply === 'string' ? FinishReason.Stop : reply.finishReason;
       return new Response(
         JSON.stringify({
-          choices: [{ message: { content: text }, finish_reason: 'stop' }],
+          choices: [{ message: { content: text }, finish_reason: finishReason }],
           usage: { prompt_tokens: 120, completion_tokens: 45, cost: 0.0012 },
         }),
         { status: 200, headers: { 'content-type': 'application/json' } },
@@ -6392,6 +6397,1789 @@ describe('Player-stated changes and model-written fixed values', () => {
     } finally {
       store.close();
     }
+  });
+});
+
+const BudgetSuite = Object.freeze({
+  Model: 'openai/gpt-4.1-mini',
+  ReplyReserve: 2222,
+  BelowReserveContext: 1000,
+  StartingCharsPerToken: 3,
+  LoweredCharsPerToken: 2,
+  LoweredPromptChars: 2000,
+  LoweredPromptTokens: 1000,
+  TightFactor: 0.6,
+  BodyChars: 1400,
+  SmallBodyChars: 100,
+  HugeBodyChars: 25000,
+  PedantBodyChars: 2000,
+  MarkerPrefix: 'TURNMARK-',
+  MarkerWidth: 3,
+  Filler: 'x',
+  FactsHeading: '=== FACTS',
+  FactLabel: 'Rowan',
+  FactCategory: 'belonging',
+  OutsideCite: 999,
+  WiredServices: Object.freeze(['ScribeService', 'PedantService']),
+  NarratorShapeLine: 'Answer in exactly this shape and nothing else:',
+  KeptTag: 'KEPTROW',
+  DiscardedTag: 'DISCARDEDROW',
+  Garbage: 'I cannot process this without more context.',
+  InvalidHead: 'INVALIDHEAD',
+  InvalidTail: 'INVALIDTAIL',
+  OversizedInvalidChars: 20000,
+  RepairSlackChars: 3000,
+  RepairBaseMarginChars: 100,
+  PedantNone: '=== CONTRADICTIONS\n(none)',
+  PedantTightTurns: 5.5,
+  FallbackChars: 20000,
+  TinyInputTokens: 50,
+  HugeContext: 1000000,
+  InvalidCatalogs: Object.freeze([{}, { contextLength: 'wide' }, 'catalog', 42, []]),
+  Heading: Object.freeze({
+    ...PedantService.Settings.Heading,
+    Reply: PedantService.Settings.Heading.ReplyOpen,
+  }),
+  Empty: '',
+  Newline: '\n',
+  BlankLine: '\n\n',
+  Space: ' ',
+  FieldSeparator: ' | ',
+  MarkerPad: '0',
+  AstralChar: '\u{10400}',
+  RoundingBodyChars: 114,
+  RoundingRoomTokens: 10,
+  RoundingRatioChars: 4600,
+  RoundingRatioTokens: 1000,
+  SurrogateRoomTokens: 10,
+  RepairRoomChars: 60,
+  TurnChars: 700,
+  ExpectedScribeSettings: Object.freeze({
+    MaxBatchTurns: 20,
+    AbortName: 'AbortError',
+    AbortMessage: 'Scribe update aborted.',
+    ReadResultStatus: 'read',
+    RepairLines: Object.freeze([
+      'Your previous response did not follow the required pipe-delimited block format.',
+      'Re-output strictly using === SUBJECTS, === NAMES, === FACTS, === CHANGES, === TOLD, === NIGHTS, === THREADS blocks.',
+      'If there are no entries for a section, omit it or write (none). Do not include prose explanations.',
+    ]),
+    PreviousOutputHeading: 'Previous invalid output:',
+    OriginalInputHeading: 'Original input:',
+    TrailingLeadSurrogatePattern: /[\uD800-\uDBFF]$/u,
+  }),
+  ExpectedPedantSettings: Object.freeze({
+    MaxRecentMessages: 10,
+    FallbackRecentChars: 20000,
+    FallbackSinceChars: 20000,
+    Heading: Object.freeze({
+      Player: 'PLAYER CHARACTER:',
+      Roster: 'SUBJECT ROSTER:',
+      Ledger: 'LEDGER:',
+      Unknown: 'DOES NOT KNOW:',
+      Recent: 'RECENT MESSAGES:',
+      Since: 'SINCE THE BOOK WAS LAST READ:',
+      ReplyOpen: 'REPLY (#',
+      ReplyClose: '):',
+    }),
+  }),
+  LargeTurnCount: 300,
+  LargeReadTurns: 10,
+  KnownContext: 32768,
+  TurnsWithTwelveRead: 14,
+  ReadTwelve: 12,
+  MaxRecent: 10,
+  FewChars: 9,
+});
+const MarkerPattern = new RegExp(`${BudgetSuite.MarkerPrefix}(\\d+)`, 'gu');
+
+/**
+ * @param {string} text
+ * @returns {number[]}
+ */
+function markersIn(text) {
+  const found = new Set();
+  for (const match of text.matchAll(MarkerPattern)) {
+    found.add(Number.parseInt(match[1], 10));
+  }
+  return [...found].sort((left, right) => left - right);
+}
+
+/**
+ * @param {number} first
+ * @param {number} last
+ * @returns {number[]}
+ */
+function numberRange(first, last) {
+  return Array.from({ length: last - first + 1 }, (unusedSlot, index) => first + index);
+}
+
+/**
+ * @param {number} chars
+ * @returns {(turnNumber: number) => number}
+ */
+function uniformBody(chars) {
+  return () => chars;
+}
+
+/**
+ * @param {{store: SqliteStore, campaign: object, rowan: object, mara: object, firstNumber: number, count: number, bodyCharsFor: (turnNumber: number) => number, blankTurnNumbers?: ReadonlyArray<number>}} options
+ * @returns {Array<{id: string, seq: number, role: string}>}
+ * @throws {Error}
+ */
+function importTurnRun({ store, campaign, rowan, mara, firstNumber, count, bodyCharsFor, blankTurnNumbers = [] }) {
+  const witnessIds = [rowan.id, mara.id];
+  const rows = Array.from({ length: count }, (unusedSlot, index) => {
+    const turnNumber = firstNumber + index;
+    const isPlayerTurn = turnNumber % 2 === 1;
+    const marker = `${BudgetSuite.MarkerPrefix}${String(turnNumber).padStart(BudgetSuite.MarkerWidth, BudgetSuite.MarkerPad)} `;
+    const body = blankTurnNumbers.includes(turnNumber)
+      ? BudgetSuite.Empty
+      : marker + BudgetSuite.Filler.repeat(Math.max(0, bodyCharsFor(turnNumber) - marker.length));
+    return {
+      role: isPlayerTurn ? TurnRole.User : TurnRole.Assistant,
+      mode: TurnMode.Normal,
+      rawText: body,
+      sceneNumber: 1,
+      witnessIds,
+      sceneStateBefore: campaign.sceneState,
+      sceneStateAfter: campaign.sceneState,
+      beats: [
+        {
+          speakerType: isPlayerTurn ? SpeakerType.Player : SpeakerType.Character,
+          characterId: isPlayerTurn ? rowan.id : mara.id,
+          speakerName: isPlayerTurn ? rowan.name : mara.name,
+          text: body,
+          witnessIds,
+        },
+      ],
+    };
+  });
+  return store.importTurns(campaign.id, rows);
+}
+
+/**
+ * @param {{store: SqliteStore, campaign: object, characters: ReadonlyArray<object>}} options
+ * @returns {void}
+ * @throws {Error}
+ */
+function seedSubjects({ store, campaign, characters }) {
+  const log = ScribeLogCore.create();
+  let state = ScribeReplay.run(log, []);
+  for (const character of characters) {
+    ScribeLogCore.syncCharacterSubject(log, state, {
+      subjectId: character.scribeSubjectId,
+      name: character.name,
+      aliases: character.aliases,
+      kind: ScribeCategory.SubjectKinds.Character,
+    });
+    state = ScribeReplay.run(log, []);
+  }
+  store.saveScribeBook(campaign.id, { bookJson: JSON.stringify(log), lastTurnSeq: 0, dirty: false });
+}
+
+/**
+ * @param {{store: SqliteStore, campaignId: string, seqs: ReadonlyArray<number>}} options
+ * @returns {void}
+ * @throws {Error}
+ */
+function markRead({ store, campaignId, seqs }) {
+  const loader = new ScribeService({ store });
+  const loaded = loader.loadState(campaignId);
+  const readMessages = loaded.messages.filter((message) => seqs.includes(message.position));
+  ScribeLogCore.append(loaded.log, loaded.state, [], {
+    messages: readMessages,
+    origin: ScribeLogCore.Origin.Story,
+    sources: new Map(loaded.messages.map((message) => [message.position, message])),
+    results: new Map(readMessages.map((message) => [message.position, ScribeService.Settings.ReadResultStatus])),
+  });
+  store.saveScribeBook(campaignId, {
+    bookJson: JSON.stringify(loaded.log),
+    lastTurnSeq: Math.max(...seqs),
+    dirty: false,
+  });
+}
+
+/**
+ * @param {{replyReserve?: number}} [options]
+ * @returns {{store: SqliteStore, campaign: object, rowan: object, mara: object, vesper: object, corin: object}}
+ * @throws {Error}
+ */
+function createBudgetCampaign({ replyReserve = BudgetSuite.ReplyReserve } = {}) {
+  const seeded = createSeededCampaign({ scribeModel: BudgetSuite.Model });
+  seeded.store.updateSettings({ replyReserve });
+  return seeded;
+}
+
+/**
+ * @param {string} tag
+ * @returns {(payload: {messages: Array<{content: string}>}) => string}
+ */
+function factReplyFor(tag) {
+  /**
+   * @param {{messages: Array<{content: string}>}} payload
+   * @returns {string}
+   * @throws {TypeError}
+   */
+  return (payload) => {
+    const [firstNumber] = markersIn(payload.messages[1].content);
+    return [
+      BudgetSuite.FactsHeading,
+      [BudgetSuite.FactLabel, BudgetSuite.FactCategory, `${tag} ${firstNumber}`, `#${firstNumber}`].join(BudgetSuite.FieldSeparator),
+    ].join(BudgetSuite.Newline);
+  };
+}
+
+/**
+ * @param {string} tag
+ * @returns {(payload: {messages: Array<{content: string}>}) => {text: string, finishReason: string}}
+ */
+function cutOffReplyFor(tag) {
+  /**
+   * @param {{messages: Array<{content: string}>}} payload
+   * @returns {{text: string, finishReason: string}}
+   * @throws {TypeError}
+   */
+  return (payload) => ({ text: factReplyFor(tag)(payload), finishReason: FinishReason.Length });
+}
+
+/**
+ * @param {{tag: string, observed: Array<{dirty: boolean, lastTurnSeq: number}>, store: SqliteStore, campaignId: string}} options
+ * @returns {(payload: {messages: Array<{content: string}>}) => string}
+ * @throws {Error}
+ */
+function recordingReplyFor({ tag, observed, store, campaignId }) {
+  const loader = new ScribeService({ store });
+  /**
+   * @param {{messages: Array<{content: string}>}} payload
+   * @returns {string}
+   * @throws {Error}
+   */
+  return (payload) => {
+    const { dirty, lastTurnSeq } = loader.loadState(campaignId);
+    observed.push({ dirty, lastTurnSeq });
+    return factReplyFor(tag)(payload);
+  };
+}
+
+/**
+ * @param {number} count
+ * @param {() => string | object | ((payload: object) => string | object)} factory
+ * @returns {Array<string | object | ((payload: object) => string | object)>}
+ * @throws {Error}
+ */
+function repeatReply(count, factory) {
+  return Array.from({ length: count }, () => factory());
+}
+
+/**
+ * @param {number | null} contextLength
+ * @returns {{contextLength: (modelId: string) => number | null, requested: string[]}}
+ */
+function createCatalogStub(contextLength) {
+  const requested = [];
+  return {
+    requested,
+    /**
+     * @param {string} modelId
+     * @returns {number | null}
+     */
+    contextLength(modelId) {
+      requested.push(modelId);
+      return contextLength;
+    },
+  };
+}
+
+/**
+ * @param {{replyReserve: number, chars: number, charsPerToken: number}} options
+ * @returns {number}
+ */
+function contextLengthForChars({ replyReserve, chars, charsPerToken }) {
+  return replyReserve + Math.ceil(chars / charsPerToken);
+}
+
+/**
+ * @param {{call: {messages: Array<{content: string}>}, userText?: string, systemPrompt: string, contextLength: number | null, replyReserve: number, charsPerToken: number}} options
+ * @returns {boolean}
+ * @throws {RangeError | TypeError}
+ */
+function requestFits({ call, userText = call.messages[1].content, systemPrompt, contextLength, replyReserve, charsPerToken }) {
+  const budget = RequestBudget.create({ contextLength, replyReserve, charsPerToken });
+  return budget.fits(budget.estimate(systemPrompt), userText);
+}
+
+/**
+ * @param {string} batchPrompt
+ * @param {string} previousOutput
+ * @returns {string}
+ */
+function repairPromptFor(batchPrompt, previousOutput) {
+  const settings = ScribeService.Settings;
+  return [
+    ...settings.RepairLines,
+    BudgetSuite.Empty,
+    settings.PreviousOutputHeading,
+    previousOutput,
+    BudgetSuite.Empty,
+    settings.OriginalInputHeading,
+    batchPrompt,
+  ].join(BudgetSuite.Newline);
+}
+
+/**
+ * @param {{turnCount: number, bodyCharsFor: (turnNumber: number) => number}} options
+ * @returns {Promise<number>}
+ * @throws {Error}
+ */
+async function probeScribePromptChars({ turnCount, bodyCharsFor }) {
+  const { store, campaign, rowan, mara, vesper, corin } = createBudgetCampaign();
+  try {
+    seedSubjects({ store, campaign, characters: [rowan, mara, vesper, corin] });
+    importTurnRun({ store, campaign, rowan, mara, firstNumber: 1, count: turnCount, bodyCharsFor });
+    const { client, calls } = createFakeClient([factReplyFor(BudgetSuite.KeptTag)]);
+    await new ScribeService({ store, client }).updateMemory({ campaignId: campaign.id });
+    return calls[0].messages[1].content.length;
+  } finally {
+    store.close();
+  }
+}
+
+/**
+ * @param {{store: SqliteStore, campaignId: string}} options
+ * @returns {number}
+ * @throws {Error}
+ */
+function readCount({ store, campaignId }) {
+  return Object.keys(new ScribeService({ store }).loadState(campaignId).log.read).length;
+}
+
+describe('Budget-aware Scribe batching', () => {
+  it('rejects an invalid modelCatalog in both services and accepts null or an object with contextLength()', () => {
+    const store = new SqliteStore(':memory:');
+    try {
+      const scribeService = new ScribeService({ store });
+      for (const invalidCatalog of BudgetSuite.InvalidCatalogs) {
+        assert.throws(() => new ScribeService({ store, modelCatalog: invalidCatalog }), TypeError);
+        assert.throws(() => new PedantService({ store, scribeService, modelCatalog: invalidCatalog }), TypeError);
+      }
+      const validCatalog = createCatalogStub(null);
+      assert.doesNotThrow(() => new ScribeService({ store, modelCatalog: null }));
+      assert.doesNotThrow(() => new ScribeService({ store, modelCatalog: validCatalog }));
+      assert.doesNotThrow(() => new PedantService({ store, scribeService, modelCatalog: null }));
+      assert.doesNotThrow(() => new PedantService({ store, scribeService, modelCatalog: validCatalog }));
+    } finally {
+      store.close();
+    }
+  });
+
+  it('splits 45 unread turns into batches of 20, 20 and 5, sends the reply cap, persists between batches and totals the result', async () => {
+    const { store, campaign, rowan, mara, vesper, corin } = createBudgetCampaign();
+    try {
+      seedSubjects({ store, campaign, characters: [rowan, mara, vesper, corin] });
+      importTurnRun({ store, campaign, rowan, mara, firstNumber: 1, count: 45, bodyCharsFor: uniformBody(BudgetSuite.SmallBodyChars) });
+      const initial = new ScribeService({ store }).loadState(campaign.id);
+      const expectedFirstPrompt = ScribeAnalyzer.input(initial.state, initial.player, initial.messages.slice(0, 20), null);
+
+      const observed = [];
+      const { client, calls } = createFakeClient(repeatReply(3, () => {
+        return recordingReplyFor({ tag: BudgetSuite.KeptTag, observed, store, campaignId: campaign.id });
+      }));
+      const result = await new ScribeService({ store, client }).updateMemory({ campaignId: campaign.id });
+
+      assert.equal(calls.length, 3);
+      assert.deepEqual(calls.map((call) => markersIn(call.messages[1].content)), [
+        numberRange(1, 20),
+        numberRange(21, 40),
+        numberRange(41, 45),
+      ]);
+      for (const call of calls) {
+        assert.equal(call.max_tokens, BudgetSuite.ReplyReserve);
+        assert.equal(call.messages[0].content, ScribeAnalyzer.StoryPrompt);
+      }
+      assert.equal(calls[0].messages[1].content, expectedFirstPrompt);
+      assert.deepEqual(observed, [
+        { dirty: false, lastTurnSeq: 0 },
+        { dirty: true, lastTurnSeq: 20 },
+        { dirty: true, lastTurnSeq: 40 },
+      ]);
+
+      const saved = new ScribeService({ store }).loadState(campaign.id);
+      assert.equal(saved.dirty, false);
+      assert.equal(saved.lastTurnSeq, 45);
+      assert.equal(Object.keys(saved.log.read).length, 45);
+      assert.equal(result.updated, true);
+      assert.equal(result.lastTurnSeq, 45);
+      assert.equal(result.state.facts.filter((fact) => fact.text.includes(BudgetSuite.KeptTag)).length, 3);
+      assert.equal(result.state.scenes.length, 3);
+      assert.equal(result.scenesAdded, 3);
+      assert.equal(result.operationsAdded, 6);
+      assert.equal(Object.isFrozen(result.refused), true);
+    } finally {
+      store.close();
+    }
+  });
+
+  it('aggregates refused operations over all batches into one frozen list', async () => {
+    const { store, campaign, rowan, mara, vesper, corin } = createBudgetCampaign();
+    try {
+      seedSubjects({ store, campaign, characters: [rowan, mara, vesper, corin] });
+      importTurnRun({ store, campaign, rowan, mara, firstNumber: 1, count: 25, bodyCharsFor: uniformBody(BudgetSuite.SmallBodyChars) });
+      const { client } = createFakeClient(repeatReply(2, () => {
+        /**
+         * @param {{messages: Array<{content: string}>}} payload
+         * @returns {string}
+         * @throws {TypeError}
+         */
+        return (payload) => {
+          const [firstNumber] = markersIn(payload.messages[1].content);
+          return [
+            BudgetSuite.FactsHeading,
+            [BudgetSuite.FactLabel, BudgetSuite.FactCategory, `${BudgetSuite.KeptTag} ${firstNumber}`, `#${BudgetSuite.OutsideCite}`].join(BudgetSuite.FieldSeparator),
+          ].join(BudgetSuite.Newline);
+        };
+      }));
+      const result = await new ScribeService({ store, client }).updateMemory({ campaignId: campaign.id });
+
+      assert.equal(result.refused.length, 2);
+      assert.equal(Object.isFrozen(result.refused), true);
+      assert.deepEqual(
+        result.refused.map((entry) => entry.operation.text),
+        [`${BudgetSuite.KeptTag} 1`, `${BudgetSuite.KeptTag} 21`],
+      );
+    } finally {
+      store.close();
+    }
+  });
+
+  it('limits batches only by MaxBatchTurns when the catalog has no context length, and asks the catalog for the Scribe model each batch', async () => {
+    const { store, campaign, rowan, mara, vesper, corin } = createBudgetCampaign();
+    try {
+      seedSubjects({ store, campaign, characters: [rowan, mara, vesper, corin] });
+      importTurnRun({ store, campaign, rowan, mara, firstNumber: 1, count: 25, bodyCharsFor: uniformBody(BudgetSuite.BodyChars) });
+      const catalog = createCatalogStub(null);
+      const { client, calls } = createFakeClient(repeatReply(2, () => factReplyFor(BudgetSuite.KeptTag)));
+      await new ScribeService({ store, client, modelCatalog: catalog }).updateMemory({ campaignId: campaign.id });
+
+      assert.deepEqual(calls.map((call) => markersIn(call.messages[1].content).length), [20, 5]);
+      assert.deepEqual(catalog.requested, [BudgetSuite.Model, BudgetSuite.Model]);
+    } finally {
+      store.close();
+    }
+  });
+
+  it('keeps the request text of a fully fitting update identical to the unbatched prompt', async () => {
+    const { store, campaign, rowan, mara, vesper, corin } = createBudgetCampaign();
+    try {
+      seedSubjects({ store, campaign, characters: [rowan, mara, vesper, corin] });
+      importTurnRun({ store, campaign, rowan, mara, firstNumber: 1, count: 4, bodyCharsFor: uniformBody(BudgetSuite.SmallBodyChars) });
+      const initial = new ScribeService({ store }).loadState(campaign.id);
+      const expectedPrompt = ScribeAnalyzer.input(initial.state, initial.player, initial.messages, null);
+      const { client, calls } = createFakeClient([factReplyFor(BudgetSuite.KeptTag)]);
+      await new ScribeService({ store, client, modelCatalog: createCatalogStub(BudgetSuite.HugeContext) }).updateMemory({
+        campaignId: campaign.id,
+      });
+
+      assert.equal(calls.length, 1);
+      assert.equal(calls[0].messages[0].content, ScribeAnalyzer.StoryPrompt);
+      assert.equal(calls[0].messages[1].content, expectedPrompt);
+    } finally {
+      store.close();
+    }
+  });
+
+  it('shrinks batches under a tight context and recomputes the budget when the measured characters per token drop between batches', async () => {
+    const { store, campaign, rowan, mara, vesper, corin } = createBudgetCampaign();
+    try {
+      const probeChars = await probeScribePromptChars({ turnCount: 20, bodyCharsFor: uniformBody(BudgetSuite.BodyChars) });
+      const contextLength = contextLengthForChars({
+        replyReserve: BudgetSuite.ReplyReserve,
+        chars: Math.floor(BudgetSuite.TightFactor * (ScribeAnalyzer.StoryPrompt.length + probeChars)),
+        charsPerToken: BudgetSuite.StartingCharsPerToken,
+      });
+      seedSubjects({ store, campaign, characters: [rowan, mara, vesper, corin] });
+      importTurnRun({ store, campaign, rowan, mara, firstNumber: 1, count: 30, bodyCharsFor: uniformBody(BudgetSuite.BodyChars) });
+
+      /**
+       * @returns {void}
+       * @throws {Error}
+       */
+      const lowerRatio = () => {
+        store.recordSpend({
+          campaignId: campaign.id,
+          stage: SpendStage.Scribe,
+          model: BudgetSuite.Model,
+          promptChars: BudgetSuite.LoweredPromptChars,
+          promptTokens: BudgetSuite.LoweredPromptTokens,
+        });
+      };
+      const { client, calls } = createFakeClient(repeatReply(30, () => {
+        /**
+         * @param {{messages: Array<{content: string}>}} payload
+         * @returns {string}
+         * @throws {Error}
+         */
+        return (payload) => {
+          if (calls.length === 1) {
+            lowerRatio();
+          }
+          return factReplyFor(BudgetSuite.KeptTag)(payload);
+        };
+      }));
+      await new ScribeService({ store, client, modelCatalog: createCatalogStub(contextLength) }).updateMemory({
+        campaignId: campaign.id,
+      });
+
+      const sizes = calls.map((call) => markersIn(call.messages[1].content).length);
+      assert.equal(sizes.reduce((total, size) => total + size, 0), 30);
+      assert.equal(sizes[0] > 1 && sizes[0] < 20, true);
+      assert.equal(sizes[1] < sizes[0], true);
+      calls.forEach((call, index) => {
+        assert.equal(
+          requestFits({
+            call,
+            systemPrompt: ScribeAnalyzer.StoryPrompt,
+            contextLength,
+            replyReserve: BudgetSuite.ReplyReserve,
+            charsPerToken: index === 0 ? BudgetSuite.StartingCharsPerToken : BudgetSuite.LoweredCharsPerToken,
+          }),
+          true,
+        );
+        assert.equal(call.max_tokens, BudgetSuite.ReplyReserve);
+      });
+      assert.equal(readCount({ store, campaignId: campaign.id }), 30);
+    } finally {
+      store.close();
+    }
+  });
+
+  it('throws before any call when one turn cannot fit, including when the context length is not above the reply cap', async () => {
+    for (const contextLength of [BudgetSuite.ReplyReserve, BudgetSuite.BelowReserveContext]) {
+      const { store, campaign, rowan, mara, vesper, corin } = createBudgetCampaign();
+      try {
+        seedSubjects({ store, campaign, characters: [rowan, mara, vesper, corin] });
+        importTurnRun({ store, campaign, rowan, mara, firstNumber: 1, count: 2, bodyCharsFor: uniformBody(BudgetSuite.SmallBodyChars) });
+        const { client, calls } = createFakeClient([factReplyFor(BudgetSuite.KeptTag)]);
+        await assert.rejects(
+          new ScribeService({ store, client, modelCatalog: createCatalogStub(contextLength) }).updateMemory({
+            campaignId: campaign.id,
+          }),
+          (error) => {
+            assert.equal(error instanceof RangeError, true);
+            assert.match(error.message, /Scribe prompt for turn #1 exceeds/);
+            assert.match(error.message, /> 0 input budget/);
+            return true;
+          },
+        );
+        assert.equal(calls.length, 0);
+        assert.equal(readCount({ store, campaignId: campaign.id }), 0);
+      } finally {
+        store.close();
+      }
+    }
+  });
+
+  it('keeps an earlier batch saved when a later single turn cannot fit, and leaves that turn unread', async () => {
+    const { store, campaign, rowan, mara, vesper, corin } = createBudgetCampaign();
+    try {
+      const smallChars = await probeScribePromptChars({ turnCount: 1, bodyCharsFor: uniformBody(BudgetSuite.SmallBodyChars) });
+      const contextLength = contextLengthForChars({
+        replyReserve: BudgetSuite.ReplyReserve,
+        chars: ScribeAnalyzer.StoryPrompt.length
+          + repairPromptFor(BudgetSuite.Filler.repeat(smallChars), BudgetSuite.Empty).length
+          + BudgetSuite.RepairBaseMarginChars,
+        charsPerToken: BudgetSuite.StartingCharsPerToken,
+      });
+      seedSubjects({ store, campaign, characters: [rowan, mara, vesper, corin] });
+      importTurnRun({
+        store,
+        campaign,
+        rowan,
+        mara,
+        firstNumber: 1,
+        count: 2,
+        bodyCharsFor: (turnNumber) => (turnNumber === 1 ? BudgetSuite.SmallBodyChars : BudgetSuite.HugeBodyChars),
+      });
+      const { client, calls } = createFakeClient(repeatReply(2, () => factReplyFor(BudgetSuite.KeptTag)));
+      await assert.rejects(
+        new ScribeService({ store, client, modelCatalog: createCatalogStub(contextLength) }).updateMemory({
+          campaignId: campaign.id,
+        }),
+        /Scribe prompt for turn #2 exceeds/,
+      );
+
+      assert.equal(calls.length, 1);
+      const saved = new ScribeService({ store }).loadState(campaign.id);
+      assert.equal(saved.dirty, true);
+      assert.equal(saved.lastTurnSeq, 1);
+      assert.equal(Object.keys(saved.log.read).length, 1);
+    } finally {
+      store.close();
+    }
+  });
+
+  it('honours upToSeq in the middle of the unread turns and then continues with the rest', async () => {
+    const { store, campaign, rowan, mara, vesper, corin } = createBudgetCampaign();
+    try {
+      seedSubjects({ store, campaign, characters: [rowan, mara, vesper, corin] });
+      importTurnRun({ store, campaign, rowan, mara, firstNumber: 1, count: 45, bodyCharsFor: uniformBody(BudgetSuite.SmallBodyChars) });
+      const { client, calls } = createFakeClient(repeatReply(3, () => factReplyFor(BudgetSuite.KeptTag)));
+      const service = new ScribeService({ store, client });
+      const partial = await service.updateMemory({ campaignId: campaign.id, upToSeq: 30 });
+
+      assert.deepEqual(calls.map((call) => markersIn(call.messages[1].content)), [numberRange(1, 20), numberRange(21, 30)]);
+      assert.equal(partial.lastTurnSeq, 30);
+      assert.equal(new ScribeService({ store }).loadState(campaign.id).dirty, false);
+
+      await service.updateMemory({ campaignId: campaign.id });
+      assert.deepEqual(markersIn(calls[2].messages[1].content), numberRange(31, 45));
+      assert.equal(readCount({ store, campaignId: campaign.id }), 45);
+    } finally {
+      store.close();
+    }
+  });
+
+  it('batches unread turns that have gaps in seq and gives every turn exactly one scene without overlap', async () => {
+    const { store, campaign, rowan, mara, vesper, corin } = createBudgetCampaign();
+    try {
+      seedSubjects({ store, campaign, characters: [rowan, mara, vesper, corin] });
+      importTurnRun({ store, campaign, rowan, mara, firstNumber: 1, count: 30, bodyCharsFor: uniformBody(BudgetSuite.SmallBodyChars) });
+      markRead({ store, campaignId: campaign.id, seqs: [1, 2, 11, 12, 29, 30] });
+      const { client, calls } = createFakeClient(repeatReply(2, () => factReplyFor(BudgetSuite.KeptTag)));
+      const result = await new ScribeService({ store, client }).updateMemory({ campaignId: campaign.id });
+
+      assert.deepEqual(calls.map((call) => markersIn(call.messages[1].content)), [
+        [...numberRange(3, 10), ...numberRange(13, 24)],
+        numberRange(25, 28),
+      ]);
+      const sortedScenes = [...result.state.scenes].sort((left, right) => left.firstPosition - right.firstPosition);
+      assert.equal(sortedScenes.length, 2);
+      assert.equal(result.scenesAdded, 2);
+      for (let sceneIndex = 1; sceneIndex < sortedScenes.length; sceneIndex += 1) {
+        assert.equal(sortedScenes[sceneIndex].firstPosition > sortedScenes[sceneIndex - 1].lastPosition, true);
+      }
+      for (const seq of numberRange(1, 30)) {
+        assert.notEqual(ScribeKnowledge.sceneAt(result.state, seq), null);
+      }
+      assert.equal(readCount({ store, campaignId: campaign.id }), 30);
+    } finally {
+      store.close();
+    }
+  });
+
+  it('stops before the next call when the signal is aborted before the first batch, with nothing read', async () => {
+    const { store, campaign, rowan, mara, vesper, corin } = createBudgetCampaign();
+    try {
+      seedSubjects({ store, campaign, characters: [rowan, mara, vesper, corin] });
+      importTurnRun({ store, campaign, rowan, mara, firstNumber: 1, count: 4, bodyCharsFor: uniformBody(BudgetSuite.SmallBodyChars) });
+      const { client, calls } = createFakeClient([factReplyFor(BudgetSuite.KeptTag)]);
+      await assert.rejects(
+        new ScribeService({ store, client }).updateMemory({ campaignId: campaign.id, signal: { aborted: true } }),
+        (error) => {
+          assert.equal(error.name, ScribeService.Settings.AbortName);
+          assert.equal(error.message, ScribeService.Settings.AbortMessage);
+          return true;
+        },
+      );
+      assert.equal(calls.length, 0);
+      assert.equal(readCount({ store, campaignId: campaign.id }), 0);
+    } finally {
+      store.close();
+    }
+  });
+
+  it('stops between batches on abort, keeping the saved batch and not calling the model again', async () => {
+    const { store, campaign, rowan, mara, vesper, corin } = createBudgetCampaign();
+    try {
+      seedSubjects({ store, campaign, characters: [rowan, mara, vesper, corin] });
+      importTurnRun({ store, campaign, rowan, mara, firstNumber: 1, count: 25, bodyCharsFor: uniformBody(BudgetSuite.SmallBodyChars) });
+      const signal = { aborted: false };
+      const originalSave = store.saveScribeBook.bind(store);
+      /**
+       * @param {string} campaignId
+       * @param {{bookJson: string, lastTurnSeq: number, dirty: boolean}} payload
+       * @returns {unknown}
+       * @throws {Error}
+       */
+      store.saveScribeBook = (campaignId, payload) => {
+        const saved = originalSave(campaignId, payload);
+        signal.aborted = true;
+        return saved;
+      };
+      const { client, calls } = createFakeClient(repeatReply(2, () => factReplyFor(BudgetSuite.KeptTag)));
+      await assert.rejects(
+        new ScribeService({ store, client }).updateMemory({ campaignId: campaign.id, signal }),
+        (error) => {
+          assert.equal(error.name, ScribeService.Settings.AbortName);
+          return true;
+        },
+      );
+
+      assert.equal(calls.length, 1);
+      const saved = new ScribeService({ store }).loadState(campaign.id);
+      assert.equal(saved.dirty, true);
+      assert.equal(saved.lastTurnSeq, 20);
+      assert.equal(Object.keys(saved.log.read).length, 20);
+    } finally {
+      store.close();
+    }
+  });
+
+  it('surfaces an abort raised during a call and keeps the earlier batch', async () => {
+    const { store, campaign, rowan, mara, vesper, corin } = createBudgetCampaign();
+    try {
+      seedSubjects({ store, campaign, characters: [rowan, mara, vesper, corin] });
+      importTurnRun({ store, campaign, rowan, mara, firstNumber: 1, count: 45, bodyCharsFor: uniformBody(BudgetSuite.SmallBodyChars) });
+      const signal = { aborted: false };
+      const { client, calls } = createFakeClient([
+        factReplyFor(BudgetSuite.KeptTag),
+        /**
+         * @param {{messages: Array<{content: string}>}} payload
+         * @returns {string}
+         */
+        (payload) => {
+          signal.aborted = true;
+          return factReplyFor(BudgetSuite.KeptTag)(payload);
+        },
+        factReplyFor(BudgetSuite.KeptTag),
+      ]);
+      await assert.rejects(
+        new ScribeService({ store, client }).updateMemory({ campaignId: campaign.id, signal }),
+        (error) => {
+          assert.equal(error.name, ScribeService.Settings.AbortName);
+          return true;
+        },
+      );
+
+      assert.equal(calls.length, 2);
+      const saved = new ScribeService({ store }).loadState(campaign.id);
+      assert.equal(saved.dirty, true);
+      assert.equal(saved.lastTurnSeq, 20);
+    } finally {
+      store.close();
+    }
+  });
+
+  it('keeps batch 1 when batch 2 fails, leaves batch 2 unread, and a second run finishes with dirty false', async () => {
+    const { store, campaign, rowan, mara, vesper, corin } = createBudgetCampaign();
+    try {
+      seedSubjects({ store, campaign, characters: [rowan, mara, vesper, corin] });
+      importTurnRun({ store, campaign, rowan, mara, firstNumber: 1, count: 25, bodyCharsFor: uniformBody(BudgetSuite.SmallBodyChars) });
+      const { client: failingClient, calls: failingCalls } = createFakeClient([
+        factReplyFor(BudgetSuite.KeptTag),
+        BudgetSuite.Garbage,
+        BudgetSuite.Garbage,
+      ]);
+      await assert.rejects(
+        new ScribeService({ store, client: failingClient }).updateMemory({ campaignId: campaign.id }),
+        /repair retry/i,
+      );
+      assert.equal(failingCalls.length, 3);
+      const interrupted = new ScribeService({ store }).loadState(campaign.id);
+      assert.equal(interrupted.dirty, true);
+      assert.equal(interrupted.lastTurnSeq, 20);
+      assert.equal(Object.keys(interrupted.log.read).length, 20);
+
+      const { client: resumeClient, calls: resumeCalls } = createFakeClient([factReplyFor(BudgetSuite.KeptTag)]);
+      const resumed = await new ScribeService({ store, client: resumeClient }).updateMemory({ campaignId: campaign.id });
+      assert.deepEqual(markersIn(resumeCalls[0].messages[1].content), numberRange(21, 25));
+      assert.equal(resumed.lastTurnSeq, 25);
+      assert.equal(new ScribeService({ store }).loadState(campaign.id).dirty, false);
+      assert.equal(readCount({ store, campaignId: campaign.id }), 25);
+    } finally {
+      store.close();
+    }
+  });
+
+  it('adds the missing scenes of read turns before, inside and after the batches exactly once', async () => {
+    const { store, campaign, rowan, mara, vesper, corin } = createBudgetCampaign();
+    try {
+      seedSubjects({ store, campaign, characters: [rowan, mara, vesper, corin] });
+      importTurnRun({ store, campaign, rowan, mara, firstNumber: 1, count: 30, bodyCharsFor: uniformBody(BudgetSuite.SmallBodyChars) });
+      markRead({ store, campaignId: campaign.id, seqs: [1, 2, 11, 12, 29, 30] });
+      const { client } = createFakeClient(repeatReply(2, () => factReplyFor(BudgetSuite.KeptTag)));
+      const result = await new ScribeService({ store, client }).updateMemory({ campaignId: campaign.id });
+
+      const spans = result.state.scenes
+        .map((scene) => [scene.firstPosition, scene.lastPosition])
+        .sort((left, right) => left[0] - right[0]);
+      assert.deepEqual(spans, [[1, 24], [25, 30]]);
+    } finally {
+      store.close();
+    }
+  });
+});
+
+describe('Scribe repair retry under the context budget', () => {
+  it('sends the repair prompt text unchanged with the reply cap when everything fits', async () => {
+    const { store, campaign, rowan, mara, vesper, corin } = createBudgetCampaign();
+    try {
+      seedSubjects({ store, campaign, characters: [rowan, mara, vesper, corin] });
+      importTurnRun({ store, campaign, rowan, mara, firstNumber: 1, count: 1, bodyCharsFor: uniformBody(BudgetSuite.SmallBodyChars) });
+      const { client, calls } = createFakeClient([BudgetSuite.Garbage, factReplyFor(BudgetSuite.KeptTag)]);
+      await new ScribeService({ store, client }).updateMemory({ campaignId: campaign.id });
+
+      assert.equal(calls.length, 2);
+      assert.equal(calls[0].max_tokens, BudgetSuite.ReplyReserve);
+      assert.equal(calls[1].max_tokens, BudgetSuite.ReplyReserve);
+      const expectedRepair = [
+        ...BudgetSuite.ExpectedScribeSettings.RepairLines,
+        BudgetSuite.Empty,
+        BudgetSuite.ExpectedScribeSettings.PreviousOutputHeading,
+        BudgetSuite.Garbage,
+        BudgetSuite.Empty,
+        BudgetSuite.ExpectedScribeSettings.OriginalInputHeading,
+        calls[0].messages[1].content,
+      ].join(BudgetSuite.Newline);
+      assert.equal(calls[1].messages[1].content, expectedRepair);
+    } finally {
+      store.close();
+    }
+  });
+
+  it('trims an oversized invalid reply so the repair request fits, and still repairs the batch', async () => {
+    const { store, campaign, rowan, mara, vesper, corin } = createBudgetCampaign();
+    try {
+      const promptChars = await probeScribePromptChars({ turnCount: 1, bodyCharsFor: uniformBody(BudgetSuite.SmallBodyChars) });
+      const contextLength = contextLengthForChars({
+        replyReserve: BudgetSuite.ReplyReserve,
+        chars: ScribeAnalyzer.StoryPrompt.length + 2 * promptChars + BudgetSuite.RepairBaseMarginChars + BudgetSuite.RepairSlackChars,
+        charsPerToken: BudgetSuite.StartingCharsPerToken,
+      });
+      const oversizedReply = [
+        BudgetSuite.InvalidHead,
+        BudgetSuite.Filler.repeat(BudgetSuite.OversizedInvalidChars),
+        BudgetSuite.InvalidTail,
+      ].join(BudgetSuite.Space);
+      seedSubjects({ store, campaign, characters: [rowan, mara, vesper, corin] });
+      importTurnRun({ store, campaign, rowan, mara, firstNumber: 1, count: 1, bodyCharsFor: uniformBody(BudgetSuite.SmallBodyChars) });
+      const { client, calls } = createFakeClient([oversizedReply, factReplyFor(BudgetSuite.KeptTag)]);
+      await new ScribeService({ store, client, modelCatalog: createCatalogStub(contextLength) }).updateMemory({
+        campaignId: campaign.id,
+      });
+
+      assert.equal(calls.length, 2);
+      const repairContent = calls[1].messages[1].content;
+      assert.equal(repairContent.includes(BudgetSuite.InvalidHead), true);
+      assert.equal(repairContent.includes(BudgetSuite.InvalidTail), false);
+      assert.equal(repairContent.length < oversizedReply.length, true);
+      assert.equal(
+        requestFits({
+          call: calls[1],
+          systemPrompt: ScribeAnalyzer.StoryPrompt,
+          contextLength,
+          replyReserve: BudgetSuite.ReplyReserve,
+          charsPerToken: BudgetSuite.StartingCharsPerToken,
+        }),
+        true,
+      );
+      assert.equal(calls[1].max_tokens, BudgetSuite.ReplyReserve);
+      assert.equal(readCount({ store, campaignId: campaign.id }), 1);
+    } finally {
+      store.close();
+    }
+  });
+
+  it('repairs a batch that fills the budget to within a few tokens: the repair call is made, fits, carries the reply cap and every turn ends up read', async () => {
+    const { store, campaign, rowan, mara, vesper, corin } = createBudgetCampaign();
+    try {
+      const promptChars = await probeScribePromptChars({ turnCount: 1, bodyCharsFor: uniformBody(BudgetSuite.SmallBodyChars) });
+      const contextLength = contextLengthForChars({
+        replyReserve: BudgetSuite.ReplyReserve,
+        chars: ScribeAnalyzer.StoryPrompt.length
+          + repairPromptFor(BudgetSuite.Filler.repeat(promptChars), BudgetSuite.Empty).length
+          + BudgetSuite.FewChars,
+        charsPerToken: BudgetSuite.StartingCharsPerToken,
+      });
+      seedSubjects({ store, campaign, characters: [rowan, mara, vesper, corin] });
+      importTurnRun({ store, campaign, rowan, mara, firstNumber: 1, count: 1, bodyCharsFor: uniformBody(BudgetSuite.SmallBodyChars) });
+      const { client, calls } = createFakeClient([BudgetSuite.Garbage, factReplyFor(BudgetSuite.KeptTag)]);
+      await new ScribeService({ store, client, modelCatalog: createCatalogStub(contextLength) }).updateMemory({
+        campaignId: campaign.id,
+      });
+
+      assert.equal(calls.length, 2);
+      assert.equal(calls[1].max_tokens, BudgetSuite.ReplyReserve);
+      assert.equal(calls[1].messages[1].content.startsWith(ScribeService.Settings.RepairLines[0]), true);
+      assert.equal(
+        requestFits({
+          call: calls[1],
+          systemPrompt: ScribeAnalyzer.StoryPrompt,
+          contextLength,
+          replyReserve: BudgetSuite.ReplyReserve,
+          charsPerToken: BudgetSuite.StartingCharsPerToken,
+        }),
+        true,
+      );
+      assert.equal(readCount({ store, campaignId: campaign.id }), 1);
+    } finally {
+      store.close();
+    }
+  });
+});
+
+describe('Scribe answers cut off at the reply length cap', () => {
+  it('discards a cut-off answer for four turns, halves the batch size for the rest of the run and never raises it again', async () => {
+    const { store, campaign, rowan, mara, vesper, corin } = createBudgetCampaign();
+    try {
+      seedSubjects({ store, campaign, characters: [rowan, mara, vesper, corin] });
+      importTurnRun({ store, campaign, rowan, mara, firstNumber: 1, count: 4, bodyCharsFor: uniformBody(BudgetSuite.SmallBodyChars) });
+      const observed = [];
+      const { client, calls } = createFakeClient([
+        cutOffReplyFor(BudgetSuite.DiscardedTag),
+        recordingReplyFor({ tag: BudgetSuite.KeptTag, observed, store, campaignId: campaign.id }),
+        recordingReplyFor({ tag: BudgetSuite.KeptTag, observed, store, campaignId: campaign.id }),
+      ]);
+      const result = await new ScribeService({ store, client }).updateMemory({ campaignId: campaign.id });
+
+      assert.deepEqual(calls.map((call) => markersIn(call.messages[1].content)), [
+        numberRange(1, 4),
+        numberRange(1, 2),
+        numberRange(3, 4),
+      ]);
+      assert.deepEqual(observed, [
+        { dirty: false, lastTurnSeq: 0 },
+        { dirty: true, lastTurnSeq: 2 },
+      ]);
+      assert.equal(readCount({ store, campaignId: campaign.id }), 4);
+      assert.equal(result.lastTurnSeq, 4);
+      assert.equal(result.state.facts.some((fact) => fact.text.includes(BudgetSuite.DiscardedTag)), false);
+      assert.equal(JSON.stringify(result.log).includes(BudgetSuite.DiscardedTag), false);
+      assert.equal(result.state.facts.filter((fact) => fact.text.includes(BudgetSuite.KeptTag)).length, 2);
+      assert.equal(result.scenesAdded, 2);
+    } finally {
+      store.close();
+    }
+  });
+
+  it('throws a RangeError for a cut-off single turn and keeps the earlier batch saved as dirty', async () => {
+    const { store, campaign, rowan, mara, vesper, corin } = createBudgetCampaign();
+    try {
+      seedSubjects({ store, campaign, characters: [rowan, mara, vesper, corin] });
+      importTurnRun({ store, campaign, rowan, mara, firstNumber: 1, count: 21, bodyCharsFor: uniformBody(BudgetSuite.SmallBodyChars) });
+      const { client, calls } = createFakeClient([
+        factReplyFor(BudgetSuite.KeptTag),
+        cutOffReplyFor(BudgetSuite.DiscardedTag),
+      ]);
+      const expectedMessage = `Scribe answer for turn #21 was cut off at the reply length cap (${BudgetSuite.ReplyReserve} tokens) on ${BudgetSuite.Model}. Raise the reply length cap.`;
+      await assert.rejects(
+        new ScribeService({ store, client }).updateMemory({ campaignId: campaign.id }),
+        (error) => {
+          assert.equal(error instanceof RangeError, true);
+          assert.equal(error.message, expectedMessage);
+          return true;
+        },
+      );
+
+      assert.equal(calls.length, 2);
+      const saved = new ScribeService({ store }).loadState(campaign.id);
+      assert.equal(saved.dirty, true);
+      assert.equal(saved.lastTurnSeq, 20);
+      assert.equal(Object.keys(saved.log.read).length, 20);
+      assert.equal(JSON.stringify(saved.log).includes(BudgetSuite.DiscardedTag), false);
+    } finally {
+      store.close();
+    }
+  });
+
+  it('discards a cut-off repair reply and asks the batch again with one turn, saving nothing from either discarded reply', async () => {
+    const { store, campaign, rowan, mara, vesper, corin } = createBudgetCampaign();
+    try {
+      seedSubjects({ store, campaign, characters: [rowan, mara, vesper, corin] });
+      importTurnRun({ store, campaign, rowan, mara, firstNumber: 1, count: 2, bodyCharsFor: uniformBody(BudgetSuite.SmallBodyChars) });
+      const { client, calls } = createFakeClient([
+        BudgetSuite.Garbage,
+        cutOffReplyFor(BudgetSuite.DiscardedTag),
+        factReplyFor(BudgetSuite.KeptTag),
+        factReplyFor(BudgetSuite.KeptTag),
+      ]);
+      const result = await new ScribeService({ store, client }).updateMemory({ campaignId: campaign.id });
+
+      assert.deepEqual(calls.map((call) => markersIn(call.messages[1].content)), [
+        numberRange(1, 2),
+        numberRange(1, 2),
+        [1],
+        [2],
+      ]);
+      assert.equal(calls[1].messages[1].content.includes(BudgetSuite.Garbage), true);
+      assert.equal(calls[2].messages[1].content.includes(BudgetSuite.Garbage), false);
+      assert.equal(JSON.stringify(result.log).includes(BudgetSuite.DiscardedTag), false);
+      assert.equal(JSON.stringify(result.log).includes(BudgetSuite.Garbage), false);
+      assert.equal(readCount({ store, campaignId: campaign.id }), 2);
+    } finally {
+      store.close();
+    }
+  });
+
+  it('gives up after five cut-off calls for twenty turns, halving 20, 10, 5, 2 and 1, with nothing read', async () => {
+    const { store, campaign, rowan, mara, vesper, corin } = createBudgetCampaign();
+    try {
+      seedSubjects({ store, campaign, characters: [rowan, mara, vesper, corin] });
+      importTurnRun({ store, campaign, rowan, mara, firstNumber: 1, count: 20, bodyCharsFor: uniformBody(BudgetSuite.SmallBodyChars) });
+      const { client, calls } = createFakeClient(repeatReply(5, () => cutOffReplyFor(BudgetSuite.DiscardedTag)));
+      await assert.rejects(
+        new ScribeService({ store, client }).updateMemory({ campaignId: campaign.id }),
+        /Scribe answer for turn #1 was cut off/,
+      );
+
+      assert.deepEqual(calls.map((call) => markersIn(call.messages[1].content).length), [20, 10, 5, 2, 1]);
+      assert.equal(readCount({ store, campaignId: campaign.id }), 0);
+      assert.equal(new ScribeService({ store }).loadState(campaign.id).dirty, false);
+    } finally {
+      store.close();
+    }
+  });
+});
+
+describe('Pedant context capping', () => {
+  /**
+   * @param {{turnCount: number, bodyCharsFor: (turnNumber: number) => number, readSeqs?: ReadonlyArray<number>, blankTurnNumbers?: ReadonlyArray<number>}} options
+   * @returns {{store: SqliteStore, campaign: object, scribeService: ScribeService, replyTurn: object}}
+   * @throws {Error}
+   */
+  function createPedantCampaign({ turnCount, bodyCharsFor, readSeqs = [], blankTurnNumbers = [] }) {
+    const { store, campaign, rowan, mara, vesper, corin } = createBudgetCampaign();
+    seedSubjects({ store, campaign, characters: [rowan, mara, vesper, corin] });
+    const imported = importTurnRun({
+      store,
+      campaign,
+      rowan,
+      mara,
+      firstNumber: 1,
+      count: turnCount,
+      bodyCharsFor,
+      blankTurnNumbers,
+    });
+    if (readSeqs.length > 0) {
+      markRead({ store, campaignId: campaign.id, seqs: readSeqs });
+    }
+    return {
+      store,
+      campaign,
+      scribeService: new ScribeService({ store }),
+      replyTurn: store.getTurn(campaign.id, imported.at(-1).id),
+    };
+  }
+
+  /**
+   * @param {{turnCount: number, bodyCharsFor: (turnNumber: number) => number, modelCatalog?: object | null, readSeqs?: ReadonlyArray<number>, blankTurnNumbers?: ReadonlyArray<number>}} options
+   * @returns {Promise<{calls: Array<{max_tokens: number, messages: Array<{content: string}>}>, content: string, messages: readonly object[]}>}
+   * @throws {Error}
+   */
+  async function runPedant({ turnCount, bodyCharsFor, modelCatalog = null, readSeqs = [], blankTurnNumbers = [] }) {
+    const { store, campaign, scribeService, replyTurn } = createPedantCampaign({
+      turnCount,
+      bodyCharsFor,
+      readSeqs,
+      blankTurnNumbers,
+    });
+    try {
+      const { client, calls } = createFakeClient([BudgetSuite.PedantNone]);
+      const pedantService = new PedantService({ store, client, scribeService, modelCatalog });
+      await pedantService.checkTurn({ campaignId: campaign.id, turn: replyTurn });
+      return { calls, content: calls[0].messages[1].content, messages: scribeService.loadState(campaign.id).messages };
+    } finally {
+      store.close();
+    }
+  }
+
+  /**
+   * @param {string} content
+   * @param {string} heading
+   * @param {string} nextHeading
+   * @returns {string}
+   */
+  function sectionOf(content, heading, nextHeading) {
+    const start = content.indexOf(heading);
+    if (start === -1) {
+      return BudgetSuite.Empty;
+    }
+    return content.slice(start, content.indexOf(nextHeading, start));
+  }
+
+  it('keeps the request text of a fully fitting check in the original section order and bodies', async () => {
+    const { store, campaign, scribeService, replyTurn } = createPedantCampaign({
+      turnCount: 6,
+      bodyCharsFor: uniformBody(BudgetSuite.SmallBodyChars),
+      readSeqs: [1, 2],
+    });
+    try {
+      const { client, calls } = createFakeClient([BudgetSuite.PedantNone]);
+      const pedantService = new PedantService({
+        store,
+        client,
+        scribeService,
+        modelCatalog: createCatalogStub(BudgetSuite.HugeContext),
+      });
+      await pedantService.checkTurn({ campaignId: campaign.id, turn: replyTurn });
+
+      const { messages, player } = scribeService.loadState(campaign.id);
+      const content = calls[0].messages[1].content;
+      const tail = [
+        ScribeAnalyzer.section(BudgetSuite.Heading.Recent, [ScribeIntakeAdapter.transcript(messages.slice(0, 2))]),
+        ScribeAnalyzer.section(BudgetSuite.Heading.Since, [ScribeIntakeAdapter.transcript(messages.slice(2, 5))]),
+        ScribeAnalyzer.section(
+          `${BudgetSuite.Heading.Reply}6${PedantService.Settings.Heading.ReplyClose}`,
+          [ScribeIntakeAdapter.transcript(messages.slice(5))],
+        ),
+      ].join(BudgetSuite.BlankLine);
+      assert.equal(calls[0].messages[0].content, PedantService.Prompt);
+      assert.equal(content.startsWith(ScribeAnalyzer.section(BudgetSuite.Heading.Player, [player])), true);
+      assert.equal(content.endsWith(tail), true);
+      const order = [
+        BudgetSuite.Heading.Player,
+        BudgetSuite.Heading.Roster,
+        BudgetSuite.Heading.Ledger,
+        BudgetSuite.Heading.Unknown,
+        BudgetSuite.Heading.Recent,
+        BudgetSuite.Heading.Since,
+        BudgetSuite.Heading.Reply,
+      ].map((heading) => content.indexOf(heading));
+      assert.deepEqual(order, [...order].sort((left, right) => left - right));
+      assert.equal(order.includes(-1), false);
+      assert.equal(calls[0].max_tokens, BudgetSuite.ReplyReserve);
+    } finally {
+      store.close();
+    }
+  });
+
+  it('caps the since-section to the newest contiguous turns inside the context length and sends the reply cap', async () => {
+    const probeShort = await runPedant({ turnCount: 2, bodyCharsFor: uniformBody(BudgetSuite.PedantBodyChars) });
+    const probeLong = await runPedant({ turnCount: 4, bodyCharsFor: uniformBody(BudgetSuite.PedantBodyChars) });
+    const turnChars = (probeLong.content.length - probeShort.content.length) / 2;
+    const mandatoryChars = probeShort.content.length - turnChars;
+    const contextLength = contextLengthForChars({
+      replyReserve: BudgetSuite.ReplyReserve,
+      chars: PedantService.Prompt.length + mandatoryChars + BudgetSuite.PedantTightTurns * turnChars,
+      charsPerToken: BudgetSuite.StartingCharsPerToken,
+    });
+
+    const run = await runPedant({
+      turnCount: 52,
+      bodyCharsFor: uniformBody(BudgetSuite.PedantBodyChars),
+      modelCatalog: createCatalogStub(contextLength),
+    });
+
+    const sinceMarkers = markersIn(sectionOf(run.content, BudgetSuite.Heading.Since, BudgetSuite.Heading.Reply));
+    assert.deepEqual(sinceMarkers, numberRange(47, 51));
+    const extraText = ScribeIntakeAdapter.transcript([run.messages[45]]);
+    assert.equal(
+      requestFits({
+        call: run.calls[0],
+        userText: run.content + BudgetSuite.BlankLine + extraText,
+        systemPrompt: PedantService.Prompt,
+        contextLength,
+        replyReserve: BudgetSuite.ReplyReserve,
+        charsPerToken: BudgetSuite.StartingCharsPerToken,
+      }),
+      false,
+    );
+    assert.equal(
+      requestFits({
+        call: run.calls[0],
+        systemPrompt: PedantService.Prompt,
+        contextLength,
+        replyReserve: BudgetSuite.ReplyReserve,
+        charsPerToken: BudgetSuite.StartingCharsPerToken,
+      }),
+      true,
+    );
+    assert.equal(run.calls[0].max_tokens, BudgetSuite.ReplyReserve);
+  });
+
+  it('caps the since-section at 20000 characters when the model has no context length, keeping the newest contiguous turns', async () => {
+    const { store, campaign, scribeService, replyTurn } = createPedantCampaign({
+      turnCount: 52,
+      bodyCharsFor: uniformBody(BudgetSuite.PedantBodyChars),
+    });
+    try {
+      const { client, calls } = createFakeClient([BudgetSuite.PedantNone]);
+      const pedantService = new PedantService({ store, client, scribeService, modelCatalog: createCatalogStub(null) });
+      await pedantService.checkTurn({ campaignId: campaign.id, turn: replyTurn });
+
+      const earlier = scribeService.loadState(campaign.id).messages.slice(0, 51);
+      let expectedCount = 0;
+      while (ScribeIntakeAdapter.transcript(earlier.slice(-(expectedCount + 1))).length <= BudgetSuite.FallbackChars) {
+        expectedCount += 1;
+      }
+      const content = calls[0].messages[1].content;
+      assert.equal(expectedCount > 1 && expectedCount < 51, true);
+      assert.deepEqual(
+        markersIn(sectionOf(content, BudgetSuite.Heading.Since, BudgetSuite.Heading.Reply)),
+        numberRange(52 - expectedCount, 51),
+      );
+      assert.equal(content.includes(BudgetSuite.Heading.Recent), false);
+      assert.equal(calls[0].max_tokens, BudgetSuite.ReplyReserve);
+    } finally {
+      store.close();
+    }
+  });
+
+  it('throws a RangeError before any call when the mandatory sections alone exceed the context length', async () => {
+    const { store, campaign, scribeService, replyTurn } = createPedantCampaign({
+      turnCount: 4,
+      bodyCharsFor: uniformBody(BudgetSuite.SmallBodyChars),
+    });
+    try {
+      const { client, calls } = createFakeClient([BudgetSuite.PedantNone]);
+      const pedantService = new PedantService({
+        store,
+        client,
+        scribeService,
+        modelCatalog: createCatalogStub(BudgetSuite.ReplyReserve + BudgetSuite.TinyInputTokens),
+      });
+      await assert.rejects(
+        pedantService.checkTurn({ campaignId: campaign.id, turn: replyTurn }),
+        (error) => {
+          assert.equal(error instanceof RangeError, true);
+          assert.match(error.message, /Pedant mandatory prompt exceeds/);
+          assert.equal(error.message.includes(BudgetSuite.Model), true);
+          return true;
+        },
+      );
+      assert.equal(calls.length, 0);
+    } finally {
+      store.close();
+    }
+  });
+
+  it('never leaves a hole in either section: an oversized turn ends the walk and older small turns are dropped', async () => {
+    const run = await runPedant({
+      turnCount: 10,
+      bodyCharsFor: (turnNumber) => (turnNumber === 4 ? BudgetSuite.HugeBodyChars : BudgetSuite.SmallBodyChars),
+      modelCatalog: createCatalogStub(null),
+      readSeqs: numberRange(1, 7),
+    });
+
+    const recentMarkers = markersIn(sectionOf(run.content, BudgetSuite.Heading.Recent, BudgetSuite.Heading.Since));
+    const sinceMarkers = markersIn(sectionOf(run.content, BudgetSuite.Heading.Since, BudgetSuite.Heading.Reply));
+    assert.deepEqual(recentMarkers, [5, 6, 7]);
+    assert.deepEqual(sinceMarkers, [8, 9]);
+
+    const sinceHole = await runPedant({
+      turnCount: 8,
+      bodyCharsFor: (turnNumber) => (turnNumber === 4 ? BudgetSuite.HugeBodyChars : BudgetSuite.SmallBodyChars),
+      modelCatalog: createCatalogStub(null),
+    });
+    assert.deepEqual(
+      markersIn(sectionOf(sinceHole.content, BudgetSuite.Heading.Since, BudgetSuite.Heading.Reply)),
+      [5, 6, 7],
+    );
+  });
+
+  it('keeps the single newest recent message even when it is over 20000 characters only when the model has no context length', async () => {
+    /**
+     * @param {number} turnNumber
+     * @returns {number}
+     */
+    const hugeNewest = (turnNumber) => {
+      return turnNumber === 3 || turnNumber === 4 ? BudgetSuite.HugeBodyChars : BudgetSuite.SmallBodyChars;
+    };
+    const unlimited = await runPedant({
+      turnCount: 6,
+      bodyCharsFor: hugeNewest,
+      modelCatalog: null,
+      readSeqs: numberRange(1, 4),
+    });
+    const unlimitedRecent = markersIn(sectionOf(unlimited.content, BudgetSuite.Heading.Recent, BudgetSuite.Heading.Since));
+    assert.deepEqual(unlimitedRecent, [4]);
+    assert.deepEqual(markersIn(sectionOf(unlimited.content, BudgetSuite.Heading.Since, BudgetSuite.Heading.Reply)), [5]);
+
+    const limited = await runPedant({
+      turnCount: 6,
+      bodyCharsFor: hugeNewest,
+      modelCatalog: createCatalogStub(BudgetSuite.HugeContext),
+      readSeqs: numberRange(1, 4),
+    });
+    assert.equal(limited.content.includes(BudgetSuite.Heading.Recent), false);
+  });
+
+  it('keeps system plus user text inside the context length with both sections filled, SINCE taking the room before RECENT', async () => {
+    const run = await runPedant({
+      turnCount: BudgetSuite.LargeTurnCount,
+      bodyCharsFor: uniformBody(BudgetSuite.PedantBodyChars),
+      modelCatalog: createCatalogStub(BudgetSuite.KnownContext),
+      readSeqs: numberRange(1, BudgetSuite.LargeReadTurns),
+    });
+
+    assert.equal(
+      requestFits({
+        call: run.calls[0],
+        systemPrompt: PedantService.Prompt,
+        contextLength: BudgetSuite.KnownContext,
+        replyReserve: BudgetSuite.ReplyReserve,
+        charsPerToken: BudgetSuite.StartingCharsPerToken,
+      }),
+      true,
+    );
+    const recentMarkers = markersIn(sectionOf(run.content, BudgetSuite.Heading.Recent, BudgetSuite.Heading.Since));
+    const sinceMarkers = markersIn(sectionOf(run.content, BudgetSuite.Heading.Since, BudgetSuite.Heading.Reply));
+    assert.equal(recentMarkers.length < BudgetSuite.MaxRecent, true);
+    assert.equal(sinceMarkers.length > 0, true);
+    assert.equal(sinceMarkers.at(-1), BudgetSuite.LargeTurnCount - 1);
+    assert.deepEqual(sinceMarkers, numberRange(sinceMarkers[0], BudgetSuite.LargeTurnCount - 1));
+  });
+
+  it('omits the RECENT heading when the recent read messages have an empty transcript', async () => {
+    const run = await runPedant({
+      turnCount: 4,
+      bodyCharsFor: uniformBody(BudgetSuite.SmallBodyChars),
+      modelCatalog: null,
+      readSeqs: [1, 2],
+      blankTurnNumbers: [1, 2],
+    });
+
+    assert.equal(run.content.includes(BudgetSuite.Heading.Recent), false);
+    assert.deepEqual(markersIn(sectionOf(run.content, BudgetSuite.Heading.Since, BudgetSuite.Heading.Reply)), [3]);
+  });
+
+  it('packs the SINCE section at its edges: everything fits, nothing fits, and a single newest message', async () => {
+    const everything = await runPedant({
+      turnCount: 6,
+      bodyCharsFor: uniformBody(BudgetSuite.SmallBodyChars),
+      modelCatalog: createCatalogStub(BudgetSuite.HugeContext),
+    });
+    assert.deepEqual(
+      markersIn(sectionOf(everything.content, BudgetSuite.Heading.Since, BudgetSuite.Heading.Reply)),
+      numberRange(1, 5),
+    );
+
+    const nothing = await runPedant({
+      turnCount: 4,
+      bodyCharsFor: (turnNumber) => (turnNumber === 3 ? BudgetSuite.HugeBodyChars : BudgetSuite.SmallBodyChars),
+      modelCatalog: null,
+    });
+    assert.deepEqual(markersIn(sectionOf(nothing.content, BudgetSuite.Heading.Since, BudgetSuite.Heading.Reply)), []);
+
+    const single = await runPedant({
+      turnCount: 2,
+      bodyCharsFor: uniformBody(BudgetSuite.SmallBodyChars),
+      modelCatalog: null,
+    });
+    assert.deepEqual(markersIn(sectionOf(single.content, BudgetSuite.Heading.Since, BudgetSuite.Heading.Reply)), [1]);
+  });
+
+  it('gives RECENT exactly the newest ten of twelve small read messages', async () => {
+    const run = await runPedant({
+      turnCount: BudgetSuite.TurnsWithTwelveRead,
+      bodyCharsFor: uniformBody(BudgetSuite.SmallBodyChars),
+      modelCatalog: null,
+      readSeqs: numberRange(1, BudgetSuite.ReadTwelve),
+    });
+
+    assert.deepEqual(
+      markersIn(sectionOf(run.content, BudgetSuite.Heading.Recent, BudgetSuite.Heading.Since)),
+      numberRange(BudgetSuite.ReadTwelve - BudgetSuite.MaxRecent + 1, BudgetSuite.ReadTwelve),
+    );
+  });
+
+  it('names the model, the estimate and the input budget in the mandatory-overflow message', async () => {
+    const { store, campaign, scribeService, replyTurn } = createPedantCampaign({
+      turnCount: 4,
+      bodyCharsFor: uniformBody(BudgetSuite.SmallBodyChars),
+    });
+    try {
+      const { client } = createFakeClient([BudgetSuite.PedantNone]);
+      const pedantService = new PedantService({
+        store,
+        client,
+        scribeService,
+        modelCatalog: createCatalogStub(BudgetSuite.ReplyReserve + BudgetSuite.TinyInputTokens),
+      });
+      await assert.rejects(
+        pedantService.checkTurn({ campaignId: campaign.id, turn: replyTurn }),
+        (error) => {
+          const expectedPattern = new RegExp(
+            `^Pedant mandatory prompt exceeds ${BudgetSuite.Model} context limit \\((\\d+) estimated tokens > ${BudgetSuite.TinyInputTokens} input budget\\)\\.$`,
+            'u',
+          );
+          assert.match(error.message, expectedPattern);
+          assert.equal(Number.parseInt(error.message.match(expectedPattern)[1], 10) > BudgetSuite.TinyInputTokens, true);
+          return true;
+        },
+      );
+    } finally {
+      store.close();
+    }
+  });
+});
+
+describe('Scribe fix round: cut-off shapes, state between batches, constants and constructors', () => {
+  it('asks a cut-off answer that does not parse again with fewer turns, without a repair call', async () => {
+    for (const cutOffText of [BudgetSuite.Garbage, BudgetSuite.Empty]) {
+      const { store, campaign, rowan, mara, vesper, corin } = createBudgetCampaign();
+      try {
+        seedSubjects({ store, campaign, characters: [rowan, mara, vesper, corin] });
+        importTurnRun({ store, campaign, rowan, mara, firstNumber: 1, count: 2, bodyCharsFor: uniformBody(BudgetSuite.SmallBodyChars) });
+        const { client, calls } = createFakeClient([
+          { text: cutOffText, finishReason: FinishReason.Length },
+          factReplyFor(BudgetSuite.KeptTag),
+          factReplyFor(BudgetSuite.KeptTag),
+        ]);
+        await new ScribeService({ store, client }).updateMemory({ campaignId: campaign.id });
+
+        assert.deepEqual(calls.map((call) => markersIn(call.messages[1].content)), [[1, 2], [1], [2]]);
+        assert.equal(readCount({ store, campaignId: campaign.id }), 2);
+      } finally {
+        store.close();
+      }
+    }
+  });
+
+  it('keeps the lowered ceiling after an accepted batch: 40 turns with a cut-off first answer give 20 then four batches of ten', async () => {
+    const { store, campaign, rowan, mara, vesper, corin } = createBudgetCampaign();
+    try {
+      seedSubjects({ store, campaign, characters: [rowan, mara, vesper, corin] });
+      importTurnRun({ store, campaign, rowan, mara, firstNumber: 1, count: 40, bodyCharsFor: uniformBody(BudgetSuite.SmallBodyChars) });
+      const { client, calls } = createFakeClient([
+        cutOffReplyFor(BudgetSuite.DiscardedTag),
+        ...repeatReply(4, () => factReplyFor(BudgetSuite.KeptTag)),
+      ]);
+      await new ScribeService({ store, client }).updateMemory({ campaignId: campaign.id });
+
+      assert.deepEqual(calls.map((call) => markersIn(call.messages[1].content).length), [20, 10, 10, 10, 10]);
+      assert.equal(readCount({ store, campaignId: campaign.id }), 40);
+    } finally {
+      store.close();
+    }
+  });
+
+  it('builds a later batch from the state left by the earlier one', async () => {
+    const { store, campaign, rowan, mara, vesper, corin } = createBudgetCampaign();
+    try {
+      seedSubjects({ store, campaign, characters: [rowan, mara, vesper, corin] });
+      importTurnRun({ store, campaign, rowan, mara, firstNumber: 1, count: 25, bodyCharsFor: uniformBody(BudgetSuite.SmallBodyChars) });
+      const { client, calls } = createFakeClient(repeatReply(2, () => factReplyFor(BudgetSuite.KeptTag)));
+      await new ScribeService({ store, client }).updateMemory({ campaignId: campaign.id });
+
+      assert.equal(calls[0].messages[1].content.includes(`${BudgetSuite.KeptTag} 1`), false);
+      assert.equal(calls[1].messages[1].content.includes(`${BudgetSuite.KeptTag} 1`), true);
+    } finally {
+      store.close();
+    }
+  });
+
+  it('reports the highest read turn as lastTurnSeq when later turns were already read', async () => {
+    const { store, campaign, rowan, mara, vesper, corin } = createBudgetCampaign();
+    try {
+      seedSubjects({ store, campaign, characters: [rowan, mara, vesper, corin] });
+      importTurnRun({ store, campaign, rowan, mara, firstNumber: 1, count: 30, bodyCharsFor: uniformBody(BudgetSuite.SmallBodyChars) });
+      markRead({ store, campaignId: campaign.id, seqs: [...numberRange(1, 24), 29, 30] });
+      const { client, calls } = createFakeClient([factReplyFor(BudgetSuite.KeptTag)]);
+      const result = await new ScribeService({ store, client }).updateMemory({ campaignId: campaign.id });
+
+      assert.deepEqual(markersIn(calls[0].messages[1].content), numberRange(25, 28));
+      assert.equal(result.lastTurnSeq, 30);
+      assert.equal(new ScribeService({ store }).loadState(campaign.id).lastTurnSeq, 30);
+    } finally {
+      store.close();
+    }
+  });
+
+  it('writes pending character subject updates once in a two-batch run', async () => {
+    const { store, campaign, rowan, mara } = createBudgetCampaign();
+    try {
+      store.updateCharacter(campaign.id, rowan.id, { scribeSubjectId: null });
+      store.updateCharacter(campaign.id, mara.id, { scribeSubjectId: null });
+      importTurnRun({ store, campaign, rowan, mara, firstNumber: 1, count: 25, bodyCharsFor: uniformBody(BudgetSuite.SmallBodyChars) });
+      let updateCalls = 0;
+      const originalUpdate = store.updateCharacter.bind(store);
+      /**
+       * @param {string} campaignId
+       * @param {string} characterId
+       * @param {object} patch
+       * @returns {object}
+       * @throws {Error}
+       */
+      store.updateCharacter = (campaignId, characterId, patch) => {
+        updateCalls += 1;
+        return originalUpdate(campaignId, characterId, patch);
+      };
+      const { client, calls } = createFakeClient(repeatReply(2, () => factReplyFor(BudgetSuite.KeptTag)));
+      await new ScribeService({ store, client }).updateMemory({ campaignId: campaign.id });
+
+      assert.equal(calls.length, 2);
+      assert.equal(updateCalls, 2);
+    } finally {
+      store.close();
+    }
+  });
+
+  it('states the exact Scribe prompt-too-large message with the estimate computed from the repair-sized request', async () => {
+    const { store, campaign, rowan, mara, vesper, corin } = createBudgetCampaign();
+    try {
+      seedSubjects({ store, campaign, characters: [rowan, mara, vesper, corin] });
+      importTurnRun({ store, campaign, rowan, mara, firstNumber: 1, count: 1, bodyCharsFor: uniformBody(BudgetSuite.SmallBodyChars) });
+      const initial = new ScribeService({ store }).loadState(campaign.id);
+      const batchPrompt = ScribeAnalyzer.input(initial.state, initial.player, initial.messages, null);
+      const budget = RequestBudget.create({
+        contextLength: null,
+        replyReserve: BudgetSuite.ReplyReserve,
+        charsPerToken: BudgetSuite.StartingCharsPerToken,
+      });
+      const usedTokens = budget.estimate(ScribeAnalyzer.StoryPrompt)
+        + budget.estimate(repairPromptFor(batchPrompt, BudgetSuite.Empty));
+      const { client } = createFakeClient([factReplyFor(BudgetSuite.KeptTag)]);
+      await assert.rejects(
+        new ScribeService({ store, client, modelCatalog: createCatalogStub(BudgetSuite.ReplyReserve) }).updateMemory({
+          campaignId: campaign.id,
+        }),
+        (error) => {
+          assert.equal(
+            error.message,
+            `Scribe prompt for turn #1 exceeds ${BudgetSuite.Model} context limit (${usedTokens} estimated tokens > 0 input budget). Switch to a larger-context Scribe model or lower reply length cap.`,
+          );
+          return true;
+        },
+      );
+    } finally {
+      store.close();
+    }
+  });
+
+  it('rejects a function carrying a contextLength property and accepts a class instance with a contextLength method', () => {
+    const store = new SqliteStore(':memory:');
+    try {
+      const scribeService = new ScribeService({ store });
+      const functionCatalog = Object.assign(() => null, { contextLength: () => null });
+      const StubCatalog = class {
+        /**
+         * @returns {number | null}
+         */
+        contextLength() {
+          return null;
+        }
+      };
+      assert.throws(() => new ScribeService({ store, modelCatalog: functionCatalog }), TypeError);
+      assert.throws(() => new PedantService({ store, scribeService, modelCatalog: functionCatalog }), TypeError);
+      assert.doesNotThrow(() => new ScribeService({ store, modelCatalog: new StubCatalog() }));
+      assert.doesNotThrow(() => new PedantService({ store, scribeService, modelCatalog: new StubCatalog() }));
+    } finally {
+      store.close();
+    }
+  });
+
+  it('freezes both Settings objects and pins their values', () => {
+    assert.equal(Object.isFrozen(ScribeService.Settings), true);
+    assert.equal(Object.isFrozen(ScribeService.Settings.RepairLines), true);
+    assert.equal(Object.isFrozen(PedantService.Settings), true);
+    assert.equal(Object.isFrozen(PedantService.Settings.Heading), true);
+    assert.deepEqual(ScribeService.Settings, BudgetSuite.ExpectedScribeSettings);
+    assert.deepEqual(PedantService.Settings, BudgetSuite.ExpectedPedantSettings);
+  });
+});
+
+describe('Scribe repair room and trimming edges', () => {
+  /**
+   * @param {{turnCount: number, bodyChars: number}} options
+   * @returns {{store: SqliteStore, campaign: object, loaded: object}}
+   * @throws {Error}
+   */
+  function createRepairFixture({ turnCount, bodyChars }) {
+    const { store, campaign, rowan, mara, vesper, corin } = createBudgetCampaign();
+    seedSubjects({ store, campaign, characters: [rowan, mara, vesper, corin] });
+    importTurnRun({ store, campaign, rowan, mara, firstNumber: 1, count: turnCount, bodyCharsFor: uniformBody(bodyChars) });
+    return { store, campaign, loaded: new ScribeService({ store }).loadState(campaign.id) };
+  }
+
+  it('leaves room for the repair request of a multi-turn batch: three turns are asked one by one and the repair fits', async () => {
+    const { store, campaign, loaded } = createRepairFixture({ turnCount: 3, bodyChars: BudgetSuite.TurnChars });
+    try {
+      const twoTurnPrompt = ScribeAnalyzer.input(loaded.state, loaded.player, loaded.messages.slice(0, 2), null);
+      const oneTurnPrompt = ScribeAnalyzer.input(loaded.state, loaded.player, loaded.messages.slice(0, 1), null);
+      const contextLength = contextLengthForChars({
+        replyReserve: BudgetSuite.ReplyReserve,
+        chars: ScribeAnalyzer.StoryPrompt.length + twoTurnPrompt.length + BudgetSuite.RepairRoomChars,
+        charsPerToken: BudgetSuite.StartingCharsPerToken,
+      });
+      const budget = RequestBudget.create({
+        contextLength,
+        replyReserve: BudgetSuite.ReplyReserve,
+        charsPerToken: BudgetSuite.StartingCharsPerToken,
+      });
+      const systemTokens = budget.estimate(ScribeAnalyzer.StoryPrompt);
+      assert.equal(budget.fits(systemTokens, twoTurnPrompt), true);
+      assert.equal(budget.fits(systemTokens, repairPromptFor(twoTurnPrompt, BudgetSuite.Empty)), false);
+      assert.equal(budget.fits(systemTokens, repairPromptFor(oneTurnPrompt, BudgetSuite.Empty)), true);
+
+      const { client, calls } = createFakeClient([
+        BudgetSuite.Garbage,
+        ...repeatReply(3, () => factReplyFor(BudgetSuite.KeptTag)),
+      ]);
+      await new ScribeService({ store, client, modelCatalog: createCatalogStub(contextLength) }).updateMemory({
+        campaignId: campaign.id,
+      });
+
+      assert.deepEqual(calls.map((call) => markersIn(call.messages[1].content)), [[1], [1], [2], [3]]);
+      assert.equal(calls[1].messages[1].content.startsWith(ScribeService.Settings.RepairLines[0]), true);
+      assert.equal(
+        requestFits({
+          call: calls[1],
+          systemPrompt: ScribeAnalyzer.StoryPrompt,
+          contextLength,
+          replyReserve: BudgetSuite.ReplyReserve,
+          charsPerToken: BudgetSuite.StartingCharsPerToken,
+        }),
+        true,
+      );
+      assert.equal(readCount({ store, campaignId: campaign.id }), 3);
+    } finally {
+      store.close();
+    }
+  });
+
+  it('stops before any call when a single turn fits only without the repair header', async () => {
+    const { store, campaign, loaded } = createRepairFixture({ turnCount: 1, bodyChars: BudgetSuite.TurnChars });
+    try {
+      const prompt = ScribeAnalyzer.input(loaded.state, loaded.player, loaded.messages, null);
+      const contextLength = contextLengthForChars({
+        replyReserve: BudgetSuite.ReplyReserve,
+        chars: ScribeAnalyzer.StoryPrompt.length + prompt.length + BudgetSuite.RepairRoomChars,
+        charsPerToken: BudgetSuite.StartingCharsPerToken,
+      });
+      const budget = RequestBudget.create({
+        contextLength,
+        replyReserve: BudgetSuite.ReplyReserve,
+        charsPerToken: BudgetSuite.StartingCharsPerToken,
+      });
+      const systemTokens = budget.estimate(ScribeAnalyzer.StoryPrompt);
+      const repairTokens = systemTokens + budget.estimate(repairPromptFor(prompt, BudgetSuite.Empty));
+      assert.equal(budget.limitTokens > 0, true);
+      assert.equal(systemTokens + budget.estimate(prompt) <= budget.limitTokens, true);
+      assert.equal(repairTokens > budget.limitTokens, true);
+
+      const { client, calls } = createFakeClient([factReplyFor(BudgetSuite.KeptTag)]);
+      await assert.rejects(
+        new ScribeService({ store, client, modelCatalog: createCatalogStub(contextLength) }).updateMemory({
+          campaignId: campaign.id,
+        }),
+        (error) => {
+          assert.equal(error instanceof RangeError, true);
+          assert.equal(
+            error.message,
+            `Scribe prompt for turn #1 exceeds ${BudgetSuite.Model} context limit (${repairTokens} estimated tokens > ${budget.limitTokens} input budget). Switch to a larger-context Scribe model or lower reply length cap.`,
+          );
+          return true;
+        },
+      );
+      assert.equal(calls.length, 0);
+    } finally {
+      store.close();
+    }
+  });
+
+  it('shortens a trimmed answer that rounding leaves one estimated token over the budget', async () => {
+    const { store, campaign, loaded } = createRepairFixture({ turnCount: 1, bodyChars: BudgetSuite.RoundingBodyChars });
+    try {
+      store.recordSpend({
+        campaignId: campaign.id,
+        stage: SpendStage.Scribe,
+        model: BudgetSuite.Model,
+        promptChars: BudgetSuite.RoundingRatioChars,
+        promptTokens: BudgetSuite.RoundingRatioTokens,
+      });
+      const prompt = ScribeAnalyzer.input(loaded.state, loaded.player, loaded.messages, null);
+      const base = repairPromptFor(prompt, BudgetSuite.Empty);
+      const roundingCharsPerToken = BudgetSuite.RoundingRatioChars / BudgetSuite.RoundingRatioTokens;
+      const estimator = RequestBudget.create({
+        contextLength: null,
+        replyReserve: BudgetSuite.ReplyReserve,
+        charsPerToken: roundingCharsPerToken,
+      });
+      const systemTokens = estimator.estimate(ScribeAnalyzer.StoryPrompt);
+      const limitTokens = systemTokens + estimator.estimate(base) + BudgetSuite.RoundingRoomTokens;
+      const contextLength = BudgetSuite.ReplyReserve + limitTokens;
+      const roomChars = Math.floor(BudgetSuite.RoundingRoomTokens * roundingCharsPerToken);
+      assert.equal(systemTokens + estimator.estimate(base + BudgetSuite.Filler.repeat(roomChars)) > limitTokens, true);
+
+      const { client, calls } = createFakeClient([BudgetSuite.Garbage.repeat(3), factReplyFor(BudgetSuite.KeptTag)]);
+      await new ScribeService({ store, client, modelCatalog: createCatalogStub(contextLength) }).updateMemory({
+        campaignId: campaign.id,
+      });
+
+      assert.equal(calls.length, 2);
+      assert.equal(
+        requestFits({
+          call: calls[1],
+          systemPrompt: ScribeAnalyzer.StoryPrompt,
+          contextLength,
+          replyReserve: BudgetSuite.ReplyReserve,
+          charsPerToken: roundingCharsPerToken,
+        }),
+        true,
+      );
+      assert.equal(readCount({ store, campaignId: campaign.id }), 1);
+    } finally {
+      store.close();
+    }
+  });
+
+  it('never cuts a surrogate pair in half when trimming the invalid answer', async () => {
+    const { store, campaign, loaded } = createRepairFixture({ turnCount: 1, bodyChars: BudgetSuite.SmallBodyChars });
+    try {
+      const prompt = ScribeAnalyzer.input(loaded.state, loaded.player, loaded.messages, null);
+      const estimator = RequestBudget.create({
+        contextLength: null,
+        replyReserve: BudgetSuite.ReplyReserve,
+        charsPerToken: BudgetSuite.StartingCharsPerToken,
+      });
+      const limitTokens = estimator.estimate(ScribeAnalyzer.StoryPrompt)
+        + estimator.estimate(repairPromptFor(prompt, BudgetSuite.Empty))
+        + BudgetSuite.SurrogateRoomTokens;
+      const contextLength = BudgetSuite.ReplyReserve + limitTokens;
+      const roomChars = BudgetSuite.SurrogateRoomTokens * BudgetSuite.StartingCharsPerToken;
+      const answer = BudgetSuite.Filler.repeat(roomChars - 1) + BudgetSuite.AstralChar.repeat(roomChars);
+      assert.equal(answer.slice(0, roomChars).isWellFormed(), false);
+      const charsPerToken = RequestBudget.charsPerToken({ store, model: BudgetSuite.Model });
+      const budget = RequestBudget.create({ contextLength, replyReserve: BudgetSuite.ReplyReserve, charsPerToken });
+      const systemTokens = budget.estimate(ScribeAnalyzer.StoryPrompt);
+      const serviceRoomChars = Math.floor(
+        (budget.limitTokens - systemTokens - budget.estimate(repairPromptFor(prompt, BudgetSuite.Empty))) * charsPerToken,
+      );
+      assert.equal(serviceRoomChars, roomChars);
+      assert.equal(budget.fits(systemTokens, repairPromptFor(prompt, answer)), false);
+      assert.equal(budget.fits(systemTokens, repairPromptFor(prompt, answer.slice(0, roomChars))), true);
+
+      const { client, calls } = createFakeClient([answer, factReplyFor(BudgetSuite.KeptTag)]);
+      await new ScribeService({ store, client, modelCatalog: createCatalogStub(contextLength) }).updateMemory({
+        campaignId: campaign.id,
+      });
+
+      assert.equal(calls.length, 2);
+      const repairContent = calls[1].messages[1].content;
+      const previousStart = repairContent.indexOf(ScribeService.Settings.PreviousOutputHeading)
+        + ScribeService.Settings.PreviousOutputHeading.length;
+      const previousEnd = repairContent.indexOf(ScribeService.Settings.OriginalInputHeading);
+      assert.equal(repairContent.slice(previousStart, previousEnd).isWellFormed(), true);
+      assert.equal(
+        requestFits({
+          call: calls[1],
+          systemPrompt: ScribeAnalyzer.StoryPrompt,
+          contextLength,
+          replyReserve: BudgetSuite.ReplyReserve,
+          charsPerToken: BudgetSuite.StartingCharsPerToken,
+        }),
+        true,
+      );
+      assert.equal(readCount({ store, campaignId: campaign.id }), 1);
+    } finally {
+      store.close();
+    }
+  });
+});
+
+describe('Context budget wiring', () => {
+  it('passes the active model catalog to both background services in server.mjs', () => {
+    const serverSource = fs.readFileSync(new URL('../src/server.mjs', import.meta.url), 'utf8');
+    for (const serviceName of BudgetSuite.WiredServices) {
+      const construction = new RegExp(`new ${serviceName}\\(\\{[^}]*modelCatalog: activeModelCatalog`, 'u');
+      assert.match(serverSource, construction);
+    }
+  });
+
+  it('keeps the Narrator source on its original output-shape line', () => {
+    const narratorSource = fs.readFileSync(new URL('../src/engine/Narrator.mjs', import.meta.url), 'utf8');
+    assert.equal(narratorSource.includes(BudgetSuite.NarratorShapeLine), true);
   });
 });
 

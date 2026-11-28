@@ -192,27 +192,30 @@ Export `BeatTextFormatter` (`Object.freeze({ ActionClass: 'beat-action', Kind: O
   - `MaxBatchTurns: 20`
   - `AbortName: 'AbortError'`
   - `AbortMessage: 'Scribe update aborted.'`
+  - `ReadResultStatus: 'read'`
+  - `RepairLines` (the three repair header lines), `PreviousOutputHeading: 'Previous invalid output:'`, `OriginalInputHeading: 'Original input:'`, `TrailingLeadSurrogatePattern: /[\uD800-\uDBFF]$/u`
 - Resolve `model = await this.#resolveModel(campaignId)` and `replyReserve = this.#store.getSettings().replyReserve`.
 - Loop chronologically over `unreadTurns` starting at `cursor = 0`:
   1. If `signal?.aborted`, throw an `AbortError` (`error.name = ScribeService.Settings.AbortName`) cleanly (any earlier completed batches are already persisted).
   2. Build fresh `budget` for this batch using current `RequestBudget.charsPerToken({ store: this.#store, model })` and `contextLength = this.#modelCatalog?.contextLength(model) ?? null`, and recompute `systemTokens = budget.estimate(ScribeAnalyzer.StoryPrompt)` from this batch's `budget`.
-  3. Select the largest contiguous batch `batchTurns` starting at `cursor` up to `Math.min(unreadTurns.length, cursor + ScribeService.Settings.MaxBatchTurns)`:
+  3. Select the largest contiguous batch `batchTurns` starting at `cursor` up to `Math.min(unreadTurns.length, cursor + batchCeiling)`:
      - Grow `count = 1..maxCount`, mapping `candidateTurns` -> `candidateMessages` and building `candidatePrompt = ScribeAnalyzer.input(state, player, candidateMessages, profile)`.
-     - Check `budget.fits(systemTokens, candidatePrompt)`.
-     - If `count === 1` and `!budget.fits(systemTokens, candidatePrompt)`:
-       - Let `usedTokens = systemTokens + budget.estimate(candidatePrompt)`.
+     - A candidate fits only when its repair request with an empty previous answer fits: `budget.fits(systemTokens, candidateRepairPrompt)`, where `candidateRepairPrompt` is built by the repair-prompt builder (defined once before the loop) from `candidatePrompt` and `''`.
+     - If `count === 1` and `!budget.fits(systemTokens, candidateRepairPrompt)`:
+       - Let `usedTokens = systemTokens + budget.estimate(candidateRepairPrompt)`.
        - Throw a `RangeError` (`Scribe prompt for turn #${candidateTurns[0].seq} exceeds ${model} context limit (${usedTokens} estimated tokens > ${budget.limitTokens} input budget). Switch to a larger-context Scribe model or lower reply length cap.`) — maps cleanly to HTTP 400 in `Router.#mapErrorStatusCode` and a clear `[scribe]` warning in `TurnEngine`.
-     - If `count > 1` and `!budget.fits(systemTokens, candidatePrompt)`: stop growing and keep the `count - 1` slice with its already-built `batchPrompt`.
+     - If `count > 1` and `!budget.fits(systemTokens, candidateRepairPrompt)`: stop growing and keep the `count - 1` slice with its already-built `batchPrompt`.
   4. **Non-overlapping `missingSceneTurns` partitioning:**
      - Let `nextBatchFirstSeq = cursor + batchTurns.length < unreadTurns.length ? unreadTurns[cursor + batchTurns.length].seq : null`.
      - Include in this batch's scene synthesis only remaining `missingSceneTurns` with `nextBatchFirstSeq === null || turn.seq < nextBatchFirstSeq`, removing them from the remaining `missingSceneTurns` pool so multi-batch catch-up never emits overlapping scene spans.
   5. Call `this.#client.complete({ model, messages: [{ role: 'system', content: ScribeAnalyzer.StoryPrompt }, { role: 'user', content: batchPrompt }], maxTokens: replyReserve, stage: SpendStage.Scribe, campaignId, signal })`.
-  6. Parse response with `ScribeAnswer.parseStory(completion.text)`. On unparseable non-empty output (existing repair-retry path):
+  6. **Cut-off answers are never used.** A run keeps a ceiling `batchCeiling`, starting at `ScribeService.Settings.MaxBatchTurns`; step 3 grows a batch up to `Math.min(unreadTurns.length, cursor + batchCeiling)`. When any completion for the batch (the first call or the repair call of step 7) returns `truncated === true`, the answer is discarded and nothing from it is appended or persisted. If the batch holds more than one turn, `batchCeiling` becomes `Math.floor(batchTurns.length / 2)` for the rest of the run (it is never raised again) and the loop iteration starts again from step 1, selecting the batch from the same `cursor`. If the batch holds one turn, throw a `RangeError` (`Scribe answer for turn #${seq} was cut off at the reply length cap (${replyReserve} tokens) on ${model}. Raise the reply length cap.`); the turn stays unread and batches already persisted stay persisted. The partition of step 4 (taken from the pool only when the batch is accepted) and the append of step 8 therefore take effect only after a completion that was not cut off.
+  7. Parse response with `ScribeAnswer.parseStory(completion.text)`. On unparseable non-empty output (existing repair-retry path):
      - Build `repairPrompt` and check `budget.fits(systemTokens, repairPrompt)`.
-     - If `repairPrompt` exceeds `budget`, compute remaining char budget for `completion.text` (`Math.max(0, Math.floor((budget.limitTokens - systemTokens - budget.estimate(repairWithoutReply)) * charsPerToken))`); if `> 0`, truncate `completion.text` to that ceiling and re-verify `budget.fits(...)`; if even the header + `batchPrompt` alone exceeds `budget`, throw an `Error` (`'Scribe returned unparseable output and repair prompt exceeds model context budget.'`) rather than silently marking unparsed turns as read.
+     - If `repairPrompt` exceeds `budget`, compute remaining char budget for `completion.text` (`Math.max(0, Math.floor((budget.limitTokens - systemTokens - budget.estimate(repairWithoutReply)) * charsPerToken))`); the invalid answer is trimmed to that many characters, then shortened one character at a time until the repair request fits by the estimate (if the answer is already empty and the request still does not fit, throw `new Error('Scribe returned unparseable output and repair prompt exceeds model context budget.')`; this cannot be reached while step 3 holds), and a trailing first half of a surrogate pair is dropped (the base request always fits, because step 3 admitted the batch only if its repair request with an empty previous answer fits).
      - Always pass `maxTokens: replyReserve` on the repair retry call.
-  7. Append operations with `ScribeLogCore.append(log, state, [...sceneOps, ...parsedOperations], { messages: batchMessages, origin: ScribeLogCore.Origin.Story, sources: sourcesByPosition, results: new Map(batchMessages.map((message) => [message.position, 'read'])) })` (matching existing `ScribeService` append contract), replay `state = ScribeReplay.run(...)`, recompute `lastTurnSeq`, and **persist immediately** (`#persistBookAndCharacters`, setting `dirty: cursor + batchTurns.length < unreadTurns.length`, clearing `pendingSubjectUpdates` after the first persist).
-  8. Accumulate `totalScenesAdded`, `totalOperationsAdded`, `allRefused`, and advance `cursor += batchTurns.length`.
+  8. Append operations with `ScribeLogCore.append(log, state, [...sceneOps, ...parsedOperations], { messages: batchMessages, origin: ScribeLogCore.Origin.Story, sources: sourcesByPosition, results: new Map(batchMessages.map((message) => [message.position, 'read'])) })` (matching existing `ScribeService` append contract), replay `state = ScribeReplay.run(...)`, recompute `lastTurnSeq`, and **persist immediately** (`#persistBookAndCharacters`, setting `dirty: cursor + batchTurns.length < unreadTurns.length`, clearing `pendingSubjectUpdates` after the first persist).
+  9. Accumulate `totalScenesAdded`, `totalOperationsAdded`, `allRefused`, and advance `cursor += batchTurns.length`.
 - Return `Object.freeze({ log, state, lastTurnSeq, updated, scenesAdded: totalScenesAdded, operationsAdded: totalOperationsAdded, refused: Object.freeze(allRefused) })`.
 
 ### 4.3 Pedant Budget Capping (`PedantService.checkTurn`)
@@ -221,16 +224,17 @@ Export `BeatTextFormatter` (`Object.freeze({ ActionClass: 'beat-action', Kind: O
   - `MaxRecentMessages: 10`
   - `FallbackRecentChars: 20000`
   - `FallbackSinceChars: 20000`
+  - `Heading`: the seven section headings (`Player`, `Roster`, `Ledger`, `Unknown`, `Recent`, `Since`, and `ReplyOpen` / `ReplyClose` around the reply position)
 - Resolve `replyReserve = this.#store.getSettings().replyReserve`, `contextLength = this.#modelCatalog?.contextLength(model) ?? null`, `charsPerToken = RequestBudget.charsPerToken({ store: this.#store, model })`, and build `budget = RequestBudget.create({ contextLength, replyReserve, charsPerToken })`.
-- Define a single canonical prompt assembler `buildUserPrompt(recentSlice, sinceSlice)` that builds the exact `sections.join('\n\n')` string (mandatory `PLAYER CHARACTER`, `SUBJECT ROSTER`, `LEDGER`, `DOES NOT KNOW`, optional `RECENT MESSAGES` when `recentSlice.length > 0`, `SINCE THE BOOK WAS LAST READ`, and `REPLY (#n)`).
+- Define a single canonical prompt assembler `buildUserPrompt(recentSlice, sinceSlice)` that builds the exact `sections.join('\n\n')` string (mandatory `PLAYER CHARACTER`, `SUBJECT ROSTER`, `LEDGER`, `DOES NOT KNOW`, optional `RECENT MESSAGES` only when the transcript of `recentSlice` is not the empty string, `SINCE THE BOOK WAS LAST READ`, and `REPLY (#n)`).
 - Compute `systemTokens = budget.estimate(PedantService.Prompt)` and verify mandatory minimum fits:
   - Check `budget.fits(systemTokens, buildUserPrompt([], []))`.
   - If `false`: compute `mandatoryTokens = systemTokens + budget.estimate(buildUserPrompt([], []))` and throw a `RangeError` (`Pedant mandatory prompt exceeds ${model} context limit (${mandatoryTokens} estimated tokens > ${budget.limitTokens} input budget).`) so `TurnEngine` emits a clean `[pedant]` warning rather than sending a doomed HTTP 400.
-- Pack optional context sections as contiguous newest suffixes (walking backwards from newest to oldest, breaking on the first message that does not fit so chronological holes are never created):
+- Pack optional context sections as contiguous newest suffixes, so chronological holes are never created:
   1. **`SINCE THE BOOK WAS LAST READ:`** (`earlierUnread`, sorted ascending by `position`):
-     - Walk backwards from newest to oldest, forming `candidateSince = [msg, ...selectedSince]`.
+     - Select the largest newest suffix of `earlierUnread` that fits, found by binary search over the suffix length (the fit is monotonic in the length and zero always fits), forming `candidateSince` as the newest `n` messages.
      - Check UTF-16 char ceiling `ScribeIntakeAdapter.transcript(candidateSince).length <= PedantService.Settings.FallbackSinceChars` when `budget.limitTokens === null`, AND when `budget.limitTokens !== null`, check `budget.fits(systemTokens, buildUserPrompt([], candidateSince))`.
-     - If it fits, accept `selectedSince = candidateSince`; otherwise `break`. (If even the single newest unread message exceeds the budget or 20,000-char fallback, `selectedSince` stays empty rather than overflowing.)
+     - The largest fitting suffix is `selectedSince`. (If even the single newest unread message exceeds the budget or 20,000-char fallback, `selectedSince` stays empty rather than overflowing.)
   2. **`RECENT MESSAGES:`** (up to last `PedantService.Settings.MaxRecentMessages` = 10 read messages before `message.position`):
      - Walk backwards from newest to oldest, forming `candidateRecent = [msg, ...selectedRecent]`.
      - Always enforce `ScribeIntakeAdapter.transcript(candidateRecent).length <= PedantService.Settings.FallbackRecentChars` (except preserving the existing single-message exception when `budget.limitTokens === null && selectedRecent.length === 0`), AND when `budget.limitTokens !== null`, enforce `budget.fits(systemTokens, buildUserPrompt(candidateRecent, selectedSince))`.

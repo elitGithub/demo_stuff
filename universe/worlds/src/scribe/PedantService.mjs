@@ -1,3 +1,4 @@
+import { RequestBudget } from '../engine/RequestBudget.mjs';
 import { CharacterCard } from '../store/CharacterCard.mjs';
 import { FindingKind } from '../store/enums/FindingKind.mjs';
 import { FindingStatus } from '../store/enums/FindingStatus.mjs';
@@ -36,16 +37,33 @@ export class PedantService {
     '6. Judge from context whether a name in the REPLY is a misspelling of a known subject. A similar spelling alone is insufficient. Give the written name and intended roster ID, one pair per line.',
   ]).join('\n');
 
+  static Settings = Object.freeze({
+    MaxRecentMessages: 10,
+    FallbackRecentChars: 20000,
+    FallbackSinceChars: 20000,
+    Heading: Object.freeze({
+      Player: 'PLAYER CHARACTER:',
+      Roster: 'SUBJECT ROSTER:',
+      Ledger: 'LEDGER:',
+      Unknown: 'DOES NOT KNOW:',
+      Recent: 'RECENT MESSAGES:',
+      Since: 'SINCE THE BOOK WAS LAST READ:',
+      ReplyOpen: 'REPLY (#',
+      ReplyClose: '):',
+    }),
+  });
+
   #store;
   #client;
   #scribeService;
   #modelProvider;
+  #modelCatalog;
 
   /**
-   * @param {{store: object, client?: object | null, scribeService: object, modelProvider?: ((context: {stage: string, campaignId: string}) => string | Promise<string>) | null}} options
+   * @param {{store: object, client?: object | null, scribeService: object, modelProvider?: ((context: {stage: string, campaignId: string}) => string | Promise<string>) | null, modelCatalog?: {contextLength: (modelId: string) => number | null} | null}} options
    * @throws {TypeError}
    */
-  constructor({ store, client = null, scribeService, modelProvider = null } = {}) {
+  constructor({ store, client = null, scribeService, modelProvider = null, modelCatalog = null } = {}) {
     if (store === null || typeof store !== 'object') {
       throw new TypeError('store must be a valid StoryStore instance.');
     }
@@ -58,10 +76,14 @@ export class PedantService {
     if (modelProvider !== null && typeof modelProvider !== 'function') {
       throw new TypeError('modelProvider must be null or a function.');
     }
+    if (modelCatalog !== null && (typeof modelCatalog !== 'object' || typeof modelCatalog.contextLength !== 'function')) {
+      throw new TypeError('modelCatalog must be null or an object with contextLength().');
+    }
     this.#store = store;
     this.#client = client;
     this.#scribeService = scribeService;
     this.#modelProvider = modelProvider;
+    this.#modelCatalog = modelCatalog;
   }
 
   /**
@@ -200,7 +222,6 @@ export class PedantService {
     const earlierUnread = messages
       .filter((item) => !Object.hasOwn(log.read, item.id) && item.position < message.position)
       .sort((left, right) => left.position - right.position);
-    const sinceTranscript = ScribeIntakeAdapter.transcript(earlierUnread);
 
     const unknownPairs = [];
     for (const speakerEntry of speakers) {
@@ -216,13 +237,9 @@ export class PedantService {
     });
 
     const seenEarlierIds = new Set(earlierUnread.map((item) => item.id));
-    let recentMessages = messages
+    const candidateRecentMessages = messages
       .filter((item) => item.position < message.position && !seenEarlierIds.has(item.id))
-      .slice(-10);
-    while (recentMessages.length > 1 && Array.from(ScribeIntakeAdapter.transcript(recentMessages)).length > 20000) {
-      recentMessages = recentMessages.slice(1);
-    }
-    const recentTranscript = ScribeIntakeAdapter.transcript(recentMessages);
+      .slice(-PedantService.Settings.MaxRecentMessages);
 
     const labels = ScribeAnalyzer.labels(state);
     const ledgerLines = ledgerFacts.map((fact) => {
@@ -237,26 +254,88 @@ export class PedantService {
       .filter((subject) => subject.mergedInto === null)
       .map((subject) => [subject.id, subject.label, subject.kind, ...subject.aka].join(' | '));
 
-    const sections = [
-      ScribeAnalyzer.section('PLAYER CHARACTER:', [player]),
-      ScribeAnalyzer.section('SUBJECT ROSTER:', rosterLines),
-      ScribeAnalyzer.section('LEDGER:', ledgerLines),
-      ScribeAnalyzer.section('DOES NOT KNOW:', unknownLines),
-    ];
-    if (recentTranscript !== '') {
-      sections.push(ScribeAnalyzer.section('RECENT MESSAGES:', [recentTranscript]));
+    /**
+     * @param {ReadonlyArray<object>} recentSlice
+     * @param {ReadonlyArray<object>} sinceSlice
+     * @returns {string}
+     * @throws {TypeError}
+     */
+    const buildUserPrompt = (recentSlice, sinceSlice) => {
+      const heading = PedantService.Settings.Heading;
+      const analyzerSettings = ScribeAnalyzer.Settings;
+      const recentTranscript = ScribeIntakeAdapter.transcript(recentSlice);
+      const sinceTranscript = ScribeIntakeAdapter.transcript(sinceSlice);
+      const sections = [
+        ScribeAnalyzer.section(heading.Player, [player]),
+        ScribeAnalyzer.section(heading.Roster, rosterLines),
+        ScribeAnalyzer.section(heading.Ledger, ledgerLines),
+        ScribeAnalyzer.section(heading.Unknown, unknownLines),
+      ];
+      if (recentTranscript !== analyzerSettings.Nothing) {
+        sections.push(ScribeAnalyzer.section(heading.Recent, [recentTranscript]));
+      }
+      sections.push(
+        ScribeAnalyzer.section(heading.Since, sinceTranscript === analyzerSettings.Nothing ? [] : [sinceTranscript]),
+        ScribeAnalyzer.section(
+          `${heading.ReplyOpen}${message.position}${heading.ReplyClose}`,
+          [ScribeIntakeAdapter.transcript([message])],
+        ),
+      );
+      return sections.join(analyzerSettings.BlankLine);
+    };
+
+    const replyReserve = this.#store.getSettings().replyReserve;
+    const contextLength = this.#modelCatalog === null ? null : this.#modelCatalog.contextLength(model);
+    const charsPerToken = RequestBudget.charsPerToken({ store: this.#store, model });
+    const budget = RequestBudget.create({ contextLength, replyReserve, charsPerToken });
+    const systemTokens = budget.estimate(PedantService.Prompt);
+    const mandatoryPrompt = buildUserPrompt([], []);
+    if (!budget.fits(systemTokens, mandatoryPrompt)) {
+      const mandatoryTokens = systemTokens + budget.estimate(mandatoryPrompt);
+      throw new RangeError(
+        `Pedant mandatory prompt exceeds ${model} context limit (${mandatoryTokens} estimated tokens > ${budget.limitTokens} input budget).`,
+      );
     }
-    sections.push(
-      ScribeAnalyzer.section('SINCE THE BOOK WAS LAST READ:', sinceTranscript === '' ? [] : [sinceTranscript]),
-      ScribeAnalyzer.section(`REPLY (#${message.position}):`, [ScribeIntakeAdapter.transcript([message])]),
-    );
+
+    let sinceLow = 0;
+    let sinceHigh = earlierUnread.length;
+    while (sinceLow < sinceHigh) {
+      const sinceMiddle = Math.ceil((sinceLow + sinceHigh) / 2);
+      const candidateSince = earlierUnread.slice(earlierUnread.length - sinceMiddle);
+      const sinceFits = budget.limitTokens === null
+        ? ScribeIntakeAdapter.transcript(candidateSince).length <= PedantService.Settings.FallbackSinceChars
+        : budget.fits(systemTokens, buildUserPrompt([], candidateSince));
+      if (sinceFits) {
+        sinceLow = sinceMiddle;
+      } else {
+        sinceHigh = sinceMiddle - 1;
+      }
+    }
+    const selectedSince = earlierUnread.slice(earlierUnread.length - sinceLow);
+
+    let selectedRecent = [];
+    for (let recentIndex = candidateRecentMessages.length - 1; recentIndex >= 0; recentIndex -= 1) {
+      const candidateRecent = [candidateRecentMessages[recentIndex], ...selectedRecent];
+      const isNewestException = budget.limitTokens === null && selectedRecent.length === 0;
+      const recentFits =
+        (
+          isNewestException ||
+          ScribeIntakeAdapter.transcript(candidateRecent).length <= PedantService.Settings.FallbackRecentChars
+        ) &&
+        budget.fits(systemTokens, buildUserPrompt(candidateRecent, selectedSince));
+      if (!recentFits) {
+        break;
+      }
+      selectedRecent = candidateRecent;
+    }
 
     const completion = await this.#client.complete({
       model,
       messages: [
         { role: 'system', content: PedantService.Prompt },
-        { role: 'user', content: sections.join('\n\n') },
+        { role: 'user', content: buildUserPrompt(selectedRecent, selectedSince) },
       ],
+      maxTokens: replyReserve,
       stage: SpendStage.Pedant,
       campaignId,
       signal,

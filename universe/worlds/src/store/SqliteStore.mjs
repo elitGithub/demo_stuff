@@ -18,6 +18,18 @@ import { TurnRole } from './enums/TurnRole.mjs';
 const MAX_REPLIES_PER_CHARACTER = 5;
 
 export class SqliteStore {
+  static Settings = Object.freeze({
+    MaxCharacterQueryLength: 100,
+    LikeEscapeChar: '\\',
+    ControlCharPattern: /\p{Cc}/u,
+    /**
+     * @returns {RegExp}
+     */
+    get AsciiUpperPattern() {
+      return /[A-Z]/g;
+    },
+  });
+
   #db;
   #closed = false;
   #transactionDepth = 0;
@@ -551,38 +563,81 @@ export class SqliteStore {
 
   /**
    * @param {string} campaignId
-   * @param {{includeArchived?: boolean, limit?: number, after?: string | null}} options
+   * @param {{includeArchived?: boolean, limit?: number, after?: string | null, query?: string | null}} [options]
    * @returns {{items: Array<object>, total: number, nextCursor: string | null}}
    * @throws {Error}
    */
-  listCharacters(campaignId, { includeArchived = false, limit = 25, after = null } = {}) {
+  listCharacters(campaignId, { includeArchived = false, limit = 25, after = null, query = null } = {}) {
     this.#validateNonEmptyString(campaignId, 'campaignId');
     if (typeof includeArchived !== 'boolean') {
       throw new TypeError('includeArchived must be a boolean.');
     }
     const validLimit = this.#validateLimit(limit);
+    let normalizedQuery = null;
+    if (query !== null) {
+      if (typeof query !== 'string') {
+        throw new TypeError('query must be null or a string.');
+      }
+      if (query.length > SqliteStore.Settings.MaxCharacterQueryLength) {
+        throw new RangeError(`query must be at most ${SqliteStore.Settings.MaxCharacterQueryLength} characters.`);
+      }
+      if (SqliteStore.Settings.ControlCharPattern.test(query)) {
+        throw new RangeError('query must not contain control characters.');
+      }
+      const trimmedQuery = query.trim();
+      if (trimmedQuery.length > 0) {
+        normalizedQuery = trimmedQuery;
+      }
+    }
+
     const archivedClause = includeArchived ? '' : ' AND archived = 0';
+    const escapeChar = SqliteStore.Settings.LikeEscapeChar;
+    let queryClause = '';
+    const filterParams = [campaignId];
+    if (normalizedQuery !== null) {
+      const foldedQuery = normalizedQuery.replace(
+        SqliteStore.Settings.AsciiUpperPattern,
+        (letter) => letter.toLowerCase(),
+      );
+      const escapedQuery = foldedQuery
+        .replaceAll(escapeChar, `${escapeChar}${escapeChar}`)
+        .replaceAll('%', `${escapeChar}%`)
+        .replaceAll('_', `${escapeChar}_`);
+      const likePattern = `%${escapedQuery}%`;
+      queryClause = `
+        AND (
+          lower(name) LIKE ? ESCAPE '${escapeChar}'
+          OR lower(slug) LIKE ? ESCAPE '${escapeChar}'
+          OR EXISTS (
+            SELECT 1
+            FROM json_each(characters.aliases_json)
+            WHERE lower(CAST(value AS TEXT)) LIKE ? ESCAPE '${escapeChar}'
+          )
+        )`;
+      filterParams.push(likePattern, likePattern, likePattern);
+    }
+
     const totalRow = this.#db.prepare(
-      `SELECT COUNT(*) AS total FROM characters WHERE campaign_id = ?${archivedClause}`,
-    ).get(campaignId);
+      `SELECT COUNT(*) AS total FROM characters WHERE campaign_id = ?${archivedClause}${queryClause}`,
+    ).get(...filterParams);
 
     let rows;
     if (after !== null) {
       const cursor = this.#decodeCursor(after, ['name', 'id']);
       rows = this.#db.prepare(
         `SELECT * FROM characters
-         WHERE campaign_id = ?${archivedClause}
+         WHERE campaign_id = ?${archivedClause}${queryClause}
            AND (name > ? OR (name = ? AND id > ?))
          ORDER BY name ASC, id ASC
          LIMIT ?`,
-      ).all(campaignId, cursor.name, cursor.name, cursor.id, validLimit + 1);
+      ).all(...filterParams, cursor.name, cursor.name, cursor.id, validLimit + 1);
     } else {
       rows = this.#db.prepare(
         `SELECT * FROM characters
-         WHERE campaign_id = ?${archivedClause}
+         WHERE campaign_id = ?${archivedClause}${queryClause}
          ORDER BY name ASC, id ASC
          LIMIT ?`,
-      ).all(campaignId, validLimit + 1);
+      ).all(...filterParams, validLimit + 1);
     }
 
     const hasMore = rows.length > validLimit;

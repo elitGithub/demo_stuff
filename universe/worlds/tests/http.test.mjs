@@ -4,6 +4,7 @@ import http from 'node:http';
 import os from 'node:os';
 import path from 'node:path';
 import { after, describe, it } from 'node:test';
+import { WorldsApi } from '../public/api.mjs';
 import { WorldsConfig } from '../src/config.mjs';
 import { CharacterBrain } from '../src/engine/CharacterBrain.mjs';
 import { Director } from '../src/engine/Director.mjs';
@@ -3947,6 +3948,446 @@ describe('Scene style pin, sequential SSE lifecycle, warning continuation, and d
     assert.equal(context.store.getCampaign(context.campaign.id).sceneState.style, SceneStyle.None);
     const todayUtc = new Date().toISOString().slice(0, 10);
     assert.equal(context.store.getDailySpend(todayUtc).callCount, 3);
+  });
+});
+
+describe('GET /api/campaigns/:id/characters search and WorldsApi.listCharacters', () => {
+  const SEARCH_HTTP = Object.freeze({
+    MethodGet: 'GET',
+    MethodPost: 'POST',
+    StatusOk: 200,
+    StatusCreated: 201,
+    StatusBadRequest: 400,
+    OriginHeader: 'origin',
+    CsrfHeader: 'x-worlds-csrf',
+    ContentTypeHeader: 'content-type',
+    JsonMimePrefix: 'application/json',
+    QueryParam: 'q',
+    QueryErrorMessage: 'q must be at most 100 characters without control characters.',
+    ExactNonAsciiName: 'Élodie',
+    SqlInjectionPayload: "' OR 1=1 --",
+    ExpectedMaxQueryLength: 100,
+    PaddingPrefix: '  ',
+    ValenQuery: 'valen',
+    KestrelQuery: 'kestrel',
+    CampaignsPath: '/api/campaigns',
+    CharactersSegment: 'characters',
+    PageSize: 2,
+    FillerChar: 'a',
+    ControlRanges: Object.freeze([
+      Object.freeze({ first: 0x00, last: 0x1f }),
+      Object.freeze({ first: 0x7f, last: 0x9f }),
+    ]),
+    AcceptedNeighbourCodes: Object.freeze([0x20, 0x7e, 0xa0, 0x200b, 0x202e]),
+    TrimmedControlCodes: Object.freeze([0x09, 0x0a, 0x0b, 0x0c, 0x0d]),
+    JsonProbes: Object.freeze(['[', ']', '"', ',']),
+  });
+  const QUERY_PATH_SUFFIX = `?${SEARCH_HTTP.QueryParam}=`;
+
+  const cleanups = [];
+
+  after(async () => {
+    for (const cleanupFn of cleanups) {
+      await cleanupFn();
+    }
+  });
+
+  /**
+   * @returns {Promise<{env: object, store: SqliteStore, server: WorldsServer, started: {url: string, port: number, csrfToken: string}, headers: Record<string, string>}>}
+   * @throws {Error}
+   */
+  async function startSearchServer() {
+    const env = createTempEnvironment({ envApiKey: 'sk-search-http-key' });
+    const store = new SqliteStore(env.config.dbPath);
+    const { client } = createScriptedOpenRouterClient([], { store });
+    const fake = createFakeModelCatalog();
+    const server = await WorldsServer.create({
+      config: env.config,
+      store,
+      client,
+      publicDir: env.publicDir,
+      modelCatalog: fake.catalog,
+    });
+    const started = await server.start();
+    cleanups.push(async () => {
+      await server.stop();
+      store.close();
+      fs.rmSync(env.tempRoot, { recursive: true, force: true });
+    });
+    const headers = {
+      [SEARCH_HTTP.OriginHeader]: started.url,
+      [SEARCH_HTTP.CsrfHeader]: started.csrfToken,
+      [SEARCH_HTTP.ContentTypeHeader]: SEARCH_HTTP.JsonMimePrefix,
+    };
+    return { env, store, server, started, headers };
+  }
+
+  /**
+   * @param {{started: {url: string}, headers: Record<string, string>}} context
+   * @param {string} method
+   * @param {string} pathName
+   * @param {unknown} [body]
+   * @returns {Promise<{status: number, json: any}>}
+   * @throws {Error}
+   * @throws {SyntaxError}
+   */
+  async function requestJson(context, method, pathName, body = undefined) {
+    const response = await fetch(`${context.started.url}${pathName}`, {
+      method,
+      headers: context.headers,
+      body: body === undefined ? undefined : JSON.stringify(body),
+    });
+    const text = await response.text();
+    const contentType = response.headers.get(SEARCH_HTTP.ContentTypeHeader);
+    const json = contentType.startsWith(SEARCH_HTTP.JsonMimePrefix) ? JSON.parse(text) : null;
+    return { status: response.status, json };
+  }
+
+  /**
+   * @param {string} campaignId
+   * @returns {string}
+   */
+  function buildCharactersPath(campaignId) {
+    return `${SEARCH_HTTP.CampaignsPath}/${campaignId}/${SEARCH_HTTP.CharactersSegment}`;
+  }
+
+  /**
+   * @param {number} code
+   * @returns {string}
+   */
+  function buildFilledProbe(code) {
+    return `${SEARCH_HTTP.FillerChar}${String.fromCharCode(code)}${SEARCH_HTTP.FillerChar}`;
+  }
+
+  /**
+   * @param {string} queryPath
+   * @param {string} queryText
+   * @returns {string}
+   * @throws {URIError}
+   */
+  function buildQueryUrl(queryPath, queryText) {
+    return `${queryPath}${encodeURIComponent(queryText)}`;
+  }
+
+  /**
+   * @param {{status: number, json: any}} rejected
+   * @returns {void}
+   * @throws {Error}
+   */
+  function assertQueryRejected(rejected) {
+    assert.equal(rejected.status, SEARCH_HTTP.StatusBadRequest);
+    assert.equal(rejected.json.error, SEARCH_HTTP.QueryErrorMessage);
+  }
+
+  /**
+   * @param {{started: {url: string}, headers: Record<string, string>}} context
+   * @param {string} campaignId
+   * @param {Record<string, unknown>} payload
+   * @returns {Promise<object>}
+   * @throws {Error}
+   */
+  async function createSearchCharacter(context, campaignId, payload) {
+    const created = await requestJson(
+      context,
+      SEARCH_HTTP.MethodPost,
+      buildCharactersPath(campaignId),
+      payload,
+    );
+    assert.equal(created.status, SEARCH_HTTP.StatusCreated);
+    return created.json;
+  }
+
+  it('filters by name, slug, alias, encoded wildcards, non-ASCII exact case, includeArchived, and pagination cursor', async () => {
+    const context = await startSearchServer();
+    const campaignRes = await requestJson(context, SEARCH_HTTP.MethodPost, SEARCH_HTTP.CampaignsPath, {
+      title: 'HTTP Cast Search',
+    });
+    assert.equal(campaignRes.status, SEARCH_HTTP.StatusCreated);
+    const campaignId = campaignRes.json.id;
+    const queryPath = `${buildCharactersPath(campaignId)}${QUERY_PATH_SUFFIX}`;
+    const valenQueryPath = `${queryPath}${SEARCH_HTTP.ValenQuery}`;
+    const pagedPath = `${valenQueryPath}&limit=${SEARCH_HTTP.PageSize}`;
+    const repeatedQueryPart = `&${SEARCH_HTTP.QueryParam}=`;
+    const valenThenLaterQueryPath = `${valenQueryPath}${repeatedQueryPart}`;
+
+    const valenAlpha = await createSearchCharacter(context, campaignId, {
+      slug: 'valen-alpha',
+      name: 'Valen Alpha',
+      aliases: ['Harbor Warden'],
+      tier: CharacterTier.Main,
+      avatarToken: AvatarToken.Sage,
+    });
+    const valenBeta = await createSearchCharacter(context, campaignId, {
+      slug: 'valen-beta',
+      name: 'Valen Beta',
+      aliases: ['Watchman'],
+      tier: CharacterTier.Main,
+      avatarToken: AvatarToken.Rose,
+    });
+    const slugMatch = await createSearchCharacter(context, campaignId, {
+      slug: 'dock-valen-three',
+      name: 'Kestrel Marsh',
+      aliases: ['Quiet Blade'],
+      tier: CharacterTier.Recurring,
+      avatarToken: AvatarToken.Amber,
+    });
+    const archivedValen = await createSearchCharacter(context, campaignId, {
+      slug: 'valen-archived',
+      name: 'Valen Archived',
+      aliases: ['Retired Warden'],
+      archived: true,
+      tier: CharacterTier.Recurring,
+      avatarToken: AvatarToken.Slate,
+    });
+    const pctChar = await createSearchCharacter(context, campaignId, {
+      slug: 'pct-char',
+      name: '100% Pure',
+      aliases: ['Literal_Under', 'Back\\Slash'],
+      tier: CharacterTier.Recurring,
+      avatarToken: AvatarToken.Teal,
+    });
+    const elodie = await createSearchCharacter(context, campaignId, {
+      slug: 'elodie-char',
+      name: SEARCH_HTTP.ExactNonAsciiName,
+      aliases: ['Silver Lantern'],
+      tier: CharacterTier.Recurring,
+      avatarToken: AvatarToken.Indigo,
+    });
+
+    const byAlias = await requestJson(context, SEARCH_HTTP.MethodGet, `${queryPath}QUIET%20BLADE`);
+    assert.equal(byAlias.status, SEARCH_HTTP.StatusOk);
+    assert.equal(byAlias.json.total, 1);
+    assert.deepEqual(byAlias.json.items.map((item) => item.id), [slugMatch.id]);
+
+    const bySlug = await requestJson(context, SEARCH_HTTP.MethodGet, `${queryPath}dock-valen`);
+    assert.equal(bySlug.status, SEARCH_HTTP.StatusOk);
+    assert.equal(bySlug.json.total, 1);
+    assert.deepEqual(bySlug.json.items.map((item) => item.id), [slugMatch.id]);
+
+    const byPercent = await requestJson(context, SEARCH_HTTP.MethodGet, `${queryPath}%25`);
+    assert.equal(byPercent.status, SEARCH_HTTP.StatusOk);
+    assert.equal(byPercent.json.total, 1);
+    assert.deepEqual(byPercent.json.items.map((item) => item.id), [pctChar.id]);
+
+    const byUnderscore = await requestJson(context, SEARCH_HTTP.MethodGet, `${queryPath}%5F`);
+    assert.equal(byUnderscore.status, SEARCH_HTTP.StatusOk);
+    assert.equal(byUnderscore.json.total, 1);
+    assert.deepEqual(byUnderscore.json.items.map((item) => item.id), [pctChar.id]);
+
+    const byBackslash = await requestJson(context, SEARCH_HTTP.MethodGet, `${queryPath}%5C`);
+    assert.equal(byBackslash.status, SEARCH_HTTP.StatusOk);
+    assert.equal(byBackslash.json.total, 1);
+    assert.deepEqual(byBackslash.json.items.map((item) => item.id), [pctChar.id]);
+
+    const byNonAscii = await requestJson(
+      context,
+      SEARCH_HTTP.MethodGet,
+      buildQueryUrl(queryPath, SEARCH_HTTP.ExactNonAsciiName),
+    );
+    assert.equal(byNonAscii.status, SEARCH_HTTP.StatusOk);
+    assert.equal(byNonAscii.json.total, 1);
+    assert.deepEqual(byNonAscii.json.items.map((item) => item.id), [elodie.id]);
+
+    const sqlInjectionRes = await requestJson(
+      context,
+      SEARCH_HTTP.MethodGet,
+      buildQueryUrl(queryPath, SEARCH_HTTP.SqlInjectionPayload),
+    );
+    assert.equal(sqlInjectionRes.status, SEARCH_HTTP.StatusOk);
+    assert.equal(sqlInjectionRes.json.total, 0);
+
+    for (const jsonProbe of SEARCH_HTTP.JsonProbes) {
+      const probeRes = await requestJson(
+        context,
+        SEARCH_HTTP.MethodGet,
+        buildQueryUrl(queryPath, jsonProbe),
+      );
+      assert.equal(probeRes.status, SEARCH_HTTP.StatusOk);
+      assert.equal(probeRes.json.total, 0);
+    }
+
+    const blankRes = await requestJson(context, SEARCH_HTTP.MethodGet, `${queryPath}%20%20%20`);
+    assert.equal(blankRes.status, SEARCH_HTTP.StatusOk);
+    assert.equal(blankRes.json.total, 5);
+
+    const pageOne = await requestJson(context, SEARCH_HTTP.MethodGet, pagedPath);
+    assert.equal(pageOne.status, SEARCH_HTTP.StatusOk);
+    assert.equal(pageOne.json.total, 3);
+    assert.equal(pageOne.json.items.length, 2);
+    assert.notEqual(pageOne.json.nextCursor, null);
+
+    const pageTwo = await requestJson(
+      context,
+      SEARCH_HTTP.MethodGet,
+      `${pagedPath}&after=${encodeURIComponent(pageOne.json.nextCursor)}`,
+    );
+    assert.equal(pageTwo.status, SEARCH_HTTP.StatusOk);
+    assert.equal(pageTwo.json.total, 3);
+    assert.equal(pageTwo.json.items.length, 1);
+    assert.equal(pageTwo.json.nextCursor, null);
+    assert.deepEqual(
+      [...pageOne.json.items, ...pageTwo.json.items].map((item) => item.id),
+      [slugMatch.id, valenAlpha.id, valenBeta.id],
+    );
+
+    const archivedRes = await requestJson(
+      context,
+      SEARCH_HTTP.MethodGet,
+      `${valenQueryPath}&includeArchived=true`,
+    );
+    assert.equal(archivedRes.status, SEARCH_HTTP.StatusOk);
+    assert.equal(archivedRes.json.total, 4);
+    assert.deepEqual(
+      archivedRes.json.items.map((item) => item.id),
+      [slugMatch.id, valenAlpha.id, archivedValen.id, valenBeta.id],
+    );
+
+    const firstQueryWins = await requestJson(
+      context,
+      SEARCH_HTTP.MethodGet,
+      `${valenThenLaterQueryPath}${SEARCH_HTTP.KestrelQuery}`,
+    );
+    assert.equal(firstQueryWins.status, SEARCH_HTTP.StatusOk);
+    assert.equal(firstQueryWins.json.total, 3);
+    assert.deepEqual(
+      firstQueryWins.json.items.map((item) => item.id),
+      [slugMatch.id, valenAlpha.id, valenBeta.id],
+    );
+
+    const firstQueryWinsReversed = await requestJson(
+      context,
+      SEARCH_HTTP.MethodGet,
+      `${queryPath}${SEARCH_HTTP.KestrelQuery}${repeatedQueryPart}${SEARCH_HTTP.ValenQuery}`,
+    );
+    assert.equal(firstQueryWinsReversed.status, SEARCH_HTTP.StatusOk);
+    assert.equal(firstQueryWinsReversed.json.total, 1);
+    assert.deepEqual(firstQueryWinsReversed.json.items.map((item) => item.id), [slugMatch.id]);
+
+    const [firstControlRange] = SEARCH_HTTP.ControlRanges;
+    const laterControlIgnored = await requestJson(
+      context,
+      SEARCH_HTTP.MethodGet,
+      buildQueryUrl(valenThenLaterQueryPath, buildFilledProbe(firstControlRange.first)),
+    );
+    assert.equal(laterControlIgnored.status, SEARCH_HTTP.StatusOk);
+    assert.equal(laterControlIgnored.json.total, 3);
+
+    const laterOverLengthIgnored = await requestJson(
+      context,
+      SEARCH_HTTP.MethodGet,
+      buildQueryUrl(
+        valenThenLaterQueryPath,
+        SEARCH_HTTP.FillerChar.repeat(SEARCH_HTTP.ExpectedMaxQueryLength + 1),
+      ),
+    );
+    assert.equal(laterOverLengthIgnored.status, SEARCH_HTTP.StatusOk);
+    assert.equal(laterOverLengthIgnored.json.total, 3);
+
+    const recordedUrls = [];
+    const api = new WorldsApi({
+      baseUrl: context.started.url,
+      csrfToken: context.started.csrfToken,
+      /**
+       * @param {string | URL | Request} requestUrl
+       * @param {RequestInit} [requestInit]
+       * @returns {Promise<Response>}
+       * @throws {Error}
+       */
+      fetchImpl: async (requestUrl, requestInit) => {
+        recordedUrls.push(new URL(String(requestUrl)));
+        return await globalThis.fetch(requestUrl, requestInit);
+      },
+    });
+    const paddedValen = `${SEARCH_HTTP.PaddingPrefix}${SEARCH_HTTP.ValenQuery}${SEARCH_HTTP.PaddingPrefix}`;
+    const apiPageOne = await api.listCharacters(campaignId, { query: paddedValen, limit: SEARCH_HTTP.PageSize });
+    assert.equal(recordedUrls.at(-1).searchParams.get(SEARCH_HTTP.QueryParam), SEARCH_HTTP.ValenQuery);
+    assert.equal(apiPageOne.total, 3);
+    assert.equal(apiPageOne.items.length, 2);
+    assert.notEqual(apiPageOne.nextCursor, null);
+
+    const apiPageTwo = await api.listCharacters(campaignId, {
+      query: paddedValen,
+      limit: SEARCH_HTTP.PageSize,
+      after: apiPageOne.nextCursor,
+    });
+    assert.equal(recordedUrls.at(-1).searchParams.get(SEARCH_HTTP.QueryParam), SEARCH_HTTP.ValenQuery);
+    assert.equal(apiPageTwo.total, 3);
+    assert.deepEqual(
+      [...apiPageOne.items, ...apiPageTwo.items].map((item) => item.id),
+      [slugMatch.id, valenAlpha.id, valenBeta.id],
+    );
+
+    for (const emptyOptions of [{ query: '   ' }, {}, { query: null }, { query: '' }]) {
+      const apiUnfiltered = await api.listCharacters(campaignId, emptyOptions);
+      assert.equal(apiUnfiltered.total, 5);
+      assert.equal(recordedUrls.at(-1).searchParams.has(SEARCH_HTTP.QueryParam), false);
+    }
+  });
+
+  it('rejects oversized, whitespace-padded oversized, and control-character q parameters with HTTP 400', async () => {
+    const context = await startSearchServer();
+    const campaignRes = await requestJson(context, SEARCH_HTTP.MethodPost, SEARCH_HTTP.CampaignsPath, {
+      title: 'HTTP Validation',
+    });
+    assert.equal(campaignRes.status, SEARCH_HTTP.StatusCreated);
+    const queryPath = `${buildCharactersPath(campaignRes.json.id)}${QUERY_PATH_SUFFIX}`;
+
+    const paddedOverLimit = `${SEARCH_HTTP.PaddingPrefix}${SEARCH_HTTP.FillerChar.repeat(
+      SEARCH_HTTP.ExpectedMaxQueryLength - SEARCH_HTTP.PaddingPrefix.length + 1,
+    )}`;
+    assert.equal(paddedOverLimit.length, SqliteStore.Settings.MaxCharacterQueryLength + 1);
+    const paddedRes = await requestJson(
+      context,
+      SEARCH_HTTP.MethodGet,
+      buildQueryUrl(queryPath, paddedOverLimit),
+    );
+    assertQueryRejected(paddedRes);
+
+    const exactLimit = SEARCH_HTTP.FillerChar.repeat(SqliteStore.Settings.MaxCharacterQueryLength);
+    const exactRes = await requestJson(
+      context,
+      SEARCH_HTTP.MethodGet,
+      buildQueryUrl(queryPath, exactLimit),
+    );
+    assert.equal(exactRes.status, SEARCH_HTTP.StatusOk);
+    assert.equal(exactRes.json.total, 0);
+
+    for (const controlRange of SEARCH_HTTP.ControlRanges) {
+      for (let code = controlRange.first; code <= controlRange.last; code += 1) {
+        const controlRes = await requestJson(
+          context,
+          SEARCH_HTTP.MethodGet,
+          buildQueryUrl(queryPath, buildFilledProbe(code)),
+        );
+        assertQueryRejected(controlRes);
+      }
+    }
+
+    for (const trimmedCode of SEARCH_HTTP.TrimmedControlCodes) {
+      const trimmedChar = String.fromCharCode(trimmedCode);
+      const edgeQueries = [
+        trimmedChar,
+        `${trimmedChar}${SEARCH_HTTP.ValenQuery}`,
+        `${SEARCH_HTTP.ValenQuery}${trimmedChar}`,
+      ];
+      for (const edgeQuery of edgeQueries) {
+        const edgeRes = await requestJson(
+          context,
+          SEARCH_HTTP.MethodGet,
+          buildQueryUrl(queryPath, edgeQuery),
+        );
+        assertQueryRejected(edgeRes);
+      }
+    }
+
+    for (const neighbourCode of SEARCH_HTTP.AcceptedNeighbourCodes) {
+      const acceptedRes = await requestJson(
+        context,
+        SEARCH_HTTP.MethodGet,
+        buildQueryUrl(queryPath, buildFilledProbe(neighbourCode)),
+      );
+      assert.equal(acceptedRes.status, SEARCH_HTTP.StatusOk);
+    }
   });
 });
 

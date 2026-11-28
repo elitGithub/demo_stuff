@@ -10,6 +10,7 @@ import { ScribeLogCore } from '../scribe/ScribeLogCore.mjs';
 import { ScribeReplay } from '../scribe/ScribeReplay.mjs';
 import { ScribeText } from '../scribe/ScribeText.mjs';
 import { CharacterCard } from '../store/CharacterCard.mjs';
+import { SqliteStore } from '../store/SqliteStore.mjs';
 import { FindingStatus } from '../store/enums/FindingStatus.mjs';
 import { SceneStyle } from '../store/enums/SceneStyle.mjs';
 import { TurnMode } from '../store/enums/TurnMode.mjs';
@@ -674,7 +675,24 @@ export class Router {
               defaultValue: 25,
             });
             const after = this.#parseCursorParam(searchParams);
-            this.#sendJson(response, 200, this.#store.listCharacters(campaignId, { includeArchived, limit, after }));
+            const rawQuery = searchParams.has('q') ? searchParams.get('q') : null;
+            if (
+              rawQuery !== null &&
+              (
+                rawQuery.length > SqliteStore.Settings.MaxCharacterQueryLength ||
+                SqliteStore.Settings.ControlCharPattern.test(rawQuery)
+              )
+            ) {
+              throw this.#createHttpError(
+                400,
+                `q must be at most ${SqliteStore.Settings.MaxCharacterQueryLength} characters without control characters.`,
+              );
+            }
+            this.#sendJson(
+              response,
+              200,
+              this.#store.listCharacters(campaignId, { includeArchived, limit, after, query: rawQuery }),
+            );
             return;
           }
           if (method === 'POST') {

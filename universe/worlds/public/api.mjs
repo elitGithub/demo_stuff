@@ -354,17 +354,20 @@ export class WorldsApi {
 
   /**
    * @param {string} campaignId
-   * @param {{includeArchived?: boolean, limit?: number, after?: string | null, signal?: AbortSignal | null}} [options]
+   * @param {{includeArchived?: boolean, limit?: number, after?: string | null, query?: string | null, signal?: AbortSignal | null}} [options]
    * @returns {Promise<{items: Array<object>, total: number, nextCursor: string | null}>}
    * @throws {Error}
    */
-  async listCharacters(campaignId, { includeArchived = false, limit = 25, after = null, signal = null } = {}) {
+  async listCharacters(campaignId, { includeArchived = false, limit = 25, after = null, query = null, signal = null } = {}) {
     const params = new URLSearchParams({
       includeArchived: includeArchived ? 'true' : 'false',
       limit: String(limit),
     });
     if (typeof after === 'string' && after.length > 0) {
       params.set('after', after);
+    }
+    if (typeof query === 'string' && query.trim().length > 0) {
+      params.set('q', query.trim());
     }
     return await this.#requestJson(
       'GET',

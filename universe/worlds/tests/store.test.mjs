@@ -2126,3 +2126,405 @@ describe('SceneStyle enum and SqliteStore sceneStyles settings', () => {
     }
   });
 });
+
+describe('SqliteStore hardened character search', () => {
+  const COMMA_PROBE = ',';
+  const SEARCH_CONSTANTS = Object.freeze({
+    ExpectedMaxQueryLength: 100,
+    ExpectedEscapeChar: '\\',
+    ExpectedControlPatternSource: '\\p{Cc}',
+    ExpectedControlPatternFlags: 'u',
+    ExpectedMaxLengthMessage: 'query must be at most 100 characters.',
+    ExpectedControlMessage: 'query must not contain control characters.',
+    PaddingPrefix: '   ',
+    AshQuery: 'ash',
+    VaultSlug: 'vault_keeper',
+    FillerChar: 'a',
+    UnderscoreName: 'under_score',
+    BackslashName: 'back\\slash',
+    EscapedPercentAlias: 'Rate\\%Split',
+    CaptainAshAlias: 'Captain Ash',
+    SmallPageSize: 2,
+    LargePageSize: 4,
+    ControlRanges: Object.freeze([
+      Object.freeze({ first: 0x00, last: 0x1f }),
+      Object.freeze({ first: 0x7f, last: 0x9f }),
+    ]),
+    AcceptedNeighbourCodes: Object.freeze([0x20, 0x7e, 0xa0, 0x200b, 0x202e]),
+    ExactNonAsciiName: 'Élodie',
+    LowerNonAsciiQuery: 'élodie',
+    ArchivedMatchName: 'Ashby Archived',
+    SqlInjectionOr: "' OR 1=1 --",
+    SqlInjectionDrop: '\'"; DROP TABLE characters; --',
+    CommaProbe: COMMA_PROBE,
+    JsonProbes: Object.freeze(['[', ']', '"', COMMA_PROBE]),
+  });
+
+  /**
+   * @param {number} code
+   * @returns {string}
+   */
+  function buildFilledProbe(code) {
+    return `${SEARCH_CONSTANTS.FillerChar}${String.fromCharCode(code)}${SEARCH_CONSTANTS.FillerChar}`;
+  }
+
+  /**
+   * @param {SqliteStore} store
+   * @param {string} campaignId
+   * @returns {Record<string, object>}
+   * @throws {Error}
+   */
+  function seedSearchCast(store, campaignId) {
+    const lyra = store.createCharacter(campaignId, {
+      slug: 'lyra-vale',
+      name: 'Lyra Vale',
+      aliases: ['Starling', SEARCH_CONSTANTS.CaptainAshAlias],
+      tier: CharacterTier.Main,
+      avatarToken: AvatarToken.Sage,
+    });
+    const elodie = store.createCharacter(campaignId, {
+      slug: 'elodie-marsh',
+      name: SEARCH_CONSTANTS.ExactNonAsciiName,
+      aliases: ['Marsh Lantern'],
+      tier: CharacterTier.Main,
+      avatarToken: AvatarToken.Rose,
+    });
+    const percentChar = store.createCharacter(campaignId, {
+      slug: 'pct-broker',
+      name: '100% Pure',
+      aliases: ['Esc\\Pct', SEARCH_CONSTANTS.EscapedPercentAlias],
+      tier: CharacterTier.Recurring,
+      avatarToken: AvatarToken.Amber,
+    });
+    const underscoreChar = store.createCharacter(campaignId, {
+      slug: 'under-score',
+      name: SEARCH_CONSTANTS.UnderscoreName,
+      aliases: ['Agent_Zero'],
+      tier: CharacterTier.Recurring,
+      avatarToken: AvatarToken.Slate,
+    });
+    const backslashChar = store.createCharacter(campaignId, {
+      slug: 'slash-scout',
+      name: SEARCH_CONSTANTS.BackslashName,
+      aliases: ['Path\\Marker'],
+      tier: CharacterTier.Recurring,
+      avatarToken: AvatarToken.Teal,
+    });
+    const ashOne = store.createCharacter(campaignId, {
+      slug: 'ash-alpha',
+      name: 'Ash Alpha',
+      aliases: ['Cinder'],
+      tier: CharacterTier.Recurring,
+      avatarToken: AvatarToken.Indigo,
+    });
+    const ashTwo = store.createCharacter(campaignId, {
+      slug: 'ash-beta',
+      name: 'Ash Beta',
+      aliases: ['Ember'],
+      tier: CharacterTier.Recurring,
+      avatarToken: AvatarToken.Coral,
+    });
+    const ashSlug = store.createCharacter(campaignId, {
+      slug: 'cinder-ash-three',
+      name: 'Bram Mercer',
+      aliases: ['Quiet Watch'],
+      tier: CharacterTier.Recurring,
+      avatarToken: AvatarToken.Plum,
+    });
+    const archivedAsh = store.createCharacter(campaignId, {
+      slug: 'ashby-archived',
+      name: SEARCH_CONSTANTS.ArchivedMatchName,
+      aliases: ['Old Ash'],
+      archived: true,
+      tier: CharacterTier.Recurring,
+      avatarToken: AvatarToken.Slate,
+    });
+
+    return {
+      lyra,
+      elodie,
+      percentChar,
+      underscoreChar,
+      backslashChar,
+      ashOne,
+      ashTwo,
+      ashSlug,
+      archivedAsh,
+    };
+  }
+
+  it('exposes frozen query validation constants and matches name, slug, and json_each aliases case-insensitively for ASCII', () => {
+    assert.equal(Object.isFrozen(SqliteStore.Settings), true);
+    assert.equal(SqliteStore.Settings.MaxCharacterQueryLength, SEARCH_CONSTANTS.ExpectedMaxQueryLength);
+    assert.equal(SqliteStore.Settings.LikeEscapeChar, SEARCH_CONSTANTS.ExpectedEscapeChar);
+    assert.notEqual(SqliteStore.Settings.AsciiUpperPattern, SqliteStore.Settings.AsciiUpperPattern);
+    assert.equal(SqliteStore.Settings.ControlCharPattern.source, SEARCH_CONSTANTS.ExpectedControlPatternSource);
+    assert.equal(SqliteStore.Settings.ControlCharPattern.flags, SEARCH_CONSTANTS.ExpectedControlPatternFlags);
+
+    const store = new SqliteStore(':memory:');
+    try {
+      const campaign = store.createCampaign({ title: 'Cast Search' });
+      const otherCampaign = store.createCampaign({ title: 'Other Campaign' });
+      const cast = seedSearchCast(store, campaign.id);
+      store.createCharacter(otherCampaign.id, {
+        slug: 'lyra-outsider',
+        name: 'Lyra Outsider',
+        aliases: [SEARCH_CONSTANTS.CaptainAshAlias],
+      });
+
+      const byName = store.listCharacters(campaign.id, { query: 'LYRA' });
+      assert.equal(byName.total, 1);
+      assert.deepEqual(byName.items.map((character) => character.id), [cast.lyra.id]);
+
+      const bySlug = store.listCharacters(campaign.id, { query: 'CINDER-ASH-THREE' });
+      assert.equal(bySlug.total, 1);
+      assert.deepEqual(bySlug.items.map((character) => character.id), [cast.ashSlug.id]);
+
+      const byAlias = store.listCharacters(campaign.id, { query: 'STARLING' });
+      assert.equal(byAlias.total, 1);
+      assert.deepEqual(byAlias.items.map((character) => character.id), [cast.lyra.id]);
+
+      const byExactNonAscii = store.listCharacters(campaign.id, { query: SEARCH_CONSTANTS.ExactNonAsciiName });
+      assert.equal(byExactNonAscii.total, 1);
+      assert.deepEqual(byExactNonAscii.items.map((character) => character.id), [cast.elodie.id]);
+
+      const byLowerNonAscii = store.listCharacters(campaign.id, { query: SEARCH_CONSTANTS.LowerNonAsciiQuery });
+      assert.equal(byLowerNonAscii.total, 0);
+
+      const paddedAllowed = store.listCharacters(campaign.id, { query: '  starling  ' });
+      assert.equal(paddedAllowed.total, 1);
+      assert.equal(paddedAllowed.items[0].id, cast.lyra.id);
+
+      const exactMaxQuery = SEARCH_CONSTANTS.FillerChar.repeat(SqliteStore.Settings.MaxCharacterQueryLength);
+      assert.equal(store.listCharacters(campaign.id, { query: exactMaxQuery }).total, 0);
+    } finally {
+      store.close();
+    }
+  });
+
+  it('escapes LIKE wildcards and backslashes in order, blocks SQL injection, and avoids JSON syntax false positives', () => {
+    const store = new SqliteStore(':memory:');
+    try {
+      const campaign = store.createCampaign({ title: 'Wildcard Safety' });
+      const cast = seedSearchCast(store, campaign.id);
+      const commaChar = store.createCharacter(campaign.id, {
+        slug: 'comma-alias',
+        name: 'Comma Carrier',
+        aliases: ['East,West'],
+      });
+      const vaultChar = store.createCharacter(campaign.id, {
+        slug: SEARCH_CONSTANTS.VaultSlug,
+        name: 'Dara Quill',
+        aliases: ['Night Clerk'],
+      });
+
+      const injectOne = store.listCharacters(campaign.id, { query: SEARCH_CONSTANTS.SqlInjectionOr });
+      assert.equal(injectOne.total, 0);
+      assert.equal(injectOne.items.length, 0);
+
+      const injectTwo = store.listCharacters(campaign.id, { query: SEARCH_CONSTANTS.SqlInjectionDrop });
+      assert.equal(injectTwo.total, 0);
+      assert.equal(store.listCharacters(campaign.id).total, 10);
+
+      const vaultSlugMatch = store.listCharacters(campaign.id, { query: SEARCH_CONSTANTS.VaultSlug });
+      assert.equal(vaultSlugMatch.total, 1);
+      assert.deepEqual(vaultSlugMatch.items.map((character) => character.id), [vaultChar.id]);
+
+      const pctMatch = store.listCharacters(campaign.id, { query: '100%' });
+      assert.equal(pctMatch.total, 1);
+      assert.deepEqual(pctMatch.items.map((character) => character.id), [cast.percentChar.id]);
+
+      const lonePctMatch = store.listCharacters(campaign.id, { query: '%' });
+      assert.equal(lonePctMatch.total, 1);
+      assert.deepEqual(lonePctMatch.items.map((character) => character.id), [cast.percentChar.id]);
+
+      const escapedSlashPctMatch = store.listCharacters(campaign.id, { query: SEARCH_CONSTANTS.EscapedPercentAlias });
+      assert.equal(escapedSlashPctMatch.total, 1);
+      assert.deepEqual(escapedSlashPctMatch.items.map((character) => character.id), [cast.percentChar.id]);
+
+      const missSlashPctMatch = store.listCharacters(campaign.id, { query: 'Esc\\%' });
+      assert.equal(missSlashPctMatch.total, 0);
+
+      const underscoreMatch = store.listCharacters(campaign.id, { query: SEARCH_CONSTANTS.UnderscoreName });
+      assert.equal(underscoreMatch.total, 1);
+      assert.deepEqual(underscoreMatch.items.map((character) => character.id), [cast.underscoreChar.id]);
+
+      const loneUnderscoreMatch = store.listCharacters(campaign.id, { query: '_' });
+      assert.equal(loneUnderscoreMatch.total, 2);
+      assert.deepEqual(
+        loneUnderscoreMatch.items.map((character) => character.id),
+        [vaultChar.id, cast.underscoreChar.id],
+      );
+
+      const backslashMatch = store.listCharacters(campaign.id, { query: SEARCH_CONSTANTS.BackslashName });
+      assert.equal(backslashMatch.total, 1);
+      assert.deepEqual(backslashMatch.items.map((character) => character.id), [cast.backslashChar.id]);
+
+      const loneBackslashMatch = store.listCharacters(campaign.id, { query: SEARCH_CONSTANTS.ExpectedEscapeChar });
+      assert.equal(loneBackslashMatch.total, 2);
+      assert.deepEqual(
+        loneBackslashMatch.items.map((character) => character.id),
+        [cast.percentChar.id, cast.backslashChar.id],
+      );
+
+      for (const jsonProbe of SEARCH_CONSTANTS.JsonProbes) {
+        const probeResult = store.listCharacters(campaign.id, { query: jsonProbe });
+        if (jsonProbe === SEARCH_CONSTANTS.CommaProbe) {
+          assert.equal(probeResult.total, 1);
+          assert.deepEqual(probeResult.items.map((character) => character.id), [commaChar.id]);
+        } else {
+          assert.equal(probeResult.total, 0);
+        }
+      }
+    } finally {
+      store.close();
+    }
+  });
+
+  it('paginates filtered results with accurate total, keyset cursor ordering, and includeArchived support', () => {
+    const store = new SqliteStore(':memory:');
+    try {
+      const campaign = store.createCampaign({ title: 'Filtered Pagination' });
+      const cast = seedSearchCast(store, campaign.id);
+
+      const pageOne = store.listCharacters(campaign.id, {
+        query: SEARCH_CONSTANTS.AshQuery,
+        limit: SEARCH_CONSTANTS.SmallPageSize,
+      });
+      assert.equal(pageOne.total, 5);
+      assert.equal(pageOne.items.length, 2);
+      assert.notEqual(pageOne.nextCursor, null);
+
+      const pageTwo = store.listCharacters(campaign.id, {
+        query: SEARCH_CONSTANTS.AshQuery,
+        limit: SEARCH_CONSTANTS.SmallPageSize,
+        after: pageOne.nextCursor,
+      });
+      assert.equal(pageTwo.total, 5);
+      assert.equal(pageTwo.items.length, 2);
+      assert.notEqual(pageTwo.nextCursor, null);
+
+      const pageThree = store.listCharacters(campaign.id, {
+        query: SEARCH_CONSTANTS.AshQuery,
+        limit: SEARCH_CONSTANTS.SmallPageSize,
+        after: pageTwo.nextCursor,
+      });
+      assert.equal(pageThree.total, 5);
+      assert.equal(pageThree.items.length, 1);
+      assert.equal(pageThree.nextCursor, null);
+
+      const activeOrderedIds = [...pageOne.items, ...pageTwo.items, ...pageThree.items].map((character) => character.id);
+      assert.deepEqual(activeOrderedIds, [
+        cast.ashOne.id,
+        cast.ashTwo.id,
+        cast.ashSlug.id,
+        cast.lyra.id,
+        cast.backslashChar.id,
+      ]);
+
+      const archivedPageOne = store.listCharacters(campaign.id, {
+        query: SEARCH_CONSTANTS.AshQuery,
+        includeArchived: true,
+        limit: SEARCH_CONSTANTS.LargePageSize,
+      });
+      assert.equal(archivedPageOne.total, 6);
+      assert.equal(archivedPageOne.items.length, 4);
+      assert.notEqual(archivedPageOne.nextCursor, null);
+
+      const archivedPageTwo = store.listCharacters(campaign.id, {
+        query: SEARCH_CONSTANTS.AshQuery,
+        includeArchived: true,
+        limit: SEARCH_CONSTANTS.LargePageSize,
+        after: archivedPageOne.nextCursor,
+      });
+      assert.equal(archivedPageTwo.total, 6);
+      assert.equal(archivedPageTwo.items.length, 2);
+      assert.equal(archivedPageTwo.nextCursor, null);
+
+      const archivedIncludedIds = [...archivedPageOne.items, ...archivedPageTwo.items].map((character) => character.id);
+      assert.deepEqual(archivedIncludedIds, [
+        cast.ashOne.id,
+        cast.ashTwo.id,
+        cast.archivedAsh.id,
+        cast.ashSlug.id,
+        cast.lyra.id,
+        cast.backslashChar.id,
+      ]);
+    } finally {
+      store.close();
+    }
+  });
+
+  it('rejects non-string, over-length padded, and control-char queries while normalizing whitespace-only queries to unfiltered', () => {
+    const store = new SqliteStore(':memory:');
+    try {
+      const campaign = store.createCampaign({ title: 'Validation' });
+      seedSearchCast(store, campaign.id);
+
+      for (const nonString of [
+        123,
+        true,
+        {},
+        [SEARCH_CONSTANTS.AshQuery],
+        {
+          /**
+           * @returns {string}
+           */
+          trim() {
+            return SEARCH_CONSTANTS.AshQuery;
+          },
+        },
+        new String(SEARCH_CONSTANTS.AshQuery),
+      ]) {
+        assert.throws(
+          () => store.listCharacters(campaign.id, { query: nonString }),
+          (error) => error instanceof TypeError && /query must be null or a string/.test(error.message),
+        );
+      }
+
+      const paddingPrefix = SEARCH_CONSTANTS.PaddingPrefix;
+      const maxQueryLength = SqliteStore.Settings.MaxCharacterQueryLength;
+      const paddedTooLong = `${paddingPrefix}${SEARCH_CONSTANTS.FillerChar.repeat(
+        SEARCH_CONSTANTS.ExpectedMaxQueryLength - paddingPrefix.length + 1,
+      )}`;
+      assert.equal(paddedTooLong.length, maxQueryLength + 1);
+      assert.throws(
+        () => store.listCharacters(campaign.id, { query: paddedTooLong }),
+        (error) => error instanceof RangeError && error.message === SEARCH_CONSTANTS.ExpectedMaxLengthMessage,
+      );
+
+      /**
+       * @param {unknown} error
+       * @returns {boolean}
+       */
+      const isControlError = (error) => error instanceof RangeError
+        && error.message === SEARCH_CONSTANTS.ExpectedControlMessage;
+
+      for (const controlRange of SEARCH_CONSTANTS.ControlRanges) {
+        for (let code = controlRange.first; code <= controlRange.last; code += 1) {
+          assert.throws(
+            () => store.listCharacters(campaign.id, { query: buildFilledProbe(code) }),
+            isControlError,
+          );
+        }
+      }
+
+      assert.throws(
+        () => store.listCharacters(campaign.id, { query: '  \n  ' }),
+        isControlError,
+      );
+
+      for (const neighbourCode of SEARCH_CONSTANTS.AcceptedNeighbourCodes) {
+        assert.doesNotThrow(
+          () => store.listCharacters(campaign.id, { query: buildFilledProbe(neighbourCode) }),
+        );
+      }
+
+      assert.equal(store.listCharacters(campaign.id, { query: '' }).total, 8);
+      assert.equal(store.listCharacters(campaign.id, { query: paddingPrefix }).total, 8);
+      assert.equal(store.listCharacters(campaign.id, { query: ' '.repeat(maxQueryLength) }).total, 8);
+    } finally {
+      store.close();
+    }
+  });
+});
